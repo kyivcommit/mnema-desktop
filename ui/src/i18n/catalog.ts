@@ -1,5 +1,5 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
-  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
+  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
   | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -39,7 +39,6 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
-  | 'settings_folders_scan' | 'settings_folders_scan_named'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -61,6 +60,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
+  | 'settings_folders_added_note'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
@@ -91,6 +91,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_roots_read' | 'indexing_root_partly_read' | 'indexing_root_unavailable'
   | 'indexing_root_volume_missing' | 'indexing_root_message'
   | 'indexing_resume' | 'indexing_retry'
+  | 'scanning_scan' | 'scanning_incomplete'
   | 'indexing_note_no_key' | 'indexing_note_no_model'
   | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
@@ -98,7 +99,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
-  | 'indexing_index_pending_chunks' | 'indexing_index_resume_embedding'
+  | 'indexing_index_pending_chunks'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
@@ -117,7 +118,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_title: 'Налаштування',
     settings_nav_models: 'Моделі',
     settings_nav_folders: 'Теки',
-    settings_nav_indexing: 'Індексація',
+    // Task 8: renamed from «Індексація» — the section renders one «Сканувати»
+    // control now, not only what the index holds, and the nav label says what
+    // pressing it does.
+    settings_nav_scanning: 'Сканування',
     settings_nav_application: 'Застосунок',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
@@ -338,13 +342,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
     recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
     recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
-    // §9.2 / Task 8 — running the index, showing it, stopping it. The scan
-    // starts on this control and never on adding a folder, because excluding
-    // subfolders (PR 8) is a move a person still has to make in between.
-    settings_folders_scan: 'Сканувати',
-    // Carries the path so two "Сканувати" buttons in a list stay apart for a
-    // screen reader; the VISIBLE label stays the plain word above.
-    settings_folders_scan_named: 'Сканувати {path}',
     // PR 8a, Task 5 — the folder row expands into what is on disk.
     //
     // The control keeps ONE name in both states: `aria-expanded` carries open
@@ -504,6 +501,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Підтвердити виключення {path}',
     settings_folders_confirm_include_named: 'Підтвердити скасування правила на {path}',
     settings_folders_confirm_cancel_named: 'Залишити {path} як є',
+    // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
+    // subfolders and setting masks are moves a person may still want to make
+    // first — so this sentence stands where the old per-row Scan button's
+    // implicit promise used to be, and names the one place a scan now starts.
+    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
     settings_masks_heading: 'Маски файлів',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
     // маска глобальна (D-c), тому не стосується тієї теки, поруч з якою вона
@@ -768,15 +770,24 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // own doing.
     indexing_resume: 'Продовжити',
     indexing_retry: 'Повторити',
+    // §9.3, Task 8 — the Scanning section's own ONE control, shown whenever no
+    // run already owns the slot.
+    scanning_scan: 'Сканувати',
+    // The marker `continueAction` (`jobs.ts`) reads FIRST, ahead of the queue:
+    // a half-read archive says so before it says anything about what is
+    // waiting to be embedded, because embedding what is there and leaving the
+    // unread half invisible would be the worse silence of the two.
+    scanning_incomplete: 'Попереднє сканування не дочитало теки.',
     // The walk runs regardless, because word search needs neither a key
     // nor a model — so each sentence names what is absent and what already
     // works.
     indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
     indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
     indexing_cancel: 'Зупинити',
-    // §9.3, PR 9 Task 6 — the Indexing SECTION, which says what the index
-    // holds. Every key here is `indexing_index_*` so nothing confuses it with
-    // the `indexing_*` keys above, which belong to the window's job strip and
+    // §9.3, PR 9 Task 6 — the Scanning SECTION (called Indexing before Task
+    // 8), which says what the index holds. Every key here is
+    // `indexing_index_*` so nothing confuses it with the `indexing_*` keys
+    // above, which belong to the window's job strip and
     // say what a pass is doing right now.
     //
     // The count is of `path` rows, not of documents (D-e): a file in two
@@ -828,11 +839,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
     // F4 (spec §9.3, amended 2026-09-04): the embedding queue, `IndexRead.
     // pendingChunks` — a tray Stop mid-pass, then a restart, left thousands of
-    // chunks un-embedded with nothing on screen saying so. Shown only while no
-    // run is under way (`Indexing.svelte`'s own gate on `jobs.state`'s phase),
-    // beside a button that resumes it.
+    // chunks un-embedded with nothing on screen saying so. Task 8: the button
+    // beside it is `indexing_resume` now, through `continueAction`'s
+    // `where: 'section'`/`entry: 'embedOnly'` offer, not a button of its own —
+    // `indexing_index_resume_embedding` is gone, grepped for other consumers
+    // first (none found).
     indexing_index_pending_chunks: '{count, plural, one {Ще не вбудовано # фрагмент} few {Ще не вбудовано # фрагменти} many {Ще не вбудовано # фрагментів} other {Ще не вбудовано # фрагмента}}.',
-    indexing_index_resume_embedding: 'Продовжити вбудовування',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
@@ -885,7 +897,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_title: 'Settings',
     settings_nav_models: 'Models',
     settings_nav_folders: 'Folders',
-    settings_nav_indexing: 'Indexing',
+    settings_nav_scanning: 'Scanning',
     settings_nav_application: 'Application',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
@@ -975,8 +987,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
-    settings_folders_scan: 'Scan',
-    settings_folders_scan_named: 'Scan {path}',
     settings_folders_expand: 'Subfolders',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
@@ -1022,6 +1032,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Confirm excluding {path}',
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
+    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
@@ -1084,6 +1095,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_root_message: '{rootPath}: {message}',
     indexing_resume: 'Resume',
     indexing_retry: 'Retry',
+    scanning_scan: 'Scan',
+    scanning_incomplete: 'The previous scan did not finish reading the folders.',
     indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
     indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
     indexing_cancel: 'Stop',
@@ -1098,7 +1111,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
     indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
     indexing_index_pending_chunks: '{count, plural, one {# chunk is not embedded yet} other {# chunks are not embedded yet}}.',
-    indexing_index_resume_embedding: 'Continue embedding',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything

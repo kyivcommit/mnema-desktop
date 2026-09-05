@@ -470,7 +470,7 @@ test('the subfolder wire types reject Rust snake_case spellings', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The Indexing section's own fields on `model_settings`' index read arm
+// The Scanning section's own fields on `model_settings`' index read arm
 // (`src-tauri/src/models.rs`, §9.3). The Rust side pins that the wire carries
 // them, against a really walked index, in
 // `the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment`

@@ -19,7 +19,7 @@
   // of the two would eventually read a fixed set of fields differently.
   import { providerReady } from '../launcher/state';
 
-  // The controller, as a PROP — the same rule `Folders` and `Indexing` already
+  // The controller, as a PROP — the same rule `Folders` and `Scanning` already
   // follow, and this section was the one left out. It matters here for two
   // separate things this component used to keep to itself: the pass it starts
   // reports on a channel that belongs to whoever started it (`bridge.rs`), so a

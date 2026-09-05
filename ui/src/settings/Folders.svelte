@@ -11,14 +11,12 @@
   } from '../lib/ipc';
   import type { JobController } from './jobs';
 
-  // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
-  //
-  // The scan starts on a button of its own and NEVER on adding a folder,
-  // because excluding subfolders (PR 8) is a configuration move a person still
-  // has to make in between — a walk started by `add_watched_folder` would run
-  // before that chance exists. This component still never calls the walk
-  // itself: it asks the controller `Settings.svelte` owns, so the job outlives
-  // a click on another section.
+  // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove. Scanning is
+  // not this component's any more (Task 8): the single Scan control
+  // lives in the Scanning section (`Scanning.svelte`), and adding a folder here
+  // starts nothing at all — the note below the list says so and names the next
+  // step, because excluding subfolders (PR 8) is a configuration move a person
+  // may still want to make before the first scan reads this folder.
   //
   // Fixture question: `TreeRoot` (`ipc.ts`) carries `files: TreeFile[]` and no
   // flag for whether a walk has ever run. A folder just added and a folder
@@ -27,8 +25,12 @@
   // count `indexed_documents` gives, which is true of both states, and stops
   // there. Telling the two apart belongs to the task that runs the walk.
 
-  // Required, not optional: a folder list that quietly drops its scan control
-  // when nobody passes one is the shape a person opens to find nothing happens.
+  // Still required, even with the scan button gone: this component listens for
+  // a job's ending through the SAME controller `Settings.svelte` owns, to
+  // re-read a panel a scan elsewhere may have moved underneath it — see
+  // `reread`/`withdrawQuestions` below. A folder list that quietly dropped that
+  // listener when nobody passed one is the shape a stale panel goes unnoticed
+  // in.
   let { jobs }: { jobs: JobController } = $props();
 
   let roots = $state<TreeRoot[]>([]);
@@ -54,6 +56,17 @@
   // at `exclude`/`include` or `answer` themselves: those run only once one of
   // the four above has already cleared it for this press.
   let rootChanged = $state(false);
+
+  // 🔴 Task 8. NOT `rootChanged`: that flag answers a different question — "the
+  // id/path a press was about has moved underneath it" — and never becomes
+  // `true` on an ordinary successful add, so it cannot be reused here without
+  // making an unrelated banner appear or disappear by accident. This one
+  // answers "the last press was an add that succeeded", for the owner's own
+  // ruling: adding a folder starts no scan, and this is the sentence that says
+  // what to do instead. Cleared at the top of `addFolder` and `removeFolder`,
+  // the same place and the same reason `rootChanged` is cleared there — what
+  // the last press led to stands until the next one.
+  let folderAdded = $state(false);
 
   // ── PR 8a, Task 5: what an expanded folder holds ──────────────────────────
   //
@@ -972,6 +985,7 @@
   async function addFolder() {
     actionError = null;
     rootChanged = false; // what the last press led to stands until the next one
+    folderAdded = false; // same rule, same place, for the note below
     const selected = await open({ directory: true });
     if (selected === null) return; // cancelled dialog — calls nothing further
     try {
@@ -980,6 +994,11 @@
       actionError = e instanceof Error ? e.message : String(e);
       return;
     }
+    // Set on the add's own success, before the re-read below — which can fail
+    // on its own account (`loadError`) without un-adding the folder the note is
+    // about. §9.2, Task 8 (owner's ruling): adding a folder starts no scan, so
+    // this is what stands in its place.
+    folderAdded = true;
     // Outside the action's own try: a rejection here is list_tree's own
     // sentence, about the list being unreadable, not about the add having
     // failed — the add already succeeded by this point.
@@ -998,6 +1017,7 @@
   async function removeFolder(rootId: number, path: string) {
     actionError = null;
     rootChanged = false; // what the last press led to stands until the next one
+    folderAdded = false; // the note is about the LAST press, and this one is a remove
     try {
       await removeWatchedFolder(rootId, path);
     } catch (e) {
@@ -1014,8 +1034,11 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_folders_empty'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_folders_add'); });
   const removeLabel = $derived.by(() => { void $locale; return t('settings_folders_remove'); });
-  const scanLabel = $derived.by(() => { void $locale; return t('settings_folders_scan'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_folders_load_failed'); });
+  // §9.2, Task 8. Built the same way every other sentence on this screen is —
+  // inside the `void $locale` rebuild — so a language switch while it is
+  // showing moves it too.
+  const addedNoteLabel = $derived.by(() => { void $locale; return t('settings_folders_added_note'); });
 
   // Rows carry their own count label, not a bare `t()` call in the markup —
   // a call inside `{#each}` reads `get(locale)` non-reactively (`i18n/index.ts:11`)
@@ -1262,7 +1285,6 @@
         root,
         countLabel: t('settings_folders_indexed', { count: root.files.length }),
         removeAriaLabel: t('settings_folders_remove_named', { path: root.absolutePath }),
-        scanAriaLabel: t('settings_folders_scan_named', { path: root.absolutePath }),
         expandAriaLabel: t('settings_folders_expand_named', { path: root.absolutePath }),
         expanded: panel !== undefined,
         panel:
@@ -1366,7 +1388,7 @@
     <p>{emptyLabel}</p>
   {:else}
     <ul>
-      {#each rows as { root, countLabel, removeAriaLabel, scanAriaLabel, expandAriaLabel, expanded, panel } (root.rootId)}
+      {#each rows as { root, countLabel, removeAriaLabel, expandAriaLabel, expanded, panel } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
           <span>{root.absolutePath}</span>
           <span>{countLabel}</span>
@@ -1376,17 +1398,10 @@
             aria-expanded={expanded}
             aria-label={expandAriaLabel}
             onclick={() => toggleRoot(root)}>{expandLabel}</button>
-          <!-- ⚠️ This button's own funeral is Task 8, which deletes it along with
-               `scanLabel`, `scanAriaLabel` and their catalogue keys. Until then
-               it over-promises: a scan is ONE job over every watched folder now
-               (`scan_state::Entry`), and the label still names this row's
-               folder. Left rather than reworded because the rewording would be
-               a catalogue key with a one-task life. -->
-          <button
-            type="button"
-            data-testid={`folder-scan-${root.rootId}`}
-            aria-label={scanAriaLabel}
-            onclick={() => jobs.scan('full')}>{scanLabel}</button>
+          <!-- The per-folder scan button's funeral, Task 8: a scan is ONE job
+               over every watched folder now (`scan_state::Entry`), and the
+               single Scan control lives in the Scanning section instead
+               (`Scanning.svelte`) — this row starts nothing any more. -->
           <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId, root.absolutePath)}>{removeLabel}</button>
           {#if panel}
             <div data-testid={`folder-panel-${root.rootId}`}>
@@ -1457,6 +1472,15 @@
         </li>
       {/each}
     </ul>
+  {/if}
+  <!-- Under the list, Task 8: adding a folder starts no scan (owner's ruling —
+       excluding subfolders is still a move a person may want to make first),
+       so this is what stands where the old per-row Scan button's implicit
+       promise used to be. Stands until the next add or remove, never a job
+       ending: nothing about a scan changes what this sentence is telling a
+       person to go and do next. -->
+  {#if folderAdded}
+    <p data-testid="folders-added-note">{addedNoteLabel}</p>
   {/if}
   <button type="button" onclick={addFolder}>{addLabel}</button>
   {#if actionError}<p data-testid="folders-action-error">{actionError}</p>{/if}

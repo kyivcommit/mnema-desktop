@@ -1,5 +1,6 @@
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
-import { expect, test, afterEach, vi } from 'vitest';
+import { expect, test, afterEach, beforeEach, vi } from 'vitest';
+import { tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
 import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
@@ -48,8 +49,16 @@ const APP_PREFS: AppPrefs = {
 // now mounts into the 'folders' panel and reads it on mount too — an empty
 // listing is enough, since nothing here exercises Folders' own behaviour
 // (that lives in Folders.test.ts).
+// `modelSettings` and `listenScanProgress` are trackable `vi.fn()`s, not plain
+// arrow functions, for Task 8's own fixtures below: they count how many times
+// `Settings.svelte`'s single reader calls `model_settings`, and they need the
+// listener callback the controller registers so a test can deliver the states
+// a real scan would (`deliver`, the shape `Scanning.test.ts`/`JobStrip.test.ts`
+// already use).
+const modelSettings = vi.fn();
+let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
-  modelSettings: () => Promise.resolve(SETTINGS),
+  modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
   forgetKey: vi.fn(),
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
@@ -76,10 +85,15 @@ vi.mock('../lib/ipc', () => ({
   jobStatus: () => Promise.resolve(IDLE_SCAN),
   startScanJob: vi.fn(),
   cancelJob: vi.fn(),
-  // The window opens the scan subscription at mount now. Left out of this mock
-  // the wrapper is `undefined`, `mount` throws, and the whole window fails to
-  // render — the same lesson `jobStatus` above records.
-  listenScanProgress: () => Promise.resolve(() => {}),
+  // The window opens the scan subscription at mount now. Returns the SAME
+  // `deliver` shape `Scanning.test.ts` uses, so Task 8's own fixtures below can
+  // push a `ScanState` the way the core's own observer does. Left out of this
+  // mock the wrapper is `undefined`, `mount` throws, and the whole window fails
+  // to render.
+  listenScanProgress: (cb: (state: ScanState) => void) => {
+    deliver = cb;
+    return Promise.resolve(() => {});
+  },
   // Task 7 mounts `Application` into the 'application' panel, for the same
   // reason as `jobStatus` above: left out of this mock the wrapper is
   // `undefined`, the call throws, and every test in this file that ever visits
@@ -91,18 +105,31 @@ vi.mock('../lib/ipc', () => ({
   setAutostart: vi.fn(),
 }));
 
+beforeEach(() => {
+  modelSettings.mockReset();
+  modelSettings.mockResolvedValue(SETTINGS);
+  deliver = null;
+});
+
 afterEach(() => {
   cleanup();
   setLocale('en'); // the store outlives the component; leave it as found
 });
 
+// One state, the way the core's own observer sends it.
+async function emit(state: ScanState) {
+  if (deliver === null) throw new Error('nothing is listening to scan-progress');
+  deliver(state);
+  await tick();
+}
+
 test('shows all four section names, in the spec order', () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Settings);
   const nav = screen.getByRole('navigation');
-  // spec order: Models, Folders, Indexing, Application — read as one string so
+  // spec order: Models, Folders, Scanning, Application — read as one string so
   // a swap in order fails even though all four words are still present.
-  expect(nav.textContent).toBe('ModelsFoldersIndexingApplication');
+  expect(nav.textContent).toBe('ModelsFoldersScanningApplication');
 });
 
 test('clicking Folders shows the Folders heading and removes the Models heading', async () => {
@@ -169,7 +196,7 @@ test('no section claims to be disabled, and no button carries aria-describedby',
   setLocale('en'); // seed, do not inherit
   render(Settings);
 
-  for (const name of ['Models', 'Folders', 'Indexing', 'Application']) {
+  for (const name of ['Models', 'Folders', 'Scanning', 'Application']) {
     await fireEvent.click(screen.getByRole('button', { name }));
     const button = screen.getByRole('button', { name });
     expect(button.getAttribute('aria-disabled')).toBeNull();
@@ -246,15 +273,18 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
     + '     ',
   );
 
-  // Task 6: the Indexing panel is the §9.3 section now, and this fixture is an
-  // index nothing has ever been added to — so what a person reads is the count
-  // and the sentence that stands where a date would be, never a blank and never
-  // an epoch. Measured from a real render rather than hand-edited, the way every
-  // earlier version of this string was.
-  await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
+  // Task 6: the Scanning panel (renamed from Indexing by Task 8) is the §9.3
+  // section now, and this fixture is an index nothing has ever been added to
+  // — so what a person reads is the count and the sentence that stands where a
+  // date would be, never a blank and never an epoch, followed by the one
+  // «Scan» control Task 8 gives the section (shown whenever no run already
+  // owns the slot, which is true of this fixture's idle snapshot). Measured
+  // from a real render rather than hand-edited, the way every earlier version
+  // of this string was.
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
   expect(panel()?.textContent?.replace(/\s+/g, ' ').trim())
-    .toBe('Indexing The index holds 0 files. Nothing has been indexed yet.');
+    .toBe('Scanning The index holds 0 files. Nothing has been indexed yet. Scan');
 });
 
 // M2 (review): the Застосунок branch was once rendered by no test — a person
@@ -288,8 +318,8 @@ test('labels stay correct across a language switch after mount', async () => {
   // sentence here, navigated to Models (destroying the component), and only
   // came back to Application at the very end under a FRESH mount — which reads
   // whatever locale is current whether or not `void $locale` is present, so it
-  // could not have caught its own removal. This is `Indexing`'s own shape,
-  // applied here first because it is the shorter case; `Indexing` gets the
+  // could not have caught its own removal. This is `Scanning`'s own shape,
+  // applied here first because it is the shorter case; `Scanning` gets the
   // identical treatment two blocks down for the same reason.
   await fireEvent.click(screen.getByRole('button', { name: 'Application' }));
   await waitFor(() => expect(screen.getByTestId('application-shortcut-status')).toBeTruthy());
@@ -308,14 +338,14 @@ test('labels stay correct across a language switch after mount', async () => {
   await waitFor(() => expect(screen.getByText('This shortcut is registered with the system.')).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
 
-  // The same property, on `Indexing.svelte`'s own `$derived.by` strings. The
+  // The same property, on `Scanning.svelte`'s own `$derived.by` strings. The
   // component is destroyed by every nav change, so it too is opened under
   // 'en' and left mounted ACROSS `setLocale` rather than re-opened after it —
-  // a version that clicked Індексація AFTER the switch would mount it fresh
+  // a version that clicked Сканування AFTER the switch would mount it fresh
   // under `uk` and read Ukrainian whether or not the anchor is there. Measured:
   // with `void $locale` deleted from `filesLine`, this test fails on the
   // Ukrainian assertion below and the English one still resolves.
-  await fireEvent.click(screen.getByRole('button', { name: 'Indexing' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByText('The index holds 0 files.')).toBeTruthy());
   expect(screen.getByText('Nothing has been indexed yet.')).toBeTruthy();
 
@@ -328,7 +358,7 @@ test('labels stay correct across a language switch after mount', async () => {
   expect(screen.queryByText('Nothing has been indexed yet.')).toBeNull();
 
   const nav = screen.getByRole('navigation');
-  expect(nav.textContent).toBe('МоделіТекиІндексаціяЗастосунок');
+  expect(nav.textContent).toBe(['Моделі', 'Теки', 'Сканування', 'Застосунок'].join(''));
   await fireEvent.click(screen.getByRole('button', { name: 'Моделі' }));
   expect(screen.getByRole('heading', { name: 'Моделі' })).toBeTruthy();
 
@@ -338,4 +368,161 @@ test('labels stay correct across a language switch after mount', async () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Застосунок' }));
   await waitFor(() => expect(screen.getByTestId('application-shortcut-status')).toBeTruthy());
   expect(screen.getByText('Це скорочення зареєстровано в системі.')).toBeTruthy();
+});
+
+// Task 8's controller ruling: this window's ONE `model_settings` re-read fires
+// when `scan.readSeq` grows OR the snapshot reaches `ended` — not "every
+// ending" alone. `readSeq` (`scan_state.rs`) counts reading passes that have
+// ENDED, and it can grow while the snapshot is still `running` — a reading
+// phase handing off to embedding within the same job — which is exactly the
+// moment `scanIncomplete`/`indexedFiles` can have moved without an `ended`
+// snapshot ever appearing to say so. The three states below are read as one
+// sequence because they are the only fixture that can tell all three fates
+// (re-read / re-read / no re-read) apart from one another.
+test('a growing readSeq re-reads even mid-run, an ending re-reads even with readSeq unchanged, and an identical snapshot re-reads nothing', async () => {
+  render(Settings);
+  // `Models.svelte` reads `model_settings` on its own mount too (an
+  // independent poll Task 8 does not touch), and the window opens on Models
+  // by default — so the baseline after mount is TWO calls, not one. Navigating
+  // to Scanning unmounts Models and tears its own `jobs.state` subscription
+  // down with it, so every call from here on is `Settings.svelte`'s alone.
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const baseline = modelSettings.mock.calls.length;
+
+  const EMBEDDING_COUNTS = { done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null };
+  const runningWithReadSeq = (readSeq: number): ScanState => ({
+    revision: readSeq + 1, files: 0, readSeq, lastReading: null,
+    snapshot: { kind: 'running', cancellable: true, phase: { kind: 'embedding', counts: EMBEDDING_COUNTS } },
+  });
+
+  // `readSeq` 0 -> 1, the snapshot stays `running`.
+  await emit(runningWithReadSeq(1));
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+
+  const endedSameReadSeq: ScanState = {
+    revision: 10, files: 0, readSeq: 1, lastReading: null,
+    snapshot: {
+      kind: 'ended',
+      report: {
+        embedding: { kind: 'ran', done: 1, total: 1, refused: 0 },
+        endedIn: 'embedding', reason: 'completed', message: null, resume: null,
+      },
+    },
+  };
+  // `readSeq` unchanged (still 1) — an `embedOnly`-shaped ending — yet the
+  // snapshot becoming `ended` still triggers its own re-read.
+  await emit(endedSameReadSeq);
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 2));
+
+  // The identical object again: `apply` (`jobs.ts`) drops it as no newer than
+  // what the controller already holds, so this window's subscriber is never
+  // even called — the pair "an ending re-reads" above is only real evidence of
+  // the trigger if a non-event like this one stays silent.
+  await emit(endedSameReadSeq);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline + 2);
+});
+
+// ---------------------------------------------------------------------------
+// Two reads in flight, and the older one answering last — moved here from
+// `Scanning.test.ts` (Task 8): the `settingsSeq` stamp these two pin is now
+// `Settings.svelte`'s own guard, not that section's, since this window reads
+// `model_settings` exactly once for everybody rather than once per section.
+// ---------------------------------------------------------------------------
+
+type IndexReadT = Extract<ModelSettings['index'], { kind: 'read' }>;
+function readFixture(over: Partial<IndexReadT> = {}): ModelSettings {
+  return { key: { kind: 'absent' }, index: { ...(SETTINGS.index as IndexReadT), ...over }, platform: 'linux' };
+}
+
+const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+const pageText = () => visible(document.body);
+
+function deferredPromise<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const endedOnce = (revision: number, readSeq: number): ScanState => ({
+  revision, files: 0, readSeq, lastReading: null,
+  snapshot: {
+    kind: 'ended',
+    report: {
+      embedding: { kind: 'notReached' }, endedIn: 'reading', reason: 'completed', message: null, resume: null,
+    },
+  },
+});
+
+// 🔴 `Models.svelte` reads `model_settings` on its OWN mount too (Task 4, an
+// independent poll Task 8 does not touch), and the window opens on the Models
+// section by default — so a fresh mount always makes TWO calls, not one, and
+// navigating to Models.svelte's own next `ended` would make a THIRD. Both
+// tests below navigate to Scanning FIRST and let the two mount-time reads
+// settle on the default fixture before installing a deferred queue, so the
+// only calls the queue ever sees are `Settings.svelte`'s own — Models is
+// unmounted by then and its `jobs.state` subscription has been torn down with
+// it, the same as any other section a nav change destroys.
+test('an older read that settles last does not repaint over the newer one', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+
+  const queue: ReturnType<typeof deferredPromise<ModelSettings>>[] = [];
+  modelSettings.mockImplementation(() => {
+    const d = deferredPromise<ModelSettings>();
+    queue.push(d);
+    return d.promise;
+  });
+
+  await emit(endedOnce(1, 1));
+  await waitFor(() => expect(queue).toHaveLength(1)); // the first ending's read
+  await emit(endedOnce(2, 1)); // a second ending, `readSeq` unchanged
+  await waitFor(() => expect(queue).toHaveLength(2)); // the second ending's read
+
+  // Newer first, older last — the order the network is free to choose.
+  queue[1].resolve(readFixture({ indexedFiles: 99 }));
+  await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 99 files.'));
+  queue[0].resolve(readFixture({ indexedFiles: 7 }));
+  await tick();
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 99 files.');
+  expect(pageText()).not.toContain('The index holds 7 files.');
+});
+
+// The mirror. An older read can REJECT after a newer one has already
+// repainted — nothing here asserts a failure sentence, because `Settings.svelte`
+// keeps no `loadError` banner of its own visible outside `Scanning.svelte`'s
+// props; what this pins is that the numbers stay the newer read's.
+test('an older read that is refused last does not overwrite the newer numbers', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+
+  const queue: ReturnType<typeof deferredPromise<ModelSettings>>[] = [];
+  modelSettings.mockImplementation(() => {
+    const d = deferredPromise<ModelSettings>();
+    queue.push(d);
+    return d.promise;
+  });
+
+  await emit(endedOnce(1, 1));
+  await waitFor(() => expect(queue).toHaveLength(1));
+  await emit(endedOnce(2, 1));
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  queue[1].resolve(readFixture({ indexedFiles: 42 }));
+  await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 42 files.'));
+  queue[0].reject(new Error('STALE-REJECTION'));
+  await tick();
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 42 files.');
+  expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
+  expect(pageText()).not.toContain('STALE-REJECTION');
 });

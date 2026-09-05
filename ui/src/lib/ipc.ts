@@ -275,7 +275,8 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // eventually be read as though they could disagree. `embeddingModel !== null`
 // is how "there is an active space" is spelled on this side.
 //
-// PR 9's Indexing section (§9.3) widens the subset by four, and all four are
+// PR 9's Scanning section (§9.3, called Indexing before Task 8) widens the
+// subset by four, and all four are
 // REQUIRED for the argument `totalChunks` above already makes: the only
 // substitute for a missing count is `0`, and `0` in front of a person reads as
 // a measured claim this build has not made. `indexedFiles` says how many files

@@ -6,7 +6,7 @@ import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
 import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 
-// The typed wrappers, not the raw `invoke` — the shape `Indexing.test.ts` uses.
+// The typed wrappers, not the raw `invoke` — the shape `Scanning.test.ts` uses.
 // Every wrapper `Settings.svelte`'s other sections reach for is declared too,
 // because the whole-window case at the bottom mounts all four: a wrapper left
 // out is `undefined`, and every call on it becomes a TypeError a `catch`
@@ -68,7 +68,7 @@ const IDLE_SCAN: ScanState = {
   revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
-// 🔴 Annotated `AppPrefs`, for the reason `Indexing.test.ts` annotates
+// 🔴 Annotated `AppPrefs`, for the reason `Scanning.test.ts` annotates
 // `ModelSettings`: every inline fixture in this project's UI suites sits behind
 // an untyped mock where the compiler never looks, so a fixture that forgets
 // `platform` or `version` would render `undefined` in front of a person and

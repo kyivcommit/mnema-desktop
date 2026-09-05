@@ -147,6 +147,50 @@ test('adding a folder saves the picked path, the list re-reads, and no job start
   // around it is named (P3-6 review — the previous form named an export that
   // did not exist and could never fail).
   expect(invoke.mock.calls.some(([command]) => command === 'start_scan_job')).toBe(false);
+  // §9.2, Task 8: owner's ruling — nothing here starts a scan, and the note
+  // says where to go do that instead.
+  expect(screen.getByTestId('folders-added-note')).toBeTruthy();
+});
+
+// §9.2, Task 8. The per-row Scan button is gone (`Scanning.svelte` owns the
+// one control now); this pins the three states its note replaces it with —
+// both directions of "the last press was a successful add", and the direction
+// that must NOT show it at all.
+test('a successful add shows the note and no row offers to scan; the next remove takes the note away; a rejected add shows neither', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValueOnce(listing([]));
+  listTree.mockResolvedValueOnce(
+    listing([root({ rootId: 7, absolutePath: '/synthetic/reports', files: [] })]),
+  );
+  listTree.mockResolvedValueOnce(listing([])); // after the remove below
+  open.mockResolvedValue('/synthetic/reports');
+  addWatchedFolder.mockResolvedValue(7);
+  removeWatchedFolder.mockResolvedValue(1);
+
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+  expect(screen.queryByTestId('folders-added-note')).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/reports')).toBeTruthy());
+
+  expect(screen.getByTestId('folders-added-note')).toBeTruthy();
+  expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
+    'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
+  );
+  // No row offers to scan any more: the only control this row carries besides
+  // Subfolders is Remove.
+  expect(screen.queryAllByRole('button', { name: /^Scan/ })).toHaveLength(0);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/reports' }));
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+  expect(screen.queryByTestId('folders-added-note')).toBeNull();
+
+  // A rejected add never shows the note — the add itself did not succeed.
+  addWatchedFolder.mockRejectedValueOnce(new Error('This path is already watched.'));
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByText('This path is already watched.')).toBeTruthy());
+  expect(screen.queryByTestId('folders-added-note')).toBeNull();
 });
 
 test('a cancelled folder dialog calls nothing', async () => {
@@ -820,7 +864,7 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
   expect(visibleText(screen.getByTestId('folder-row-1'))).toBe([
     '/synthetic/root',
     'Indexed: 0 documents',
-    'Subfolders', 'Scan', 'Remove',
+    'Subfolders', 'Remove',
     // The tree. `Archive` carries the conditional sentence, because a rule of
     // the person's own remains under it.
     'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
@@ -1670,7 +1714,7 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
   expect(text).toBe([
     '/synthetic/root',
     'Indexed: 2 documents',
-    'Subfolders', 'Scan', 'Remove',
+    'Subfolders', 'Remove',
     '1 subfolder is not listed: its name could not be read as text.',
     'Archive', 'Excluded by your rule.', cost, 'Do not exclude', 'Subfolders',
     'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
@@ -2286,21 +2330,26 @@ async function endScan() {
   deliver!(endedScan());
 }
 
-test('a job ending re-reads every expanded panel, not only the root whose Scan was pressed', async () => {
+test('a job ending re-reads every expanded panel, not only one root', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing(EMPTY_ROOTS));
   listSubfolders.mockImplementation((rootId: number) =>
     Promise.resolve(subfolders([sub(rootId === 1 ? 'first-before' : 'second-before')])));
   listExclusions.mockResolvedValue([]);
 
-  renderWatching();
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await fireEvent.click(screen.getByTestId('folder-expand-2'));
   await screen.findByTestId('subfolder-1-first-before');
   await screen.findByTestId('subfolder-2-second-before');
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  // Task 8: this component no longer starts a scan itself — the single
+  // «Сканувати» control lives in the Scanning section now. Started here
+  // through the SAME controller that section would use, so what is exercised
+  // is still the real wiring an ending goes through, not a store shaped like
+  // one.
+  void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   // Swapped only after the scan has started, so the new names can reach the
   // screen only by both panels being READ again.
@@ -2333,7 +2382,7 @@ test('a question standing when a job ends is withdrawn by name, and nothing is s
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  renderWatching();
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2342,7 +2391,9 @@ test('a question standing when a job ends is withdrawn by name, and nothing is s
   // Both directions: the question is on screen and unwithdrawn until the ending.
   expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  // Task 8: started through the controller directly — see the comment on the
+  // first test in this section for why that is still the real wiring.
+  void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   await endScan();
 
@@ -2376,7 +2427,7 @@ test('a check still in flight when a job ends raises no question when its reply 
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  renderWatching();
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2384,7 +2435,7 @@ test('a check still in flight when a job ends raises no question when its reply 
   expect(visibleText(await screen.findByTestId('folder-confirm-1')))
     .toBe('Checking what this exclusion removes…');
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   await endScan();
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
@@ -2445,14 +2496,14 @@ test('a scan ending withdraws the question even when the re-read that follows it
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  renderWatching();
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
   await screen.findByTestId('folder-confirm-1');
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
 
   // Queued here and not at the top, so it is the re-read AT THE ENDING that
@@ -2496,14 +2547,14 @@ test('the withdrawn-question note switches language with everything else', async
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  renderWatching();
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
   await screen.findByTestId('folder-confirm-1');
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   await endScan();
   await screen.findByTestId('folder-question-withdrawn-1');

@@ -9,12 +9,12 @@
   // report says about the embedding half, and the one button that offers to
   // carry on.
   //
-  // 🔴 This is the WINDOW's job strip, not the Indexing section. It is drawn
+  // 🔴 This is the WINDOW's job strip, not the Scanning section. It is drawn
   // above the nav and outside every `{#if section === …}` (`Settings.svelte`),
   // so a running scan stays visible and stoppable from every section — the
   // live run's finding 3. The §9.3 section, which says what the index HOLDS
-  // rather than what a pass is doing, is `Indexing.svelte`, a different file
-  // mounted inside the panel.
+  // rather than what a pass is doing, is `Scanning.svelte` (called
+  // `Indexing.svelte` until Task 8), a different file mounted inside the panel.
   //
   // 🔴 Task 6 gave this component the smallest thing drawable from the new
   // `ScanState` snapshot and left the rest for this task, by name: the reading
@@ -303,7 +303,7 @@
 
   // D-m's table, decided once in `jobs.ts` so the strip and the section cannot
   // answer it differently. Rendered here only when it names THIS strip —
-  // `where: 'section'` is the Indexing section's own offer (Task 8), and a
+  // `where: 'section'` is the Scanning section's own offer (Task 8), and a
   // strip that drew it too would put two buttons in front of one decision.
   const action = $derived(continueAction(scan, read));
   const stripAction = $derived(action !== null && action.where === 'strip' ? action : null);

@@ -50,11 +50,11 @@ const ROOTS = {
 // 🔴 Annotated `ModelSettings`, and the annotation is the guard rather than
 // documentation. This fixture crosses an UNTYPED mock (`invoke` answers
 // `unknown`), so without it a required field added to the `read` arm reaches
-// the §9.3 section as `undefined` and every test that stands on the Indexing
+// the §9.3 section as `undefined` and every test that stands on the Scanning
 // nav item dies somewhere unrelated. Task 7: `Settings.svelte` now reads
 // `model_settings` on ITS OWN mount too (for the strip's `read` prop), so
 // every test in this file crosses this fixture whether or not it ever visits
-// the Indexing section.
+// the Scanning section.
 const READY_SETTINGS: ModelSettings = {
   key: { kind: 'present' },
   index: {
@@ -774,13 +774,22 @@ test('the label follows the reason, and the entry follows what the report named 
 
 // Both directions on the one thing the strip must NOT decide: whether the
 // index's own markers owe a button. `continueAction`'s `where: 'section'` arm
-// is the Indexing section's offer (Task 8), and the strip must stay silent for
-// it whether or not the index was ever read at all.
+// is the Scanning section's offer (Task 8), and the strip must stay silent for
+// it whether or not the index was ever read at all. Task 8 widens this to the
+// WHOLE window: the offer this pair used to leave unclaimed is now the
+// Scanning section's own, read through `Settings.svelte`'s single
+// `model_settings` — not a second one this section polls for itself.
 test('a report naming no resumption defers to the section, with the index read and with no index read at all', async () => {
   reply({ model_settings: readSettings({ scanIncomplete: true }) });
   await openWindow();
   await emit(ended({ resume: null }));
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('scanning-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'full' });
 });
 
 test('a report naming no resumption defers to the section even when the index could not be read at all', async () => {
@@ -788,6 +797,39 @@ test('a report naming no resumption defers to the section even when the index co
   await openWindow();
   await emit(ended({ resume: null }));
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  // Neither surface may guess: `read === null` (an `Unreadable` index) makes
+  // `continueAction` answer `null` outright, so the section offers nothing
+  // either — the correct degradation, not a second place a marker leaks
+  // through.
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
+});
+
+// Fixture pair, both directions of D-m's ordering (`jobs.ts`): a report that
+// NAMES its own resumption wins over the index's markers, wherever they point
+// — the strip shows the one button and the section shows none — and a report
+// that ends a cycle with nothing left offers nothing on either surface, not
+// merely nothing on the one that happened to be visible.
+test('a report naming its own resumption wins the strip over the section, whatever the markers say; and a completed cycle with nothing left offers neither', async () => {
+  reply({ model_settings: readSettings({ scanIncomplete: true }) });
+  await openWindow();
+
+  await emit(endedReading('cancelled', { resume: 'full' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  reply({ model_settings: readSettings({ scanIncomplete: false }) });
+  await emit(endedReading('completed', { resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
 });
 
 // 🔴 The R2-1 sequence, through the REAL controller: `Full(partial)` stops in
@@ -861,10 +903,12 @@ test('the last reading\'s warning outlives a continued embedding, across an unmo
 test('a refused scan shows the backend sentence verbatim, with no lead-in of this window\'s own', async () => {
   reply({ start_scan_job: new Error('LEAK-TOKEN-ANOTHER-JOB') });
   await openWindow();
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
+  // Task 8: the one «Сканувати» control lives in the Scanning section now —
+  // Folders no longer starts a scan of its own.
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
 
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-ANOTHER-JOB');
@@ -877,15 +921,31 @@ test('a refused scan shows the backend sentence verbatim, with no lead-in of thi
 // sentence would leave the window with no way to stop the job it just collided
 // with.
 test('a scan refused because another job holds the slot leaves that job`s Stop in place', async () => {
-  reply({
-    start_scan_job: new Error('another job is already running'),
-    job_status: { ...reading() },
+  reply({ start_scan_job: new Error('another job is already running') });
+  // The window has to open IDLE — a running snapshot from the first
+  // `job_status` would hide the Scanning section's own button entirely (Task
+  // 8: it steps aside once a run already owns the slot, correctly). The race
+  // this test is about is the other job claiming the slot BETWEEN this
+  // window's mount and its own press — so `job_status` answers idle for BOTH
+  // calls the mount itself makes (`jobs.ts`'s own fast-paint read and the one
+  // behind `listenScanProgress`'s resolution) and running only on the THIRD
+  // call, the one `jobs.scan`'s own catch handler makes after `start_scan_job`
+  // is refused.
+  let jobStatusCalls = 0;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'job_status') {
+      jobStatusCalls += 1;
+      return Promise.resolve(jobStatusCalls <= 2 ? IDLE_SCAN : reading());
+    }
+    const r = replies[cmd];
+    if (r instanceof Error) return Promise.reject(r);
+    return Promise.resolve(r);
   });
   await openWindow();
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
 
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
 
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
@@ -974,7 +1034,7 @@ test('the folder list re-reads when a scan ends, and not while one runs', async 
   await waitFor(() => expect(calls('list_tree').length).toBe(before + 1));
 });
 
-test('the indexing section re-reads what the index holds when a scan ends', async () => {
+test('the scanning section re-reads what the index holds when a scan ends', async () => {
   await openWindow();
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
@@ -1042,9 +1102,9 @@ test('a language switch while ended re-renders the reading block, the embedding 
 test('a language switch leaves the backend`s rejection sentence verbatim', async () => {
   reply({ start_scan_job: new Error('LEAK-TOKEN-VERBATIM') });
   await openWindow('uk');
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
 
   setLocale('en');

@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import Models from './Models.svelte';
   import Folders from './Folders.svelte';
   import Masks from './Masks.svelte';
   import JobStrip from './JobStrip.svelte';
-  import Indexing from './Indexing.svelte';
+  import Scanning from './Scanning.svelte';
   import Application from './Application.svelte';
   import { createJobController } from './jobs';
-  import { modelSettings, type IndexRead } from '../lib/ipc';
+  import { modelSettings, type ModelSettings } from '../lib/ipc';
 
   // All four sections render; hiding one not yet built would make the window
   // claim the product has fewer sections than the spec does. Order matches the
@@ -42,44 +43,98 @@
   // promise Svelte keeps and never calls, leaving the listener behind.
   onMount(() => jobs.mount());
 
-  // Task 7's minimal wiring for the strip: ONE `modelSettings` read, owned
-  // here and handed down as a prop. `continueAction` (`jobs.ts`) falls back to
-  // the index's own markers — `scanIncomplete`, `pendingChunks` — exactly when
-  // a report names no resumption of its own, and a read taken inside a
-  // section would not survive that section's own unmount the way this window
-  // survives every nav click. `null` until the read answers, and `null` again
-  // on a rejection: both are the strip's correct degradation to showing only
-  // its own row (`JobStrip.svelte`), never a guess about markers this window
-  // has not actually read.
-  //
-  // ⚠️ Task 8 reuses this exact value for `Indexing.svelte`, which today takes
-  // no such prop and calls `modelSettings()` a second time on its own mount —
-  // replacing that call with this one is what makes the window read the state
-  // of the index once instead of twice.
-  let read = $state<IndexRead | null>(null);
+  // 🔴 Task 8's controller ruling: `Settings.svelte` is the window's SINGLE
+  // reader of `model_settings`, not a second one racing `Scanning.svelte`'s own
+  // (Task 7 wrote this window's read alone and left Task 8's own note here
+  // saying so — `Scanning.svelte` used to poll on its own mount and its own
+  // subscription, with no ordering between the two reads at all). `settings`
+  // and `loadError` are what used to live inside that section; they live here
+  // now and go down as props, alongside the narrower `read` `JobStrip.svelte`
+  // has always taken.
+  let settings = $state<ModelSettings | null>(null);
+  // A rejected `model_settings`. §10: a rejection arrives as a SENTENCE, never
+  // a kind — shown verbatim by `Scanning.svelte`, beside its own catalogue
+  // lead-in, and never branched on here.
+  let loadError = $state<string | null>(null);
+
+  // A newer request always wins over an older one that resolves later, the
+  // same stamp `Models.svelte` and the old `Scanning.svelte` each carried on
+  // their own: every call that writes `settings` stamps itself with the
+  // sequence current at the moment it was ISSUED, and applies its answer only
+  // while that stamp is still the latest. Two reads can be in flight here
+  // whenever endings arrive faster than the IPC answers.
+  let settingsSeq = 0;
+
+  async function refresh() {
+    const seq = ++settingsSeq;
+    try {
+      const s = await modelSettings();
+      if (seq !== settingsSeq) return; // a newer read has already spoken
+      settings = s;
+      loadError = null;
+    } catch (e) {
+      if (seq !== settingsSeq) return; // superseded before this rejection arrived
+      loadError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // `read`, derived from `settings` for `JobStrip.svelte`'s narrower need:
+  // `continueAction` (`jobs.ts`) falls back to the index's own markers —
+  // `scanIncomplete`, `pendingChunks` — exactly when a report names no
+  // resumption of its own. `null` until the read answers, and `null` again on
+  // a rejection or an `Unreadable` index: all three are the strip's correct
+  // degradation to showing only its own row, never a guess about markers this
+  // window has not actually read.
+  const read = $derived(
+    settings !== null && settings.index.kind === 'read' ? settings.index : null,
+  );
+
   onMount(() => {
-    void (async () => {
-      try {
-        const settings = await modelSettings();
-        if (settings.index.kind === 'read') read = settings.index;
-      } catch {
-        // `read` stays `null` — the strip's own degradation, not a sentence
-        // this window owes anyone: `Models.svelte` and `Indexing.svelte`
-        // already report a failed `model_settings` read in their own words.
-      }
-    })();
+    // Fired when `scan.readSeq` grows OR the snapshot becomes `ended` —
+    // deliberately not "every ending" alone, the rule the old
+    // `Scanning.svelte` kept: a reading pass can end and hand the phase to
+    // embedding without the snapshot itself ever reaching `ended` (`readSeq`
+    // is `scan_state.rs`'s own count of reading passes that have ENDED), and
+    // that is exactly the moment `scanIncomplete`/`indexedFiles` can have
+    // moved. An `embedOnly` run's own ending moves `pendingChunks`/
+    // `failedChunks` without moving `readSeq` at all, which is why `ended`
+    // alone still has to trigger this on its own.
+    //
+    // Compared by snapshot IDENTITY, not by kind: the controller replaces the
+    // whole state on every change, so a progress tick changes the object
+    // without ever being a `readSeq` change or an ending. Seeded with what the
+    // store already holds, so mounting this window mid-run does not treat its
+    // very first snapshot as a change.
+    let seenSnapshot = get(jobs.state).scan.snapshot;
+    let seenReadSeq = get(jobs.state).scan.readSeq;
+    const stop = jobs.state.subscribe(({ scan }) => {
+      if (scan.snapshot === seenSnapshot) return;
+      seenSnapshot = scan.snapshot;
+      const readSeqChanged = scan.readSeq !== seenReadSeq;
+      seenReadSeq = scan.readSeq;
+      if (readSeqChanged || scan.snapshot.kind === 'ended') void refresh();
+    });
+    void refresh();
+    // Returned, so Svelte tears the subscription down when this window closes
+    // — this is the WINDOW's own subscription, unlike the per-section ones a
+    // nav click destroys and rebuilds, so it lives for as long as `jobs.mount`
+    // does above.
+    return stop;
   });
 
   const modelsLabel = $derived.by(() => { void $locale; return t('settings_nav_models'); });
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
-  const indexingLabel = $derived.by(() => { void $locale; return t('settings_nav_indexing'); });
+  // `settings_nav_scanning`, not `settings_nav_indexing` (Task 8): the LABEL
+  // renamed, not the `SectionId` — `'indexing'` is a machine id, not prose, and
+  // nothing reads it as a word.
+  const scanningLabel = $derived.by(() => { void $locale; return t('settings_nav_scanning'); });
   const applicationLabel = $derived.by(() => { void $locale; return t('settings_nav_application'); });
 
   function labelFor(id: SectionId): string {
     switch (id) {
       case 'models': return modelsLabel;
       case 'folders': return foldersLabel;
-      case 'indexing': return indexingLabel;
+      case 'indexing': return scanningLabel;
       case 'application': return applicationLabel;
     }
   }
@@ -98,12 +153,15 @@
        moved: it is still created above every section, and `cancel_job` still
        needs no channel.
        ⚠️ The component outside every `{#if}` is this one, `<JobStrip>`.
-       `<Indexing>` is INSIDE the conditional below and depends on being there:
-       its per-mount `refresh()` is the only re-read of `model_settings` after a
-       change made while that section was off screen, and the store subscription
-       it opens is torn down by the unmount a nav change causes. Hoisting it out
-       would quietly cost both — the sentence that stood here said the opposite
-       and would have invited exactly that.
+       `<Scanning>` is INSIDE the conditional below, and Task 8 changed what
+       that placement costs: the re-read of `model_settings` no longer lives in
+       that section's own mount at all (`refresh()` above is this window's, not
+       a per-section one a nav click destroys and rebuilds) — what a nav change
+       still tears down is only `<Scanning>`'s own rendering of whatever `read`
+       the window already holds, not the read itself. Hoisting `<Scanning>` out
+       here beside `<JobStrip>` would cost something else now: it would show the
+       §9.3 numbers over every other section's own content, which nobody asked
+       for.
        `.scols` exists so the CSS that lands later cannot make this a THIRD
        column beside the nav and the panel: the pair is the row, the status line
        is not part of it. -->
@@ -134,11 +192,13 @@
              starts a job. -->
         <Masks />
       {:else if section === 'indexing'}
-        <h2>{indexingLabel}</h2>
-        <!-- §9.3 — what the index holds. It takes `jobs` to hear an ending,
-             which is the one moment its numbers can have changed; it starts
-             nothing itself. The running pass is the strip above the nav. -->
-        <Indexing {jobs} />
+        <h2>{scanningLabel}</h2>
+        <!-- §9.3 — what the index holds, and the one Scan control (Task
+             8). `settings`/`loadError` are this window's own read, handed down
+             rather than fetched again; `jobs` is for the button and for reading
+             the running phase this section gates on. The running pass itself is
+             the strip above the nav. -->
+        <Scanning {jobs} {settings} {loadError} />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>
         <!-- §9.4 — the shortcut, autostart, and the version. It takes no
