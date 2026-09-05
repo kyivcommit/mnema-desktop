@@ -347,8 +347,11 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     //
     // ⚠️ **This list is not every `(async)` command, and saying so is part of
     // the finding.** Re-derive it rather than trusting the arithmetic below,
-    // which has already gone stale once — it said 23 while the tree held 27,
-    // because four commands arrived between the measurement and the reading:
+    // which has already gone stale twice — first it said 23 while the tree
+    // held 27, because four commands arrived between the measurement and the
+    // reading; then Task 3b deleted the two commands the second version of
+    // this paragraph was built around, which is what made THAT arithmetic
+    // wrong without changing a single number in it:
     //
     //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
     //
@@ -357,30 +360,28 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // moved by the time it was read — the same staleness the paragraph above is
     // about, committed one paragraph later.
     //
-    // Measured on this branch: 33 lines, of which two are prose naming the
-    // attribute rather than carrying it (`prefs.rs:386` and `:512`), so 31
-    // `(async)` commands — against 5 deliberately blocking ones
-    // (`start_probe_job`, `job_status`, `cancel_job`, `get_locale`,
-    // `set_locale`), of which `cancel_job` is the counterweight below. A grep
-    // for the bare `#[tauri::command]` overcounts in the same way and for the
-    // same reason: three doc comments name it without carrying it,
-    // `set_hotkey`'s, `change_hotkey`'s and the one above `models::key`.
+    // Measured on this branch: 33 lines, of which FOUR are prose naming the
+    // attribute rather than carrying it — `prefs.rs:386` and `:512`, and two
+    // more Task 3b's own file headers added, `walk_job.rs:7` and
+    // `embed_job.rs:16`, each quoting the deleted commands' old signatures as
+    // history — so 29 `(async)` commands, and **all 29 are registered**: the
+    // two that once were not, `start_walk_job` and `start_embed_job`, are
+    // gone along with the commands themselves, not merely unregistered.
+    // Against them are 5 deliberately blocking ones (`start_probe_job`,
+    // `job_status`, `cancel_job`, `get_locale`, `set_locale`), of which
+    // `cancel_job` is the counterweight below. A grep for the bare
+    // `#[tauri::command]` overcounts in the same way and for the same reason:
+    // three doc comments name it without carrying it, `set_hotkey`'s,
+    // `change_hotkey`'s and the one above `models::key`.
     //
-    // 🔴 Two of the 31 are NOT in `invoke_handler!` — `start_walk_job` and
-    // `start_embed_job`, unregistered with the scanning job's embedding phase —
-    // so their attributes are inert and they cannot be asked from here at all.
-    // They were on this list until then, and were replaced by `start_scan_job`
-    // rather than dropped: the reason they were here (a person waits on them
-    // from the folder screen while a job holds the index mutex) is now that
-    // command's. That leaves 29 reachable; the loop below asks 10 of them, so
-    // 19 are checked by nothing here.
-    //
-    // That is a gap this branch did not create and does not close, written
-    // down rather than left for the list's shape to imply it was considered.
-    // What the seven above have in common is that a person waits on them from
-    // the folder screen while a job holds the index mutex; the three PR 9 ones
-    // are here for the sharper reason written beside them. The rest is one
-    // enumeration and belongs to whoever widens it.
+    // The loop below asks 10 of the 29 reachable `(async)` commands, so 19
+    // are checked by nothing here — a gap this branch did not create and does
+    // not close, written down rather than left for the list's shape to imply
+    // it was considered. What the seven non-PR-9 ones have in common is that
+    // a person waits on them from the folder screen while a job holds the
+    // index mutex; the three PR 9 ones are here for the sharper reason
+    // written beside them. The rest is one enumeration and belongs to
+    // whoever widens it.
     for cmd in [
         "open_index",
         "search",
@@ -3352,7 +3353,7 @@ fn including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went() {
 /// words: "a symlink, a dangling symlink, a FIFO, a socket or a device." It
 /// is journalled and the walk continues, which this test leans on twice:
 /// once for `skips` to have a row to return, and once for
-/// `run_walk_to_completion`'s own assertion that the walk still completes.
+/// `scan_to_completion`'s own assertion that the scan still completes.
 #[cfg(unix)]
 #[test]
 fn skips_reports_what_the_walk_could_not_read() {

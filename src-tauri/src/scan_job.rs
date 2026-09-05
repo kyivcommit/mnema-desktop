@@ -135,8 +135,10 @@ pub fn start_scan_job(state: State<'_, AppState>, entry: Entry) -> Result<(), Er
     start(&state, entry)
 }
 
-/// The command, reachable from Rust — the shape `run_walk_and_capture_ending`
-/// already uses for the walk, and what the tray will call.
+/// The command, reachable from Rust — the shape `support::scan::
+/// run_scan_capturing_snapshots` uses for the scan (the deleted
+/// `run_walk_and_capture_ending` used it for the walk before Task 3b), and
+/// what the tray will call.
 pub(crate) fn start(state: &AppState, entry: Entry) -> Result<(), Error> {
     let deps = ScanDeps::production(state);
     start_inner(state, entry, deps)
