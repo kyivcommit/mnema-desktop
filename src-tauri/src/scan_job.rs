@@ -929,35 +929,6 @@ fn set_test_hook(hook: Option<Hook>) {
     *TEST_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
 }
 
-/// Turn on [`TEST_HOOK`]. The slot is one per binary, so two tests that install
-/// a hook cannot overlap: otherwise one's teardown clears the other's hook
-/// before that other's reader has had a chance to run it. `prefs.rs`'s own
-/// `HOOK_TURN` is the shape this copies, not the instance — they guard
-/// different hooks and must not serialise against each other.
-#[cfg(test)]
-static HOOK_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-#[must_use = "the hook is cleared when this is dropped"]
-#[allow(dead_code)] // held for its `Drop`, the guard itself is never read
-struct HookTurn(std::sync::MutexGuard<'static, ()>);
-
-#[cfg(test)]
-impl Drop for HookTurn {
-    fn drop(&mut self) {
-        set_test_hook(None); // idempotent; covers the panic path
-    }
-}
-
-#[cfg(test)]
-fn take_hook_turn(hook: Hook) -> HookTurn {
-    // Poisoning is absorbed: a test that panicked must not also poison the next
-    // one's turn.
-    let turn = HOOK_TURN.lock().unwrap_or_else(|e| e.into_inner());
-    set_test_hook(Some(hook));
-    HookTurn(turn)
-}
-
 /// Cloned out of its mutex before it is called, so the hook may take any lock
 /// it likes — including the index's — without meeting this one.
 #[cfg(test)]
@@ -982,10 +953,9 @@ fn test_hook(_state: &AppState) {}
 /// taking the state would suggest there is something else to reach.
 ///
 /// A second hook rather than a parameter on [`TEST_HOOK`], because the two model
-/// different races and a test that wanted one would have to no-op the other —
-/// and the turn below is separate for the same reason `prefs.rs`'s is separate
-/// from this file's: two hooks that serialised against each other would make
-/// every test of one wait for every test of the other.
+/// different races and a test that wanted one would have to no-op the other.
+/// They share one turn all the same — see [`SCAN_TURN`], which is held by every
+/// test here that starts a scan and not only by the ones that arm a hook.
 #[cfg(test)]
 type BoundaryHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 
@@ -993,25 +963,77 @@ type BoundaryHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 static BOUNDARY_HOOK: std::sync::Mutex<Option<BoundaryHook>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-static BOUNDARY_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn set_boundary_hook(hook: Option<BoundaryHook>) {
+    *BOUNDARY_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+/// 🔴 **The turn belongs to the SCAN, not to the hook.** Every test in this
+/// module that starts a scan takes it, whether or not it installs anything.
+///
+/// [`TEST_HOOK`] and [`BOUNDARY_HOOK`] are one per binary, and **every** scan
+/// calls both — not only the scan of the test that armed them. So an armed hook
+/// fires inside a sibling test's job, on that job's thread, and acts on the
+/// state IT was armed for. Measured: with the turn guarding only the installers,
+/// `a_stop_after_the_last_root_report_still_ends_cancelled_with_resume_full`
+/// failed 7 times in 30 parallel runs of this module, reporting a folder that
+/// ended `Cancelled` with `done: 0, total: 2` — its Stop raised by another
+/// test's scan while its own walk had not read a file yet, which the boundary
+/// hook cannot do from where it is called.
+///
+/// Guarding the installers alone closes only the window where two hooks
+/// overlap, and leaves the wider one where an armed hook overlaps an ordinary
+/// scan — nineteen of the twenty-two tests here. A turn that is a **parameter**
+/// of [`run_scan`] is what makes the rule mechanical rather than remembered:
+/// there is no way to start a scan in this module without one in hand.
+///
+/// `prefs.rs`'s own `HOOK_TURN` is the shape this copies, not the instance —
+/// they guard different hooks and must not serialise against each other.
+#[cfg(test)]
+static SCAN_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-#[must_use = "the hook is cleared when this is dropped"]
+#[must_use = "a scan started without holding the turn can be reached by another test's hook"]
 #[allow(dead_code)] // held for its `Drop`, the guard itself is never read
-struct BoundaryTurn(std::sync::MutexGuard<'static, ()>);
+struct ScanTurn(std::sync::MutexGuard<'static, ()>);
 
 #[cfg(test)]
-impl Drop for BoundaryTurn {
+impl Drop for ScanTurn {
+    /// Both hooks, unconditionally: idempotent, and it covers the panic path of
+    /// a test that armed one.
     fn drop(&mut self) {
-        *BOUNDARY_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        set_test_hook(None);
+        set_boundary_hook(None);
     }
 }
 
+/// The turn, with nothing armed — what a test that only runs a scan needs.
+///
+/// Poisoning is absorbed: a test that panicked must not also poison the next
+/// one's turn.
 #[cfg(test)]
-fn take_boundary_turn(hook: BoundaryHook) -> BoundaryTurn {
-    let turn = BOUNDARY_TURN.lock().unwrap_or_else(|e| e.into_inner());
-    *BOUNDARY_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
-    BoundaryTurn(turn)
+fn take_scan_turn() -> ScanTurn {
+    let turn = SCAN_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    set_test_hook(None);
+    set_boundary_hook(None);
+    ScanTurn(turn)
+}
+
+/// The turn, with [`TEST_HOOK`] armed. Armed **after** the lock is held, which
+/// is the half of the ordering that matters: armed before it, the hook is
+/// reachable by whatever scan is running now.
+#[cfg(test)]
+fn take_scan_turn_reading(hook: Hook) -> ScanTurn {
+    let turn = take_scan_turn();
+    set_test_hook(Some(hook));
+    turn
+}
+
+/// The turn, with [`BOUNDARY_HOOK`] armed.
+#[cfg(test)]
+fn take_scan_turn_boundary(hook: BoundaryHook) -> ScanTurn {
+    let turn = take_scan_turn();
+    set_boundary_hook(Some(hook));
+    turn
 }
 
 /// Cloned out of its mutex before it is called, for [`test_hook`]'s reason.
@@ -1306,7 +1328,14 @@ mod tests {
     /// and for the same reason: a scan has no channel, so recording what was
     /// READ at each announcement is recording exactly what a tray or a reopened
     /// window would have drawn.
+    ///
+    /// 🔴 The `turn` is a parameter and is never taken inside, so that no test
+    /// in this module can start a scan without holding it — see [`SCAN_TURN`]
+    /// for the race that reaches a scan running without one, and for how it was
+    /// measured. It is borrowed rather than taken because a test that arms a
+    /// hook takes the same turn to arm it, and one lock cannot be taken twice.
     fn run_scan(
+        turn: &ScanTurn,
         state: &Arc<AppState>,
         entry: Entry,
         deps: ScanDeps,
@@ -1314,7 +1343,7 @@ mod tests {
         Vec<crate::scan_state::ScanState>,
         crate::scan_state::ScanState,
     ) {
-        run_scan_watching(state, entry, deps, |_, _| {})
+        run_scan_watching(turn, state, entry, deps, |_, _| {})
     }
 
     /// [`run_scan`] with a hand at the announcement: `watcher` runs on whichever
@@ -1322,6 +1351,7 @@ mod tests {
     /// inside `walk_root`. That is what makes the interleavings below built
     /// rather than waited for.
     fn run_scan_watching(
+        turn: &ScanTurn,
         state: &Arc<AppState>,
         entry: Entry,
         deps: ScanDeps,
@@ -1346,6 +1376,11 @@ mod tests {
             watcher(&state, &now);
         }));
 
+        // Read, so that the borrow is a real one: the turn is proof the caller
+        // holds it, and a parameter nothing touches is a parameter a future
+        // edit deletes. Borrowed and never moved — dropping it here would
+        // release the lock this very scan is running under.
+        let _held: &std::sync::MutexGuard<'static, ()> = &turn.0;
         start_inner(state, entry, deps).expect("the scan would not start");
         wait_for_the_slot(state);
         let settled = state.scan_state();
@@ -1704,7 +1739,7 @@ mod tests {
         // with nothing to install, is what `take_remove_hook_turn`'s own doc
         // says every caller of that function must do.
         let _remove_turn = crate::bridge::take_remove_hook_turn(Arc::new(|_: &AppState| {}));
-        let _turn = take_hook_turn(Arc::new({
+        let _turn = take_scan_turn_reading(Arc::new({
             let fired = Arc::clone(&fired);
             let removed = Arc::clone(&removed);
             move |state: &AppState| {
@@ -1781,6 +1816,7 @@ mod tests {
     /// must not touch what the folders said.
     #[test]
     fn a_scan_that_read_its_folders_goes_on_to_embed_what_they_queued() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt", "a2.txt"]);
         let state = app_in(data.path());
@@ -1788,7 +1824,7 @@ mod tests {
         adopt_a_model(&state);
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_embeds(3));
-        let (snapshots, settled) = run_scan(&state, Entry::Full, deps);
+        let (snapshots, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         let report = report_of(&settled);
         assert_eq!(
@@ -1870,6 +1906,7 @@ mod tests {
     /// was.
     #[test]
     fn a_store_that_will_not_answer_is_reported_as_unavailable_not_as_no_key() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt"]);
         let state = app_in(data.path());
@@ -1878,7 +1915,7 @@ mod tests {
 
         let (deps, calls) =
             deps_counting_embeds(a_store_that_will_not_answer, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         let report = report_of(&settled);
         let message = match &report.embedding {
@@ -1918,7 +1955,7 @@ mod tests {
         watch(&state, folder.path());
         adopt_a_model(&state);
         let (deps, calls) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         let report = report_of(&settled);
         assert_eq!(
@@ -1955,6 +1992,7 @@ mod tests {
     /// this question with silence whether or not the guard above it survived.
     #[test]
     fn a_stop_during_the_key_read_wins_whatever_the_store_answers() {
+        let turn = take_scan_turn();
         for (which, answer, model) in [
             (
                 "a key",
@@ -2011,7 +2049,7 @@ mod tests {
                 },
                 a_pass_that_must_not_run(),
             );
-            let (snapshots, settled) = run_scan(&state, Entry::Full, deps);
+            let (snapshots, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
             // 🔴 The ending FIRST, and the phase the store was asked under
             // second. The ending is the harm — a scan that tells somebody who
@@ -2097,6 +2135,15 @@ mod tests {
     /// embedding phase entered. The hook fires in exactly that window, and
     /// `fired` is asserted so a hook that stopped being called cannot leave this
     /// test passing about nothing.
+    ///
+    /// ⚠️ **Every folder ending `Completed` is a PREMISE here, not a result**,
+    /// and it is the line that caught [`SCAN_TURN`]'s race: with the turn
+    /// guarding only the hook installers, a sibling test's scan called this
+    /// test's hook and raised this test's Stop while its own walk was still in
+    /// phase 2, so the folder answered `Cancelled` with `done: 0` and the
+    /// premise failed. A folder that was itself stopped proves nothing about
+    /// the boundary, which is why the assertion is worth its own message rather
+    /// than being folded into the one below it.
     #[test]
     fn a_stop_after_the_last_root_report_still_ends_cancelled_with_resume_full() {
         let data = tempfile::tempdir().expect("a data directory");
@@ -2107,7 +2154,7 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let stopping = Arc::downgrade(&state);
-        let _turn = take_boundary_turn(Arc::new({
+        let turn = take_scan_turn_boundary(Arc::new({
             let fired = Arc::clone(&fired);
             move || {
                 fired.store(true, Ordering::SeqCst);
@@ -2118,7 +2165,7 @@ mod tests {
         }));
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         assert!(
             fired.load(Ordering::SeqCst),
@@ -2185,6 +2232,7 @@ mod tests {
     /// usually caught one layer down.
     #[test]
     fn a_stop_raised_in_the_last_progress_event_ends_cancelled_and_never_embeds() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
         let state = app_in(data.path());
@@ -2193,7 +2241,7 @@ mod tests {
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
         let stopping = Arc::downgrade(&state);
-        let (_, settled) = run_scan_watching(&state, Entry::Full, deps, move |_, now| {
+        let (_, settled) = run_scan_watching(&turn, &state, Entry::Full, deps, move |_, now| {
             if let crate::scan_state::ScanSnapshot::Running {
                 phase: Phase::Reading { counts, .. },
                 ..
@@ -2251,6 +2299,7 @@ mod tests {
     /// because it is not about the embedding.
     #[test]
     fn a_reading_phase_that_visited_every_root_clears_the_marker_even_without_a_key() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let first = dir_holding(&["a1.txt"]);
         let second = dir_holding(&["b1.txt"]);
@@ -2269,14 +2318,15 @@ mod tests {
             Arc::new(std::sync::Mutex::new(None));
         let recorder = Arc::clone(&at_the_announcement);
         let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan_watching(&state, Entry::Full, deps, move |state, now| {
-            if now.read_seq == 1 {
-                let mut slot = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                if slot.is_none() {
-                    *slot = Some(marker(state));
+        let (_, settled) =
+            run_scan_watching(&turn, &state, Entry::Full, deps, move |state, now| {
+                if now.read_seq == 1 {
+                    let mut slot = recorder.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(marker(state));
+                    }
                 }
-            }
-        });
+            });
 
         assert_eq!(
             settled.last_reading.as_ref().map(|r| r.roots_read),
@@ -2311,6 +2361,7 @@ mod tests {
     /// cleared, which is the same as no marker at all.
     #[test]
     fn a_reading_phase_stopped_at_the_first_of_two_folders_leaves_the_marker_set() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
         let second = dir_holding(&["b1.txt"]);
@@ -2320,7 +2371,7 @@ mod tests {
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
         let stopping = Arc::downgrade(&state);
-        let (_, settled) = run_scan_watching(&state, Entry::Full, deps, move |_, now| {
+        let (_, settled) = run_scan_watching(&turn, &state, Entry::Full, deps, move |_, now| {
             if let crate::scan_state::ScanSnapshot::Running {
                 phase:
                     Phase::Reading {
@@ -2363,11 +2414,12 @@ mod tests {
     /// finished.
     #[test]
     fn a_scan_over_no_folders_at_all_still_clears_the_marker() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let state = app_in(data.path());
 
         let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         assert_eq!(
             settled.last_reading.as_ref().map(|r| r.root_count),
@@ -2392,6 +2444,7 @@ mod tests {
     /// pass that read folders and said nothing about it.
     #[test]
     fn an_embed_only_entry_never_reads_a_folder() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt"]);
         let state = app_in(data.path());
@@ -2399,7 +2452,7 @@ mod tests {
 
         let before = state.scan_state().read_seq;
         let (deps, calls) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
-        let (snapshots, settled) = run_scan(&state, Entry::EmbedOnly, deps);
+        let (snapshots, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
 
         let report = report_of(&settled);
         assert_eq!(
@@ -2453,6 +2506,7 @@ mod tests {
     /// nothing.
     #[test]
     fn an_embed_only_run_over_pending_chunks_leaves_the_reading_alone() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt", "a2.txt"]);
         let state = app_in(data.path());
@@ -2463,7 +2517,7 @@ mod tests {
         // hand: the state a scan stopped during its EMBEDDING leaves, where the
         // folders were visited and the index is still owed vectors.
         let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
-        let (_, first) = run_scan(&state, Entry::Full, deps);
+        let (_, first) = run_scan(&turn, &state, Entry::Full, deps);
         let reading_before = first
             .last_reading
             .clone()
@@ -2474,7 +2528,7 @@ mod tests {
             .expect("setting the marker by hand");
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_embeds(2));
-        let (snapshots, settled) = run_scan(&state, Entry::EmbedOnly, deps);
+        let (snapshots, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
 
         let report = report_of(&settled);
         assert_eq!(
@@ -2523,6 +2577,7 @@ mod tests {
     /// behind a rule this run was never going to apply.
     #[test]
     fn embed_only_runs_under_a_stored_prefix_that_refuses_full() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt"]);
         let state = app_in(data.path());
@@ -2544,7 +2599,7 @@ mod tests {
             "the refused scan embedded something"
         );
 
-        let (_, settled) = run_scan(&state, Entry::EmbedOnly, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
         let report = report_of(&settled);
         assert_eq!(
             report.embedding,
@@ -2575,13 +2630,14 @@ mod tests {
     /// everything would fail the second half.
     #[test]
     fn an_index_with_no_model_skips_the_embedding_rather_than_asking_the_provider() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt"]);
         let state = app_in(data.path());
         watch(&state, folder.path());
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
         let report = report_of(&settled);
         assert_eq!(
             report.embedding,
@@ -2602,7 +2658,7 @@ mod tests {
         // The mirror: the one thing that was missing, supplied.
         adopt_a_model(&state);
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_embeds(1));
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
         assert_eq!(
             report_of(&settled).embedding,
             EmbedOutcome::Ran {
@@ -2654,7 +2710,7 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let stopping = Arc::downgrade(&state);
-        let _turn = take_boundary_turn(Arc::new({
+        let turn = take_scan_turn_boundary(Arc::new({
             let fired = Arc::clone(&fired);
             move || {
                 fired.store(true, Ordering::SeqCst);
@@ -2665,7 +2721,7 @@ mod tests {
         }));
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         assert!(
             fired.load(Ordering::SeqCst),
@@ -2736,6 +2792,7 @@ mod tests {
     /// to reach it at all.
     #[test]
     fn a_reading_stopped_over_an_index_with_no_model_is_still_a_stop() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
         let state = app_in(data.path());
@@ -2743,7 +2800,7 @@ mod tests {
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
         let stopping = Arc::downgrade(&state);
-        let (_, settled) = run_scan_watching(&state, Entry::Full, deps, move |_, now| {
+        let (_, settled) = run_scan_watching(&turn, &state, Entry::Full, deps, move |_, now| {
             if let crate::scan_state::ScanSnapshot::Running {
                 phase: Phase::Reading { counts, .. },
                 ..
@@ -2779,6 +2836,7 @@ mod tests {
     /// was nothing to read.
     #[test]
     fn a_stop_during_the_embedding_resumes_as_embed_only() {
+        let turn = take_scan_turn();
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt"]);
         let state = app_in(data.path());
@@ -2800,7 +2858,7 @@ mod tests {
                 failed: 0,
             })
         });
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         let report = report_of(&settled);
         assert_eq!(report.reason, EndReason::Cancelled, "{report:?}");
@@ -2835,6 +2893,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_partly_read_root_stays_partly_read_after_a_successful_embedding() {
+        let turn = take_scan_turn();
         use std::os::unix::fs::PermissionsExt;
 
         let data = tempfile::tempdir().expect("a data directory");
@@ -2851,7 +2910,7 @@ mod tests {
         adopt_a_model(&state);
 
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_embeds(1));
-        let (_, settled) = run_scan(&state, Entry::Full, deps);
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
 
         // Restored before anything can fail below, so the temporary directory
         // can still be cleaned up when it does.
@@ -2912,6 +2971,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_embed_only_run_keeps_the_last_readings_warning() {
+        let turn = take_scan_turn();
         use std::os::unix::fs::PermissionsExt;
 
         let data = tempfile::tempdir().expect("a data directory");
@@ -2938,7 +2998,7 @@ mod tests {
                 failed: 0,
             })
         });
-        let (_, stopped) = run_scan(&state, Entry::Full, deps);
+        let (_, stopped) = run_scan(&turn, &state, Entry::Full, deps);
         let after_reading = stopped
             .last_reading
             .clone()
@@ -2957,7 +3017,7 @@ mod tests {
 
         // 2 — the resumption the report just named.
         let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_embeds(1));
-        let (_, resumed) = run_scan(&state, Entry::EmbedOnly, deps);
+        let (_, resumed) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             resumed.last_reading.as_ref(),
@@ -2979,7 +3039,7 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .expect("restoring the subdirectory");
         let (deps, _) = deps_counting_embeds(a_key, a_pass_that_embeds(1));
-        let (_, whole) = run_scan(&state, Entry::Full, deps);
+        let (_, whole) = run_scan(&turn, &state, Entry::Full, deps);
         let after_second_reading = whole
             .last_reading
             .clone()
