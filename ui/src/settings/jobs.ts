@@ -173,22 +173,51 @@ export function createJobController(): JobController {
       if (fn !== null) fn();
     };
 
-    // 🔴 The two are started INDEPENDENTLY, and neither waits on the other.
+    // `async` so that a wrapper which throws SYNCHRONOUSLY — one that is
+    // `undefined`, or that answers with something that is not a promise — comes
+    // back as a rejection this `catch` can turn into a sentence. Called bare,
+    // that throw would escape `mount`, and `mount` is what `onMount` calls: the
+    // whole window would fail to render over a boundary that only failed to
+    // answer.
+    const readSnapshot = () => {
+      void (async () => {
+        const state = await jobStatus();
+        if (!destroyed) absorb(state);
+      })().catch((e) => { if (!destroyed) say(e); });
+    };
+
+    // 🔴 **Three things reach this controller, and each covers what the one
+    // before it cannot.**
     //
-    // The obvious alternative is `bootLocale`'s (`i18n/index.ts`): register the
-    // listener, and only then take the snapshot, so a change landing between the
-    // reply and a later subscription cannot fall in the gap. That order is right
-    // THERE and buys nothing here, because the two files carry different values.
-    // A locale reply is a bare choice with no version, so the order is the only
-    // thing that can say which of two answers is newer. A `ScanState` states its
-    // own revision, and `apply` picks the newer of any two however they arrive —
-    // so the gap that ordering exists to close does not exist for this value.
+    // The FIRST read, started here and waiting on nothing, is the fast paint: a
+    // window opened mid-scan draws the run without waiting for a dynamic import
+    // to resolve. It is started independently of the subscription because
+    // `listenScanProgress` awaits that import, and a promise that never settles
+    // is neither a rejection nor a resolution — chained behind it, this read
+    // would never happen at all, and the window would say nothing whatever
+    // about a scan that is running, with no timeout and nothing else that asks.
     //
-    // What ordering would cost is a real failure: `listenScanProgress` awaits a
-    // dynamic import, and a promise that never settles is neither a rejection
-    // nor a resolution. Chained, it would take the snapshot down with it, and
-    // the window would say nothing at all about a scan that is running — with no
-    // timeout and nothing else that asks.
+    // The SECOND read, inside the `.then` below, closes the gap that
+    // independence opens — and the gap is real. `apply` sorts two states that
+    // both ARRIVE; `scan-progress` is a fire-and-forget `handle.emit`
+    // (`lib.rs`) with no replay and no retained last value, so an emission
+    // landing between the first read and the moment the listener finishes
+    // registering is delivered to nobody and is in no reply either. During a run
+    // the next progress tick corrects that. The LAST emission of a job does not:
+    // a window opened just as a scan ends would keep a running strip with a Stop
+    // that `cancel_job` will refuse, and the sections would never take their
+    // ending re-read. The duplicate costs nothing — the second answer is either
+    // newer, or the same revision and dropped by `apply` on identity.
+    //
+    // The EVENTS cover everything after that.
+    //
+    // This is where the controller parts company with `bootLocale`
+    // (`i18n/index.ts`), which registers before it asks and asks once: a locale
+    // reply carries no version, so order is the only thing that can say which of
+    // two answers is newer, and deferring that read is free because a window
+    // with no locale yet has not painted. Neither holds here.
+    readSnapshot();
+
     void listenScanProgress((incoming) => {
       if (destroyed) return;
       absorb(incoming);
@@ -196,25 +225,19 @@ export function createJobController(): JobController {
       .then((fn) => {
         // `destroy` may already have run, with nothing to call. The unlisten is
         // used the moment it arrives instead, so a section switch during boot
-        // does not leave a listener on the window for the life of the process.
-        if (destroyed) fn();
-        else unlisten = fn;
+        // does not leave a listener on the window for the life of the process —
+        // and a window that has gone has nothing to re-read for.
+        if (destroyed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        readSnapshot();
       })
       // Trailing, so it covers the handler above as well as the subscription
       // itself. A subscription that could not be registered is a sentence like
       // any other rejection.
       .catch((e) => { if (!destroyed) say(e); });
-
-    // `async` so that a wrapper which throws SYNCHRONOUSLY — one that is
-    // `undefined`, or that answers with something that is not a promise — comes
-    // back as a rejection this catch can turn into a sentence. Called bare, that
-    // throw would escape `mount`, and `mount` is what `onMount` calls: the whole
-    // window would fail to render over a boundary that only failed to answer.
-    const readSnapshot = async () => {
-      const state = await jobStatus();
-      if (!destroyed) absorb(state);
-    };
-    void readSnapshot().catch((e) => { if (!destroyed) say(e); });
 
     return destroy;
   }

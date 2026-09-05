@@ -126,7 +126,7 @@ beforeEach(() => {
 // controller is ready to be driven — waiting on `job_status` used to imply the
 // listener existed and no longer does.
 const started = () => vi.waitFor(() => {
-  expect(calls('job_status')).toHaveLength(1);
+  expect(calls('job_status').length).toBeGreaterThanOrEqual(1);
   expect(listen).toHaveBeenCalled();
 });
 
@@ -342,6 +342,57 @@ test('a subscription that never settles does not stop the snapshot being read', 
   expect(get(jobs.state).note).toBeNull();
 });
 
+// 🔴 The gap the independent start opens, and the read that closes it.
+//
+// `apply` sorts two states that both ARRIVE. It cannot sort one that never
+// arrives — and `scan-progress` is a fire-and-forget `handle.emit` (`lib.rs`)
+// with no replay and no retained last value, so an emission landing between the
+// snapshot read and the moment the listener finishes registering is delivered
+// to nobody and is in no reply either.
+//
+// During a running scan the next progress tick corrects it. The LAST emission
+// of a job does not: a person opening the settings window just as a scan ends
+// would keep a running strip with a Stop that `cancel_job` will refuse, while
+// the sections never take their ending re-read — and nothing asks again until
+// the next job.
+//
+// The fixture builds exactly that window: the first reply is `running@3`, the
+// scan ends while the listener is still being registered, and **no event is
+// ever delivered**. Only a second read, taken after the listener exists, can
+// reach `ended@4`.
+test('a state that changed in the mount gap is read again once the listener exists', async () => {
+  let register!: (fn: () => void) => void;
+  listen.mockReturnValue(new Promise<() => void>((resolve) => { register = resolve; }));
+  replies({ job_status: runningAt(3) });
+  const jobs = createJobController();
+
+  jobs.mount();
+  await vi.waitFor(() => expect(get(jobs.state).scan.revision).toBe(3));
+
+  // The scan ends here — after the window read the state, before it is
+  // listening. Nothing is emitted to this window, ever.
+  replies({ job_status: endedAt(4) });
+  register(unlisten);
+
+  await vi.waitFor(() => expect(get(jobs.state).scan.revision).toBe(4));
+  expect(get(jobs.state).scan.snapshot.kind).toBe('ended');
+  expect(calls('job_status')).toHaveLength(2);
+});
+
+// Both directions on the count: twice, and then it stops. Once leaves the gap
+// above open; a read per event, or a read that re-triggers itself, would put an
+// IPC round trip behind every progress tick of every scan.
+test('a mount reads the snapshot twice and then stops asking', async () => {
+  await mounted();
+
+  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(2));
+  // A macrotask boundary, not a fixed number of microtask ticks: whatever else
+  // the mount had queued is given every chance to run before this is believed.
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+
+  expect(calls('job_status')).toHaveLength(2);
+});
+
 // The other shape a broken boundary takes, and the one that reaches this code as
 // a value rather than as a rejection: a wrapper that is `undefined`, or one that
 // answers with something that is not a promise. It throws SYNCHRONOUSLY inside
@@ -452,13 +503,15 @@ test('a scan asks for the entry point it was given, and clears the standing sent
 test('a refused scan shows the sentence verbatim and asks the state again', async () => {
   replies({ job_status: IDLE, start_scan_job: new Error('another job is already running') });
   const { jobs } = await mounted();
-  expect(calls('job_status')).toHaveLength(1);
+  // Two, not one: a mount reads the snapshot once for a fast first paint and
+  // again once the listener exists — see `a mount reads the snapshot twice`.
+  await vi.waitFor(() => expect(calls('job_status')).toHaveLength(2));
 
   replies({ job_status: runningAt(4), start_scan_job: new Error('another job is already running') });
   await jobs.scan('full');
 
   expect(get(jobs.state).note).toBe('another job is already running');
-  expect(calls('job_status')).toHaveLength(2);
+  expect(calls('job_status')).toHaveLength(3);
   expect(get(jobs.state).scan.snapshot.kind).toBe('running');
 });
 
@@ -515,6 +568,10 @@ test('destroying before the subscription resolves still unsubscribes, exactly on
 
   expect(unlisten).toHaveBeenCalledTimes(1);
   expect(get(jobs.state).scan).toEqual(IDLE);
+  // ONE read, not two. The second read exists to close the gap between the
+  // first one and the listener; a window that has gone has no gap left to
+  // close, and an IPC round trip fired for it is work nobody will ever read.
+  expect(calls('job_status')).toHaveLength(1);
 });
 
 // The reply is in flight when the section goes. Applied, it would write to a
