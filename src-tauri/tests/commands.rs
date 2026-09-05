@@ -2544,9 +2544,12 @@ fn removing_a_folder_through_the_ipc_needs_the_path_and_answers_with_the_doomed_
 
     let missing_path = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
         .expect_err("a call with no `path` field was accepted");
-    assert!(
-        missing_path.as_str().unwrap_or_default().contains("path"),
-        "the rejection should name the missing field; it was {missing_path}"
+    assert_eq!(
+        missing_path,
+        json!(
+            "invalid args `path` for command `remove_watched_folder`: command \
+             remove_watched_folder missing required key path"
+        )
     );
 
     let removed = call(

@@ -228,3 +228,59 @@ fn removing_a_root_takes_its_documents_vectors_too() {
 
     assert!(db.knn(space, &[0.1; 4], 5, None).unwrap().is_empty());
 }
+
+/// [`Db::delete_watched_root_if_path`]'s whole reason to exist: the delete
+/// runs only if `root_id` still names the path the caller expects, checked
+/// inside the SAME transaction the delete itself runs in — not by the caller
+/// beforehand, and not by two statements that merely sit next to each other.
+///
+/// Both directions, in the order a real caller hits them: a stale path first
+/// (deletes nothing, the row survives to prove it), then the true path
+/// (deletes exactly like `delete_watched_root`). A version that compared
+/// outside the transaction, or did not compare at all, passes the second half
+/// alone; this is the same shape `bridge.rs`'s own swap test pins one layer up,
+/// checked here at the layer that actually owns the guarantee.
+#[test]
+fn delete_watched_root_if_path_only_deletes_a_matching_path() {
+    let db = fixture_db();
+    let root = db.insert_watched_root("/tmp/one").unwrap();
+    let doc = insert_document_with_chunk(&db, root, "a.txt", "unique marker text");
+
+    let mismatch = db
+        .delete_watched_root_if_path(root, "/tmp/somewhere-else")
+        .unwrap();
+    assert_eq!(mismatch, None, "a stale path must not delete anything");
+    assert!(
+        db.document_exists(&doc).unwrap(),
+        "the document was deleted under a path that did not match"
+    );
+    assert_eq!(
+        db.watched_root_path(root).unwrap().as_deref(),
+        Some("/tmp/one"),
+        "the root row itself was deleted under a path that did not match"
+    );
+
+    let removed = db.delete_watched_root_if_path(root, "/tmp/one").unwrap();
+    assert_eq!(
+        removed,
+        Some(1),
+        "a matching path should delete exactly like delete_watched_root"
+    );
+    assert!(!db.document_exists(&doc).unwrap());
+    assert_eq!(db.watched_root_path(root).unwrap(), None);
+}
+
+/// The third outcome `Ok(None)` folds into the same value as a path mismatch:
+/// an id with no row at all. Both are "nothing was deleted", and the caller
+/// that needs to tell them apart reads `watched_root_path` afterwards — this
+/// crate's own contribution to that split is only that neither case writes
+/// anything, which is what this pins.
+#[test]
+fn delete_watched_root_if_path_answers_none_for_an_id_nobody_holds() {
+    let db = fixture_db();
+    assert_eq!(
+        db.delete_watched_root_if_path(999, "/tmp/anything")
+            .unwrap(),
+        None
+    );
+}

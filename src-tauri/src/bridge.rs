@@ -95,20 +95,26 @@ pub fn add_watched_folder(state: State<'_, AppState>, path: String) -> Result<i6
 /// finished.
 ///
 /// **`path` is not decoration — it is what [`Error::WatchedRootChanged`]
-/// checks against, inside the same `with_index` call that deletes.** A
-/// caller that only sent `root_id` would be asking to delete whatever
-/// currently sits at that row, and `watched_root.id` is a rowid alias SQLite
-/// reuses the moment a row is gone: a second window could remove this exact
-/// folder and add an unrelated one that inherits its id between whenever
-/// this caller last read the list and the moment this command's own delete
-/// runs. Reading `watched_root_path` and comparing it to `path`, and doing
-/// that comparison and the delete inside the SAME `with_index` call, is what
-/// closes that window — nothing that goes through `with_index` can swap the
-/// row in between, because `with_index` holds the one lock every writer
-/// takes. `a_root_swapped_before_the_delete_is_refused_and_the_newcomer_
-/// survives` (below) is what this claim answers to; the two mutants in its
-/// own doc comment are what a compare that is skipped, or read too early,
-/// looks like.
+/// checks against, and the check is true BY CONSTRUCTION rather than by an
+/// inventory of who else might write `watched_root` today.** A caller that
+/// only sent `root_id` would be asking to delete whatever currently sits at
+/// that row, and `watched_root.id` is a rowid alias SQLite reuses the moment
+/// a row is gone: a second window could remove this exact folder and add an
+/// unrelated one that inherits its id in between. The compare and the delete
+/// are [`mnema_index::Db::delete_watched_root_if_path`]'s own single
+/// `IMMEDIATE` transaction — not two statements sharing this function's
+/// `with_index` closure. SQLite takes the write lock at `BEGIN IMMEDIATE`
+/// and WAL allows one writer at a time, so no OTHER connection can write
+/// `watched_root` between that transaction's read and its delete, whether or
+/// not that connection goes through `with_index`'s shared mutex —
+/// [`AppState::open_job_index`] hands out connections that bypass it
+/// entirely, and the swap test below uses exactly one of those to model a
+/// second window. `with_index` here is only how this function reaches the
+/// `Db` at all, and how the post-delete `indexed_file_count` read shares the
+/// same connection and the same just-committed state; it is not what makes
+/// the compare-and-delete atomic, and the doc used to say it was.
+/// `a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives`
+/// (below) is what this claim answers to.
 #[tauri::command(async)]
 pub fn remove_watched_folder(
     state: State<'_, AppState>,
@@ -130,13 +136,26 @@ pub fn remove_watched_folder(
 /// and before the `with_index` call, which is the only window
 /// `a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives`
 /// needs to model a second window's write landing between them. Last, one
-/// `with_index` call does the compare AND the delete: `Some(p) if p == path`
-/// is the only arm that deletes anything, `Some(_)` (a different folder now
-/// sits at this id) answers [`Error::WatchedRootChanged`], and `None` (the
-/// row is simply gone) answers [`Error::UnknownWatchedRoot`] as it always
-/// has. On the success arm the slot is given back with the new count so a
-/// window watching [`AppState::scan_state`] never sees a stale one; on
-/// either error arm the slot is never given back explicitly and
+/// `with_index` call reaches
+/// [`mnema_index::Db::delete_watched_root_if_path`], where the compare AND
+/// the delete actually happen atomically, inside ITS OWN transaction — see
+/// that function's own doc comment for why an `IMMEDIATE` transaction is
+/// what closes the window, not this function's `with_index` call.
+/// `Some(removed)` is the only outcome that deleted anything; `Ok(files)`
+/// beside it is read from the SAME connection, right after that same
+/// transaction committed, so it is never a count from before the delete.
+/// `None` means nothing was deleted, for one of two reasons the transaction
+/// itself does not distinguish — the row is simply gone, or a different
+/// folder now sits at this id — so a SEPARATE read of
+/// [`mnema_index::Db::watched_root_path`] chooses which sentence to show:
+/// `None` there is [`Error::UnknownWatchedRoot`], `Some` is
+/// [`Error::WatchedRootChanged`]. That second read cannot change what was
+/// deleted; the transaction above already decided and committed (or did
+/// nothing) by the time it runs, so a swap landing between the two reads
+/// only risks naming the wrong reason, never doing the wrong delete. On the
+/// success arm the slot is given back with the new count so a window
+/// watching [`AppState::scan_state`] never sees a stale one; on either
+/// error arm the slot is never given back explicitly and
 /// [`crate::state::JobSlot`]'s own drop policy writes `Idle` for it, because
 /// `Removing` is not one of the two phases that owe a report.
 pub(crate) fn remove_watched_root(
@@ -152,13 +171,12 @@ pub(crate) fn remove_watched_root(
     )?;
     remove_hook(state);
     let (removed, files) = state.with_index(|db| {
-        Ok(match db.watched_root_path(root_id)? {
-            Some(p) if p == path => {
-                let removed = db.delete_watched_root(root_id)?;
-                Ok((removed, db.indexed_file_count()?))
-            }
-            Some(_) => Err(Error::WatchedRootChanged),
-            None => Err(Error::UnknownWatchedRoot(root_id)),
+        Ok(match db.delete_watched_root_if_path(root_id, path)? {
+            Some(removed) => Ok((removed, db.indexed_file_count()?)),
+            None => Err(match db.watched_root_path(root_id)? {
+                Some(_) => Error::WatchedRootChanged,
+                None => Error::UnknownWatchedRoot(root_id),
+            }),
         })
     })??;
     slot.finish(crate::scan_state::Terminal::Idle, Some(files));
@@ -185,7 +203,7 @@ fn set_remove_hook(hook: Option<RemoveHook>) {
 }
 
 /// Turn on [`REMOVE_HOOK`]. One per binary, so two tests that install a hook
-/// here cannot overlap — `scan_job.rs`'s own `HOOK_TURN` doc explains why
+/// here cannot overlap — `scan_job.rs`'s own `SCAN_TURN` doc explains why
 /// this has to be a lock and not merely a convention.
 ///
 /// 🔴 **Every test in this binary that calls [`remove_watched_root`] takes
@@ -203,6 +221,25 @@ fn set_remove_hook(hook: Option<RemoveHook>) {
 /// deleted and re-inserted a root in the snapshot test's own index. A caller
 /// with nothing to install still takes the turn with a no-op closure — see
 /// that test, and `scan_job.rs`'s own swap-race test, for the shape.
+///
+/// ⚠️ **What this turn does NOT do on its own: stop [`remove_hook`] from
+/// being reached through `scan_job.rs`'s own hook mechanism (review round 1,
+/// Minor 4).** `scan_job.rs`'s swap-race test arms ITS OWN hook with a
+/// closure that calls [`remove_watched_root`], and that hook fires from
+/// whichever scan happens to reach `read_roots` — not only from the scan the
+/// arming test itself started. A second, unrelated scan reaching that point
+/// while this file's `REMOVE_HOOK` also happens to be armed would run THIS
+/// hook against a THIRD `AppState` that built neither closure. Holding
+/// `REMOVE_HOOK_TURN` cannot prevent that call from happening in the first
+/// place — it only decides what runs once it does. What closes the chain at
+/// its source is `scan_job.rs`'s own `SCAN_TURN`: every test in that module
+/// that can start a scan takes it as a `&ScanTurn` PARAMETER of
+/// `run_scan`/`run_scan_watching`, armed only after the lock is held, whether
+/// or not it arms a hook of its own — enforced by the compiler, since there
+/// is no way to call either function without a `ScanTurn` in hand, which is
+/// what makes two scans unable to run inside each other's hook window at all
+/// (fixed alongside this file's own contamination, `scan_job.rs`'s
+/// `SCAN_TURN` commit).
 #[cfg(test)]
 static REMOVE_HOOK_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1836,12 +1873,17 @@ mod tests {
     /// `add_watched_folder` from another window, which does not take the job
     /// slot and so is never blocked by this call already holding it —
     /// deletes root A and inserts root B, which SQLite hands the same rowid
-    /// A just gave up. Correct code's own `with_index` call then reads back
-    /// `/b` for id 1, does not match the `/a` this call was asked to delete,
-    /// and answers [`Error::WatchedRootChanged`] without touching the row.
+    /// A just gave up. Correct code's own `with_index` call reaches
+    /// [`mnema_index::Db::delete_watched_root_if_path`], which reads back
+    /// `/b` for id 1 INSIDE the transaction the delete would run in, does not
+    /// match the `/a` this call was asked to delete, and answers
+    /// [`Error::WatchedRootChanged`] without touching the row.
     ///
-    /// Mutants A and B (task-4 report) are tried by hand against this test
-    /// and are not part of the shipped code.
+    /// Two hand mutants are tried against this test (task-4 fix-round-1
+    /// report): a stale pre-claim read fed into the compare — the read
+    /// happens before this hook can run, so it still equals `/a` and passes,
+    /// and the delete lands on `/b` anyway — and a fresh read that is never
+    /// compared at all. Neither is part of the shipped code.
     #[test]
     fn a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives() {
         let dir = tempfile::tempdir().unwrap();
@@ -2005,6 +2047,37 @@ mod tests {
             before, after,
             "the fixture counted the same before and after, so this test \
              cannot tell a carried count from a stale one"
+        );
+    }
+
+    /// The pair of states this separates: an id `watched_root` still holds
+    /// versus one nobody does. Before this command took `path`, the body was
+    /// `state.with_index(|db| db.delete_watched_root(root_id))`, which
+    /// answered `Ok(0)` for a row that was never there — the same shape a
+    /// mutant that deleted the `None` arm and fell through to `Ok((0,
+    /// count))` would reintroduce, and nothing else in this suite reaches
+    /// this arm to catch it.
+    #[test]
+    fn an_id_nobody_holds_answers_unknown_watched_root() {
+        // A no-op hook, taken for no reason but mutual exclusion: see
+        // `take_remove_hook_turn`'s own doc for why a caller with nothing to
+        // install still has to hold this turn.
+        let _turn = take_remove_hook_turn(Arc::new(|_: &AppState| {}));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+
+        let outcome = remove_watched_root(&state, 999, "/nonexistent");
+
+        assert!(
+            matches!(outcome, Err(Error::UnknownWatchedRoot(999))),
+            "an id nobody holds should be refused with UnknownWatchedRoot; got \
+             {outcome:?}"
+        );
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "the refused removal left the job slot taken"
         );
     }
 }

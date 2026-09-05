@@ -878,47 +878,72 @@ impl Db {
     /// `search_lexical`, citing a folder that no longer exists (D33's own
     /// failure mode, one level up).
     ///
-    /// A document is doomed only if EVERY path that ever named it sat under
-    /// this root — the `NOT EXISTS` clause below excludes a document that also
-    /// has a path under some other root, the same rule a second copy of a file
-    /// already gets from [`Db::path_count`]. Read and decided inside the one
-    /// transaction this method opens, not by the caller: a check-then-delete
-    /// split across two calls could read "no other root" and then lose the
-    /// race to a path being added under a different root in between.
-    ///
-    /// Done as one transaction rather than a loop of independent statements —
-    /// a half-applied removal, root gone with some doomed documents still
-    /// standing or the reverse, is exactly the orphan this closes. Which of
-    /// the two is deleted first inside it does not matter for recovery: an
-    /// interruption before `commit` leaves nothing committed at all, root and
-    /// documents alike, because that is what one transaction means.
+    /// The cascade itself — which documents are doomed, and in what order they
+    /// and the root go — is [`delete_watched_root_in`], shared with
+    /// [`Db::delete_watched_root_if_path`] below. This method opens a
+    /// transaction and commits it unconditionally: it is for a caller that
+    /// already knows which row it means, an id read moments ago in the same
+    /// window it is deleting through. A caller acting on an id it read
+    /// earlier, or handed across a boundary where the row could have changed
+    /// underneath it since, wants the other entry point instead.
     pub fn delete_watched_root(&self, root_id: i64) -> Result<u64, Error> {
         let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
-        let doomed: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT p.document_id FROM path p
-                  WHERE p.watched_root_id = ?1
-                    AND NOT EXISTS (SELECT 1 FROM path q
-                                     WHERE q.document_id = p.document_id
-                                       AND q.watched_root_id <> ?1)",
-            )?;
-            stmt.query_map(params![root_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?
-        };
-        for id in &doomed {
-            crate::space::delete_vectors_for_document_in(&tx, id)?;
-            // The document's own cascade takes its pages, blocks, chunks,
-            // search rows, chunk_embedding_state rows, ingest_stage row,
-            // document_tag rows, and its remaining path rows (all of them
-            // under this same root, since it was doomed).
-            tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
-        }
-        // Cascades away the path rows of any document that survived — one
-        // still named from another root — and this root's tag_rule, skipped
-        // and ignore_rule rows.
-        tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
+        let doomed = delete_watched_root_in(&tx, root_id)?;
         tx.commit()?;
-        Ok(doomed.len() as u64)
+        Ok(doomed)
+    }
+
+    /// [`Db::delete_watched_root`], but the delete only happens if `root_id`
+    /// still names `expected_path` — made true BY CONSTRUCTION, not by an
+    /// inventory of who else might write `watched_root`.
+    ///
+    /// The read of `watched_root.absolute_path` and the delete are the SAME
+    /// `IMMEDIATE` transaction: `BEGIN IMMEDIATE` takes SQLite's write lock at
+    /// that statement (`open.rs`'s own comment on `busy_timeout` says so —
+    /// "writers here take the lock at BEGIN IMMEDIATE"), and WAL's rule is one
+    /// writer at a time, so no OTHER connection — through this crate's shared
+    /// mutex or through a connection that never touches it, such as a job's own
+    /// — can write `watched_root` between this transaction's read and its
+    /// delete. A second connection attempting to isn't merely unlikely to win a
+    /// race; it cannot acquire the write lock at all until this transaction
+    /// ends. That is the whole difference from comparing outside a transaction
+    /// and deleting inside one: two statements with nothing between them are
+    /// still two statements, and a lock taken only for the second leaves the
+    /// window the first cannot be trusted to have seen.
+    ///
+    /// `Ok(None)` is one answer for two different reasons — the id has no row
+    /// at all, or it has one but `absolute_path` is not `expected_path` — and
+    /// deliberately does not distinguish them: telling those apart is a
+    /// question about what SENTENCE to show a person, not about whether
+    /// anything should be deleted, and the answer to the second question is
+    /// already final by the time this method returns. A caller that needs the
+    /// first reads [`Db::watched_root_path`] afterwards, in a read of its own —
+    /// which is fine, because that later read only chooses wording; it cannot
+    /// change what this method already committed or rolled back.
+    pub fn delete_watched_root_if_path(
+        &self,
+        root_id: i64,
+        expected_path: &str,
+    ) -> Result<Option<u64>, Error> {
+        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT absolute_path FROM watched_root WHERE id = ?1",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match current {
+            Some(p) if p == expected_path => {
+                let doomed = delete_watched_root_in(&tx, root_id)?;
+                tx.commit()?;
+                Ok(Some(doomed))
+            }
+            // No commit: nothing was written, and letting `tx` drop here rolls
+            // back a transaction that made no changes — there is nothing to
+            // roll back, but nothing to lose by letting `Drop` say so either.
+            _ => Ok(None),
+        }
     }
 
     pub fn path_count(&self, document_id: &str) -> Result<i64, Error> {
@@ -1483,6 +1508,55 @@ impl Db {
         }
         Ok(out)
     }
+}
+
+/// The cascade [`Db::delete_watched_root`] and [`Db::delete_watched_root_if_path`]
+/// share: every document whose last path was under `root_id` goes with it,
+/// then the root row itself. Takes an already-open transaction rather than
+/// opening its own, so the two callers decide what surrounds this — nothing,
+/// or a compare read moments earlier in that same transaction — and neither
+/// duplicates the query that decides which documents are doomed.
+///
+/// A document is doomed only if EVERY path that ever named it sat under this
+/// root — the `NOT EXISTS` clause below excludes a document that also has a
+/// path under some other root, the same rule a second copy of a file already
+/// gets from [`Db::path_count`]. Read and decided inside the SAME transaction
+/// the caller opened, not by the caller itself: a check-then-delete split
+/// across two calls could read "no other root" and then lose the race to a
+/// path being added under a different root in between.
+///
+/// Run as one pass over the doomed set rather than a loop of independent
+/// statements committed as they go — a half-applied removal, root gone with
+/// some doomed documents still standing or the reverse, is exactly the orphan
+/// this closes. Which of the two is deleted first inside it does not matter
+/// for recovery: an interruption before the CALLER's `commit` leaves nothing
+/// committed at all, root and documents alike, because that is what one
+/// transaction means — this function itself commits nothing; both callers do.
+fn delete_watched_root_in(tx: &Transaction<'_>, root_id: i64) -> Result<u64, Error> {
+    let doomed: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT p.document_id FROM path p
+              WHERE p.watched_root_id = ?1
+                AND NOT EXISTS (SELECT 1 FROM path q
+                                 WHERE q.document_id = p.document_id
+                                   AND q.watched_root_id <> ?1)",
+        )?;
+        stmt.query_map(params![root_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for id in &doomed {
+        crate::space::delete_vectors_for_document_in(tx, id)?;
+        // The document's own cascade takes its pages, blocks, chunks, search
+        // rows, chunk_embedding_state rows, ingest_stage row, document_tag
+        // rows, and its remaining path rows (all of them under this same
+        // root, since it was doomed).
+        tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
+    }
+    // Cascades away the path rows of any document that survived — one still
+    // named from another root — and this root's tag_rule, skipped and
+    // ignore_rule rows.
+    tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
+    Ok(doomed.len() as u64)
 }
 
 /// Maps one row of the `block JOIN page` shape `reading_window`'s three
