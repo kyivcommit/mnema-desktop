@@ -2446,8 +2446,12 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
         "the fixture was never indexed, so removing it proves nothing"
     );
 
-    let removed = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
-        .expect("remove_watched_folder was rejected");
+    let removed = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": fixture.path().display().to_string() }),
+    )
+    .expect("remove_watched_folder was rejected");
     assert_eq!(
         removed,
         json!(1),
@@ -2459,6 +2463,102 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
         after["hits"],
         json!([]),
         "a document survived the folder that owned it being removed"
+    );
+}
+
+/// 🔴 The pair of states this separates: a removal that finds the slot free
+/// versus one that finds a probe already holding it. Task 4's whole point is
+/// that `remove_watched_folder` claims the job slot BEFORE it touches the
+/// index, so a job already running must refuse it the same way it refuses a
+/// second `start_probe_job` (`only_one_job_runs_at_a_time`) — and, unlike
+/// that test, the assertion that matters here is not just the error: the row
+/// must still be there afterwards, because a version that checked the slot
+/// but deleted anyway regardless of the outcome would also produce this
+/// error text.
+#[test]
+fn a_deletion_while_the_slot_is_held_is_refused_without_a_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let state = app.state::<AppState>();
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let path = fixture.path().display().to_string();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": path.clone() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let (channel, _events) = job_channel();
+    bridge::start_probe_job(state.clone(), channel).expect("the probe would not start");
+
+    let error = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": path }),
+    )
+    .expect_err("a deletion went through while the job slot was held by the probe");
+    assert_eq!(error, json!("a job is already running"));
+
+    assert!(
+        state
+            .with_index(|db| db.watched_root_path(root))
+            .expect("reading the root back")
+            .is_some(),
+        "the root was deleted despite the refusal above"
+    );
+
+    bridge::cancel_job(state.clone());
+}
+
+/// 🔴 The pair of states this separates: `{"rootId", "path"}` reaching the
+/// command versus `{"rootId"}` alone. `remove_watched_folder` gained `path`
+/// so that a stale caller cannot delete whatever now sits at an id (Task 4);
+/// a caller that could still omit it would be exactly that stale caller,
+/// unable to say which folder it meant. serde's own rejection is what
+/// enforces this — the field is required, not merely documented — so this
+/// pins the sentence naming it rather than trusting a doc comment to.
+#[test]
+fn removing_a_folder_through_the_ipc_needs_the_path_and_answers_with_the_doomed_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let path = fixture.path().display().to_string();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": path.clone() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    run_walk_to_completion(&app, root);
+
+    let missing_path = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
+        .expect_err("a call with no `path` field was accepted");
+    assert!(
+        missing_path.as_str().unwrap_or_default().contains("path"),
+        "the rejection should name the missing field; it was {missing_path}"
+    );
+
+    let removed = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": path }),
+    )
+    .expect("remove_watched_folder was rejected");
+    assert_eq!(
+        removed,
+        json!(1),
+        "the doomed count did not cross the IPC unchanged"
     );
 }
 

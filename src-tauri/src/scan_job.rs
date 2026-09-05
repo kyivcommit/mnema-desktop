@@ -1662,21 +1662,15 @@ mod tests {
     /// `Error::JobAlreadyRunning` and there is no swap to race.
     ///
     /// The hook fires inside `read_roots`, which is the moment between the read
-    /// and the walk (D-l), and it models the removal **as Task 4 will perform
-    /// it**: claim the slot, delete, give the slot back. That is deliberate and
-    /// it is what this test can and cannot prove at this commit — see the note
-    /// below.
-    ///
-    /// ⚠️ **What it proves here.** `bridge::remove_watched_folder` does not
-    /// take the job slot yet; Task 4 is what makes it. So the hook cannot
-    /// simply call that command — it would delete the row whichever order the
-    /// production lines are in, and the test would fail against correct code.
-    /// Calling `state.with_index(|db| db.delete_watched_root(1))` would be the
-    /// same mistake one layer down. What the hook does instead is exactly what
-    /// Task 4's command will do, so this test asserts the protocol the scan
-    /// depends on: that a removal which asks for the slot first cannot get it
-    /// while a scan holds it. It does NOT assert that today's
-    /// `remove_watched_folder` asks — that is Task 4's own test to write.
+    /// and the walk (D-l), and it calls `bridge::remove_watched_root` itself —
+    /// Task 4's real removal, not a model of it. Against correct code the scan
+    /// is already holding the slot by the time `read_roots` runs, so this call
+    /// is refused with `Error::JobAlreadyRunning`, `removed` stays `false`, and
+    /// there is no swap. Moving `read_roots` above `claim_job` (the mutant
+    /// below) is what lets this same call succeed: the slot is still free when
+    /// the hook fires, so the removal goes through, folder B is inserted under
+    /// A's old id, and the walk — already holding `roots` from the read that
+    /// preceded the swap — writes A's files into what is now B's row.
     ///
     /// The invariant asserted is about the index and not about the ordering:
     /// every `path` row under root 1 names a file that exists under root 1's
@@ -1702,25 +1696,26 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let removed = Arc::new(AtomicBool::new(false));
+        let a_path = folder_a.path().to_path_buf();
         let b_path = folder_b.path().to_path_buf();
+        // This hook calls the real `bridge::remove_watched_root`, which is
+        // guarded by its OWN hook and its OWN turn — a global this binary's
+        // tests share the same way they share `TEST_HOOK`. Taking it here,
+        // with nothing to install, is what `take_remove_hook_turn`'s own doc
+        // says every caller of that function must do.
+        let _remove_turn = crate::bridge::take_remove_hook_turn(Arc::new(|_: &AppState| {}));
         let _turn = take_hook_turn(Arc::new({
             let fired = Arc::clone(&fired);
             let removed = Arc::clone(&removed);
             move |state: &AppState| {
                 fired.store(true, Ordering::SeqCst);
 
-                // Task 4's removal command, modelled line for line: the slot
-                // first, then the delete, then the slot back.
-                let root_path = state
-                    .with_index(|db| db.watched_root_path(1))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let Ok(slot) = state.claim_job(Phase::Removing { root_path }, false) else {
-                    return;
-                };
-                let deleted = state.with_index(|db| db.delete_watched_root(1));
-                slot.finish(Terminal::Idle, None);
+                // Task 4's real removal command, called exactly as
+                // `bridge::remove_watched_folder` calls it — see this test's
+                // own doc comment for what each ordering of `start_inner`
+                // makes of this call.
+                let deleted =
+                    crate::bridge::remove_watched_root(state, 1, &a_path.display().to_string());
                 if deleted.is_ok() {
                     removed.store(true, Ordering::SeqCst);
                     let _ = state

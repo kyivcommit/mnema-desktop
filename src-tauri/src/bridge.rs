@@ -81,10 +81,168 @@ pub fn add_watched_folder(state: State<'_, AppState>, path: String) -> Result<i6
 /// (`tests/commands.rs`) is the first thing that exercises the fix through
 /// the seam it was written for: add a folder, walk it, remove it, and check
 /// that `search` no longer answers for it.
+///
+/// **Takes the job slot, as `Removing`, before touching the index (D-k).**
+/// Without it a scan and a removal can interleave: `scan_job::read_roots`
+/// reads the watched folders, a removal races in and gives this root's id to
+/// a *different* folder, and the walk that was already reading the old
+/// folder writes its files under the newcomer's rows — the swap
+/// `a_root_swapped_between_the_read_and_the_walk_is_not_walked_under_its_
+/// successors_id` (`scan_job.rs`) exists to kill. Claiming the slot first
+/// means a scan already running refuses this call with
+/// [`Error::JobAlreadyRunning`] before anything is read, and a scan that
+/// starts after this call is holding the slot cannot begin until it is
+/// finished.
+///
+/// **`path` is not decoration — it is what [`Error::WatchedRootChanged`]
+/// checks against, inside the same `with_index` call that deletes.** A
+/// caller that only sent `root_id` would be asking to delete whatever
+/// currently sits at that row, and `watched_root.id` is a rowid alias SQLite
+/// reuses the moment a row is gone: a second window could remove this exact
+/// folder and add an unrelated one that inherits its id between whenever
+/// this caller last read the list and the moment this command's own delete
+/// runs. Reading `watched_root_path` and comparing it to `path`, and doing
+/// that comparison and the delete inside the SAME `with_index` call, is what
+/// closes that window — nothing that goes through `with_index` can swap the
+/// row in between, because `with_index` holds the one lock every writer
+/// takes. `a_root_swapped_before_the_delete_is_refused_and_the_newcomer_
+/// survives` (below) is what this claim answers to; the two mutants in its
+/// own doc comment are what a compare that is skipped, or read too early,
+/// looks like.
 #[tauri::command(async)]
-pub fn remove_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result<u64, Error> {
-    state.with_index(|db| db.delete_watched_root(root_id))
+pub fn remove_watched_folder(
+    state: State<'_, AppState>,
+    root_id: i64,
+    path: String,
+) -> Result<u64, Error> {
+    remove_watched_root(&state, root_id, &path)
 }
+
+/// [`remove_watched_folder`]'s body, as a free function over `&AppState` so a
+/// unit test can drive it with a hand-built [`AppState`] and no Tauri
+/// runtime — the same split [`crate::prefs::change_hotkey`] uses for its own
+/// command.
+///
+/// Order, and each piece of it load-bearing: the slot is claimed FIRST, with
+/// no read before it — a read-then-claim would be exactly the stale-then-act
+/// shape [`Error::WatchedRootChanged`] exists to close, moved one line
+/// earlier rather than closed. [`remove_hook`] fires next, after the claim
+/// and before the `with_index` call, which is the only window
+/// `a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives`
+/// needs to model a second window's write landing between them. Last, one
+/// `with_index` call does the compare AND the delete: `Some(p) if p == path`
+/// is the only arm that deletes anything, `Some(_)` (a different folder now
+/// sits at this id) answers [`Error::WatchedRootChanged`], and `None` (the
+/// row is simply gone) answers [`Error::UnknownWatchedRoot`] as it always
+/// has. On the success arm the slot is given back with the new count so a
+/// window watching [`AppState::scan_state`] never sees a stale one; on
+/// either error arm the slot is never given back explicitly and
+/// [`crate::state::JobSlot`]'s own drop policy writes `Idle` for it, because
+/// `Removing` is not one of the two phases that owe a report.
+pub(crate) fn remove_watched_root(
+    state: &AppState,
+    root_id: i64,
+    path: &str,
+) -> Result<u64, Error> {
+    let slot = state.claim_job(
+        crate::scan_state::Phase::Removing {
+            root_path: path.to_string(),
+        },
+        false,
+    )?;
+    remove_hook(state);
+    let (removed, files) = state.with_index(|db| {
+        Ok(match db.watched_root_path(root_id)? {
+            Some(p) if p == path => {
+                let removed = db.delete_watched_root(root_id)?;
+                Ok((removed, db.indexed_file_count()?))
+            }
+            Some(_) => Err(Error::WatchedRootChanged),
+            None => Err(Error::UnknownWatchedRoot(root_id)),
+        })
+    })??;
+    slot.finish(crate::scan_state::Terminal::Idle, Some(files));
+    Ok(removed)
+}
+
+/// What a test installs to be called from inside [`remove_watched_root`],
+/// after the slot is claimed and before the compare-and-delete `with_index`
+/// call — the same shape `scan_job.rs`'s own `TEST_HOOK` uses, and a
+/// separate slot from it: the two model different races
+/// (`scan_job.rs`'s models a removal arriving mid-scan; this one models a
+/// second window's write arriving mid-removal), and a hook that serialised
+/// against the other file's tests would make every test of one wait for
+/// every test of the other for no reason either race needs.
+#[cfg(test)]
+pub(crate) type RemoveHook = std::sync::Arc<dyn Fn(&AppState) + Send + Sync>;
+
+#[cfg(test)]
+static REMOVE_HOOK: std::sync::Mutex<Option<RemoveHook>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_remove_hook(hook: Option<RemoveHook>) {
+    *REMOVE_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+/// Turn on [`REMOVE_HOOK`]. One per binary, so two tests that install a hook
+/// here cannot overlap — `scan_job.rs`'s own `HOOK_TURN` doc explains why
+/// this has to be a lock and not merely a convention.
+///
+/// 🔴 **Every test in this binary that calls [`remove_watched_root`] takes
+/// this turn, not only the one installing a hook of its own.** [`remove_hook`]
+/// reads [`REMOVE_HOOK`] unconditionally on every call, with no way to tell
+/// "my caller wants to be hooked" from "my caller has never heard of this
+/// mechanism" — the hook receives whatever `&AppState` the call it fired
+/// inside was made with, not the state of whoever installed it. A caller that
+/// skipped this turn and happened to run while another test's hook was
+/// installed would have that hook's closure run against ITS OWN state: this
+/// is not hypothetical, it is what made
+/// `a_snapshot_taken_during_a_removal_shows_removing_then_idle_and_the_new_
+/// count` fail once, nondeterministically, with `WatchedRootChanged` — the
+/// swap test's hook, still installed from a run overlapping this one,
+/// deleted and re-inserted a root in the snapshot test's own index. A caller
+/// with nothing to install still takes the turn with a no-op closure — see
+/// that test, and `scan_job.rs`'s own swap-race test, for the shape.
+#[cfg(test)]
+static REMOVE_HOOK_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+#[must_use = "the hook is cleared when this is dropped"]
+#[allow(dead_code)] // held for its `Drop`, the guard itself is never read
+pub(crate) struct RemoveHookTurn(std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+impl Drop for RemoveHookTurn {
+    fn drop(&mut self) {
+        set_remove_hook(None); // idempotent; covers the panic path
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn take_remove_hook_turn(hook: RemoveHook) -> RemoveHookTurn {
+    // Poisoning is absorbed: a test that panicked must not also poison the
+    // next one's turn.
+    let turn = REMOVE_HOOK_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    set_remove_hook(Some(hook));
+    RemoveHookTurn(turn)
+}
+
+/// Cloned out of its mutex before it is called, so the hook may take any
+/// lock it likes — including the index's — without meeting this one.
+#[cfg(test)]
+fn remove_hook(state: &AppState) {
+    let hook = REMOVE_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(state);
+    }
+}
+
+#[cfg(not(test))]
+#[inline]
+fn remove_hook(_state: &AppState) {}
 
 /// One stored exclusion rule, plus whether the path it names is still on
 /// disk.
@@ -1607,5 +1765,246 @@ mod tests {
         let absent = entry_named(std::fs::read_dir(dir.path()).unwrap(), "private")
             .expect("a clean listing is not an error");
         assert_eq!(absent, None);
+    }
+
+    // --------------------------------------------- remove_watched_root
+
+    use crate::scan_state::{Phase, ScanSnapshot, ScanState};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// An `AppState` over a temporary data directory, with its index open —
+    /// `scan_job.rs`'s own `state_in`, copied rather than shared: that one
+    /// lives behind `#[cfg(test)]` in a different file and needs a real
+    /// extraction worker binary this module's tests never spawn a walk with.
+    /// The worker path is never read by anything these tests call, so an
+    /// empty one is honest rather than a placeholder standing in for a
+    /// binary nothing here runs.
+    fn state_in(data_dir: &std::path::Path) -> AppState {
+        let state = AppState::new(
+            data_dir.to_path_buf(),
+            std::path::PathBuf::new(),
+            // Nothing here calls the provider, and an address that refuses
+            // instantly is how a test that starts to would find out at once.
+            "http://127.0.0.1:1".to_string(),
+            format!("mnema-desktop-bridge-test-{}", data_dir.display()),
+        );
+        state.open_index().expect("the index would not open");
+        state
+    }
+
+    /// One indexed file under `root`, so `indexed_file_count` has something
+    /// to lose when the root is removed. A bare `insert_path` needs a
+    /// `document` row to join against — `Db::indexed_file_count`'s own query
+    /// is `path JOIN document WHERE d.status = 'indexed'` — so this writes a
+    /// document, flips its status the way a real indexing job's last act
+    /// does (`tests/commands.rs`'s own `rebuild_one_chunk`), and a path, with
+    /// no page, block, chunk or vector: nothing here reads any of those.
+    fn seed_one_file(state: &AppState, root: i64, relative_path: &str, content_hash: &str) {
+        state
+            .with_index(|db| {
+                db.insert_document(
+                    content_hash,
+                    "text/plain",
+                    1,
+                    mnema_core::SourceKind::Document,
+                )?;
+                db.set_document_status(content_hash, mnema_index::DocumentStatus::Indexed)?;
+                db.insert_path(
+                    root,
+                    relative_path,
+                    content_hash,
+                    mnema_core::OnDisk {
+                        size_bytes: 1,
+                        mtime: 1,
+                    },
+                    "text",
+                    1,
+                )
+            })
+            .expect("seeding one indexed file");
+    }
+
+    /// 🔴 The pair of states this separates: `remove_watched_root` reads
+    /// `path` back and compares it to what it was asked to delete, against a
+    /// version that deletes whatever now sits at `root_id` on the strength
+    /// of a `path` read before — or never checked against — the compare.
+    ///
+    /// The hook fires between the claim and the `with_index` call (see
+    /// [`remove_hook`]'s own doc) and, through a SECOND `Db` opened on the
+    /// same index file rather than through `state.with_index` — modelling
+    /// `add_watched_folder` from another window, which does not take the job
+    /// slot and so is never blocked by this call already holding it —
+    /// deletes root A and inserts root B, which SQLite hands the same rowid
+    /// A just gave up. Correct code's own `with_index` call then reads back
+    /// `/b` for id 1, does not match the `/a` this call was asked to delete,
+    /// and answers [`Error::WatchedRootChanged`] without touching the row.
+    ///
+    /// Mutants A and B (task-4 report) are tried by hand against this test
+    /// and are not part of the shipped code.
+    #[test]
+    fn a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+
+        let id = state
+            .with_index(|db| db.insert_watched_root("/a"))
+            .expect("adding root A");
+        assert_eq!(
+            id, 1,
+            "this test is about the id a deleted root gives up, so root A has \
+             to be holding it"
+        );
+        seed_one_file(&state, id, "one.txt", &"1".repeat(64));
+        seed_one_file(&state, id, "two.txt", &"2".repeat(64));
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let _turn = take_remove_hook_turn(Arc::new({
+            let fired = Arc::clone(&fired);
+            move |state: &AppState| {
+                let second = state
+                    .open_job_index()
+                    .expect("a second connection onto the same index file");
+                second
+                    .delete_watched_root(1)
+                    .expect("deleting root A through the second connection");
+                let new_id = second
+                    .insert_watched_root("/b")
+                    .expect("inserting root B through the second connection");
+                assert_eq!(
+                    new_id, 1,
+                    "this test is about the id the delete gives back to SQLite; \
+                     it did not come back"
+                );
+                fired.store(true, Ordering::SeqCst);
+            }
+        }));
+
+        let outcome = remove_watched_root(&state, 1, "/a");
+
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the hook never ran, so this test asserted nothing about the swap \
+             it exists for"
+        );
+        assert!(
+            matches!(outcome, Err(Error::WatchedRootChanged)),
+            "deleting root A under a stale path should have been refused; got \
+             {outcome:?}"
+        );
+        let survivor = state
+            .with_index(|db| db.watched_root_path(1))
+            .expect("reading root 1 back");
+        assert_eq!(
+            survivor.as_deref(),
+            Some("/b"),
+            "root 1 was deleted despite having been swapped for a newcomer \
+             after the claim"
+        );
+        // The claim above never reaches `finish` on this arm — see
+        // `remove_watched_root`'s own doc comment — so this is
+        // `crate::state::JobSlot`'s drop policy, not this function's own
+        // code, giving the slot back. Asserted here anyway: a version that
+        // matched `WatchedRootChanged` and then forgot to let `slot` drop
+        // (held it in a loop, leaked it into a `static`) would pass every
+        // assertion above and leave the application unable to index again.
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "the refused removal left the job slot taken"
+        );
+    }
+
+    /// The pair of states this separates: a window reading
+    /// [`AppState::scan_state`] *while* a removal holds the slot, against
+    /// one reading it after the removal has given the slot back. Neither can
+    /// be answered by inspecting the return value of
+    /// [`remove_watched_root`] alone — that is the whole reason
+    /// [`crate::state::JobSlot`] exists as a separate channel from a
+    /// command's own `Result`.
+    ///
+    /// `files` is asserted on both sides of the call for the same reason:
+    /// the count [`AppState::scan_state`] carries is "the last count the
+    /// window was actually shown" (`set_files`'s own doc), not merely
+    /// whatever the index answers right now, so seeding it before the call
+    /// and reading it after is what tells "the count moved because the slot
+    /// carried the new one" from "the count was never wrong to begin with".
+    #[test]
+    fn a_snapshot_taken_during_a_removal_shows_removing_then_idle_and_the_new_count() {
+        // A no-op hook, taken for no reason but mutual exclusion: see
+        // `take_remove_hook_turn`'s own doc for why a caller with nothing to
+        // install still has to hold this turn.
+        let _turn = take_remove_hook_turn(Arc::new(|_: &AppState| {}));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(state_in(dir.path()));
+
+        let root = state
+            .with_index(|db| db.insert_watched_root("/a"))
+            .expect("adding root A");
+        seed_one_file(&state, root, "one.txt", &"3".repeat(64));
+
+        let before = state
+            .with_index(|db| db.indexed_file_count())
+            .expect("counting before the removal");
+        state.set_files(before);
+        assert_eq!(
+            state.scan_state().files,
+            before,
+            "seeding `files` did not take"
+        );
+
+        let log: Arc<std::sync::Mutex<Vec<ScanState>>> = Arc::default();
+        let weak = Arc::downgrade(&state);
+        let sink = log.clone();
+        state.set_job_observer(Box::new(move || {
+            let seen = weak
+                .upgrade()
+                .expect("the state outlives its own observer")
+                .scan_state();
+            sink.lock().unwrap_or_else(|e| e.into_inner()).push(seen);
+        }));
+
+        let removed = remove_watched_root(&state, root, "/a").expect("the removal was refused");
+        assert_eq!(removed, 1);
+
+        let snapshots: Vec<ScanSnapshot> = log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|s| s.snapshot.clone())
+            .collect();
+        assert_eq!(
+            snapshots,
+            vec![
+                ScanSnapshot::Running {
+                    phase: Phase::Removing {
+                        root_path: "/a".to_string()
+                    },
+                    cancellable: false,
+                },
+                ScanSnapshot::Idle,
+            ],
+            "the window watching scan_state must see the removal claim the \
+             slot and then give it back, in that order and with nothing else \
+             announced"
+        );
+
+        let after = state
+            .with_index(|db| db.indexed_file_count())
+            .expect("counting after the removal");
+        assert_eq!(after, 0, "the removed folder's file was not gone");
+        assert_eq!(
+            state.scan_state().files,
+            after,
+            "the slot was finished with a stale count instead of the new one"
+        );
+        // Not the same value, or the assertion above would hold by accident
+        // whether `finish` carried the new count or forgot to.
+        assert_ne!(
+            before, after,
+            "the fixture counted the same before and after, so this test \
+             cannot tell a carried count from a stale one"
+        );
     }
 }

@@ -96,6 +96,17 @@ pub enum Error {
     /// the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
+    /// `remove_watched_folder`'s own `path` did not match what `root_id`
+    /// names, read back inside the same `with_index` call that would have
+    /// deleted it — a second window removed this folder and added a
+    /// different one that reused its id (`watched_root.id` is a rowid alias,
+    /// and SQLite reuses one the moment its row is gone) between whenever the
+    /// caller last saw this row and the delete that was about to run.
+    ///
+    /// Task 4's whole reason to exist: refusing here, inside the compare, is
+    /// what keeps that delete from ever running against the newcomer.
+    #[error("the folder at this entry has changed; refresh the list")]
+    WatchedRootChanged,
     /// A rule `mnema-walk` refuses — a folder prefix or, since PR 8b, a file
     /// mask. `RulesError` carries both, and nothing branches on the kind here:
     /// every rejection is serialised as `to_string()`, so the sentence a person
