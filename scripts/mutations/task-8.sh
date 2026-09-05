@@ -199,8 +199,8 @@ case_ "build: the profile section must exist at all" \
 
 case_ "commands: job_status reports the running job" \
   src-tauri/src/bridge.rs \
-  's{        running: state\.job_is_running\(\),}{        running: false,}' \
-  'running: false,' \
+  's~    state\.scan_state\(\)\n\}~    crate::scan_state::ScanState \{ snapshot: crate::scan_state::ScanSnapshot::Idle, ..state.scan_state() \} // mutant: job_status never reports a running job\n\}~' \
+  '// mutant: job_status never reports a running job' \
   mnema-desktop 'the_window_can_ask_whether_a_job_is_running' --test commands
 
 case_ "commands: job_status is registered" \
@@ -218,8 +218,8 @@ case_ "commands: a new job does not inherit the last cancellation" \
 
 case_ "commands: only one job at a time" \
   src-tauri/src/state.rs \
-  's{        self\.running\n            \.compare_exchange\(false, true, Ordering::AcqRel, Ordering::Acquire\)\n            \.map_err\(\|_\| Error::JobAlreadyRunning\)\?;}{        self.running.store(true, Ordering::Release);}' \
-  'self.running.store(true, Ordering::Release);' \
+  's{            if matches!\(\n                scan\.snapshot,\n                crate::scan_state::ScanSnapshot::Running \{ \.\. \}\n            \) \{\n                return Err\(Error::JobAlreadyRunning\);\n            \}}{            // mutant: a second job takes the slot from the first}' \
+  '// mutant: a second job takes the slot from the first' \
   mnema-desktop 'only_one_job_runs_at_a_time' --test commands
 
 case_ "commands: start_probe_job is registered" \

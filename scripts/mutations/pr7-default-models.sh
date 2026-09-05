@@ -86,6 +86,6 @@ case_ "the embedding role must get the embedding model, not the chat one" \
 # one call. No test in this suite can build that, and none here pretends to.
 case_ "the slot must be taken before the default is adopted" \
   src-tauri/src/models.rs \
-  's{    let Ok\(_slot\) = state\.claim_job\(\) else \{\n        return;\n    \};}{    let _slot = ();}' \
+  's{    let Ok\(_slot\) = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \) else \{\n        return;\n    \};}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_key_entered_while_a_job_runs_stores_the_key_and_moves_no_pointer' --test model_commands

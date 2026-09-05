@@ -1206,7 +1206,12 @@ pub fn start_probe_job(
     state: State<'_, AppState>,
     on_progress: Channel<JobEvent>,
 ) -> Result<(), Error> {
-    let slot = state.claim_job()?;
+    let slot = state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::Probe,
+        },
+        true,
+    )?;
 
     // A dedicated OS thread, not a task on the async pool: that pool is sized to
     // the core count and also serves every other command, and a real indexing
@@ -1278,26 +1283,25 @@ pub fn start_probe_job(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JobStatus {
-    pub running: bool,
-}
-
-/// What the window asks on load.
+/// What the window asks on load, and whenever it wants to be sure.
 ///
 /// A page that reloads mid-job has no channel any more — the one the job sends
 /// on belongs to the page that started it. Without this it cannot tell a running
 /// job from an idle one, and would have to draw a guess: either an idle window
 /// over a job that is still writing, or a Start button it will not re-enable.
 ///
-/// Blocking, like `cancel_job`, and for the same reason: one atomic load, and it
-/// must not queue behind a search.
+/// 🔴 **It answered `{ running }` and could not.** A boolean says a job exists
+/// and nothing about which folder it is on, how far it has got, whether Stop is
+/// offered, or how the last one ended — so a reloaded page could re-enable its
+/// controls and still had to draw a progress bar from nothing. The whole of
+/// [`crate::scan_state::ScanState`] is the answer instead: every surface reads
+/// the same value and draws exactly what it finds.
+///
+/// Blocking, like `cancel_job`, and for the same reason: one lock and a clone,
+/// and it must not queue behind a search.
 #[tauri::command]
-pub fn job_status(state: State<'_, AppState>) -> JobStatus {
-    JobStatus {
-        running: state.job_is_running(),
-    }
+pub fn job_status(state: State<'_, AppState>) -> crate::scan_state::ScanState {
+    state.scan_state()
 }
 
 /// Left blocking: one atomic store, and it must not queue behind a search.

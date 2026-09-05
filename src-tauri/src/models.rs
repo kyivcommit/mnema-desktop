@@ -156,7 +156,12 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
     if !unset {
         return;
     }
-    let Ok(_slot) = state.claim_job() else {
+    let Ok(_slot) = state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    ) else {
         return;
     };
     let Ok(check) =
@@ -444,7 +449,12 @@ pub fn set_embedding_model(
     // authorisation dialog on screen, and the slot must not be held while
     // somebody decides what to do about it. Everything after this point that
     // touches the index is inside the claim.
-    let _slot = state.claim_job()?;
+    let _slot = state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    )?;
     let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
     let hash = mnema_chunk::chunker_hash();
     let dim = check.dim as i64;

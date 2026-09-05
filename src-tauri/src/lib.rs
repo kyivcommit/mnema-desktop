@@ -14,6 +14,7 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod scan_state;
 pub mod shortcut;
 pub mod state;
 pub mod tray;

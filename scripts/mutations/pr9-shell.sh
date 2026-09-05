@@ -477,22 +477,22 @@ case_ "claiming the job slot announces itself" \
   '// mutant: the claim is never announced' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
-# 🔴 The store and the announcement swapped, which is the ordering the whole
-# observer contract rests on. `JobSlot::drop` frees the slot and only then says
-# so, and that order is what lets an incoming job claim the slot in between: the
-# handoff then announces `true` from the incoming claim and, last, the outgoing
-# drop — where a look finds a job running. Announce first and the slot is still
-# taken when anybody looks, so the incoming claim in the named fixture is
-# refused outright and the state a person's tray is drawn from is the outgoing
-# job's for as long as it takes the next event to arrive.
+# 🔴 The ending and the announcement swapped, which is the ordering the whole
+# observer contract rests on. `JobSlot::drop` writes the ending and only then
+# says so, and that order is what lets an incoming job claim the slot in
+# between: the handoff then announces `true` from the incoming claim and, last,
+# the outgoing drop — where a look finds a job running. Announce first and the
+# snapshot is still `Running` when anybody looks, so the incoming claim in the
+# named fixture is refused outright and the state a person's tray is drawn from
+# is the outgoing job's for as long as it takes the next event to arrive.
 #
 # The named test is the one whose fixture builds the handoff; its neighbour
 # `the_observer_hears_a_job_start_and_finish` also goes red here, which is what
 # a swapped pair of statements should do to both.
-case_ "the outgoing job frees the slot before it announces, never after" \
+case_ "the outgoing job writes its ending before it announces, never after" \
   src-tauri/src/state.rs \
-  's~        self\.running\.store\(false, Ordering::Release\);.*?if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        if let Some(f) = \&self.observer \{ f(); \} // mutant: the outgoing job announces before it frees the slot\n        self.running.store(false, Ordering::Release);~s' \
-  '// mutant: the outgoing job announces before it frees the slot' \
+  's{        \{\n            let mut scan = self\n                \.scan\n                \.lock\(\)\n                \.unwrap_or_else\(std::sync::PoisonError::into_inner\);\n            let owed_a_report(.*?)\n        \}\n        self\.announce\(\);}{        self.announce(); // mutant: the outgoing job announces before it writes the ending\n        {\n            let mut scan = self\n                .scan\n                .lock()\n                .unwrap_or_else(std::sync::PoisonError::into_inner);\n            let owed_a_report$1\n        }}s' \
+  '// mutant: the outgoing job announces before it writes the ending' \
   mnema-desktop 'state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge' --lib
 
 # 🔴 The `false` edge moved from the job ENDING to the stop being REQUESTED —

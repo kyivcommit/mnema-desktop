@@ -1043,8 +1043,8 @@ case_ "models: the settings must read the refusal count, not report zero (T8)" \
 # then fails with `NoKey` anyway.
 case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
   src-tauri/src/embed_job.rs \
-  's{    let key = crate::models::key\(&state\)\?;\n    let base = state\.provider_base\(\)\.to_string\(\);\n\n    let slot = state\.claim_job\(\)\?;}{    let slot = state.claim_job()?;\n\n    let key = crate::models::key(\&state)?;\n    let base = state.provider_base().to_string();}' \
-  '    let slot = state.claim_job()?;
+  's{    let key = crate::models::key\(&state\)\?;\n    let base = state\.provider_base\(\)\.to_string\(\);\n\n(    // Zero counts.*?\n    \)\?;\n)}{$1\n    let key = crate::models::key(\&state)?;\n    let base = state.provider_base().to_string();\n}s' \
+  '    )?;
 
     let key = crate::models::key(&state)?;' \
   mnema-desktop 'the_key_is_read_before_the_job_slot_is_taken' --test model_commands
@@ -1062,7 +1062,7 @@ case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
 # (`left: Some(2), right: Some(1)`), not the one about which error came back.
 case_ "models: a model change must not be possible while a job holds the slot (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
 
@@ -1070,7 +1070,7 @@ case_ "models: a model change must not be possible while a job holds the slot (T
 # One case per test, since `case_` names one at a time.
 case_ "models: a model change must not be possible while a pass is writing (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
 

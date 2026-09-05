@@ -161,7 +161,18 @@ pub fn start_walk_job(
         // is exactly that variant's own message.
         .map_err(mnema_ingest::IngestError::Pool)?;
 
-    let slot = state.claim_job()?;
+    // Zero counts and a single root: this command is the window-driven walk
+    // that Task 3 replaces with the scanning job, and the phase it claims with
+    // is the minimum that compiles rather than a description worth drawing.
+    let slot = state.claim_job(
+        crate::scan_state::Phase::Reading {
+            root_index: 0,
+            root_count: 1,
+            root_path: String::new(),
+            counts: crate::job::Progress::default(),
+        },
+        true,
+    )?;
 
     // The job's own connection, not the window's — see `AppState::
     // open_job_index`'s own doc comment. A walk is a sequence of writes that

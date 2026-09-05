@@ -89,7 +89,14 @@ pub fn start_embed_job(
     let key = crate::models::key(&state)?;
     let base = state.provider_base().to_string();
 
-    let slot = state.claim_job()?;
+    // Zero counts, for the reason `walk_job.rs`'s own claim gives: Task 3
+    // replaces this command with the scanning job's embedding phase.
+    let slot = state.claim_job(
+        crate::scan_state::Phase::Embedding {
+            counts: crate::job::Progress::default(),
+        },
+        true,
+    )?;
 
     // The job's own connection, for the reason `AppState::open_job_index`'s own
     // doc comment gives: this is a sequence of writes that can run for hours,

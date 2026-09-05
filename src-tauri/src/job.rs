@@ -15,7 +15,12 @@ use serde::Serialize;
 /// not render as `0`. `skipped` is separate from `done` because a run that
 /// skipped half the folder and one that indexed it are not the same run, and a
 /// single counter cannot tell the user which one they got.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `PartialEq` and `Default` are here for `crate::scan_state::Phase`, which
+/// carries one of these inside the snapshot every surface compares against what
+/// it last drew — and whose callers claim the slot with a pass that has counted
+/// nothing yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
     pub done: u64,

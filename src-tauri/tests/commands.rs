@@ -906,6 +906,12 @@ fn the_window_can_ask_whether_a_job_is_running() {
     // What a page that reloaded mid-job has to ask. Its channel belonged to the
     // page that started the job and is gone, so this is its only way to find out
     // whether it should be drawing one.
+    //
+    // Asserted on the JSON the IPC actually produces, not on a Rust value, and
+    // that is the pair of states it separates: the core and the window agreeing
+    // on a type, against their agreeing on the wire. A field that stopped being
+    // camelCase, or a `kind` that changed spelling, compiles and reaches the
+    // page as a snapshot it cannot match on.
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
@@ -913,7 +919,15 @@ fn the_window_can_ask_whether_a_job_is_running() {
 
     assert_eq!(
         call(&webview, "job_status", json!({})).expect("job_status was rejected"),
-        json!({ "running": false })
+        json!({
+            "revision": 0,
+            "files": 0,
+            "readSeq": 0,
+            "lastReading": null,
+            "snapshot": { "kind": "idle" },
+        }),
+        "a window opened before anything has run is told so in fields it can \
+         draw, not by an absence it has to interpret"
     );
 
     let (channel, events) = job_channel();
@@ -922,7 +936,17 @@ fn the_window_can_ask_whether_a_job_is_running() {
 
     assert_eq!(
         call(&webview, "job_status", json!({})).expect("job_status was rejected"),
-        json!({ "running": true }),
+        json!({
+            "revision": 1,
+            "files": 0,
+            "readSeq": 0,
+            "lastReading": null,
+            "snapshot": {
+                "kind": "running",
+                "cancellable": true,
+                "phase": { "kind": "other", "job": "probe" },
+            },
+        }),
         "a page reloading now would draw an idle window over a running job"
     );
 
