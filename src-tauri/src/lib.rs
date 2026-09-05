@@ -14,6 +14,7 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod scan_job;
 pub mod scan_state;
 pub mod shortcut;
 pub mod state;
@@ -62,6 +63,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_chat_model,
         models::model_settings,
         walk_job::start_walk_job,
+        scan_job::start_scan_job,
         embed_job::start_embed_job,
         locale::get_locale,
         locale::set_locale,

@@ -10992,3 +10992,702 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
     assert!(after["index"].get("last_indexed_at").is_none(), "{after}");
     assert!(after["index"].get("pending_chunks").is_none(), "{after}");
 }
+
+// ------------------------------------------------------------ the scanning job
+
+use mnema_desktop::job::EndReason;
+use mnema_desktop::scan_job;
+use mnema_desktop::scan_state::{EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState};
+
+/// A watched folder holding one indexable file per name given, each with text
+/// of its own.
+///
+/// Distinct text per file rather than one string repeated: content addressing
+/// makes two files with the same bytes ONE document, so a fixture of identical
+/// files would count as fewer indexed documents than it has files and every
+/// count below would be about the wrong thing.
+fn dir_holding(names: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the scan fixture");
+    for name in names {
+        std::fs::write(
+            dir.path().join(name),
+            format!("the text of {name}, and nothing else"),
+        )
+        .expect("writing a scan fixture file");
+    }
+    dir
+}
+
+/// Adds `path` as a watched folder through the command the window uses, and
+/// answers with the id the index gave it.
+fn watch(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
+    call(
+        webview,
+        "add_watched_folder",
+        json!({ "path": path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id")
+}
+
+/// Runs a whole scan and answers with what an observer FOUND each time the job
+/// slot changed hands, followed by the state the application settled in.
+///
+/// An observer rather than a channel, because a scan has no channel: the job
+/// writes one value and announces, and every surface reads
+/// `AppState::scan_state` for itself — `state::JobObserver`'s own doc comment
+/// has why nothing is passed to the observer. Recording what was READ at each
+/// announcement is therefore recording exactly what a tray or a reopened window
+/// would have drawn.
+fn run_scan_capturing_snapshots(
+    app: &tauri::App<MockRuntime>,
+    entry: Entry,
+    within: Duration,
+) -> (Vec<ScanState>, ScanState) {
+    run_scan_watching(app, entry, within, |_, _| {})
+}
+
+/// [`run_scan_capturing_snapshots`] with a hand at the announcement: `watcher`
+/// runs on whichever thread announced, which for a progress report is the job's
+/// own thread INSIDE `walk_root`.
+///
+/// That is what makes the interleavings below built rather than waited for, the
+/// same choice `run_walk_cancelling_on_the_last_report` already makes one
+/// section up: there is no sleep anywhere in them.
+fn run_scan_watching(
+    app: &tauri::App<MockRuntime>,
+    entry: Entry,
+    within: Duration,
+    watcher: impl Fn(&AppState, &ScanState) + Send + Sync + 'static,
+) -> (Vec<ScanState>, ScanState) {
+    let handle = app.handle().clone();
+    let seen: Arc<Mutex<Vec<ScanState>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+
+    let state = app.state::<AppState>();
+    state.set_job_observer(Box::new(move || {
+        let state = handle.state::<AppState>();
+        let now = state.scan_state();
+        recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(now.clone());
+        watcher(state.inner(), &now);
+    }));
+    scan_job::start_scan_job(state, entry).expect("the scan would not start");
+
+    let deadline = std::time::Instant::now() + within;
+    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let settled = app.state::<AppState>().scan_state();
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "the scan never released the job slot: {settled:?}"
+    );
+    let snapshots = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    (snapshots, settled)
+}
+
+/// The report a finished scan settled on, or a failure naming what was found
+/// instead.
+fn report_of(settled: &ScanState) -> mnema_desktop::scan_state::ScanReport {
+    match &settled.snapshot {
+        ScanSnapshot::Ended { report } => report.clone(),
+        other => panic!("the scan did not end with a report: {other:?}"),
+    }
+}
+
+/// Which folder each `Reading` announcement was about, in the order they were
+/// announced.
+fn reading_positions(snapshots: &[ScanState]) -> Vec<u64> {
+    snapshots
+        .iter()
+        .filter_map(|state| match &state.snapshot {
+            ScanSnapshot::Running {
+                phase: Phase::Reading { root_index, .. },
+                ..
+            } => Some(*root_index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 🔴 Two watched folders, one job, one reading pass.
+///
+/// The pair of states this separates is "one scan read both folders" from "two
+/// scans, one per folder" — which is what the chain this replaces produced, and
+/// which is indistinguishable from the first if you look only at the index. So
+/// the assertions are about the JOB and not only about the files: `readSeq`
+/// rises by exactly one across the whole run (two passes would move it twice),
+/// the announcements walk from folder 1 to folder 2 without going back, and one
+/// `ReadingOutcome` accounts for both folders at once.
+#[test]
+fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt", "b3.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let before = app.state::<AppState>().scan_state().read_seq;
+    let (snapshots, settled) =
+        run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass at all");
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert_eq!(reading.roots_read, 2, "{reading:?}");
+    assert_eq!(reading.root_count, 2, "{reading:?}");
+    assert_eq!(reading.indexed, 6, "{reading:?}");
+    assert!(reading.complete, "{reading:?}");
+    assert_eq!(
+        reading
+            .roots
+            .iter()
+            .map(|r| r.root_path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            first.path().display().to_string(),
+            second.path().display().to_string(),
+        ],
+        "the pass must account for the folders it read, in the order it read them"
+    );
+
+    assert_eq!(
+        settled.read_seq,
+        before + 1,
+        "two folders under one job are ONE reading pass; {} passes were recorded",
+        settled.read_seq - before
+    );
+    assert_eq!(settled.files, 6, "{settled:?}");
+
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Completed);
+    assert_eq!(report.embedding, EmbedOutcome::NotReached);
+    assert_eq!(report.ended_in, EndedIn::Reading);
+    assert_eq!(
+        report.resume, None,
+        "a scan that read everything has nothing for a next one to pick up"
+    );
+
+    let positions = reading_positions(&snapshots);
+    assert!(
+        positions.contains(&1) && positions.contains(&2),
+        "the window was never shown both folders: {positions:?}"
+    );
+    assert!(
+        positions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the pass went back to an earlier folder, which is what a restarted \
+         scan looks like: {positions:?}"
+    );
+
+    assert_eq!(indexed_paths(&app, first_id).len(), 3);
+    assert_eq!(indexed_paths(&app, second_id).len(), 3);
+}
+
+/// A folder that is not there does not stop the folder after it.
+///
+/// The pair it separates is "one ejected disk costs you one folder" from "one
+/// ejected disk costs you the whole scan". Both directions are asserted,
+/// because the second half is what makes the first mean anything: the first
+/// folder's rows are still there afterwards (a scan that reconciled against an
+/// absent folder would delete them all) AND the second folder was read.
+#[test]
+fn a_folder_that_is_not_there_does_not_stop_the_folder_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["gone1.txt", "gone2.txt"]);
+    let first_id = watch(&webview, first.path());
+    run_walk_to_completion(&app, first_id);
+    let rows_before = indexed_paths(&app, first_id);
+    assert_eq!(
+        rows_before.len(),
+        2,
+        "nothing was indexed under the first folder, so its survival below \
+         proves nothing"
+    );
+
+    // The folder goes away between one scan and the next — an ejected volume,
+    // a folder deleted by hand.
+    std::fs::remove_dir_all(first.path()).expect("removing the first watched folder");
+
+    let second = dir_holding(&["b1.txt", "b2.txt"]);
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::RootUnavailable,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots_read, 2,
+        "the folder after the missing one was never read: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id),
+        rows_before,
+        "the missing folder's rows were treated as deleted files"
+    );
+    assert_eq!(
+        indexed_paths(&app, second_id).len(),
+        2,
+        "the readable folder after the missing one was not indexed"
+    );
+}
+
+/// 🔴 A folder that was stopped part-way still reports what it wrote.
+///
+/// The pair it separates is "stopped after 3 of 3 in this folder, one folder of
+/// two read" from "stopped, and here are some zeroes". They are the same
+/// `reason` and the same slot state; only the counters differ, and the counters
+/// are what a person is owed — they tell them how much of their archive is now
+/// in the index. `Stop` is raised from inside the announcement for the LAST
+/// file of the first folder, so at least one document is written before it
+/// fires and the count cannot pass by being zero.
+///
+/// The other half, asserted alongside: the second folder is not read at all.
+#[test]
+fn a_cancelled_root_still_counts_what_it_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt", "b3.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) =
+        run_scan_watching(&app, Entry::Full, Duration::from_secs(60), |state, now| {
+            if let ScanSnapshot::Running {
+                phase:
+                    Phase::Reading {
+                        root_index: 1,
+                        counts,
+                        ..
+                    },
+                ..
+            } = &now.snapshot
+                && counts.total >= 3
+                && counts.done == counts.total
+            {
+                state.cancel_job();
+            }
+        });
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+    assert_eq!(reading.reason, EndReason::Cancelled, "{reading:?}");
+    assert_eq!(reading.roots_read, 1, "{reading:?}");
+    assert_eq!(reading.root_count, 2, "{reading:?}");
+    assert_eq!(
+        reading.roots[0].indexed, 3,
+        "the folder that was read before the Stop reported fewer documents than \
+         it wrote: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id).len(),
+        3,
+        "the counters and the index disagree, so one of them is invented"
+    );
+    assert!(
+        indexed_paths(&app, second_id).is_empty(),
+        "the folder after the Stop was read anyway"
+    );
+
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Cancelled);
+    assert_eq!(
+        report.resume,
+        Some(Entry::Full),
+        "a reading pass that was stopped has folders left to read"
+    );
+}
+
+/// A worker that cannot read anything stops the scan at the folder that broke,
+/// and the folder keeps its counters.
+///
+/// The pair it separates is "eight files proved the install is broken" from
+/// "forty thousand files each proved it separately" — D44's counter is what
+/// makes the first one true, and this asserts the scan honours it rather than
+/// carrying the same broken worker into the next folder. `done` below is the
+/// evidence the folder really worked before it gave up; a scan that reported
+/// zeroes for the folder that broke would pass a bare `reason` assertion.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_reads_nothing_stops_the_scan_at_the_folder_that_broke() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let app = app_with_a_worker_that_reads_nothing(dir.path(), scratch.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    // Nine, not three: the threshold is `(configured_workers * 2).max(8)` and
+    // the default pool has two workers, so eight consecutive crashes are what
+    // trips it — see `mnema-ingest`'s own
+    // `a_worker_that_answers_nothing_useful_stops_the_walk`.
+    let names: Vec<String> = (0..9).map(|i| format!("f{i}.txt")).collect();
+    let first = dir_holding(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    let second = dir_holding(&["b1.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(120));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(reading.reason, EndReason::BrokenWorker, "{reading:?}");
+    assert_eq!(reading.roots_read, 1, "{reading:?}");
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::BrokenWorker,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].total, 9,
+        "the folder's own phase-1 count was lost: {reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].done, 8,
+        "the folder gave up at the threshold and the count of what it got \
+         through was lost: {reading:?}"
+    );
+    assert!(
+        indexed_paths(&app, first_id).is_empty(),
+        "a worker that reads nothing indexed something"
+    );
+    assert!(
+        indexed_paths(&app, second_id).is_empty(),
+        "the scan carried a broken worker into the next folder"
+    );
+    assert_eq!(
+        report_of(&settled).resume,
+        Some(Entry::Full),
+        "an install that has to be repaired is still something to run again"
+    );
+}
+
+/// 🔴 A folder emptied between the ingest and the reconcile pauses, keeps the
+/// counters it earned, and does not stop the folder after it.
+///
+/// D33's ambiguity: an unmounted volume and a mass delete are the same thing
+/// from here, and the answer is a pause rather than a guess. What this
+/// fixture adds over `mnema-ingest`'s own is the phase-2 counters — the folder
+/// is emptied AFTER its files were indexed, so `VolumeMissing` arrives on a
+/// folder that really did read nine files' worth of work, and a scan that
+/// zeroed the folder because its ending was not `Completed` would fail here.
+///
+/// The emptying is done from inside the announcement for the folder's last
+/// file, which `walk_root` makes on its own thread between phase 2 and phase 3.
+#[test]
+fn a_folder_emptied_after_its_files_were_read_pauses_and_keeps_its_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let vanishing = first.path().to_path_buf();
+    let (_, settled) =
+        run_scan_watching(&app, Entry::Full, Duration::from_secs(60), move |_, now| {
+            if let ScanSnapshot::Running {
+                phase:
+                    Phase::Reading {
+                        root_index: 1,
+                        counts,
+                        ..
+                    },
+                ..
+            } = &now.snapshot
+                && counts.total >= 3
+                && counts.done == counts.total
+            {
+                for entry in std::fs::read_dir(&vanishing).expect("listing the folder") {
+                    let _ = std::fs::remove_file(entry.expect("a directory entry").path());
+                }
+            }
+        });
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::VolumeMissing,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].indexed, 3,
+        "the folder read three files before it vanished and the count was lost: \
+         {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id).len(),
+        3,
+        "the pause did not hold: the rows for a folder that may be an unmounted \
+         volume were deleted"
+    );
+    assert_eq!(
+        reading.roots_read, 2,
+        "one folder that may be unmounted stopped the whole scan: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, second_id).len(),
+        2,
+        "the folder after the paused one was not read"
+    );
+    // What the aggregate says today, pinned rather than assumed: the pass did
+    // not STOP for this, so its own `reason` stays `Completed` and the folder's
+    // row is the only place the pause is stated. A window that draws the scan
+    // from `reason` alone therefore owes `roots` a look.
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+}
+
+/// 🔴 «Completed» is not «saw everything», and the pair is asserted on the
+/// same counters.
+///
+/// Two folders that end the same way and indexed the same number of files: one
+/// readable file each, `reason: completed` each. The first also holds a
+/// subdirectory nothing can read. Phase 2 finished everything phase 1 could
+/// hand it, so both end `Completed` — and `complete` is what tells them apart.
+/// A scan that folded the two questions together, or that let the pass's own
+/// `complete` follow its `reason`, draws a person a finished scan over an index
+/// missing whatever is under that subdirectory.
+///
+/// `done` and `total` are deliberately NOT asserted equal between the two: the
+/// unreadable subdirectory is itself an entry phase 1 turned away, so the first
+/// folder counts one more of them. That difference is real, and claiming the
+/// two folders differ in `complete` alone would be a sentence this fixture does
+/// not support.
+///
+/// Asserted on the JSON `job_status` answers with, because that is the value
+/// the window actually reads.
+#[cfg(unix)]
+#[test]
+fn a_folder_with_an_unreadable_subdirectory_completes_without_claiming_it_saw_everything() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let partly = dir_holding(&["seen.txt"]);
+    let locked = partly.path().join("locked");
+    std::fs::create_dir(&locked).expect("creating the subdirectory");
+    std::fs::write(locked.join("hidden.txt"), "text nothing will read")
+        .expect("writing inside the subdirectory");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("making the subdirectory unreadable");
+
+    let whole = dir_holding(&["also-seen.txt"]);
+    watch(&webview, partly.path());
+    watch(&webview, whole.path());
+
+    let (_, settled) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+
+    // Restored before anything can fail below, so the temporary directory can
+    // still be cleaned up when it does.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("restoring the subdirectory");
+
+    let status = call(&webview, "job_status", json!({})).expect("job_status was rejected");
+    let roots = status["lastReading"]["roots"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the reading pass named no folders: {status}"))
+        .clone();
+    assert_eq!(roots.len(), 2, "{status}");
+
+    for (which, root) in roots.iter().enumerate() {
+        assert_eq!(
+            root["reason"],
+            json!("completed"),
+            "folder {which} did not complete: {status}"
+        );
+        assert_eq!(
+            root["indexed"],
+            json!(1),
+            "folder {which} indexed something other than its one readable file: {status}"
+        );
+    }
+    assert_eq!(
+        roots[0]["complete"],
+        json!(false),
+        "the folder with the unreadable subdirectory claims it saw everything: {status}"
+    );
+    assert_eq!(
+        roots[1]["complete"],
+        json!(true),
+        "the folder nothing was wrong with is being reported as partly read, so \
+         `complete` is not measuring anything: {status}"
+    );
+    assert_eq!(
+        status["lastReading"]["complete"],
+        json!(false),
+        "one folder that was not fully seen must make the pass not fully seen: {status}"
+    );
+    assert_eq!(
+        status["lastReading"]["reason"],
+        json!("completed"),
+        "the pass finished everything it could, which is a different question: {status}"
+    );
+
+    let _ = settled;
+}
+
+/// An index with no watched folders is a scan that read none, said so, and did
+/// not fall over.
+///
+/// The pair it separates is "nothing to read" from "something went wrong":
+/// zero folders is an ordinary state — a fresh installation is in it — and the
+/// pass must end `Completed` with the counts to match rather than as a failure
+/// or a panic that leaves `JobSlot::drop` to write the ending.
+#[test]
+fn a_scan_with_no_watched_folders_reads_none_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let (_, settled) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(30));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert_eq!(reading.root_count, 0, "{reading:?}");
+    assert_eq!(reading.roots_read, 0, "{reading:?}");
+    assert!(reading.roots.is_empty(), "{reading:?}");
+    assert!(
+        reading.complete,
+        "a pass with nothing to miss cannot have missed anything: {reading:?}"
+    );
+    assert_eq!(
+        report_of(&settled).message,
+        None,
+        "an empty index is not a defect report"
+    );
+}
+
+/// A stored prefix that `WalkRules::new` refuses stops the scan before it
+/// spawns — and the slot it had already taken says so.
+///
+/// This is the cost D-f accepts, asserted rather than assumed: the scan claims
+/// the slot BEFORE it reads the index, so a refusal happens with the slot in
+/// hand. The pair it separates is "the refusal was reported" from "the refusal
+/// left an application that looks idle over a scan that never ran" —
+/// `JobSlot::drop`'s policy is what turns the second into the first, and this
+/// is the only caller that reaches it on purpose.
+#[test]
+fn a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = dir_holding(&["a1.txt", "a2.txt"]);
+    let root = watch(&webview, fixture.path());
+    run_walk_to_completion(&app, root);
+    let before = indexed_paths(&app, root);
+    assert_eq!(before.len(), 2, "the fixture was not indexed");
+
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.add_path_exclusion(root, ".."))
+        .expect("writing an unvalidated prefix straight to the index");
+
+    let refusal = scan_job::start_scan_job(state.clone(), Entry::Full)
+        .expect_err("a scan started even though a stored prefix cannot become a rule");
+    assert_eq!(
+        refusal.to_string(),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
+    );
+
+    assert!(
+        !state.job_is_running(),
+        "the refused scan kept the job slot"
+    );
+    assert_eq!(
+        report_of(&state.scan_state()).reason,
+        EndReason::Failed,
+        "the slot went back to idle, so a window is left with no account of a \
+         scan that was asked for and never ran"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "the refused scan changed the index, so something ran before it refused"
+    );
+}
+
+/// The narrow question `the_walk_job_is_reachable_through_the_ipc` asks for the
+/// walk: is `start_scan_job` in `invoke_handler!` at all, and does its one
+/// argument arrive under the name and in the spelling the window sends.
+///
+/// `entry` is the argument, and it is an enum rather than a string, so the pair
+/// this separates is "the window's two entry points reach the command" from
+/// "one of them is refused as an unknown variant". A value nobody defined must
+/// be refused rather than defaulted — a `walk` silently read as `full` would be
+/// a resumption that re-read the archive.
+#[test]
+fn the_scan_job_is_reachable_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(&webview, "start_scan_job", json!({ "entry": "full" }))
+        .expect("start_scan_job was rejected");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "the scan job never released the slot"
+    );
+
+    let error = call(&webview, "start_scan_job", json!({ "entry": "walk" }))
+        .expect_err("an entry point nobody defined was accepted");
+    assert!(
+        error
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown variant"),
+        "the rejection should be serde's own sentence about the variant; it was {error}"
+    );
+}
+
+#[cfg(unix)]
+use app::app_with_a_worker_that_reads_nothing;

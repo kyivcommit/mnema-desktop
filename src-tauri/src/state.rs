@@ -725,28 +725,54 @@ impl Drop for JobSlot {
         if self.finished {
             return;
         }
+        // Which phase it vanished from, not merely whether it owed anything:
+        // the report says where the job was, and the two phases are resumed
+        // from different places — see `scan_job::resume_for`. The note sits
+        // above the block rather than beside the binding it is about, because
+        // `scripts/mutations/pr9-shell.sh` quotes the lock and that binding as
+        // one adjacent block; a comment between them leaves the case matching
+        // nothing, and a case that matches nothing proves nothing while still
+        // reporting green.
         {
             let mut scan = self
                 .scan
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let owed_a_report = matches!(
-                scan.snapshot,
+            let owed_a_report = match scan.snapshot {
                 crate::scan_state::ScanSnapshot::Running {
-                    phase: crate::scan_state::Phase::Reading { .. }
-                        | crate::scan_state::Phase::Embedding { .. },
+                    phase: crate::scan_state::Phase::Reading { .. },
                     ..
-                }
-            );
-            scan.snapshot = if owed_a_report {
+                } => Some(crate::scan_state::EndedIn::Reading),
+                crate::scan_state::ScanSnapshot::Running {
+                    phase: crate::scan_state::Phase::Embedding { .. },
+                    ..
+                } => Some(crate::scan_state::EndedIn::Embedding),
+                _ => None,
+            };
+            scan.snapshot = if let Some(ended_in) = owed_a_report {
                 crate::scan_state::ScanSnapshot::Ended {
                     report: crate::scan_state::ScanReport {
+                        // ⚠️ `NotReached` even for a job that vanished DURING
+                        // the embedding phase, and that is the conservative
+                        // direction rather than an accurate one: nothing here
+                        // knows how far that pass got, and the two ways to be
+                        // wrong are not symmetric. Under-claiming leaves a
+                        // person told nothing was embedded when some of it was,
+                        // and `resume` below sends them back to finish it;
+                        // over-claiming would tell them their archive is
+                        // searchable when it is not.
+                        embedding: crate::scan_state::EmbedOutcome::NotReached,
+                        ended_in,
                         reason: crate::job::EndReason::Failed,
                         // English, and here rather than in `locale.rs`, for the
                         // reason every sentence in `error.rs` is: it is a
                         // diagnostic about a defect, not a sentence written for
                         // a person to act on.
                         message: Some("the job ended without a report".to_string()),
+                        resume: crate::scan_job::resume_for(
+                            crate::job::EndReason::Failed,
+                            ended_in,
+                        ),
                     },
                 }
             } else {
@@ -764,7 +790,8 @@ mod tests {
 
     use crate::job::{EndReason, Progress};
     use crate::scan_state::{
-        OtherJob, Phase, ReadingOutcome, ScanReport, ScanSnapshot, ScanState, Terminal,
+        EmbedOutcome, EndedIn, OtherJob, Phase, ReadingOutcome, ScanReport, ScanSnapshot,
+        ScanState, Terminal,
     };
 
     /// An `AppState` with nothing but paths — the observer contract touches no
@@ -804,13 +831,42 @@ mod tests {
         }
     }
 
+    /// A reading outcome with something in every field the slot has to carry
+    /// unchanged, so that a slot storing a blank one — or the one from the pass
+    /// before — is a failure rather than an equality between two defaults.
+    fn a_pass_that_read_one_folder() -> ReadingOutcome {
+        ReadingOutcome {
+            reason: EndReason::VolumeMissing,
+            complete: false,
+            roots_read: 1,
+            root_count: 3,
+            done: 4,
+            total: 5,
+            indexed: 2,
+            unchanged: 1,
+            skipped: 1,
+            removed: 6,
+            contended: 1,
+            roots: Vec::new(),
+        }
+    }
+
     /// What [`JobSlot::drop`] writes for a phase that owed a report and never
-    /// produced one. Written out here so that the four Drop tests compare
-    /// against one spelling rather than four.
-    fn report_nobody_wrote() -> ScanReport {
+    /// produced one. Written out here so that the Drop tests compare against
+    /// one spelling rather than several.
+    ///
+    /// Takes the phase it vanished from, because the report names it: a job
+    /// that disappeared out of the reading pass and one that disappeared out of
+    /// the embedding pass are resumed from different places, and a fixture that
+    /// spelled one answer for both would let the two swap without a test
+    /// noticing.
+    fn report_nobody_wrote(ended_in: EndedIn) -> ScanReport {
         ScanReport {
+            embedding: EmbedOutcome::NotReached,
+            ended_in,
             reason: EndReason::Failed,
             message: Some("the job ended without a report".to_string()),
+            resume: crate::scan_job::resume_for(EndReason::Failed, ended_in),
         }
     }
 
@@ -1083,7 +1139,7 @@ mod tests {
         assert_eq!(
             state.scan_state().snapshot,
             ScanSnapshot::Ended {
-                report: report_nobody_wrote(),
+                report: report_nobody_wrote(EndedIn::Reading),
             },
             "a reading job that ended without a report is a failure, not an idle \
              application"
@@ -1124,7 +1180,7 @@ mod tests {
         assert_eq!(
             state.scan_state().snapshot,
             ScanSnapshot::Ended {
-                report: report_nobody_wrote(),
+                report: report_nobody_wrote(EndedIn::Embedding),
             }
         );
         state
@@ -1192,8 +1248,9 @@ mod tests {
     /// that recorded it and the next claim. A `claim_job` that cleared it leaves
     /// a reopened window with no answer about the scan that just ran.
     ///
-    /// `ReadingOutcome` carries no fields yet, so the transition this pins is
-    /// `None` to `Some`; Task 2 gives it something to disagree about.
+    /// The outcome recorded is a filled one rather than the default, so the
+    /// transition pinned is not merely `None` to `Some`: a slot that stored a
+    /// blank outcome, or the one from a pass before it, fails here too.
     #[test]
     fn only_a_finished_reading_pass_moves_read_seq() {
         let state = state();
@@ -1215,13 +1272,13 @@ mod tests {
             "progress inside a reading pass is not the pass ending"
         );
 
-        slot.mark_reading_done(ReadingOutcome::default());
+        slot.mark_reading_done(a_pass_that_read_one_folder());
         let done = state.scan_state();
         assert_eq!(
             done.read_seq, 1,
             "the pass ended, which is the one thing that moves this"
         );
-        assert_eq!(done.last_reading, Some(ReadingOutcome::default()));
+        assert_eq!(done.last_reading, Some(a_pass_that_read_one_folder()));
         assert!(
             done.revision > claimed.revision,
             "a reading pass ending is a change to the snapshot too"
@@ -1234,7 +1291,7 @@ mod tests {
             later.read_seq, 1,
             "neither the job ending nor a file count is a reading pass"
         );
-        assert_eq!(later.last_reading, Some(ReadingOutcome::default()));
+        assert_eq!(later.last_reading, Some(a_pass_that_read_one_folder()));
 
         let next = state.claim_job(reading(), true).expect("the slot is free");
         let after_next_claim = state.scan_state();
@@ -1244,7 +1301,7 @@ mod tests {
         );
         assert_eq!(
             after_next_claim.last_reading,
-            Some(ReadingOutcome::default()),
+            Some(a_pass_that_read_one_folder()),
             "a claim that cleared this leaves a reopened window with no answer \
              about the scan that just ran"
         );

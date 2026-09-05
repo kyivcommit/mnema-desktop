@@ -190,6 +190,13 @@ pub fn start_walk_job(
         // promises what the window *saw*, not the loop's internal position.
         let reported = AtomicU64::new(0);
         let last_total = AtomicU64::new(0);
+        // What the walk last said about contention, kept on EVERY callback and
+        // not only on the ones that got through the throttle below: the count
+        // exists nowhere else — `WalkReport` has no such field — so a value
+        // recorded after the `progress_is_due` check would be whatever the last
+        // *sent* event happened to carry, which for a short walk is nothing at
+        // all. [`Ended::contended`] has the rest of the reasoning.
+        let contended_seen = AtomicU64::new(0);
         let started = Instant::now();
         // Throttling state for the progress closure below, mirroring
         // `job::run_probe`'s own `last_report` exactly — see the `due` check
@@ -218,6 +225,8 @@ pub fn start_walk_job(
                 &mut |progress| {
                     let done = progress.done;
                     let total = progress.total;
+                    // Before the throttle, deliberately. See `contended_seen`.
+                    contended_seen.store(progress.contended, Ordering::Relaxed);
 
                     // `walk_root` calls this once per file (twice for a
                     // file whose busy retries were all refused, and once
@@ -318,7 +327,11 @@ pub fn start_walk_job(
         // makes a stuck slot lock the application out of indexing.
         let stopped_late = slot.cancel_flag().load(Ordering::SeqCst);
         let ending = match caught {
-            Ok(Ok(report)) => ended_from_report(&report, stopped_late),
+            Ok(Ok(report)) => ended_from_report(
+                &report,
+                stopped_late,
+                contended_seen.load(Ordering::Relaxed),
+            ),
             // Neither arm below has a `WalkReport` to read `frozen` or the
             // counters from — `walk_root` returned `Err`, or never returned
             // at all — so both fall back to the same "last count the window
@@ -418,7 +431,14 @@ pub fn start_walk_job(
 /// is `true`: phase 1 really did read every entry. The two fields answer
 /// different questions — `complete` is about what was SEEN, `reason` about why
 /// the run ENDED — and a late Stop is only ever an answer to the second.
-fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
+///
+/// `contended` is the one counter that is **not** in the report and cannot be:
+/// `WalkReport` has no such field, because contention is announced once,
+/// through the progress callback, at the moment the last busy retry is refused.
+/// Every caller of that callback throttles it, so the caller is the only place
+/// the number survives — see [`Ended::contended`] for the rule and
+/// `crate::scan_job::RootProgress` for the counter that keeps it.
+pub(crate) fn ended_from_report(report: &WalkReport, stopped_late: bool, contended: u64) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
     let reason = match report.stopped {
@@ -445,6 +465,7 @@ fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
         // Same merge `Progress` makes for the same reason — see the comment
         // where the live progress event is built, above.
         skipped: report.skipped + report.refused,
+        contended,
         // A walk gives no unit up for good; `report.refused` is a file it
         // declined to open, and it is already inside `skipped`.
         refused: 0,
@@ -462,7 +483,7 @@ fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
 /// See [`job::FrozenReason`]'s own doc comment for why the words moved to
 /// the window rather than staying here as `Ended.frozen[_].why`, which is
 /// what this function replaced.
-fn frozen_reason(why: FrozenReason) -> job::FrozenReason {
+pub(crate) fn frozen_reason(why: FrozenReason) -> job::FrozenReason {
     match why {
         FrozenReason::SymlinkedSubtree => job::FrozenReason::SymlinkedSubtree,
         FrozenReason::EmptyDirectory => job::FrozenReason::EmptyDirectory,
@@ -491,6 +512,40 @@ mod tests {
         }
     }
 
+    /// The contention count reaches the ending from the caller, and only from
+    /// the caller.
+    ///
+    /// The pair of states this separates is "a walk that met a held write lock"
+    /// from "a walk that met none", on two reports that are otherwise the same
+    /// byte for byte — `WalkReport` carries nothing about contention, so the
+    /// only thing that can differ is the argument. An implementation that
+    /// dropped the argument and wrote `0` passes the second assertion and fails
+    /// the first; one that wrote `skipped` there passes the first and fails the
+    /// second.
+    #[test]
+    fn contention_reaches_the_ending_from_the_caller_and_not_from_the_report() {
+        assert_eq!(
+            ended_from_report(&report(StopReason::Completed), false, 2).contended,
+            2,
+            "the count the caller kept was not carried into the ending"
+        );
+        assert_eq!(
+            ended_from_report(&report(StopReason::Completed), false, 0).contended,
+            0,
+            "a walk that met no lock must report none"
+        );
+        // The rule `Ended::contended` states, on the fixture that can break it:
+        // `report(..)` skips 2 and refuses 3, so the ending's `skipped` is 5.
+        let ended = ended_from_report(&report(StopReason::Completed), false, 5);
+        assert!(
+            ended.contended <= ended.skipped,
+            "contended {} is above skipped {}, so a surface adding the two \
+             would count files twice",
+            ended.contended,
+            ended.skipped
+        );
+    }
+
     /// Pins the one thing a review round found missing entirely by mutation:
     /// with every `StopReason` arm below collapsed to `EndReason::Completed`
     /// and `frozen` replaced by `Vec::new()`, all seventeen tests in
@@ -510,7 +565,7 @@ mod tests {
         ];
         for (stopped, expected) in cases {
             assert_eq!(
-                ended_from_report(&report(stopped), false).reason,
+                ended_from_report(&report(stopped), false, 0).reason,
                 expected,
                 "StopReason::{stopped:?} did not become EndReason::{expected:?}"
             );
@@ -525,11 +580,11 @@ mod tests {
     fn completeness_crosses_the_seam_unchanged() {
         let mut walked = report(StopReason::Completed);
         walked.complete = true;
-        assert!(ended_from_report(&walked, false).complete);
+        assert!(ended_from_report(&walked, false, 0).complete);
 
         walked.complete = false;
         assert!(
-            !ended_from_report(&walked, false).complete,
+            !ended_from_report(&walked, false, 0).complete,
             "an incomplete walk must not report as one that saw everything, \
              even when it otherwise stopped `Completed`"
         );
@@ -543,7 +598,7 @@ mod tests {
             why: FrozenReason::EmptyDirectory,
         }];
 
-        let ended = ended_from_report(&walked, false);
+        let ended = ended_from_report(&walked, false, 0);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
         // The exact variant, not merely `Some`: `each_frozen_reason_maps_to_
@@ -585,7 +640,7 @@ mod tests {
     /// swapped field would show up here rather than in `done` alone.
     #[test]
     fn indexed_and_unchanged_cross_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
         assert_eq!(ended.indexed, 5);
         assert_eq!(ended.unchanged, 1);
         assert_ne!(ended.indexed, ended.done);
@@ -600,7 +655,7 @@ mod tests {
     /// field on `report(..)` so a swap — not only a drop — would fail here.
     #[test]
     fn removed_crosses_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
         assert_eq!(ended.removed, 4);
         assert_ne!(ended.removed, ended.done);
     }
@@ -612,14 +667,14 @@ mod tests {
     #[test]
     fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed), false).message,
+            ended_from_report(&report(StopReason::Completed), false, 0).message,
             None
         );
     }
 
     #[test]
     fn done_and_total_include_phase_one_refusals_and_skipped_merges_both_kinds() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
         // found: 8, refused: 3
         assert_eq!(ended.total, 11);
         // indexed: 5, unchanged: 1, skipped: 2, refused: 3
@@ -640,7 +695,7 @@ mod tests {
         walked.skipped = 0;
         walked.refused = 0;
 
-        let ended = ended_from_report(&walked, false);
+        let ended = ended_from_report(&walked, false, 0);
         assert_eq!(ended.done, 0);
         assert_eq!(ended.total, 0);
         assert_eq!(ended.reason, EndReason::RootUnavailable);

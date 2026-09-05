@@ -52,7 +52,7 @@ use crate::state::AppState;
 /// and the one number anybody measured about long inputs is D25's observation
 /// that an over-long input to `bge-m3` returns `200` with a third of the text
 /// silently dropped, which is about one text and not about how many.
-const BATCH: usize = 32;
+pub(crate) const BATCH: usize = 32;
 
 /// `(async)` for the reason given on [`crate::bridge::open_index`] and repeated
 /// by [`crate::walk_job::start_walk_job`]: this command reads the credential
@@ -324,6 +324,15 @@ fn ended_from_tally(tally: EmbedTally, total: u64, cancelled: bool) -> Ended {
         },
         done: tally.embedded,
         total,
+        // `0` for the reason `Progress::contended` gives: an embedding pass
+        // takes no index write lock a walk could find held against it.
+        //
+        // Written ABOVE `skipped` rather than in field order, because two
+        // mutation cases in `scripts/mutations/embedding.sh` quote `skipped`,
+        // `refused` and `complete` as one adjacent block, on both sides of
+        // their substitution. A field inserted anywhere inside that block
+        // leaves both cases proving nothing while still reporting green.
+        contended: 0,
         skipped: 0,
         refused: tally.failed,
         complete: true,

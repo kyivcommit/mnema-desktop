@@ -267,6 +267,18 @@ pub enum Error {
     /// single writer, so a second concurrent job would contend for both.
     #[error("a job is already running")]
     JobAlreadyRunning,
+    /// `start_scan_job` was asked for the `embedOnly` entry point while the
+    /// scanning job still has only a reading phase (Task 2).
+    ///
+    /// A refusal rather than quietly running the whole scan instead, which is
+    /// the alternative that was available and is worse in one specific way:
+    /// `embedOnly` is what a resumption asks for, and a resumption silently
+    /// promoted to a full scan re-reads every watched folder — minutes to hours
+    /// of work — for somebody who asked for the cheap half. Failing loudly on a
+    /// path nothing calls yet costs nothing; guessing costs a person's evening.
+    /// Task 3 gives the entry point its phase and takes this variant away.
+    #[error("this build's scanning job has no embedding phase yet")]
+    EmbeddingPhaseNotWired,
     /// D106: two independent toggles, and at least one is always on.
     /// `set_search_arms` refuses here so a meta row nothing rereads to check
     /// cannot make that sentence false. Proven by

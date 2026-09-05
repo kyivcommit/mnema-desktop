@@ -14,7 +14,7 @@
 //! whenever it likes and draws exactly what it finds, and [`ScanState::
 //! revision`] is what lets it know a read is worth repeating.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Everything a surface needs to draw the scan, in one read.
 ///
@@ -157,22 +157,199 @@ pub enum Terminal {
     Ended { report: ScanReport },
 }
 
+/// Where a scan is asked to begin.
+///
+/// Two entry points and not a boolean, because the second one is a resumption
+/// and not a variation: `EmbedOnly` is what a scan whose reading pass already
+/// finished is restarted as, so that a person who pressed Stop during the
+/// embedding is not made to re-read every folder to get their remaining chunks
+/// embedded. [`ScanReport::resume`] is where a finished scan names which of the
+/// two the next one should be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Entry {
+    Full,
+    EmbedOnly,
+}
+
+/// Which phase a scan was in when it ended.
+///
+/// Not derivable from [`ScanReport::reason`] and that is the point: a scan can
+/// end `Cancelled` in either phase, and the two want different things next — a
+/// reading that was stopped has folders left to read, an embedding that was
+/// stopped has only chunks left to embed. [`crate::scan_job::resume_for`] is
+/// the one place that decision is written down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EndedIn {
+    Reading,
+    Embedding,
+}
+
+/// What the embedding phase of a scan did, if it got that far.
+///
+/// `NotReached` is a state of its own rather than an absence, for
+/// [`ScanState`]'s reason: a scan whose reading pass broke and a scan that
+/// embedded nothing because there was nothing to embed are two different
+/// answers, and a window drawing "0 embedded" for the first would be telling a
+/// person their archive is searchable when half of it was never read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum EmbedOutcome {
+    /// The scan ended before the embedding phase began.
+    NotReached,
+    /// The phase was reached and declined to run, for a reason a person can
+    /// act on.
+    Skipped {
+        why: SkipWhy,
+    },
+    Ran {
+        done: u64,
+        total: u64,
+        refused: u64,
+    },
+}
+
+/// Why an embedding phase that was reached did not run.
+///
+/// A closed enumeration rather than a sentence, for [`crate::job::FrozenReason`]'s
+/// own reason: the words a person reads are the window's to choose, and a
+/// window given only English has nothing to group, translate or act on.
+/// `StoreUnavailable` carries a message because that one IS a diagnostic — the
+/// credential store refused to answer at all — and there is no closed
+/// vocabulary for what an operating system says when it does that.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SkipWhy {
+    NoKey,
+    NoModel,
+    StoreUnavailable { message: String },
+}
+
+/// What one watched folder's reading came to.
+///
+/// Per folder and not only in aggregate, because the aggregate cannot answer
+/// the question a person actually has: a scan of seven folders that reports
+/// `RootUnavailable` says one of them was not there and does not say which.
+///
+/// `complete` is [`crate::job::Ended::complete`]'s own question, kept per
+/// folder for the same reason — the folder with the unreadable subdirectory is
+/// the one worth naming.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootOutcome {
+    pub root_path: String,
+    pub reason: crate::job::EndReason,
+    pub complete: bool,
+    pub message: Option<String>,
+    pub done: u64,
+    pub total: u64,
+    pub indexed: u64,
+    pub unchanged: u64,
+    pub skipped: u64,
+    pub removed: u64,
+    pub contended: u64,
+    pub frozen: Vec<crate::job::Frozen>,
+}
+
+/// What a reading pass concluded, kept apart from the report because it outlives
+/// the job: `ScanReport` is about the job that ended, this is about the state of
+/// the index the pass left behind.
+///
+/// 🔴 **`roots_read` is not `root_count`, and `complete` is not
+/// `reason == Completed`.** The two pairs are what stop a window claiming more
+/// than the pass established. A pass that stopped at the second of seven
+/// folders read two and left five untouched; a pass that read every folder it
+/// was given and met an unreadable subdirectory in one of them ends
+/// `Completed` and still has not seen the whole archive. Either fact collapsed
+/// into the other draws a person a finished scan over an index that is missing
+/// something.
+///
+/// The counters are the sum over the folders that were read, and `roots` holds
+/// each folder's own — see [`RootOutcome`] for why both are here.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingOutcome {
+    pub reason: crate::job::EndReason,
+    pub complete: bool,
+    /// How many folders answered — with a report or with an error. Never more
+    /// than `root_count`, and less whenever the pass stopped early.
+    pub roots_read: u64,
+    /// How many folders the pass set out to read, as the index listed them at
+    /// the moment it started.
+    pub root_count: u64,
+    pub done: u64,
+    pub total: u64,
+    pub indexed: u64,
+    pub unchanged: u64,
+    pub skipped: u64,
+    pub removed: u64,
+    pub contended: u64,
+    pub roots: Vec<RootOutcome>,
+}
+
+/// A pass that read nothing and concluded nothing, which is what
+/// [`crate::state::JobSlot::mark_reading_done`]'s protocol tests want and what
+/// a scan over an index holding no watched folders honestly reports.
+///
+/// Hand-written for [`ScanReport`]'s own reason, one type down: the derive
+/// would need a `Default` on [`crate::job::EndReason`], and a defaulted end
+/// reason is a success claim inherited by whoever adds the next variant.
+impl Default for ReadingOutcome {
+    fn default() -> Self {
+        Self {
+            reason: crate::job::EndReason::Completed,
+            complete: true,
+            roots_read: 0,
+            root_count: 0,
+            done: 0,
+            total: 0,
+            indexed: 0,
+            unchanged: 0,
+            skipped: 0,
+            removed: 0,
+            contended: 0,
+            roots: Vec::new(),
+        }
+    }
+}
+
 /// What a finished scan has to say for itself.
 ///
-/// Two fields today, and the rest is Task 2's: `reason` is the same
-/// [`crate::job::EndReason`] the job events already carry, so a scan that
-/// stopped because a volume went missing says so here in the same words it
-/// would have said on the channel, and `message` is the diagnostic sentence for
-/// the endings that have one.
+/// `reason` is the same [`crate::job::EndReason`] the job events already carry,
+/// so a scan that stopped because a volume went missing says so here in the
+/// same words it would have said on the channel, and `message` is the
+/// diagnostic sentence for the endings that have one.
+///
+/// 🔴 **The reading is deliberately NOT here** (D-e). It lives on
+/// [`ScanState::last_reading`], because the two have different lifetimes: this
+/// report is replaced the moment the next job claims the slot, and what the
+/// last reading pass established about the index is still true afterwards. A
+/// window opened after the next scan started would otherwise have no account of
+/// the pass that filled its index.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanReport {
+    pub embedding: EmbedOutcome,
+    pub ended_in: EndedIn,
     pub reason: crate::job::EndReason,
     pub message: Option<String>,
+    /// What entry point would carry on from here, or `None` when there is
+    /// nothing left to carry on from. [`crate::scan_job::resume_for`] is where
+    /// the whole table is, and where it is tested row by row.
+    pub resume: Option<Entry>,
 }
 
-/// `Completed` and no message: the shape of an ending nobody had anything to
-/// add to.
+/// `Completed`, in the reading phase, with nothing embedded, nothing to add and
+/// nothing to resume: the shape of an ending nobody had anything to say about.
 ///
 /// Hand-written rather than derived, because the derive would need a `Default`
 /// on [`crate::job::EndReason`] itself — and a defaulted end reason is a
@@ -181,23 +358,19 @@ pub struct ScanReport {
 impl Default for ScanReport {
     fn default() -> Self {
         Self {
+            embedding: EmbedOutcome::NotReached,
+            ended_in: EndedIn::Reading,
             reason: crate::job::EndReason::Completed,
             message: None,
+            resume: None,
         }
     }
 }
 
-/// What a reading pass concluded, kept apart from the report because it outlives
-/// the job: `ScanReport` is about the job that ended, this is about the state of
-/// the index the pass left behind. Task 2 gives it its fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadingOutcome {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{EndReason, Progress};
+    use crate::job::{EndReason, Frozen, Progress};
 
     /// The wire shape of every snapshot a window can be handed, pinned as JSON.
     ///
@@ -317,17 +490,192 @@ mod tests {
         assert_eq!(
             value(ScanSnapshot::Ended {
                 report: ScanReport {
+                    embedding: EmbedOutcome::NotReached,
+                    ended_in: EndedIn::Reading,
                     reason: EndReason::VolumeMissing,
                     message: Some("the volume is not mounted".to_string()),
+                    resume: None,
                 },
             }),
             serde_json::json!({
                 "kind": "ended",
                 "report": {
+                    "embedding": { "kind": "notReached" },
+                    "endedIn": "reading",
                     "reason": "volumeMissing",
                     "message": "the volume is not mounted",
+                    "resume": null,
                 },
             })
+        );
+
+        assert_eq!(
+            value(ScanSnapshot::Ended {
+                report: ScanReport {
+                    embedding: EmbedOutcome::Skipped {
+                        why: SkipWhy::StoreUnavailable {
+                            message: "the keychain would not answer".to_string(),
+                        },
+                    },
+                    ended_in: EndedIn::Embedding,
+                    reason: EndReason::Cancelled,
+                    message: None,
+                    resume: Some(Entry::EmbedOnly),
+                },
+            }),
+            serde_json::json!({
+                "kind": "ended",
+                "report": {
+                    "embedding": {
+                        "kind": "skipped",
+                        "why": {
+                            "kind": "storeUnavailable",
+                            "message": "the keychain would not answer",
+                        },
+                    },
+                    "endedIn": "embedding",
+                    "reason": "cancelled",
+                    "message": null,
+                    "resume": "embedOnly",
+                },
+            })
+        );
+
+        assert_eq!(
+            value(ScanSnapshot::Ended {
+                report: ScanReport {
+                    embedding: EmbedOutcome::Ran {
+                        done: 90,
+                        total: 100,
+                        refused: 10,
+                    },
+                    ended_in: EndedIn::Embedding,
+                    reason: EndReason::Failed,
+                    message: Some("the provider refused".to_string()),
+                    resume: Some(Entry::Full),
+                },
+            }),
+            serde_json::json!({
+                "kind": "ended",
+                "report": {
+                    "embedding": {
+                        "kind": "ran",
+                        "done": 90,
+                        "total": 100,
+                        "refused": 10,
+                    },
+                    "endedIn": "embedding",
+                    "reason": "failed",
+                    "message": "the provider refused",
+                    "resume": "full",
+                },
+            })
+        );
+
+        for (why, spelling) in [(SkipWhy::NoKey, "noKey"), (SkipWhy::NoModel, "noModel")] {
+            assert_eq!(
+                serde_json::to_value(EmbedOutcome::Skipped { why: why.clone() }).unwrap(),
+                serde_json::json!({ "kind": "skipped", "why": { "kind": spelling } }),
+                "{why:?} serialized differently than this test's own spelling of it"
+            );
+        }
+    }
+
+    /// The reading outcome's wire shape, pinned on a pass that agrees with
+    /// nothing else in it.
+    ///
+    /// The pair it separates is the one [`ReadingOutcome`]'s own doc comment is
+    /// about: «read every folder and saw everything» against «read two of three
+    /// and could not see all of one of them». Every field here differs from
+    /// every other, so a window that reads `rootsRead` where `rootCount` was
+    /// meant — or `complete` off a `reason` that says `completed` — fails
+    /// rather than agreeing by coincidence.
+    #[test]
+    fn a_reading_outcome_has_its_wire_shape_pinned() {
+        let outcome = ReadingOutcome {
+            reason: EndReason::Completed,
+            complete: false,
+            roots_read: 2,
+            root_count: 3,
+            done: 11,
+            total: 12,
+            indexed: 5,
+            unchanged: 4,
+            skipped: 2,
+            removed: 7,
+            contended: 1,
+            roots: vec![RootOutcome {
+                root_path: "/Users/somebody/Documents".to_string(),
+                reason: EndReason::Completed,
+                complete: false,
+                message: None,
+                done: 6,
+                total: 6,
+                indexed: 3,
+                unchanged: 2,
+                skipped: 1,
+                removed: 7,
+                contended: 1,
+                frozen: vec![Frozen {
+                    prefix: "Archive".to_string(),
+                    reason: crate::job::FrozenReason::UnreadableDirectory,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            serde_json::json!({
+                "reason": "completed",
+                "complete": false,
+                "rootsRead": 2,
+                "rootCount": 3,
+                "done": 11,
+                "total": 12,
+                "indexed": 5,
+                "unchanged": 4,
+                "skipped": 2,
+                "removed": 7,
+                "contended": 1,
+                "roots": [{
+                    "rootPath": "/Users/somebody/Documents",
+                    "reason": "completed",
+                    "complete": false,
+                    "message": null,
+                    "done": 6,
+                    "total": 6,
+                    "indexed": 3,
+                    "unchanged": 2,
+                    "skipped": 1,
+                    "removed": 7,
+                    "contended": 1,
+                    "frozen": [{ "prefix": "Archive", "reason": "unreadableDirectory" }],
+                }],
+            })
+        );
+    }
+
+    /// `Entry` is what the window SENDS, so it is the one type here that has to
+    /// survive the round trip rather than only the way out.
+    ///
+    /// The pair it separates is a window whose two entry points reach the right
+    /// command from one whose `embedOnly` is refused as an unknown variant —
+    /// which is what a `rename_all` left off, or spelled `snake_case`, would
+    /// produce: a resumption that silently becomes an error message.
+    #[test]
+    fn the_two_entry_points_survive_the_round_trip_under_the_names_the_window_sends() {
+        for (entry, spelling) in [(Entry::Full, "full"), (Entry::EmbedOnly, "embedOnly")] {
+            let json = serde_json::to_value(entry).unwrap();
+            assert_eq!(json, serde_json::json!(spelling));
+            assert_eq!(
+                serde_json::from_value::<Entry>(json).unwrap(),
+                entry,
+                "{entry:?} did not come back as itself"
+            );
+        }
+        assert!(
+            serde_json::from_value::<Entry>(serde_json::json!("walk")).is_err(),
+            "an entry point nobody defined must be refused, not defaulted"
         );
     }
 
