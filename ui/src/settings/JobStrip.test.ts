@@ -4,29 +4,16 @@ import { tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale, type Loc } from '../i18n';
 import { END_REASONS } from '../lib/ipc';
-import type { Counts, EndReason, ModelSettings, ScanReport, ScanState } from '../lib/ipc';
+import type {
+  Counts, EndReason, Entry, ModelSettings, ReadingOutcome, RootOutcome, ScanReport, ScanState,
+} from '../lib/ipc';
 
-// ⚠️ **This file was cut down by PR 9b Task 6, and Task 7 is what restores it.**
-//
-// The strip used to be drawn from a channel of job events, and this file was
-// its whole matrix: the per-outcome sentences with their result lines, the
-// frozen-subtree rows, the embedding pass's own block, the `noKey`/`noModel`
-// notes, the «a job we cannot hear» state, and the chained-pass races. Task 6
-// replaced the channel with one versioned `ScanState` and rewrote the strip to
-// the SMALLEST thing that can be drawn from it, so the tests for what it no
-// longer draws are gone rather than weakened.
-//
-// What went, and where it comes back — all of it **Task 7**, by name:
-//   - the reading outcome from `scan.lastReading`: the per-root rows, the
-//     frozen prefixes, the folders-read count, the partly-read sentence;
-//   - the embedding block from `report.embedding` (`notReached` / `skipped`
-//     with its three reasons / `ran` with its counts);
-//   - the removal and probe phases, which draw no line here at all today;
-//   - the continue button from `continueAction`, and the resume/retry wording.
-// The controller-side races those tests used to reach through the strip —
-// supersession, a late reply against a newer event, destroy during a read — are
-// `jobs.test.ts`'s now, where they are about the reducer rather than about a
-// screen that happened to show it.
+// Task 7 — the reading outcome from `scan.lastReading` (the per-root rows,
+// the frozen prefixes, the folders-read count, the partly-read sentence that
+// outlives the report beside it), the embedding block from `report.embedding`,
+// the removal sentence, and the continue button from `continueAction`. Task 6
+// left this file holding only the smallest thing drawable from the new
+// `ScanState` snapshot; this is the rest of it.
 //
 // Only Tauri's own modules are faked. The whole settings window renders — the
 // nav, the sections and the strip — because the claim this file makes is about
@@ -64,7 +51,10 @@ const ROOTS = {
 // documentation. This fixture crosses an UNTYPED mock (`invoke` answers
 // `unknown`), so without it a required field added to the `read` arm reaches
 // the §9.3 section as `undefined` and every test that stands on the Indexing
-// nav item dies somewhere unrelated.
+// nav item dies somewhere unrelated. Task 7: `Settings.svelte` now reads
+// `model_settings` on ITS OWN mount too (for the strip's `read` prop), so
+// every test in this file crosses this fixture whether or not it ever visits
+// the Indexing section.
 const READY_SETTINGS: ModelSettings = {
   key: { kind: 'present' },
   index: {
@@ -75,6 +65,12 @@ const READY_SETTINGS: ModelSettings = {
   },
   platform: 'linux',
 };
+
+type IndexReadT = Extract<ModelSettings['index'], { kind: 'read' }>;
+const readSettings = (over: Partial<IndexReadT> = {}): ModelSettings => ({
+  ...READY_SETTINGS,
+  index: { ...(READY_SETTINGS.index as IndexReadT), ...over },
+});
 
 const EMPTY_CATALOGUE = { entries: [], unreadable: 0, unreadableRecords: [] };
 
@@ -90,14 +86,24 @@ const IDLE_SCAN: ScanState = {
 
 const COUNTS: Counts = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null };
 
-const reading = (counts: Partial<Counts> = {}, cancellable = true): ScanState => ({
+// `rootIndex` is ONE-BASED on the wire (`scan_job.rs`: "3 of 7" is what a
+// person reads), so the default here is 1, never 0 — a fixture that used 0
+// would be asserting against a folder position the backend never sends.
+const reading = (
+  counts: Partial<Counts> = {},
+  cancellable = true,
+  root: Partial<{ rootIndex: number; rootCount: number; rootPath: string }> = {},
+): ScanState => ({
   ...IDLE_SCAN,
   revision: (revision += 1),
   snapshot: {
     kind: 'running',
     cancellable,
     phase: {
-      kind: 'reading', rootIndex: 0, rootCount: 2, rootPath: '/home/a/notes',
+      kind: 'reading',
+      rootIndex: root.rootIndex ?? 1,
+      rootCount: root.rootCount ?? 2,
+      rootPath: root.rootPath ?? '/home/a/notes',
       counts: { ...COUNTS, ...counts },
     },
   },
@@ -113,31 +119,62 @@ const embedding = (counts: Partial<Counts> = {}): ScanState => ({
   },
 });
 
-const removing = (): ScanState => ({
+const removing = (rootPath = '/home/a/papers'): ScanState => ({
   ...IDLE_SCAN,
   revision: (revision += 1),
   snapshot: {
     kind: 'running',
     cancellable: false,
-    phase: { kind: 'removing', rootPath: '/home/a/papers' },
+    phase: { kind: 'removing', rootPath },
   },
 });
 
-const ended = (over: Partial<ScanReport> = {}): ScanState => ({
+const rootOutcome = (over: Partial<RootOutcome> = {}): RootOutcome => ({
+  rootPath: '/home/a/notes', reason: 'completed', complete: true, message: null,
+  done: 5, total: 5, indexed: 5, unchanged: 0, skipped: 0, removed: 0, contended: 0, frozen: [],
+  ...over,
+});
+
+const readingOutcome = (over: Partial<ReadingOutcome> = {}): ReadingOutcome => ({
+  reason: 'completed', complete: true, rootsRead: 1, rootCount: 1,
+  done: 5, total: 5, indexed: 5, unchanged: 0, skipped: 0, removed: 0, contended: 0,
+  roots: [rootOutcome()],
+  ...over,
+});
+
+// A finished job, optionally carrying the reading it left behind. `reading`
+// is a SEPARATE argument rather than folded into `over` — `ScanReport` and
+// `ReadingOutcome` are different fields of `ScanState` with different
+// lifetimes (`ipc.ts`), and a fixture that could only set one through the
+// other would misstate that.
+const ended = (over: Partial<ScanReport> = {}, reading: ReadingOutcome | null = null): ScanState => ({
   ...IDLE_SCAN,
   revision: (revision += 1),
+  lastReading: reading,
   snapshot: {
     kind: 'ended',
     report: {
-      embedding: { kind: 'notReached' },
-      endedIn: 'reading',
-      reason: 'completed',
-      message: null,
-      resume: null,
+      embedding: { kind: 'notReached' }, endedIn: 'reading', reason: 'completed', message: null, resume: null,
       ...over,
     },
   },
 });
+
+// A job whose ENDING IS a reading's own ending: `report.reason` and
+// `scan.lastReading.reason` are the SAME event, kept in step here the way the
+// real core keeps them in step (`ipc.ts`: `lastReading` is written whenever a
+// reading phase ends) — a fixture that set one without the other would be
+// asserting against a shape the backend cannot produce.
+const endedReading = (
+  reason: EndReason,
+  opts: { message?: string | null; resume?: Entry | null; complete?: boolean; roots?: RootOutcome[] } = {},
+): ScanState => {
+  const complete = opts.complete ?? reason === 'completed';
+  return ended(
+    { reason, endedIn: 'reading', message: opts.message ?? null, resume: opts.resume ?? null },
+    readingOutcome({ reason, complete, roots: opts.roots ?? [rootOutcome({ reason, complete })] }),
+  );
+};
 
 type Replies = Record<string, unknown>;
 let replies: Replies = {};
@@ -226,37 +263,56 @@ test('nothing on screen until something has happened, and the strip the moment i
   await emit(reading());
 
   expect(strip()).not.toBeNull();
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває читання теки.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
 });
 
-// ⚠️ Task 7 gives the removal its own sentence («we are emptying this folder»)
-// and the probe none. Until then this build has no words for either, so it
-// draws no line rather than borrowing the reading's — which would tell a person
-// their documents are being read while a folder is being deleted.
-//
-// The pair: a phase with words against a phase without. `removing` is also not
-// cancellable (`bridge.rs` claims it with `false`), so nothing at all is owed
-// and the strip stays away.
-test('a phase this build has no words for draws no line rather than another phase`s', async () => {
+// The pair this separates: a phase this build genuinely has no words for
+// (`other` — a probe or a model adoption nobody asked to start) against one
+// that does. `other` still offers Stop when `cancellable` says so — the
+// button does not depend on having a sentence.
+test('a probe or model-adoption phase this build has no words for offers only Stop, if any', async () => {
   await openWindow();
 
-  await emit(removing());
-  expect(strip()).toBeNull();
+  await emit({
+    ...IDLE_SCAN,
+    revision: (revision += 1),
+    snapshot: { kind: 'running', cancellable: true, phase: { kind: 'other', job: 'probe' } },
+  });
+  expect(screen.queryByTestId('indexing-pass')).toBeNull();
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
 
-  await emit(embedding());
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  await emit(reading());
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
 });
 
 // ---------------------------------------------------------------------------
-// A running scan: what it says, and what it offers.
+// A running reading phase, and a running removal.
 // ---------------------------------------------------------------------------
+
+// Both directions on Stop: a reading phase names the folder it is on and, when
+// cancellable, offers Stop; a removal names the folder it is emptying and, not
+// being cancellable (`bridge.rs` fixes it at `false`), offers nothing at all.
+// Neither offers the continue button — that only ever comes from an ENDED
+// report (`continueAction`), never from a running snapshot.
+test('a running reading phase names the folder and its position, a running removal names the folder alone', async () => {
+  await openWindow();
+
+  await emit(reading({}, true, { rootIndex: 2, rootCount: 5, rootPath: '/x' }));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 2 з 5: /x');
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  await emit(removing('/x'));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Видаляємо теку /x…');
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+});
 
 test('the running line reads as words, with the counts in them', async () => {
   await openWindow();
 
   await emit(reading({ done: 3, total: 8, skipped: 1, refused: 0 }));
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває читання теки.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 });
@@ -271,6 +327,19 @@ test('a run with nothing counted yet says so instead of reading as nothing to do
 
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 4. Скільки їх усього, поки не відомо. Пропущено: 1. Відхилено: 0.');
+});
+
+// Both directions, and only for EMBEDDING: a reading pass already has
+// `progressShape`'s own "countingUp" sentence for a total it has not measured
+// yet, so this is the one shape that is embedding's alone.
+test('a fresh embedding pass says it is starting rather than showing 0 of 0, and shows counts once it has some', async () => {
+  await openWindow();
+
+  await emit(embedding({ done: 0, total: 0 }));
+  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Вбудовування починається…');
+
+  await emit(embedding({ done: 3, total: 10 }));
+  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Опрацьовано 3 з 10. Пропущено: 1. Відхилено: 0.');
 });
 
 // Both directions. The busy line EXPLAINS part of the skipped number beside it
@@ -337,28 +406,31 @@ test('Stop asks the backend, and the ending that follows is what says it stopped
 
   expect(calls('cancel_job')).toHaveLength(1);
   expect(calls('cancel_job')[0]).toHaveLength(1); // the command name alone
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває читання теки.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
 
-  await emit(ended({ reason: 'cancelled' }));
+  await emit(endedReading('cancelled'));
 
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe('Сканування зупинено на ваше прохання.');
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe('Сканування зупинено на ваше прохання.');
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
-// An ending, which is a STATE and not an event.
+// The reading block: `scan.lastReading`, in `idle` and `ended` alike (D-e).
 // ---------------------------------------------------------------------------
 
-// The four rows after `failed` are the ones a table of three would lose. They
-// are NOT malfunctions — a broken helper, rules that did not take, an
-// unreadable folder, a volume that may be gone — and `job.rs` says reporting
-// them as `failed` tells a person something broke when instead a folder cannot
-// be read. A test covering only completed/cancelled/failed passes on a
-// component that collapses all four into one sentence.
-const ENDED_SENTENCES: Record<EndReason, { uk: string; en: string }> = {
+// The four rows after `failed`, plus `partlyRead`, are the ones a table of
+// three would lose. `job.rs` says reporting them as `failed` tells a person
+// something broke when instead a folder cannot be read, an exclusion rule did
+// not take, or a volume may have gone missing — and `partlyRead` is D-e's own
+// split of `completed`, never reachable through `reason` alone.
+const WALK_SENTENCES: Record<EndReason | 'partlyRead', { uk: string; en: string }> = {
   completed: {
     uk: 'Теку прочитано повністю.',
     en: 'The folder was read in full.',
+  },
+  partlyRead: {
+    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
   },
   cancelled: {
     uk: 'Сканування зупинено на ваше прохання.',
@@ -388,20 +460,21 @@ const ENDED_SENTENCES: Record<EndReason, { uk: string; en: string }> = {
   },
 };
 
-// Both directions on the table itself: a wire reason this file says nothing
-// about, and a row here for a reason the wire cannot carry, are both defects.
-test('the table names one sentence for every reason the wire can carry, and no others', () => {
-  expect(Object.keys(ENDED_SENTENCES).sort()).toEqual([...END_REASONS].sort());
+// Both directions on the table itself: a wire reason (plus `partlyRead`) this
+// file says nothing about, and a row here for a kind `readingKind` cannot
+// produce, are both defects.
+test('the table names one sentence for every reading-outcome kind, and no others', () => {
+  expect(Object.keys(WALK_SENTENCES).sort()).toEqual([...END_REASONS, 'partlyRead'].sort());
 });
 
-test.each(['uk', 'en'] as const)('every reason a scan can end for shows its own sentence, and no two share one (%s)', async (loc) => {
+test.each(['uk', 'en'] as const)('every reason a reading can end for shows its own sentence, and no two share one (%s)', async (loc) => {
   await openWindow(loc);
   const seen: string[] = [];
 
   for (const reason of END_REASONS) {
-    await emit(ended({ reason }));
-    const shown = visible(screen.getByTestId('indexing-ended'));
-    expect(shown, reason).toBe(ENDED_SENTENCES[reason][loc]);
+    await emit(endedReading(reason));
+    const shown = visible(screen.getByTestId('indexing-walk-outcome'));
+    expect(shown, reason).toBe(WALK_SENTENCES[reason][loc]);
     seen.push(shown);
   }
 
@@ -411,6 +484,18 @@ test.each(['uk', 'en'] as const)('every reason a scan can end for shows its own 
   expect(new Set(seen).size).toBe(END_REASONS.length);
 });
 
+// D-e's own split: the SAME `reason: 'completed'` reads as two different
+// sentences depending on a fact `reason` alone cannot carry.
+test('a completed reading that did not see the whole tree reads as partly read, not as completed', async () => {
+  await openWindow();
+
+  await emit(endedReading('completed', { complete: true }));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.completed.uk);
+
+  await emit(endedReading('completed', { complete: false }));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+});
+
 // Both directions. `message` is `Option<String>` on the wire, so its absence is
 // a shape the screen has to survive rather than a case that cannot happen — and
 // when it is there it is the ONLY thing telling a panic, a broken pool and a
@@ -418,37 +503,311 @@ test.each(['uk', 'en'] as const)('every reason a scan can end for shows its own 
 test('a failure carries its own text, and survives its absence', async () => {
   await openWindow();
 
-  await emit(ended({ reason: 'failed', message: 'the worker binary could not be started' }));
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe(
-    'Сканування обірвалося через збій.'
-    + ' Програма повідомила: the worker binary could not be started',
-  );
+  await emit(endedReading('failed', { message: 'the worker binary could not be started' }));
+  expect(visible(screen.getByTestId('indexing-ended-failure')))
+    .toBe('Програма повідомила: the worker binary could not be started');
 
-  await emit(ended({ reason: 'failed', message: null }));
+  await emit(endedReading('failed', { message: null }));
   expect(screen.queryByTestId('indexing-ended-failure')).toBeNull();
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe('Сканування обірвалося через збій.');
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.failed.uk);
 });
 
 // 🔴 An ending is a STATE: a scan that finished stays finished until the next
-// job claims the slot. The pair this separates is «the window heard the ending»
-// from «the window was opened after it» — and the second is the one the channel
-// could never answer, because there was nothing left to hear.
+// job claims the slot, and so does the reading it left behind. The pair this
+// separates is «the window heard the ending» from «the window was opened after
+// it» — and the second is the one a channel could never answer.
 test('a window opened after the scan ended still reads how it went', async () => {
-  reply({ job_status: { ...ended({ reason: 'volumeMissing' }) } });
+  reply({ job_status: endedReading('volumeMissing') });
 
   await openWindow();
 
-  await waitFor(() => expect(screen.getByTestId('indexing-ended')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe(ENDED_SENTENCES.volumeMissing.uk);
+  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.volumeMissing.uk);
+});
+
+// D-e, read literally: `lastReading` renders in an IDLE snapshot too, not only
+// an ended one — nothing about the sentence depends on `snapshot.kind` beyond
+// "not running".
+test('a lastReading renders in an idle snapshot too, not only an ended one', async () => {
+  await openWindow();
+
+  await emit({
+    ...IDLE_SCAN,
+    revision: (revision += 1),
+    lastReading: readingOutcome({ reason: 'completed', complete: false }),
+  });
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+});
+
+// The reading block's own copy of the busy sentence — sourced from
+// `lastReading.contended`, not from a running phase's live counts — and it is
+// what lets the fact survive past the ending. Both directions.
+test('the reading block\'s own busy sentence survives past the ending, and is silent when nothing was contended', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({ contended: 3 })));
+  expect(screen.getByTestId('indexing-contended')).toBeTruthy();
+
+  await emit(ended({}, readingOutcome({ contended: 0 })));
+  expect(screen.queryByTestId('indexing-contended')).toBeNull();
+});
+
+test('the folders-read count shows only when the reading actually names a root count', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({ rootsRead: 2, rootCount: 3 })));
+  expect(visible(screen.getByTestId('indexing-roots-read'))).toBe('Тек прочитано 2 з 3');
+
+  await emit(ended({}, readingOutcome({ rootsRead: 0, rootCount: 0 })));
+  expect(screen.queryByTestId('indexing-roots-read')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Per-root rows and frozen prefixes.
+// ---------------------------------------------------------------------------
+
+// An unavailable root and a volume-missing root are each their own row, named
+// by path; a root that simply completed gets no row at all. Three rows in
+// total once the frozen prefix under the third root is counted too.
+test('an unavailable root and a volume-missing root are each their own row, and a completed root gets none', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    reason: 'completed', complete: false, rootCount: 3, rootsRead: 3,
+    roots: [
+      rootOutcome({ rootPath: '/gone', reason: 'rootUnavailable', complete: false }),
+      rootOutcome({ rootPath: '/vol', reason: 'volumeMissing', complete: false }),
+      rootOutcome({
+        rootPath: '/a', reason: 'completed', complete: true,
+        frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+      }),
+    ],
+  })));
+
+  const rows = screen.getAllByTestId('indexing-root-row').map((el) => visible(el));
+  expect(rows).toEqual(['/gone: тека недоступна', '/vol: том відсутній']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub — прочиталася порожньою');
+});
+
+// The two `walk_job.rs`-only kinds a root row has no sentence of its own for:
+// `rootRowText` falls back to the reading-outcome table's own wording rather
+// than leaving the row blank or throwing on a wire value the type permits but
+// no fixture above ever names.
+test('a root that ended cancelled, or with its rules not applied, still gets a row rather than a blank one', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    roots: [
+      rootOutcome({ rootPath: '/c', reason: 'cancelled', complete: false, message: null }),
+      rootOutcome({ rootPath: '/r', reason: 'rulesNotApplied', complete: false, message: null }),
+    ],
+  })));
+
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual([
+    `/c: ${WALK_SENTENCES.cancelled.uk}`,
+    `/r: ${WALK_SENTENCES.rulesNotApplied.uk}`,
+  ]);
+});
+
+// Both directions, and the crash this guards against: two prefixes under the
+// SAME root can be equal (`walk.rs`'s own ancestor-climb argument, restated in
+// the component's doc comment), and a list keyed by prefix alone would throw.
+test('two frozen entries sharing a prefix under one root are both shown, not a crash — and a walk that froze nothing shows no list', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    roots: [rootOutcome({
+      rootPath: '/a',
+      frozen: [
+        { prefix: 'x', reason: 'unreadableDirectory' },
+        { prefix: 'x', reason: 'emptyDirectory' },
+      ],
+    })],
+  })));
+  expect(screen.getByTestId('indexing-frozen').querySelectorAll('li')).toHaveLength(2);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/x — не вдалося прочитати');
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/x — прочиталася порожньою');
+
+  await emit(ended({}, readingOutcome({ roots: [rootOutcome({ frozen: [] })] })));
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// The embedding block, from `report.embedding`.
+// ---------------------------------------------------------------------------
+
+// The partly-read sentence is the READING's own fact and does not go away
+// just because the embedding half that followed it succeeded — the two blocks
+// are drawn from two different fields with two different lifetimes.
+test('the partly-read sentence survives a successful embedding', async () => {
+  await openWindow();
+
+  await emit(ended(
+    { embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, endedIn: 'embedding', reason: 'completed', resume: null },
+    readingOutcome({
+      reason: 'completed', complete: false,
+      roots: [rootOutcome({ rootPath: '/a', complete: false })],
+    }),
+  ));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування всього індексу завершено.');
+  expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+});
+
+test('an embedding skipped for no key, no model, or a store that did not answer gets its own sentence', async () => {
+  await openWindow();
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noKey' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+  );
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+  );
+
+  await emit(ended(
+    { embedding: { kind: 'skipped', why: { kind: 'storeUnavailable', message: 'locked' } }, endedIn: 'embedding' },
+  ));
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('Вбудовування не запущено: сховище ключів не відповіло: locked');
+});
+
+test('an embedding that never reached the phase says nothing at all', async () => {
+  await openWindow();
+
+  await emit(endedReading('completed'));
+
+  expect(screen.queryByTestId('indexing-embed-outcome')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// The continue button — D-m's table, rendered only when it names the strip.
+// ---------------------------------------------------------------------------
+
+test('the label follows the reason, and the entry follows what the report named to resume from', async () => {
+  await openWindow();
+
+  await emit(endedReading('cancelled', { resume: 'full' }));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'full' });
+
+  await emit(ended(
+    { reason: 'cancelled', endedIn: 'embedding', embedding: { kind: 'notReached' }, resume: 'embedOnly' },
+    readingOutcome(),
+  ));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'embedOnly' });
+
+  await emit(ended({
+    reason: 'failed', endedIn: 'embedding', message: 'boom', resume: 'embedOnly',
+    embedding: { kind: 'ran', done: 1, total: 3, refused: 0 },
+  }));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Повторити');
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('Програма повідомила: boom');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'embedOnly' });
+
+  await emit(endedReading('brokenWorker', { resume: 'full' }));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Повторити');
+
+  // A report naming no resumption offers nothing here, whatever it names —
+  // `rulesNotApplied`'s own reading never has one (`scan_job::resume_for`).
+  await emit(endedReading('rulesNotApplied', { resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+});
+
+// Both directions on the one thing the strip must NOT decide: whether the
+// index's own markers owe a button. `continueAction`'s `where: 'section'` arm
+// is the Indexing section's offer (Task 8), and the strip must stay silent for
+// it whether or not the index was ever read at all.
+test('a report naming no resumption defers to the section, with the index read and with no index read at all', async () => {
+  reply({ model_settings: readSettings({ scanIncomplete: true }) });
+  await openWindow();
+  await emit(ended({ resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+});
+
+test('a report naming no resumption defers to the section even when the index could not be read at all', async () => {
+  reply({ model_settings: { key: READY_SETTINGS.key, index: { kind: 'unreadable', cause: 'notOpen', reason: 'x' }, platform: 'linux' } });
+  await openWindow();
+  await emit(ended({ resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+});
+
+// 🔴 The R2-1 sequence, through the REAL controller: `Full(partial)` stops in
+// embedding, a person presses Продовжити, the controller resumes with
+// `embedOnly`, and the reading's own warning — the row and the frozen prefix
+// under it — is still on screen once that resumed embedding finishes. Repeated
+// across an unmount and a remount of the whole window between the stop and the
+// resume, because nothing here may live in the COMPONENT: only the backend
+// this new window reads is allowed to remember it.
+test('the last reading\'s warning outlives a continued embedding, across an unmount and a remount', async () => {
+  const partlyRead = readingOutcome({
+    reason: 'completed', complete: false,
+    roots: [rootOutcome({
+      rootPath: '/a', complete: false,
+      frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+    })],
+  });
+  const cancelledInEmbedding = ended(
+    { reason: 'cancelled', endedIn: 'embedding', embedding: { kind: 'notReached' }, resume: 'embedOnly' },
+    partlyRead,
+  );
+
+  let rendered = await openWindow();
+  await emit(cancelledInEmbedding);
+
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+
+  // Unmount and remount between the stop and the resume.
+  rendered.unmount();
+  deliver = null;
+  reply({ job_status: cancelledInEmbedding });
+  rendered = await openWindow();
+  await waitFor(() => expect(screen.getByTestId('indexing-continue')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job')).toHaveLength(1);
+  expect(calls('start_scan_job')[0][1]).toEqual({ entry: 'embedOnly' });
+
+  await emit(ended(
+    { reason: 'completed', endedIn: 'embedding', embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, resume: null },
+    partlyRead, // UNCHANGED — the reading this embedding resumed from is untouched by it.
+  ));
+
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+  expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  // A LATER reading whose `complete` is true clears both the row and the
+  // frozen list — the warning is sticky, not permanent.
+  await emit(ended(
+    { reason: 'completed', endedIn: 'embedding', embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, resume: null },
+    readingOutcome({ reason: 'completed', complete: true }),
+  ));
+  expect(screen.queryByTestId('indexing-root-row')).toBeNull();
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
 // A refused command.
 // ---------------------------------------------------------------------------
 
-// A rejection crosses the IPC as text (`error.rs`) and nothing branches on it:
-// one lead-in the catalogue owns, then the backend's own sentence verbatim.
-test('a refused scan shows the lead-in and the backend sentence verbatim', async () => {
+// A rejection crosses the IPC as text (`error.rs`) and nothing branches on it.
+// Task 7 drops the window's own lead-in (`indexing_note_rejected`): the
+// backend's sentence stands alone.
+test('a refused scan shows the backend sentence verbatim, with no lead-in of this window\'s own', async () => {
   reply({ start_scan_job: new Error('LEAK-TOKEN-ANOTHER-JOB') });
   await openWindow();
   await fireEvent.click(screen.getByTestId('settings-nav-folders'));
@@ -456,9 +815,9 @@ test('a refused scan shows the lead-in and the backend sentence verbatim', async
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
 
-  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-note'))).toBe('Запит відхилено.');
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-ANOTHER-JOB');
+  expect(screen.queryByTestId('indexing-note')).toBeNull();
 });
 
 // 🔴 The sentence alone cannot say what the slot now holds, so the controller
@@ -478,7 +837,7 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
 
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває читання теки.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
   expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
 });
 
@@ -499,7 +858,7 @@ test('a scan survives switching sections, and Stop still stops it afterwards', a
   await fireEvent.click(screen.getByTestId('settings-nav-models'));
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває читання теки.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 
@@ -521,7 +880,7 @@ test('closing the window unsubscribes once, and a later state reaches nothing', 
   unmount();
 
   expect(unlisten).toHaveBeenCalledTimes(1);
-  await emit(ended({ reason: 'volumeMissing' }));
+  await emit(endedReading('volumeMissing'));
   expect(unlisten).toHaveBeenCalledTimes(1);
   expect(strip()).toBeNull();
 });
@@ -535,9 +894,9 @@ test('a scan that ends on another section leaves its report on the strip', async
   await fireEvent.click(screen.getByTestId('settings-nav-application'));
   await tick();
 
-  await emit(ended({ reason: 'brokenWorker' }));
+  await emit(endedReading('brokenWorker'));
 
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe(ENDED_SENTENCES.brokenWorker.uk);
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.brokenWorker.uk);
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
@@ -589,7 +948,7 @@ test('a language switch during a scan reaches the line, the counts, the estimate
   setLocale('en');
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('The folder is being read.');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Reading folder 1 of 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Processed 3 of 8. Skipped: 1. Given up on: 0.');
   expect(visible(screen.getByTestId('indexing-contended'))).toBe(
@@ -600,33 +959,45 @@ test('a language switch during a scan reaches the line, the counts, the estimate
   expect(visible(screen.getByTestId('indexing-cancel'))).toBe('Stop');
 });
 
-test('a language switch after an ending reaches its sentence and the failure text with it', async () => {
+// One test for the whole ended shape: the reading block, its per-root row, the
+// embedding block, the failure text and the continue button all follow the
+// switch together.
+test('a language switch while ended re-renders the reading block, the embedding block, the failure text and the continue button', async () => {
   await openWindow('uk');
-  await emit(ended({ reason: 'failed', message: 'the worker binary could not be started' }));
+  await emit(ended(
+    {
+      reason: 'failed', endedIn: 'embedding', message: 'boom', resume: 'embedOnly',
+      embedding: { kind: 'ran', done: 1, total: 2, refused: 0 },
+    },
+    readingOutcome({
+      reason: 'completed', complete: false,
+      roots: [rootOutcome({ rootPath: '/a', complete: false })],
+    }),
+  ));
 
   setLocale('en');
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-ended'))).toBe(
-    'The scan broke off because something went wrong.'
-    + ' The program reported: the worker binary could not be started',
-  );
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.en);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: partly read']);
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('The embedding pass broke off because something went wrong.');
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('The program reported: boom');
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Retry');
 });
 
 // The backend's sentence is NOT translated — it is what the backend said — and
-// the lead-in is. Both halves in one assertion, because a build that translated
-// the sentence would be inventing an English message the backend never sent.
-test('a language switch reaches the lead-in and leaves the backend sentence verbatim', async () => {
+// the strip has no lead-in of its own to translate any more (Task 7).
+test('a language switch leaves the backend`s rejection sentence verbatim', async () => {
   reply({ start_scan_job: new Error('LEAK-TOKEN-VERBATIM') });
   await openWindow('uk');
   await fireEvent.click(screen.getByTestId('settings-nav-folders'));
   await screen.findByTestId('folder-row-4');
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
 
   setLocale('en');
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-note'))).toBe('The request was refused.');
   expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-VERBATIM');
 });

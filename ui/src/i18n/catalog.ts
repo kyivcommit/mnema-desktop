@@ -73,8 +73,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
   | 'settings_masks_already_stored'
-  | 'indexing_walk_starting' | 'indexing_walk_running'
-  | 'indexing_embed_starting' | 'indexing_embed_running'
+  | 'indexing_reading_root' | 'indexing_walk_running'
+  | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
@@ -83,12 +83,16 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_walk_ended_root_unavailable' | 'indexing_walk_ended_volume_missing'
   | 'indexing_embed_ended_completed' | 'indexing_embed_ended_cancelled'
   | 'indexing_embed_ended_failed' | 'indexing_embed_ended_unexpected'
+  | 'indexing_embed_not_started_store'
   | 'indexing_failure_message' | 'indexing_walk_result' | 'indexing_embed_result'
   | 'indexing_frozen_heading' | 'indexing_frozen_row'
   | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
   | 'indexing_frozen_unreadable_directory'
-  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
-  | 'indexing_unobserved' | 'indexing_cancel'
+  | 'indexing_roots_read' | 'indexing_root_partly_read' | 'indexing_root_unavailable'
+  | 'indexing_root_volume_missing' | 'indexing_root_failed'
+  | 'indexing_resume' | 'indexing_retry'
+  | 'indexing_note_no_key' | 'indexing_note_no_model'
+  | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
   | 'indexing_index_never'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
@@ -620,13 +624,28 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
     // знайшла б його.
     settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
-    indexing_walk_starting: 'Читання теки починається…',
+    // Task 7 — the live reading phase names the folder it is on, one-based the
+    // way `scan_job.rs`'s own comment states it ("3 of 7" is what a person
+    // reads, and `rootIndex` is the folder being read now, not how many are
+    // behind it). No trailing full stop: the sentence ends in an interpolated
+    // path, and "…/x." reads as part of the path.
+    indexing_reading_root: 'Читання теки {rootIndex} з {rootCount}: {rootPath}',
     indexing_walk_running: 'Триває читання теки.',
     // The embedding pass takes no root and covers the whole index
     // (embed_job.rs), so neither of these two may name the folder that was
     // pressed.
-    indexing_embed_starting: 'Вбудовування всього індексу починається…',
+    //
+    // Task 7: `indexing_embed_starting` (the old lead-in) is gone. The queue
+    // this phase works from is a marker on the index, not a job that "starts"
+    // the way a walk does — the ONLY moment a sentence is owed here is a
+    // fresh queue reporting zero of zero, which would otherwise read as
+    // "nothing to do" while a pass is genuinely under way.
+    indexing_embed_starting_zero: 'Вбудовування починається…',
     indexing_embed_running: 'Триває вбудовування всього індексу.',
+    // A removal has no counts at all (`scan_state::Phase::Removing`) and is not
+    // cancellable (`bridge.rs` fixes it at `false`), so this is the whole of
+    // what the strip has to say while it runs.
+    indexing_removing: 'Видаляємо теку {rootPath}…',
     indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
@@ -642,6 +661,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // recorded: the skip write meets the same lock and can fail too, leaving
     // the file in neither the index nor the journal
     // (`job::Progress::contended`).
+    //
+    // Task 7: the SAME key answers for `phase.counts.contended` while a scan
+    // runs and for `scan.lastReading.contended` once it has ended — the fact
+    // it explains ("Пропущено") is the same fact either way, and reading it
+    // off `lastReading` is what lets the sentence survive past the ending.
     indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
     indexing_eta: 'Залишилось приблизно {seconds} с.',
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
@@ -697,6 +721,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // carrying the state's own name: a default branch that draws "finished" is
     // exactly how a failed pass reads as a successful one.
     indexing_embed_ended_unexpected: 'Вбудовування спинилося з причини, якої тут не очікували ({reason}).',
+    // `EmbedOutcome::Skipped(StoreUnavailable)` (`scan_state.rs`): the embedding
+    // phase was never entered because the credential store itself refused to
+    // answer — not "no key", not "no model" — so it earns its own sentence
+    // rather than folding into either of those two.
+    indexing_embed_not_started_store: 'Вбудовування не запущено: сховище ключів не відповіло: {message}',
     indexing_failure_message: 'Програма повідомила: {message}',
     indexing_walk_result: 'Додано документів: {indexed}. Без змін: {unchanged}. Пропущено: {skipped}. Вилучено з індексу: {removed}.',
     indexing_embed_result: 'Вбудовано фрагментів: {done} з {total}. Відхилено: {refused}.',
@@ -719,13 +748,32 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
     indexing_frozen_empty_directory: 'прочиталася порожньою',
     indexing_frozen_unreadable_directory: 'не вдалося прочитати',
+    // Task 7 — the reading block, drawn from `scan.lastReading` in `idle` and
+    // `ended` alike (D-e), and outliving the report that ends beside it.
+    // No trailing full stop on `indexing_roots_read`: it sits ahead of the
+    // result sentence on its own line, not as that sentence's own clause.
+    indexing_roots_read: 'Тек прочитано {rootsRead} з {rootCount}',
+    // One row per root whose reading did not simply complete
+    // (`readingKind(root) !== 'completed'`) — each names its own path, because
+    // the aggregate cannot say WHICH folder the fact is about.
+    indexing_root_partly_read: '{rootPath}: прочитано частково',
+    indexing_root_unavailable: '{rootPath}: тека недоступна',
+    indexing_root_volume_missing: '{rootPath}: том відсутній',
+    // `failed`/`brokenWorker` at the root — `job.rs`'s `message` is the one
+    // thing that tells a broken pool, a missing worker binary and a panic
+    // apart, per root the same way `indexing_failure_message` does for the
+    // whole scan.
+    indexing_root_failed: '{rootPath}: {message}',
+    // D-m's labels: a person who pressed Stop is RESUMING, one whose scan
+    // failed is RETRYING — one word for both would read a failure as their
+    // own doing.
+    indexing_resume: 'Продовжити',
+    indexing_retry: 'Повторити',
     // The walk runs regardless, because word search needs neither a key
     // nor a model — so each sentence names what is absent and what already
     // works.
     indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
     indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
-    indexing_note_rejected: 'Запит відхилено.',
-    indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
     indexing_cancel: 'Зупинити',
     // §9.3, PR 9 Task 6 — the Indexing SECTION, which says what the index
     // holds. Every key here is `indexing_index_*` so nothing confuses it with
@@ -1000,10 +1048,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
-    indexing_walk_starting: 'Reading the folder is starting…',
+    indexing_reading_root: 'Reading folder {rootIndex} of {rootCount}: {rootPath}',
     indexing_walk_running: 'The folder is being read.',
-    indexing_embed_starting: 'Embedding the whole index is starting…',
+    indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
+    indexing_removing: 'Removing the folder {rootPath}…',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
@@ -1021,6 +1070,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_ended_cancelled: 'The embedding pass was stopped at your request.',
     indexing_embed_ended_failed: 'The embedding pass broke off because something went wrong.',
     indexing_embed_ended_unexpected: 'The embedding pass stopped for a reason not expected here ({reason}).',
+    indexing_embed_not_started_store: 'Embedding was not started: the key store did not answer: {message}',
     indexing_failure_message: 'The program reported: {message}',
     indexing_walk_result: 'Documents added: {indexed}. Unchanged: {unchanged}. Skipped: {skipped}. Removed from the index: {removed}.',
     indexing_embed_result: 'Chunks embedded: {done} of {total}. Given up on: {refused}.',
@@ -1029,10 +1079,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'a symbolic link, never entered',
     indexing_frozen_empty_directory: 'read as empty',
     indexing_frozen_unreadable_directory: 'could not be read',
+    indexing_roots_read: 'Folders read: {rootsRead} of {rootCount}',
+    indexing_root_partly_read: '{rootPath}: partly read',
+    indexing_root_unavailable: '{rootPath}: the folder is unavailable',
+    indexing_root_volume_missing: '{rootPath}: the volume is missing',
+    indexing_root_failed: '{rootPath}: {message}',
+    indexing_resume: 'Resume',
+    indexing_retry: 'Retry',
     indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
     indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
-    indexing_note_rejected: 'The request was refused.',
-    indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',

@@ -8,6 +8,7 @@
   import Indexing from './Indexing.svelte';
   import Application from './Application.svelte';
   import { createJobController } from './jobs';
+  import { modelSettings, type IndexRead } from '../lib/ipc';
 
   // All four sections render; hiding one not yet built would make the window
   // claim the product has fewer sections than the spec does. Order matches the
@@ -40,6 +41,34 @@
   // Svelte's `onMount` calls on destroy — an `async` callback would return a
   // promise Svelte keeps and never calls, leaving the listener behind.
   onMount(() => jobs.mount());
+
+  // Task 7's minimal wiring for the strip: ONE `modelSettings` read, owned
+  // here and handed down as a prop. `continueAction` (`jobs.ts`) falls back to
+  // the index's own markers — `scanIncomplete`, `pendingChunks` — exactly when
+  // a report names no resumption of its own, and a read taken inside a
+  // section would not survive that section's own unmount the way this window
+  // survives every nav click. `null` until the read answers, and `null` again
+  // on a rejection: both are the strip's correct degradation to showing only
+  // its own row (`JobStrip.svelte`), never a guess about markers this window
+  // has not actually read.
+  //
+  // ⚠️ Task 8 reuses this exact value for `Indexing.svelte`, which today takes
+  // no such prop and calls `modelSettings()` a second time on its own mount —
+  // replacing that call with this one is what makes the window read the state
+  // of the index once instead of twice.
+  let read = $state<IndexRead | null>(null);
+  onMount(() => {
+    void (async () => {
+      try {
+        const settings = await modelSettings();
+        if (settings.index.kind === 'read') read = settings.index;
+      } catch {
+        // `read` stays `null` — the strip's own degradation, not a sentence
+        // this window owes anyone: `Models.svelte` and `Indexing.svelte`
+        // already report a failed `model_settings` read in their own words.
+      }
+    })();
+  });
 
   const modelsLabel = $derived.by(() => { void $locale; return t('settings_nav_models'); });
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });
@@ -78,7 +107,7 @@
        `.scols` exists so the CSS that lands later cannot make this a THIRD
        column beside the nav and the panel: the pair is the row, the status line
        is not part of it. -->
-  <JobStrip {jobs} />
+  <JobStrip {jobs} {read} />
   <div class="scols">
     <nav class="snav">
       {#each SECTIONS as id (id)}
