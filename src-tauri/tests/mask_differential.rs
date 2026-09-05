@@ -95,9 +95,12 @@ mod app;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use app::{app_in, call, main_webview, run_walk_and_capture_ending};
+use app::{app_in, call, main_webview};
+use mnema_desktop::job::EndReason;
+use mnema_desktop::scan_state::Entry;
 use mnema_desktop::state::AppState;
 use serde_json::json;
+use support::scan::{reading_of, scan_with};
 use tauri::Manager;
 use tauri::WebviewWindow;
 use tauri::test::MockRuntime;
@@ -653,46 +656,63 @@ fn materialise(world: &World) -> Built {
     built
 }
 
-/// Every walk is accepted on the WHOLE `Ended` event, not on `reason` alone:
-/// `Completed` with `complete: false` is a real shape (`job.rs`'s
-/// `Ended::complete`) and would silently shrink the `status = 'indexed'`
-/// population the oracle reads. Returns the sum of `Ended.removed` over the
-/// roots.
+/// 🔴 Rewritten for the scan job (Task 3b), not merely converted: the old
+/// `start_walk_job` took one `root_id`, so this looped and walked every root
+/// on its own call. `scan_job::start_scan_job` takes none — one job reads
+/// every watched folder — so this now drives ONE scan and reads its
+/// per-folder answers off [`crate::scan_state::ReadingOutcome::roots`], in
+/// the same order `built.root_ids` names them: `Db::list_watched_roots`
+/// orders `ORDER BY added_at, id` (`crates/mnema-index/src/write.rs`), and
+/// `materialise` inserts roots 0..`world.roots` in that same order.
+///
+/// Every walk is accepted on the WHOLE per-root outcome, not on `reason`
+/// alone: `Completed` with `complete: false` is a real shape
+/// ([`crate::scan_state::RootOutcome::complete`]) and would silently shrink
+/// the `status = 'indexed'` population the oracle reads. Returns the sum of
+/// `RootOutcome::removed` over the roots.
+///
+/// **No `refused` check** — `RootOutcome` carries no such field, because a
+/// walk-originated ending never sets it to anything but zero in the first
+/// place (`scan_job::root_outcome`, `walk_job::ended_from_report`'s own
+/// comment on the same merge): the fact this used to check is guaranteed by
+/// construction now, not dropped.
+///
 /// Every message names the seed and the root's ORDINAL in the world. The
 /// ordinal is the draw's own index and is equal across worlds by
 /// construction, whereas `root_id` (`watched_root.id`, an `INTEGER PRIMARY
 /// KEY`) would be equal only by accident of insert order.
 fn walk_all(built: &Built) -> u64 {
+    let seed = built.seed;
+    let settled = scan_with(built.app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
+    assert_eq!(
+        reading.reason,
+        EndReason::Completed,
+        "seed {seed}: the scan did not complete: {reading:?}"
+    );
+    assert_eq!(
+        reading.roots.len(),
+        built.root_ids.len(),
+        "seed {seed}: the scan did not read every watched root: {reading:?}"
+    );
+
     let mut removed = 0;
-    for (ordinal, &root) in built.root_ids.iter().enumerate() {
-        let seed = built.seed;
-        let ending = run_walk_and_capture_ending(&built.app, root);
+    for (ordinal, root) in reading.roots.iter().enumerate() {
         assert_eq!(
-            ending["reason"],
-            json!("completed"),
-            "seed {seed}, root #{ordinal}: {ending}"
+            root.reason,
+            EndReason::Completed,
+            "seed {seed}, root #{ordinal}: {root:?}"
         );
-        assert_eq!(
-            ending["complete"],
-            json!(true),
-            "seed {seed}, root #{ordinal}: an incomplete walk: {ending}"
+        assert!(
+            root.complete,
+            "seed {seed}, root #{ordinal}: an incomplete walk: {root:?}"
         );
-        assert_eq!(
-            ending["skipped"],
-            json!(0),
-            "seed {seed}, root #{ordinal}: {ending}"
+        assert_eq!(root.skipped, 0, "seed {seed}, root #{ordinal}: {root:?}");
+        assert!(
+            root.frozen.is_empty(),
+            "seed {seed}, root #{ordinal}: {root:?}"
         );
-        assert_eq!(
-            ending["refused"],
-            json!(0),
-            "seed {seed}, root #{ordinal}: {ending}"
-        );
-        assert_eq!(
-            ending["frozen"],
-            json!([]),
-            "seed {seed}, root #{ordinal}: {ending}"
-        );
-        removed += ending["removed"].as_u64().expect("Ended.removed");
+        removed += root.removed;
     }
     removed
 }

@@ -1,10 +1,6 @@
-//! The embedding pass, run as a job — `start_walk_job`'s shape, over
-//! `mnema_embed::run` instead of `walk_root`.
-//!
-//! Kept apart from `bridge.rs` for the reason `walk_job.rs` is: this one
-//! command is the only thing in the shell that reaches `mnema-embed`, and
-//! translating what that crate reports into what the window reads is enough
-//! logic on its own to want a file that is *only* that translation.
+//! What `mnema_embed::run` produced, translated into the shell's own
+//! vocabulary — [`Progress`] and [`Ended`] — for [`crate::scan_job`]'s
+//! embedding phase to report from.
 //!
 //! **The translation is the point of this file.** `mnema_embed::EmbedProgress`
 //! and [`crate::job::Progress`] are two types with deliberately different
@@ -14,18 +10,29 @@
 //! [`progress_from`], and the ending's is [`ended_from_tally`]; both are
 //! ordinary functions with unit tests below rather than closures inside the
 //! thread, so that what crosses the seam is something a test can hold.
+//!
+//! ⚠️ **This file no longer runs an embedding pass itself.** Until Task 3b it
+//! was also `start_embed_job`, the window-driven command that ran the whole
+//! index's queue as its own job — `#[tauri::command(async)] pub fn
+//! start_embed_job(state, on_progress: Channel<JobEvent>)`, reading the
+//! credential store before it claimed the slot and chaining nothing after
+//! it. It was unregistered from `invoke_handler!` when [`crate::scan_job`]'s
+//! embedding phase took over (that file's own `embed_after` is the
+//! replacement, deliberately reordered — D-g — to claim the slot BEFORE the
+//! key is read, the opposite of this command's own rule above), and deleted
+//! here once the test functions that had driven it directly as a fixture,
+//! across `tests/commands.rs`, `tests/model_commands.rs` and
+//! `tests/mask_differential.rs`, moved onto the scan job's `Entry::EmbedOnly`
+//! instead. `ui/` still names it until Task 6 rewrites the window side. What
+//! is left is the translation this file was always more than half of —
+//! [`progress_from`], [`ended_from_tally`], [`failed_ending`] and [`BATCH`]
+//! — which `scan_job.rs` still calls.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mnema_embed::{EmbedProgress, EmbedTally};
-use tauri::State;
-use tauri::ipc::Channel;
 
-use crate::error::Error;
-use crate::job::{self, EndReason, Ended, JobEvent, Progress};
-use crate::state::AppState;
+use crate::job::{self, EndReason, Ended, Progress};
 
 /// How many chunks go to the provider in one request.
 ///
@@ -53,208 +60,6 @@ use crate::state::AppState;
 /// that an over-long input to `bge-m3` returns `200` with a third of the text
 /// silently dropped, which is about one text and not about how many.
 pub(crate) const BATCH: usize = 32;
-
-/// `(async)` for the reason given on [`crate::bridge::open_index`] and repeated
-/// by [`crate::walk_job::start_walk_job`]: this command reads the credential
-/// store before it spawns anything, and a window-issued command that can block —
-/// on macOS the store can put an authorisation dialog on screen — must not be
-/// the one left running inline on the main thread.
-///
-/// **The key is read before [`AppState::claim_job`], and that ordering is a
-/// decision rather than a line that happened to come first.** It is
-/// `start_walk_job`'s own rule — every fallible step before the claim, so that a
-/// call which was always going to fail never has `job_status` reporting a job
-/// that is running — and it bites harder here, because the fallible step is a
-/// dialog somebody may leave unanswered for a minute. Claiming first would
-/// disable Start and refuse a walk for that whole minute, for a call that then
-/// fails with `NoKey`.
-///
-/// The absence of a key is [`Error::NoKey`] and never a panic: `models::key` is
-/// where that split is made, and that variant's own doc comment is about what it
-/// tells the person to do next as against [`Error::Secrets`], which is a store
-/// that would not answer at all.
-///
-/// **What is deliberately *not* checked here:** whether a model has been chosen.
-/// `mnema_embed::run` reads `meta.active_space` itself and refuses with
-/// `NoActiveSpace` when there is none, and asking the same question here first
-/// would be a second measurement of one fact — the shape `set_embedding_model`'s
-/// own doc comment argues against for the credential store. The refusal reaches
-/// the window as an ending carrying that crate's sentence, which is the same
-/// route every other failure of the pass takes.
-///
-/// ⚠️ **Not registered.** It is out of `invoke_handler!` as of the scanning
-/// job's embedding phase, so no window can reach it and the `#[tauri::command]`
-/// attribute above is inert. It is kept only because ~48 test functions across
-/// `tests/commands.rs`, `tests/model_commands.rs` and `tests/mask_differential.rs`
-/// drive it as a fixture, and those assert on the `Ended` JSON this `Channel`
-/// carries — a shape the scanning job does not have, since it writes a snapshot
-/// and announces. Task 3b is what moves the fixtures onto the scan job and
-/// deletes this; `ui/` still names it until Task 6.
-#[tauri::command(async)]
-pub fn start_embed_job(
-    state: State<'_, AppState>,
-    on_progress: Channel<JobEvent>,
-) -> Result<(), Error> {
-    let key = crate::models::key(&state)?;
-    let base = state.provider_base().to_string();
-
-    // Zero counts, for the reason `walk_job.rs`'s own claim gives: Task 3
-    // replaces this command with the scanning job's embedding phase.
-    let slot = state.claim_job(
-        crate::scan_state::Phase::Embedding {
-            counts: crate::job::Progress::default(),
-        },
-        true,
-    )?;
-
-    // The job's own connection, for the reason `AppState::open_job_index`'s own
-    // doc comment gives: this is a sequence of writes that can run for hours,
-    // and the window has to keep answering searches while it does.
-    let job_db = state.open_job_index()?;
-
-    std::thread::spawn(move || {
-        // The last two counts the window was actually *shown*, in the sense
-        // `Ended::failed` promises: written only after a send that succeeded,
-        // and read only on the paths where the pass produced no tally to read
-        // instead.
-        let reported_done = AtomicU64::new(0);
-        let reported_refused = AtomicU64::new(0);
-        // The size of the queue this run started against. Written on every
-        // report, sent or not, because unlike the two above it is not a claim
-        // about what the window saw: `mnema_embed` measures it once, before it
-        // takes anything out of the queue, and carries the same value on every
-        // report — so this is a fact about the run, and the honest denominator
-        // for an ending even when every send failed.
-        //
-        // ⚠️ **`0` when the pass reported nothing at all, and that stands for
-        // two different states.** One is an empty queue, where the total really
-        // is zero: the loop breaks before the first report and `0 of 0` is the
-        // truth. The other is a Stop landing in the first instant —
-        // `mnema_embed::run` asks `cancel()` *before* its first batch, so a run
-        // stopped there has measured a queue and reported none of it, and `0`
-        // here is "not known" wearing a number's clothes.
-        //
-        // Not repaired by reading the queue again from this side: that would be
-        // a second measurement of a number the pass already has, taken after it
-        // stopped, and it would disagree with the one the run actually used.
-        // What is repaired is the sentence — `reason` tells the two apart, so
-        // the surface that shows this can say "stopped before anything was
-        // embedded" for the cancelled one rather than claiming a total nobody
-        // measured. That surface is PR 7's; the fact it needs is here already.
-        let queue_total = AtomicU64::new(0);
-        let started = Instant::now();
-        // Throttling state, a plain local rather than an atomic for the reason
-        // `walk_job.rs` gives: `mnema_embed::run` calls this closure
-        // synchronously, on this one thread.
-        let mut last_report: Option<Instant> = None;
-
-        // `AssertUnwindSafe` for `walk_job.rs`'s reason: everything this closure
-        // reaches — the channel, the atomics, the database connection — is used
-        // only on this thread, only for as long as this call runs, and dropped
-        // when the thread ends however it ends. Nothing downstream ever sees any
-        // of it again. Unlike the walk there is no FFI here, so a panic would be
-        // this code's own; it is caught all the same, because the window has to
-        // be told the job is over or Start stays disabled for the life of the
-        // page.
-        let caught = catch_unwind(AssertUnwindSafe(|| {
-            mnema_embed::run(
-                &job_db,
-                &base,
-                &key,
-                BATCH,
-                &|| slot.cancel_flag().load(Ordering::SeqCst),
-                &mut |progress| {
-                    queue_total.store(progress.total, Ordering::Relaxed);
-
-                    // `mnema_embed::run` calls this once per batch, unthrottled,
-                    // and once per single call inside a split — its own doc
-                    // comment says the throttle belongs to whoever owns the
-                    // channel, which is here. `progress_is_due` is the same rule
-                    // the probe and the walk use, and `refused` is in it because
-                    // a run that ends with refusals never reaches `done ==
-                    // total` at all; without that the last report — the one
-                    // carrying the numbers that matter most — would be left to
-                    // the timer.
-                    let now = Instant::now();
-                    if !job::progress_is_due(
-                        last_report,
-                        now,
-                        job::REPORT_INTERVAL,
-                        progress.done,
-                        progress.failed,
-                        progress.total,
-                    ) {
-                        return;
-                    }
-                    last_report = Some(now);
-
-                    // A failed send means the webview is gone — reloaded, or
-                    // closed while the job runs. The job deliberately continues:
-                    // the work is the point, and it is paid for.
-                    if on_progress
-                        .send(JobEvent::Progress(progress_from(
-                            progress,
-                            started.elapsed(),
-                        )))
-                        .is_ok()
-                    {
-                        reported_done.store(progress.done, Ordering::Relaxed);
-                        reported_refused.store(progress.failed, Ordering::Relaxed);
-                    }
-                },
-            )
-        }));
-
-        // Read once, after the pass has returned, and it is the only thing that
-        // can tell a run that emptied the queue from one that was stopped:
-        // `mnema_embed::run` answers `Ok(tally)` to both and says nothing about
-        // which. See `ended_from_tally` for what the narrow race costs and why
-        // it is broken this way round.
-        //
-        // This is also the symmetrical half of `walk_job.rs`'s post-walk read,
-        // and it was already here — but it carries less weight, and the
-        // difference is worth naming rather than leaving to be rediscovered.
-        // **This ending has no successor.** Nothing chains a further pass off
-        // an embedding pass: `jobs.ts` chains only off a `walk` (`if (pass ===
-        // 'walk' && chainsEmbedPass(...))`), so a Stop lost here would cost a
-        // mislabelled report and nothing else, where a Stop lost at the end of
-        // a WALK sends the person's text to a provider they had just told the
-        // application not to send it to. If a pass is ever chained after this
-        // one, that asymmetry ends and this read becomes load-bearing.
-        let cancelled = slot.cancel_flag().load(Ordering::SeqCst);
-        let total = queue_total.load(Ordering::Relaxed);
-        let ending = match caught {
-            Ok(Ok(tally)) => ended_from_tally(tally, total, cancelled),
-            // Both failing paths report the last counts the window was shown
-            // rather than anything read back from the database, which is
-            // `Ended::failed`'s own promise. It costs nothing in accuracy here:
-            // `mnema_embed::run` reports before it propagates an error — the
-            // vectors of the failing batch are already written when it does —
-            // so the last number sent is already true of the index.
-            Ok(Err(refusal)) => failed_ending(
-                reported_done.load(Ordering::Relaxed),
-                reported_refused.load(Ordering::Relaxed),
-                total,
-                refusal.to_string(),
-            ),
-            Err(panic) => failed_ending(
-                reported_done.load(Ordering::Relaxed),
-                reported_refused.load(Ordering::Relaxed),
-                total,
-                job::panic_message(&*panic),
-            ),
-        };
-        // Dropped **before** the send, for the reason measured on
-        // `walk_job.rs`: `JobSlot::drop` is what clears `AppState::running`, and
-        // the window re-enables its buttons inside the handler that receives
-        // this message. A press landing between the send and an implicit
-        // end-of-scope drop races a slot this thread still holds.
-        drop(slot);
-        let _ = on_progress.send(JobEvent::Ended(ending));
-    });
-
-    Ok(())
-}
 
 /// One report from the pass, as the window receives it.
 ///
