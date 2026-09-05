@@ -11147,7 +11147,19 @@ fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
     assert_eq!(reading.roots_read, 2, "{reading:?}");
     assert_eq!(reading.root_count, 2, "{reading:?}");
     assert_eq!(reading.indexed, 6, "{reading:?}");
-    assert!(reading.complete, "{reading:?}");
+    // The positive half of the pair the two folder-failure tests assert: two
+    // folders read whole and reconciled make the pass complete. Without this a
+    // `complete` hardcoded to `false` would satisfy both of those and mean
+    // nothing.
+    assert!(
+        reading.complete,
+        "two healthy folders were read whole and reconciled, and the pass says \
+         otherwise: {reading:?}"
+    );
+    assert!(
+        reading.roots.iter().all(|root| root.complete),
+        "{reading:?}"
+    );
     assert_eq!(
         reading
             .roots
@@ -11249,6 +11261,22 @@ fn a_folder_that_is_not_there_does_not_stop_the_folder_after_it() {
         indexed_paths(&app, second_id).len(),
         2,
         "the readable folder after the missing one was not indexed"
+    );
+
+    // The pass ran to the end, and the archive is still not fully accounted
+    // for. `reason` answers the first question and `complete` the second, and a
+    // window that reads only the first draws a finished scan over an index
+    // holding rows for a folder nothing reconciled.
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert!(
+        !reading.roots[0].complete,
+        "a folder that was not there was not read whole, whatever it says: \
+         {reading:?}"
+    );
+    assert!(
+        !reading.complete,
+        "a folder that was never reconciled leaves rows nothing checked, so the \
+         pass is not complete: {reading:?}"
     );
 }
 
@@ -11463,11 +11491,24 @@ fn a_folder_emptied_after_its_files_were_read_pauses_and_keeps_its_counters() {
         2,
         "the folder after the paused one was not read"
     );
-    // What the aggregate says today, pinned rather than assumed: the pass did
-    // not STOP for this, so its own `reason` stays `Completed` and the folder's
-    // row is the only place the pause is stated. A window that draws the scan
-    // from `reason` alone therefore owes `roots` a look.
+    // 🔴 The two questions, and the reason the folder's own `complete` cannot
+    // be the aggregate's. The walk SAW the whole folder before it vanished, so
+    // the folder reports `complete: true` — and phase 3 never ran, so the rows
+    // for the three files that are now gone are still in the index and still
+    // searchable. The pass is therefore NOT complete, and `reason` stays
+    // `Completed` because the job itself ran to the end.
     assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert!(
+        reading.roots[0].complete,
+        "phase 1 read the whole folder before it was emptied, so this is the \
+         one stop reason whose folder is complete and whose pass is not: \
+         {reading:?}"
+    );
+    assert!(
+        !reading.complete,
+        "a folder that may be an unmounted volume was left unreconciled, and \
+         nothing at the top level says so: {reading:?}"
+    );
 }
 
 /// 🔴 «Completed» is not «saw everything», and the pair is asserted on the

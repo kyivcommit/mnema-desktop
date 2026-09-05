@@ -498,9 +498,19 @@ impl ReadingOutcome {
     /// at the second of seven has nothing to say about the other five, and
     /// counting them as complete is the claim that would draw a person a
     /// finished scan over an index missing most of their archive.
+    ///
+    /// 🔴 **Two conditions per folder, not one.** A folder counts towards
+    /// `complete` only if it was read whole AND it ended `Completed`, because
+    /// those are two different failures with one consequence. `RootOutcome::
+    /// complete` is about phase 1 — what the walk SAW — and the ending is what
+    /// says whether phase 3 ran. `VolumeMissing` is the case that needs both:
+    /// the walk saw the whole folder (`walk.rs` returns `walked.complete`,
+    /// which is `true`), and then stopped before reconciling, so rows for files
+    /// that are no longer there stay in the index and stay searchable.
+    /// `complete: root.complete` alone would call that pass complete.
     fn absorb(&mut self, root: RootOutcome) {
         self.roots_read += 1;
-        self.complete &= root.complete;
+        self.complete &= root.complete && root.reason == EndReason::Completed;
         self.done += root.done;
         self.total += root.total;
         self.indexed += root.indexed;
@@ -927,17 +937,26 @@ mod tests {
     /// The pass sums the folders it READ, and is complete only if every one of
     /// them was.
     ///
-    /// The pair it separates is "two folders, one of them partly seen" from
-    /// "two folders, both seen": the counters are identical and only `complete`
-    /// differs, which is the whole reason `complete` is not derived from
-    /// `reason`. `roots_read` is asserted beside it because a pass that counted
-    /// the folders it was GIVEN rather than the ones that answered reports the
-    /// same number here and a wrong one the moment a pass stops early.
+    /// 🔴 Three pairs, all on the same counters, because there are three ways a
+    /// pass can be incomplete and only one of them is about what the walk SAW.
+    ///
+    /// - two folders read whole and reconciled → complete;
+    /// - one of them only partly seen (`RootOutcome::complete` false, the
+    ///   unreadable subtree) → not complete;
+    /// - one of them seen whole and never reconciled (`complete` TRUE, ending
+    ///   `VolumeMissing`) → not complete, and this is the pair an aggregation
+    ///   written as `self.complete &= root.complete` gets wrong: the folder
+    ///   really was read to the end, phase 3 simply never ran, and the rows for
+    ///   files that are gone stay searchable.
+    ///
+    /// `roots_read` is asserted beside them because a pass that counted the
+    /// folders it was GIVEN rather than the ones that answered reports the same
+    /// number here and a wrong one the moment a pass stops early.
     #[test]
-    fn a_pass_is_complete_only_when_every_folder_it_read_was() {
-        let folder = |complete: bool| RootOutcome {
+    fn a_pass_is_complete_only_when_every_folder_it_read_was_whole_and_reconciled() {
+        let folder = |complete: bool, reason: EndReason| RootOutcome {
             root_path: "/somewhere".to_string(),
-            reason: EndReason::Completed,
+            reason,
             complete,
             message: None,
             done: 2,
@@ -949,35 +968,59 @@ mod tests {
             contended: 1,
             frozen: Vec::new(),
         };
-
-        let mut both_seen = ReadingOutcome {
-            root_count: 2,
-            ..ReadingOutcome::default()
+        let pass_over = |roots: [RootOutcome; 2]| {
+            let mut outcome = ReadingOutcome {
+                root_count: 2,
+                ..ReadingOutcome::default()
+            };
+            for root in roots {
+                outcome.absorb(root);
+            }
+            outcome
         };
-        both_seen.absorb(folder(true));
-        both_seen.absorb(folder(true));
+
+        let both_seen = pass_over([
+            folder(true, EndReason::Completed),
+            folder(true, EndReason::Completed),
+        ]);
         assert!(both_seen.complete, "{both_seen:?}");
 
-        let mut one_partly = ReadingOutcome {
-            root_count: 2,
-            ..ReadingOutcome::default()
-        };
-        one_partly.absorb(folder(false));
-        one_partly.absorb(folder(true));
+        let one_partly = pass_over([
+            folder(false, EndReason::Completed),
+            folder(true, EndReason::Completed),
+        ]);
         assert!(
             !one_partly.complete,
             "one folder that was not fully seen must make the pass not fully \
              seen: {one_partly:?}"
         );
 
-        // Identical in everything but `complete`, which is what makes the pair
-        // above a pair rather than two different passes.
-        assert_eq!(both_seen.done, one_partly.done);
-        assert_eq!(both_seen.indexed, one_partly.indexed);
-        assert_eq!(both_seen.removed, one_partly.removed);
-        assert_eq!(both_seen.contended, one_partly.contended);
+        let one_unreconciled = pass_over([
+            folder(true, EndReason::VolumeMissing),
+            folder(true, EndReason::Completed),
+        ]);
+        assert!(
+            !one_unreconciled.complete,
+            "a folder the walk saw whole and never reconciled leaves rows for \
+             files that are gone, and the pass claims it is complete: \
+             {one_unreconciled:?}"
+        );
+        let one_absent = pass_over([
+            folder(false, EndReason::RootUnavailable),
+            folder(true, EndReason::Completed),
+        ]);
+        assert!(!one_absent.complete, "{one_absent:?}");
+
+        // Identical in every counter, which is what makes these pairs rather
+        // than four different passes.
+        for other in [&one_partly, &one_unreconciled, &one_absent] {
+            assert_eq!(both_seen.done, other.done);
+            assert_eq!(both_seen.indexed, other.indexed);
+            assert_eq!(both_seen.removed, other.removed);
+            assert_eq!(both_seen.contended, other.contended);
+            assert_eq!(both_seen.roots_read, other.roots_read);
+        }
         assert_eq!(both_seen.roots_read, 2);
-        assert_eq!(one_partly.roots_read, 2);
         assert_eq!(both_seen.done, 4, "the counters are sums, not the last row");
     }
 

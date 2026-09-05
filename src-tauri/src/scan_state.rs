@@ -278,7 +278,27 @@ pub struct RootOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadingOutcome {
+    /// Why the pass itself stopped — a fact about the JOB, not about the
+    /// archive. A folder that was unreadable or may be an unmounted volume does
+    /// not stop the pass, so this stays `Completed` while `complete` below goes
+    /// `false`; that is the pair, and neither field answers the other's
+    /// question.
     pub reason: crate::job::EndReason,
+    /// **Every folder was read completely AND reconciled.**
+    ///
+    /// Exactly `roots.iter().all(|r| r.complete && r.reason == Completed)`, and
+    /// both halves are load-bearing. `RootOutcome::complete` is about phase 1,
+    /// what the walk SAW; the folder's `reason` is what says whether phase 3
+    /// ran. A folder that stopped `RootUnavailable` or `VolumeMissing` was
+    /// never reconciled, so `path` rows for files that are no longer under it
+    /// stay in the index and stay searchable — the same class of leftover an
+    /// unreadable subtree produces, arrived at from the other direction.
+    ///
+    /// It is therefore `false` in three shapes that a window must not draw as a
+    /// finished scan: a folder only partly seen, a folder never reconciled, and
+    /// a pass that stopped before reaching some of its folders. `reason` is a
+    /// separate question and stays `Completed` in the first two, because the
+    /// JOB did run to the end — see the field above.
     pub complete: bool,
     /// How many folders answered — with a report or with an error. Never more
     /// than `root_count`, and less whenever the pass stopped early.
