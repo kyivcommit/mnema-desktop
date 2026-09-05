@@ -57,17 +57,25 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// read the old one off the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    TrayStatus,       // "Проіндексовано —" / "Indexed —"
-    TrayShowSearch,   // "Показати пошук" / "Show search"
-    TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
-    TrayStopIndexing, // "Зупинити сканування" / "Stop scanning"
-    TrayQuit,         // "Вийти" / "Quit"
-    MenuLanguage,     // submenu title "Мова" / "Language"
-    LangAuto,         // "Авто (система)" / "Auto (system)"
-    SettingsTitle,    // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,    // "Закрити налаштування" / "Close Settings"
-    MenuEdit,         // "Редагувати" / "Edit"
-    MenuWindow,       // "Вікно" / "Window"
+    // The five that replaced `TrayStatus` (Task 5): `tray::status_label` is
+    // the ONE place that picks between them and appends the number and, for
+    // the count-carrying two, the plural word `files_word` below computes —
+    // this catalog holds only the fixed words, never a number.
+    TrayReadingPercent, // "Читання теки" / "Reading folder" (+ " NN %")
+    TrayReadingCount,   // "Читання теки:" / "Reading folder:" (+ " N <word>")
+    TrayEmbedding,      // "Вбудовування" / "Embedding" (+ " NN %")
+    TrayRemoving,       // "Видаляємо теку…" / "Removing folder…" (whole sentence)
+    TrayScanned,        // "Проскановано:" / "Scanned:" (+ " N <word>")
+    TrayShowSearch,     // "Показати пошук" / "Show search"
+    TrayOpenSettings,   // "Відкрити налаштування" / "Open settings"
+    TrayStopIndexing,   // "Зупинити сканування" / "Stop scanning"
+    TrayQuit,           // "Вийти" / "Quit"
+    MenuLanguage,       // submenu title "Мова" / "Language"
+    LangAuto,           // "Авто (система)" / "Auto (system)"
+    SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,      // "Закрити налаштування" / "Close Settings"
+    MenuEdit,           // "Редагувати" / "Edit"
+    MenuWindow,         // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
     // here, and not in `error.rs` with every other rejection sentence, because
     // each answers a PRESS a person made and there is a better sentence for it
@@ -81,7 +89,11 @@ pub enum Key {
 }
 
 pub const ALL_KEYS: &[Key] = &[
-    Key::TrayStatus,
+    Key::TrayReadingPercent,
+    Key::TrayReadingCount,
+    Key::TrayEmbedding,
+    Key::TrayRemoving,
+    Key::TrayScanned,
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
     Key::TrayStopIndexing,
@@ -99,8 +111,16 @@ pub const ALL_KEYS: &[Key] = &[
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
     match (lang, key) {
-        (Lang::Uk, TrayStatus) => "Проіндексовано —",
-        (Lang::En, TrayStatus) => "Indexed —",
+        (Lang::Uk, TrayReadingPercent) => "Читання теки",
+        (Lang::En, TrayReadingPercent) => "Reading folder",
+        (Lang::Uk, TrayReadingCount) => "Читання теки:",
+        (Lang::En, TrayReadingCount) => "Reading folder:",
+        (Lang::Uk, TrayEmbedding) => "Вбудовування",
+        (Lang::En, TrayEmbedding) => "Embedding",
+        (Lang::Uk, TrayRemoving) => "Видаляємо теку…",
+        (Lang::En, TrayRemoving) => "Removing folder…",
+        (Lang::Uk, TrayScanned) => "Проскановано:",
+        (Lang::En, TrayScanned) => "Scanned:",
         (Lang::Uk, TrayShowSearch) => "Показати пошук",
         (Lang::En, TrayShowSearch) => "Show search",
         (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
@@ -130,6 +150,47 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         }
         (Lang::En, HotkeyNeedsAModifier) => {
             "a shortcut needs at least one modifier: Ctrl, Alt, Shift or Cmd"
+        }
+    }
+}
+
+/// The word for "file(s)" that agrees with `n`, in `lang`.
+///
+/// The Ukrainian arm is the reason this exists at all: «файл» is a count noun
+/// with three plural forms rather than English's two, and which form applies is
+/// not "does `n` end in 1" — it is the Slavic rule where the LAST TWO digits
+/// decide, so that 11–14 fall to the "many" form even though they end in
+/// 1/2/4. Getting this wrong is not cosmetic: `tray::status_label` builds a
+/// sentence with it, and a form that disagreed with the number beside it would
+/// be exactly the kind of tray text this task was written to stop showing.
+///
+/// `n` is signed because [`crate::scan_state::ScanState::files`] is signed; the
+/// magnitude is what decides the form, so `n.unsigned_abs()` is taken up front
+/// and a negative count (a state the type allows but no writer here produces)
+/// pluralizes the same as its positive twin rather than panicking or picking
+/// arbitrarily.
+pub fn files_word(lang: Lang, n: i64) -> &'static str {
+    match lang {
+        Lang::En => {
+            if n == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        }
+        Lang::Uk => {
+            let n = n.unsigned_abs();
+            let last_two = n % 100;
+            let last_one = n % 10;
+            if (11..=14).contains(&last_two) {
+                "файлів"
+            } else if last_one == 1 {
+                "файл"
+            } else if (2..=4).contains(&last_one) {
+                "файли"
+            } else {
+                "файлів"
+            }
         }
     }
 }
@@ -289,9 +350,9 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let choice = app.state::<crate::state::AppState>().locale().choice;
     // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
     // icon and its `on_tray_icon_event` (the positioner) are left in place.
-    // The rebuild also replaces the Stop item a job may be about to disable,
-    // which is why the swap is `tray::swap_tray_menu` and not a `set_menu`
-    // here — see `tray::StopItem`.
+    // The rebuild also replaces the status/Stop items a job may be about to
+    // redraw, which is why the swap is `tray::swap_tray_menu` and not a
+    // `set_menu` here — see `tray::TrayItems`.
     crate::tray::swap_tray_menu(app, lang, choice);
     // The settings window's native OS title, re-set whether or not it is
     // visible so an already-open or merely-hidden window is right next time.
@@ -435,6 +496,41 @@ mod tests {
             assert!(!t(Lang::Uk, key).is_empty(), "UK missing for {key:?}");
             assert!(!t(Lang::En, key).is_empty(), "EN missing for {key:?}");
         }
+    }
+
+    /// The Ukrainian three-arm plural, on the table the brief pins:
+    /// 1 → «файл» singular; 2, 22 → «файли» (ends in 2–4, not 12–14); 5, 25,
+    /// 111 → «файлів» (ends in 5+ or falls in the 11–14 "teen" band by its last
+    /// two digits); 11, 21 are the pair that separates "ends in 1" from
+    /// "the Slavic rule": 21 ends in 1 and is NOT in 11–14, so it takes the
+    /// singular form same as 1, while 11 ends in 1 and IS in 11–14, so it takes
+    /// the plural — a naive "n % 10 == 1 → singular" rule would answer «файл»
+    /// for both and go red only on this one row.
+    #[test]
+    fn ukrainian_file_count_takes_the_slavic_plural() {
+        for (n, word) in [
+            (1, "файл"),
+            (2, "файли"),
+            (5, "файлів"),
+            (11, "файлів"),
+            (21, "файл"),
+            (22, "файли"),
+            (25, "файлів"),
+            (111, "файлів"),
+        ] {
+            assert_eq!(files_word(Lang::Uk, n), word, "n = {n}");
+        }
+    }
+
+    /// English has only the ordinary two forms, and 1 is the only singular one
+    /// — asserted against a neighbour (0) so the rule pinned is "n == 1", not
+    /// "n is odd" or some other coincidence that would also pass on 1 alone.
+    #[test]
+    fn english_file_count_is_singular_only_at_one() {
+        assert_eq!(files_word(Lang::En, 1), "file");
+        assert_eq!(files_word(Lang::En, 0), "files");
+        assert_eq!(files_word(Lang::En, 2), "files");
+        assert_eq!(files_word(Lang::En, 21), "files");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::error::Error;
 /// disables «Зупинити сканування» for the whole of a job that is running. The
 /// walk → embed handoff is exactly that sequence. Every consumer must therefore
 /// read [`AppState::scan_state`] at the moment it acts, which is what
-/// [`crate::tray::StopItem::replace`] already does for the same reason and what
+/// [`crate::tray::refresh_tray`] already does for the same reason and what
 /// `state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge`
 /// pins. With no boolean to replay, the ordering of two announcements cannot
 /// decide what the tray ends up saying.
@@ -720,7 +720,7 @@ impl Drop for JobSlot {
     /// nothing is passed to an observer (see [`JobObserver`]). This runs on the
     /// job's own thread, which is why the installed observer hands the work to
     /// the main thread and returns rather than blocking here — see
-    /// `tray::StopItem`.
+    /// `tray::refresh_tray`.
     fn drop(&mut self) {
         if self.finished {
             return;

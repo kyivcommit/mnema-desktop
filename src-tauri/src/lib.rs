@@ -23,6 +23,7 @@ mod tree;
 pub mod walk_job;
 
 use anyhow::Context as _;
+use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_positioner::{Position, WindowExt as _};
 
@@ -206,6 +207,29 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::
     std::thread::spawn(move || {
         models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
     })
+}
+
+/// How many files the index holds, read once so `.setup` can seed
+/// [`state::AppState::set_files`] before [`tray::build_tray`] draws the first
+/// menu — without this, a person reopening an already-indexed archive would
+/// see the tray's status line claim `0` files until the next job happened to
+/// run.
+///
+/// A free function over `&AppState` rather than inline in `.setup`, for the
+/// same reason [`manage_state`]/[`boot_index`] are: `.setup` needs a live
+/// Tauri `App` to reach at all (`tests/commands.rs`'s `app_in` never runs it —
+/// see this crate's own `AppState::with_index` doc), so the only way to unit
+/// test what it does is to give each step its own name and callable shape.
+///
+/// **`0` on every failure — an unopened index included — never a panic.**
+/// `.setup` calls this after `boot_index`, whose own `open_index` call is
+/// synchronous (only the default-model adoption it spawns runs on a thread of
+/// its own, deliberately not waited on) — but a boot whose open failed
+/// outright still has to draw a tray, and `with_index` refuses with
+/// `IndexNotOpen` exactly then. `0` is honest either way: nothing has been
+/// counted, which is also literally true of a fresh index.
+pub fn boot_files(state: &state::AppState) -> i64 {
+    state.with_index(|db| db.indexed_file_count()).unwrap_or(0)
 }
 
 /// Shows the launcher and focuses it, returning whether the launcher window was
@@ -468,9 +492,9 @@ pub fn run() -> anyhow::Result<()> {
             // storing the flag (`state.rs`'s `cancel_job`), and `claim_job`
             // clears that flag *after* it has won the slot, so a press with
             // nothing running cannot reach into the next job. The item is
-            // enabled only while a job runs (`tray::StopItem`) so as not to
-            // offer a control that does nothing, which is a different concern
-            // from safety.
+            // enabled only while a cancellable job runs (`tray::stop_enabled`,
+            // drawn by `tray::refresh_tray`) so as not to offer a control that
+            // does nothing, which is a different concern from safety.
             "stop_indexing" => {
                 app.state::<state::AppState>().cancel_job();
             }
@@ -565,50 +589,66 @@ pub fn run() -> anyhow::Result<()> {
                 );
                 let _ = prefs::install_hotkey(&state);
             }
-            // §8: the tray's «Зупинити сканування». `build_tray` hands back the
-            // item so that it can be reached again later; the slot it goes into
-            // is what a language change replaces, so nothing here or below ever
-            // captures the item itself.
-            let stop = tray::build_tray(app.handle())?;
-            app.manage(tray::StopItem(std::sync::Mutex::new(Some(stop))));
+            // §9.3/Task 5: seed how many files the index already holds BEFORE
+            // the tray is built, so the very first menu this application draws
+            // reads «Проскановано: N файлів» from a real count rather than
+            // `ScanState::default()`'s `files: 0` — a person reopening an
+            // already-indexed archive would otherwise see "0 files" flash
+            // before the first job ever ran. Must run before `build_tray`,
+            // which reads `scan_state()` to seed the status line's initial
+            // text; `boot_files` is a free function precisely so this line is
+            // unit-testable without a `.setup` to run it in.
             {
                 let state = app.state::<state::AppState>();
-                // 🔴 The closure captures the handle and NOTHING else. The item
-                // is read out of managed state on every call, because a
-                // language change during a job rebuilds the whole tray menu and
-                // puts a different item in that slot; a captured one would
-                // outlive its own menu and the visible item would keep offering
-                // to stop a job that had finished.
+                let files = boot_files(&state);
+                state.set_files(files);
+            }
+            // §8: the tray's «Зупинити сканування» and its status line.
+            // `build_tray` manages `TrayItems` itself now (Task 5) — nothing
+            // here or below captures either item directly, since a language
+            // change during a job rebuilds the whole tray menu and would leave
+            // a captured handle addressing an item that is in no menu.
+            tray::build_tray(app.handle())?;
+            {
+                let state = app.state::<state::AppState>();
+                // 🔴 The closure captures the handle and NOTHING else — see
+                // `tray::refresh_tray`'s own doc for why it re-reads
+                // `AppState` itself rather than being handed a value: a
+                // language change during a job rebuilds the whole tray menu,
+                // and a value captured here could be the announcement that
+                // arrived before that rebuild.
                 //
-                // It dispatches and returns rather than calling `set_enabled`
-                // itself. `set_enabled` hops to the main thread and waits, and
-                // the announcement from `JobSlot::drop` fires on the job's own
-                // thread — where that wait would hold the job thread until the
-                // event loop got round to it. From the main thread Tauri runs
-                // the task inline, so a claim's own announcement costs nothing
-                // either way.
+                // It dispatches and returns rather than redrawing inline.
+                // `set_text`/`set_enabled` hop to the main thread and wait,
+                // and the announcement from `JobSlot::drop` fires on the
+                // job's own thread — where that wait would hold the job
+                // thread until the event loop got round to it.
                 //
-                // 🔴 **The task asks `job_is_running()` where it acts, and is
-                // handed nothing to replay** — `state::JobObserver`'s own doc
-                // has the handoff that took the boolean away. Two announcements
-                // posted in either order then leave the item saying the same
-                // thing, because the last task to run reads the fact as it
-                // stands rather than the edge that woke it.
+                // The emit happens OFF the main thread, on the job's own —
+                // `state`/`job.rs` stay free of Tauri types, and `emit` does
+                // not need the main thread the way a menu redraw does. It may
+                // fire the same revision twice if two announcements race
+                // (`state::JobObserver`'s own doc has why two announcements
+                // can arrive in either order) — harmless: a window that
+                // re-draws from an unchanged `ScanState` draws the same thing
+                // it already had.
                 let handle = app.handle().clone();
                 state.set_job_observer(Box::new(move || {
                     let inner = handle.clone();
+                    let scan = handle.state::<state::AppState>().scan_state();
+                    let _ = handle.emit("scan-progress", &scan);
                     let _ = handle.run_on_main_thread(move || {
-                        let running = inner.state::<state::AppState>().job_is_running();
-                        tray::set_stop_enabled(&inner, running);
+                        tray::refresh_tray(&inner);
                     });
                 }));
                 // Seeded AFTER the observer is installed, which is what makes
                 // "nothing is missed between the two" a fact about the order
                 // rather than a claim that nothing can have claimed the slot
                 // this early. A claim arriving between these two statements
-                // announces itself, and this seed then reads the same fact its
-                // task would.
-                tray::set_stop_enabled(app.handle(), state.job_is_running());
+                // announces itself through the observer above, and this seed
+                // then redraws from the same fact that announcement would
+                // have read.
+                tray::refresh_tray(app.handle());
             }
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is
@@ -641,4 +681,131 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `AppState` pointed at a fresh temp directory — enough for
+    /// `open_index`/`with_index` and nothing more: no provider, no
+    /// credential store, the same trade `state.rs`'s own observer-test
+    /// helper makes, because `boot_files` touches neither.
+    fn state_in(dir: &std::path::Path) -> state::AppState {
+        state::AppState::new(
+            dir.to_path_buf(),
+            std::path::PathBuf::from("/nonexistent/mnema-boot-files-worker"),
+            "http://127.0.0.1:0".to_string(),
+            "mnema-desktop-boot-files-test".to_string(),
+        )
+    }
+
+    /// The pair `boot_files` exists to tell apart: an index that already
+    /// holds files (the seed a person reopening an already-indexed archive
+    /// needs) against one that was never opened at all (a boot before
+    /// `boot_index` ran, or one where the open itself failed) — both
+    /// directions, so a `boot_files` that always answered `0`, or one that
+    /// panicked instead of falling back, would go red on one row or the
+    /// other rather than passing by accident.
+    #[test]
+    fn boot_files_counts_an_open_index_and_falls_back_to_zero_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+
+        assert_eq!(
+            boot_files(&state),
+            0,
+            "no index has been opened yet — nothing to count, and not a panic"
+        );
+
+        state.open_index().expect("the index opens");
+        state
+            .with_index(|db| {
+                let root = db.insert_watched_root("/tmp/mnema-boot-files-fixture")?;
+                for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
+                    let id = format!("{i:064x}");
+                    db.insert_document(&id, "text/plain", 1, mnema_core::SourceKind::Document)?;
+                    db.set_document_status(&id, mnema_index::DocumentStatus::Indexed)?;
+                    db.insert_path(
+                        root,
+                        name,
+                        &id,
+                        mnema_core::OnDisk {
+                            size_bytes: 1,
+                            mtime: 1,
+                        },
+                        "text",
+                        1,
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("the fixture writes");
+
+        assert_eq!(
+            boot_files(&state),
+            3,
+            "three indexed files were seeded into the now-open index"
+        );
+    }
+
+    /// 🔴 **Brittle by design — a text-matching guard, not a type-level one.**
+    /// It reads `lib.rs`'s own source and asserts that the ONE `with_index`
+    /// substring never appears inside the `.setup` observer's
+    /// `run_on_main_thread` closure — the invariant `tray::refresh_tray`'s own
+    /// doc names: that closure runs on the main thread, and `with_index`
+    /// blocks for as long as a job holds the index (a folder removal alone,
+    /// on the order of twenty seconds), so a `with_index` call reachable from
+    /// there would freeze every window redraw and every menu click for that
+    /// long. It protects only the ONE call site this file writes today —
+    /// renaming the closure, splitting it into a named function, or a
+    /// `with_index` reached indirectly through a function this test cannot
+    /// see into (`tray::refresh_tray` itself, or anything it calls) would
+    /// slip straight past it. A `#[test]` was chosen over nothing because
+    /// nothing is a worse guard still; if a reviewer would rather have this as
+    /// a mutation-harness case instead, that is Task 11's to make, not this
+    /// one's.
+    #[test]
+    fn the_main_thread_closure_never_touches_the_index() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lib.rs could not read its own source at {path:?}: {e}"));
+
+        let needle = "run_on_main_thread(move || {";
+        let call_at = src
+            .find(needle)
+            .expect("the observer's main-thread hop moved, was renamed, or was removed");
+        let body_start = call_at + needle.len();
+
+        // Balance braces from just after the closure's opening `{` to find
+        // where the closure body ends, so this does not have to assume any
+        // particular length or shape for what is inside.
+        let mut depth: i32 = 1;
+        let mut body_end = body_start;
+        for (offset, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            depth == 0,
+            "the closure's braces never balanced — this guard's own brace-matching broke, \
+             not the invariant it protects"
+        );
+
+        let body = &src[body_start..body_end];
+        assert!(
+            !body.contains("with_index"),
+            "a `with_index` call reached the main-thread closure — this would block the whole \
+             application for as long as a job holds the index. Closure body:\n{body}"
+        );
+    }
 }
