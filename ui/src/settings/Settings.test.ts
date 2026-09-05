@@ -372,14 +372,19 @@ test('labels stay correct across a language switch after mount', async () => {
 
 // Task 8's controller ruling: this window's ONE `model_settings` re-read fires
 // when `scan.readSeq` grows OR the snapshot reaches `ended` — not "every
-// ending" alone. `readSeq` (`scan_state.rs`) counts reading passes that have
-// ENDED, and it can grow while the snapshot is still `running` — a reading
-// phase handing off to embedding within the same job — which is exactly the
-// moment `scanIncomplete`/`indexedFiles` can have moved without an `ended`
-// snapshot ever appearing to say so. The three states below are read as one
-// sequence because they are the only fixture that can tell all three fates
-// (re-read / re-read / no re-read) apart from one another.
-test('a growing readSeq re-reads even mid-run, an ending re-reads even with readSeq unchanged, and an identical snapshot re-reads nothing', async () => {
+// ending" alone, and not "any change at all" either. `readSeq` (`scan_state.
+// rs`) counts reading passes that have ENDED, and it can grow while the
+// snapshot is still `running` — a reading phase handing off to embedding
+// within the same job — which is exactly the moment `scanIncomplete`/
+// `indexedFiles` can have moved without an `ended` snapshot ever appearing to
+// say so. The four states below are read as one sequence because they are the
+// only fixture that can tell all four fates apart from one another: `readSeq`
+// growing mid-run re-reads; `readSeq` UNCHANGED and still running does NOT
+// (Important 2, review — an unconditional `refresh()` passes every other
+// assertion here); an ending re-reads even with `readSeq` unchanged; the
+// identical snapshot object again re-reads nothing, because `apply` (`jobs.
+// ts`) drops it by revision before this window's subscriber is even called.
+test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; an ending re-reads regardless; an identical snapshot re-reads nothing', async () => {
   render(Settings);
   // `Models.svelte` reads `model_settings` on its own mount too (an
   // independent poll Task 8 does not touch), and the window opens on Models
@@ -399,6 +404,23 @@ test('a growing readSeq re-reads even mid-run, an ending re-reads even with read
   // `readSeq` 0 -> 1, the snapshot stays `running`.
   await emit(runningWithReadSeq(1));
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+
+  // 🔴 Fix round 1, Important 2. `readSeq` STILL 1 (unchanged) and a HIGHER
+  // revision — an ordinary progress tick within the same embedding phase, the
+  // one state that tells "readSeq changed OR ended" apart from "any change at
+  // all": an unconditional `void refresh()` at `Settings.svelte:115` survives
+  // every assertion in this test EXCEPT this one, because every other state
+  // here also happens to be a positive case.
+  const stillRunningSameReadSeq: ScanState = {
+    revision: 5, files: 0, readSeq: 1, lastReading: null,
+    snapshot: {
+      kind: 'running', cancellable: true,
+      phase: { kind: 'embedding', counts: { ...EMBEDDING_COUNTS, done: 2 } },
+    },
+  };
+  await emit(stillRunningSameReadSeq);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline + 1); // unchanged: no re-read
 
   const endedSameReadSeq: ScanState = {
     revision: 10, files: 0, readSeq: 1, lastReading: null,
@@ -492,6 +514,56 @@ test('an older read that settles last does not repaint over the newer one', asyn
 
   expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 99 files.');
   expect(pageText()).not.toContain('The index holds 7 files.');
+});
+
+// ---------------------------------------------------------------------------
+// The `loadError` path itself (fix round 1, Important 1). The pair above
+// pins the STALE-rejection half of the stamp — a superseded rejection must
+// stay silent — but neither fixture in this file ever let a LIVE, non-stale
+// `model_settings` call reject at all, so `loadError = e…` at
+// `Settings.svelte:77` and `loadError = null` at `:74` could both be deleted
+// without reddening anything (review, Important 1). These two restore that:
+// a live rejection must show the banner beside the numbers it could not
+// confirm, and a live success afterwards must take it away again.
+// ---------------------------------------------------------------------------
+
+test('a live rejection of a re-read shows the failure banner beside the numbers it could not confirm', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+  // Models' own poll out of the way, as the pair above does.
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 0 files.');
+  expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
+
+  const SENTENCE = 'the index went away mid-session';
+  modelSettings.mockRejectedValueOnce(new Error(SENTENCE));
+  await emit(endedOnce(1, 1));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-load-failed')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-load-failed'))).toBe('The state of the index could not be read.');
+  expect(visible(screen.getByTestId('indexing-index-load-error'))).toBe(SENTENCE);
+  // Kept, not blanked: a count that was true a moment ago probably still is —
+  // `Tree.svelte`'s ruling, restated on `refresh()` itself (Minor 1, review).
+  expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 0 files.');
+});
+
+test('a live success after a rejection takes the failure banner away and shows the new numbers', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+
+  modelSettings.mockRejectedValueOnce(new Error('the index went away mid-session'));
+  await emit(endedOnce(1, 1));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-load-failed')).toBeTruthy());
+
+  modelSettings.mockResolvedValueOnce(readFixture({ indexedFiles: 13 }));
+  await emit(endedOnce(2, 1));
+
+  await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 13 files.'));
+  expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
+  expect(screen.queryByTestId('indexing-index-load-error')).toBeNull();
 });
 
 // The mirror. An older read can REJECT after a newer one has already

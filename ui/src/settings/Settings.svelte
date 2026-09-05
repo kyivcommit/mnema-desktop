@@ -63,6 +63,27 @@
   // sequence current at the moment it was ISSUED, and applies its answer only
   // while that stamp is still the latest. Two reads can be in flight here
   // whenever endings arrive faster than the IPC answers.
+  //
+  // 🔴 Fix round 1, Minor 1. Restored onto this function, which is where they
+  // belong now that the state moved here: `Scanning.svelte`'s own comment on
+  // its load-failure banner cites "the ruling recorded beside `refresh()`
+  // [here]", and `Application.svelte` cites the same ruling from the other
+  // side of the tree — both had been pointing at paragraphs the lift to
+  // `Settings.svelte` had dropped.
+  //
+  // A successful read clears the sentence. Without that line the failure
+  // outlives the state it describes: one refused re-read would leave "the
+  // state of the index could not be read" standing over numbers that were
+  // re-read successfully a second later. Guarded by *a live success after a
+  // rejection takes the failure banner away and shows the new numbers*
+  // (`Settings.test.ts`, fix round 1, Important 1).
+  //
+  // The numbers themselves are KEPT across a failed re-read, which is
+  // `Tree.svelte`'s ruling and not a new one: a count that was true a moment
+  // ago probably still is, and blanking the panel costs a person information
+  // they had. What the sentence adds is that it is no longer confirmed.
+  // Guarded by *a live rejection of a re-read shows the failure banner beside
+  // the numbers it could not confirm* (same file, same round).
   let settingsSeq = 0;
 
   async function refresh() {

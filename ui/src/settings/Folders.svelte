@@ -63,9 +63,12 @@
   // making an unrelated banner appear or disappear by accident. This one
   // answers "the last press was an add that succeeded", for the owner's own
   // ruling: adding a folder starts no scan, and this is the sentence that says
-  // what to do instead. Cleared at the top of `addFolder` and `removeFolder`,
-  // the same place and the same reason `rootChanged` is cleared there — what
-  // the last press led to stands until the next one.
+  // what to do instead. Cleared at the two presses that change the list —
+  // `addFolder` and `removeFolder` — for the same reason `rootChanged` is
+  // cleared at ITS four: what the last press led to stands until the next one.
+  // 🔴 Fix round 1, Minor 2: TWO sites, not `rootChanged`'s four — that flag
+  // also clears at `askExclude`/`askInclude`, which do not touch this list at
+  // all, so citing "the same place" overstated where this one lives.
   let folderAdded = $state(false);
 
   // ── PR 8a, Task 5: what an expanded folder holds ──────────────────────────

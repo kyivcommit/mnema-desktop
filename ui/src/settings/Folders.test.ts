@@ -155,10 +155,19 @@ test('adding a folder saves the picked path, the list re-reads, and no job start
 // §9.2, Task 8. The per-row Scan button is gone (`Scanning.svelte` owns the
 // one control now); this pins the three states its note replaces it with —
 // both directions of "the last press was a successful add", and the direction
-// that must NOT show it at all.
-test('a successful add shows the note and no row offers to scan; the next remove takes the note away; a rejected add shows neither', async () => {
+// that must NOT show it at all. Fix round 1, Minor 3, adds two more pairs
+// (`Folders.svelte:71-73` and `:1479` each claimed one, unguarded): the note
+// follows a language switch like every other sentence on this screen, and it
+// survives a job ending — nothing about a scan changes what it is telling a
+// person to go and do next, unlike the withdrawn-question note beside it.
+test('a successful add shows the note and no row offers to scan; it follows a language switch and survives a job ending; the next remove takes it away; a rejected add shows neither', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValueOnce(listing([]));
+  listTree.mockResolvedValueOnce(
+    listing([root({ rootId: 7, absolutePath: '/synthetic/reports', files: [] })]),
+  );
+  // The job ending below re-reads the list too (`reread(true)`), one call
+  // before the remove's own — nothing about the list has changed by then.
   listTree.mockResolvedValueOnce(
     listing([root({ rootId: 7, absolutePath: '/synthetic/reports', files: [] })]),
   );
@@ -167,7 +176,7 @@ test('a successful add shows the note and no row offers to scan; the next remove
   addWatchedFolder.mockResolvedValue(7);
   removeWatchedFolder.mockResolvedValue(1);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
   expect(screen.queryByTestId('folders-added-note')).toBeNull();
 
@@ -181,6 +190,27 @@ test('a successful add shows the note and no row offers to scan; the next remove
   // No row offers to scan any more: the only control this row carries besides
   // Subfolders is Remove.
   expect(screen.queryAllByRole('button', { name: /^Scan/ })).toHaveLength(0);
+
+  // Both directions of the language switch, the note still on screen.
+  setLocale('uk');
+  await tick();
+  expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
+    'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
+  );
+  expect(screen.queryByText('Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.'))
+    .toBeNull();
+  setLocale('en');
+  await tick();
+  expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
+    'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
+  );
+
+  // A job ending changes nothing about what this note is telling a person to
+  // go and do next — unlike the withdrawn-question note beside it, which a
+  // reading pass ending really does invalidate.
+  void jobs.scan('full');
+  await endScan();
+  expect(screen.getByTestId('folders-added-note')).toBeTruthy();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/reports' }));
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
