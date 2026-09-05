@@ -229,17 +229,26 @@ fn removing_a_root_takes_its_documents_vectors_too() {
     assert!(db.knn(space, &[0.1; 4], 5, None).unwrap().is_empty());
 }
 
-/// [`Db::delete_watched_root_if_path`]'s whole reason to exist: the delete
-/// runs only if `root_id` still names the path the caller expects, checked
-/// inside the SAME transaction the delete itself runs in — not by the caller
-/// beforehand, and not by two statements that merely sit next to each other.
+/// What this pins: the two outcomes `Db::delete_watched_root_if_path`
+/// produces on the paths a real caller hits, in that order. A stale path
+/// deletes nothing — `None`, and both the document and the root row still
+/// there to prove it — then the true path deletes exactly like
+/// `delete_watched_root` and answers `Some(n)`.
 ///
-/// Both directions, in the order a real caller hits them: a stale path first
-/// (deletes nothing, the row survives to prove it), then the true path
-/// (deletes exactly like `delete_watched_root`). A version that compared
-/// outside the transaction, or did not compare at all, passes the second half
-/// alone; this is the same shape `bridge.rs`'s own swap test pins one layer up,
-/// checked here at the layer that actually owns the guarantee.
+/// **What this does NOT pin: that the compare and the delete are one
+/// transaction.** That is a structural property of the function's own body
+/// (`write.rs:923-946`) — one `Transaction`, opened at
+/// `Transaction::new_unchecked(.., Immediate)`, carries the read, the
+/// compare, the delete and the commit, and SQLite's own write lock is what
+/// closes the window a second connection could otherwise write through. No
+/// assertion here can tell that apart from a version that read
+/// `absolute_path` OUTSIDE a transaction, compared, and only opened one
+/// afterwards to delete: that version passes both halves of this test and
+/// the absent-id test below just as well, and the property that says it is
+/// wrong lives one function up, not in this file. Falsified by reading
+/// `write.rs`, not by a test here — `mnema-index`'s own suite has no hook
+/// that can land a second connection's write between two statements, and
+/// none is added for this.
 #[test]
 fn delete_watched_root_if_path_only_deletes_a_matching_path() {
     let db = fixture_db();

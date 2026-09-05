@@ -4,9 +4,21 @@
 # Cases are added by the task that adds the test they protect, so this file
 # grows through the cycle rather than being written once at the end.
 
+# Anchored on the line THIS sweep is immediately followed by, not on the
+# sweep call alone: task 4 (PR 9b) factored `delete_watched_root`'s own sweep
+# into a shared `delete_watched_root_in`, which contains the identical
+# `crate::space::delete_vectors_for_document_in(tx, id)?;` line — a bare match
+# on that line alone now selects both call sites and
+# `scripts/mutation-staleness.sh` refuses it (`MATCHES MORE THAN ONCE`). The
+# two functions differ on the very next line: `clear_document_content_in`
+# runs straight into `tx.execute("DELETE FROM page ...)`, while
+# `delete_watched_root_in` has a comment there before its own (different)
+# `tx.execute("DELETE FROM document ...)`. Folding that next line into the
+# match is what makes this case unique to its own site again, the same shape
+# the two cases below it already use for the reverse reason.
 case_ "write: a rebuild takes its document's vectors with it (D88)" \
   crates/mnema-index/src/write.rs \
-  's{        crate::space::delete_vectors_for_document_in\(tx, id\)\?;\n}{}' \
+  's{        crate::space::delete_vectors_for_document_in\(tx, id\)\?;\n        tx\.execute\("DELETE FROM page WHERE document_id = \?1", params!\[id\]\)\?;\n}{        tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;\n}' \
   'of no foreign key, so nothing else reaches it.
         tx.execute("DELETE FROM page' \
   mnema-index 'clearing_a_document_takes_its_vectors' --test citation
