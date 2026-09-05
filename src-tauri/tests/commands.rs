@@ -10997,7 +10997,9 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
 
 use mnema_desktop::job::EndReason;
 use mnema_desktop::scan_job;
-use mnema_desktop::scan_state::{EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState};
+use mnema_desktop::scan_state::{
+    EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState, SkipWhy,
+};
 
 /// A watched folder holding one indexable file per name given, each with text
 /// of its own.
@@ -11183,11 +11185,23 @@ fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
 
     let report = report_of(&settled);
     assert_eq!(report.reason, EndReason::Completed);
-    assert_eq!(report.embedding, EmbedOutcome::NotReached);
-    assert_eq!(report.ended_in, EndedIn::Reading);
+    // The reading is what this test is about, and the ending records where the
+    // JOB got to — which is the embedding phase, entered and declined. `app_in`
+    // has no key in its store, so the phase reached the first question it asks
+    // and answered it. `NotReached` here would mean the scan stopped after the
+    // folders, which is a different job and one this build no longer has.
+    assert_eq!(
+        report.embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoKey
+        },
+        "{report:?}"
+    );
+    assert_eq!(report.ended_in, EndedIn::Embedding);
     assert_eq!(
         report.resume, None,
-        "a scan that read everything has nothing for a next one to pick up"
+        "a scan that read everything and has no key to embed with has nothing \
+         for a next one to pick up"
     );
 
     let positions = reading_positions(&snapshots);
@@ -11728,6 +11742,199 @@ fn the_scan_job_is_reachable_through_the_ipc() {
             .contains("unknown variant"),
         "the rejection should be serde's own sentence about the variant; it was {error}"
     );
+}
+
+/// 🔴 The real credential store, reached from the job thread and reached under
+/// the right name.
+///
+/// Every test of the phase itself hands it a store of its own, so all of them
+/// stay green if [`ScanDeps::production`] asks the wrong question — a reference
+/// that is not the one this application files its key under answers `Ok(None)`
+/// for a store holding a key, and every scan skips with `noKey` for ever. The
+/// pair that catches it needs both halves of one fixture: the same application,
+/// the same scan, and a key that is either there or not.
+///
+/// A model is deliberately never adopted, so the half WITH a key stops at the
+/// next question rather than reaching a provider. `noModel` against `noKey` is
+/// therefore the whole assertion, and neither value can be produced by the
+/// other's path.
+#[test]
+fn a_scan_reads_the_key_from_the_store_this_application_files_it_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a1.txt"]);
+    watch(&webview, folder.path());
+
+    let (_, without) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+    assert_eq!(
+        report_of(&without).embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoKey
+        },
+        "this application has no key entered: {without:?}"
+    );
+
+    // The key, filed exactly where this application files it — which is the
+    // fact under test.
+    mnema_secrets::store(app.state::<AppState>().credential_ref(), "a-key")
+        .expect("writing the key into the test store");
+
+    let (_, with) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+    assert_eq!(
+        report_of(&with).embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoModel
+        },
+        "the scan did not find the key this application had just stored, so the \
+         phase is reading some other reference: {with:?}"
+    );
+}
+
+/// 🔴 The real embedding pass, reached from the job thread with this
+/// application's own provider address.
+///
+/// The fake pass every other test injects proves the phase's decisions and
+/// nothing about whether the production one is wired to anything: a
+/// `ScanDeps::production` whose `embed` did nothing at all would leave all of
+/// them green and would leave every real scan reporting a finished embedding
+/// over an archive with no vectors in it.
+///
+/// The provider here is [`NO_PROVIDER`] — port 1, which refuses the connection
+/// at once — so what is asserted is that the pass really ran and really tried:
+/// an ending of `failed` with a sentence, in the embedding phase, resuming as
+/// the cheap half. The pair it separates from is `completed` with nothing sent,
+/// which is what a pass that was never entered would produce.
+#[test]
+fn a_scan_with_a_key_and_a_model_runs_the_real_embedding_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "a-key").expect("writing the key");
+    state
+        .with_index(|db| db.adopt_embedding_model("a-model", 8, "a-ref", "chunker-v1"))
+        .expect("adopting a model");
+
+    let folder = dir_holding(&["a1.txt"]);
+    watch(&webview, folder.path());
+
+    let (_, settled) = run_scan_capturing_snapshots(&app, Entry::Full, Duration::from_secs(60));
+
+    // The premise: the reading really did queue something for the pass to try
+    // to embed. Without it the pass would empty an empty queue and complete,
+    // and every assertion below would be about a run that had nothing to do.
+    let space = state
+        .with_index(|db| db.active_space())
+        .expect("reading the active space")
+        .expect("a model was adopted, so there is a space");
+    assert!(
+        state
+            .with_index(|db| db.queued_chunk_count(space))
+            .expect("counting the queue")
+            > 0,
+        "the reading pass queued nothing, so this test is not about an \
+         embedding pass at all"
+    );
+
+    let report = report_of(&settled);
+    assert_eq!(
+        report.ended_in,
+        EndedIn::Embedding,
+        "the scan never reached the embedding phase: {report:?}"
+    );
+    assert_eq!(
+        report.reason,
+        EndReason::Failed,
+        "nothing is listening on this application's provider address, so a pass \
+         that really ran cannot have completed: {report:?}"
+    );
+    assert!(
+        report
+            .message
+            .as_ref()
+            .is_some_and(|message| !message.is_empty()),
+        "the pass failed and said nothing about why: {settled:?}"
+    );
+    assert_eq!(
+        report.resume,
+        Some(Entry::EmbedOnly),
+        "a failed embedding leaves only chunks to embed: {report:?}"
+    );
+    assert!(
+        matches!(report.embedding, EmbedOutcome::Ran { .. }),
+        "a pass that ran and failed is not a pass that was never reached: \
+         {report:?}"
+    );
+    assert_eq!(
+        state
+            .with_index(|db| db.meta_get("scan.incomplete"))
+            .expect("reading the marker")
+            .as_deref(),
+        Some("0"),
+        "the folder was visited, so the marker clears whatever the embedding \
+         went on to do"
+    );
+}
+
+/// 🔴 An unfinished scan leaves a mark the settings screen can read, and the
+/// mark survives the process that made it.
+///
+/// The pair it separates is "a scan is half-done over this index" from "the
+/// last scan finished", and nothing else in the application can answer it after
+/// a crash: [`ScanState`] is a process's own memory and starts empty, so a
+/// power cut in the middle of a walk is indistinguishable from a clean start.
+///
+/// All three states are asserted, because two of them are spelled differently
+/// and mean the same thing: the marker is CLEARED by being written `"0"` and
+/// never by being removed, so an implementation reading `.is_some()` would
+/// report every index that has ever been scanned as unfinished for ever.
+///
+/// Asserted on the JSON, because a `rename_all` that stopped applying would
+/// leave `read.scanIncomplete` `undefined` on the window's side and the warning
+/// would silently never render — the same silence `pendingChunks` records one
+/// test up.
+#[test]
+fn an_unfinished_scan_leaves_a_mark_the_settings_screen_can_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let state = app.state::<AppState>();
+
+    let fresh = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        fresh["index"]["scanIncomplete"],
+        json!(false),
+        "an index no scan has ever touched is not an index with a half-done \
+         scan on it: {fresh}"
+    );
+
+    state
+        .with_index(|db| db.meta_set("scan.incomplete", "1"))
+        .expect("setting the marker");
+    let during = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        during["index"]["scanIncomplete"],
+        json!(true),
+        "the mark a scan leaves behind never reaches the window: {during}"
+    );
+
+    state
+        .with_index(|db| db.meta_set("scan.incomplete", "0"))
+        .expect("clearing the marker");
+    let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        after["index"]["scanIncomplete"],
+        json!(false),
+        "the marker is cleared by being written `0`, never by being removed, so \
+         a present row is not evidence of anything: {after}"
+    );
+
+    // Wire shape, both directions, for the reason the file-count test gives.
+    assert!(after["index"].get("scan_incomplete").is_none(), "{after}");
 }
 
 #[cfg(unix)]

@@ -265,7 +265,7 @@ pub fn start_embed_job(
 /// failed`, which is [`job::seconds_left`]'s existing contract — the rate is
 /// what the work has actually cost so far, and a refusal costs a round trip like
 /// anything else.
-fn progress_from(progress: EmbedProgress, elapsed: Duration) -> Progress {
+pub(crate) fn progress_from(progress: EmbedProgress, elapsed: Duration) -> Progress {
     Progress {
         done: progress.done,
         total: progress.total,
@@ -315,7 +315,7 @@ fn progress_from(progress: EmbedProgress, elapsed: Duration) -> Progress {
 /// no tree to have failed to read. `frozen`, `indexed`, `unchanged` and
 /// `removed` are empty or zero because they are a walk's counts and this is not
 /// one.
-fn ended_from_tally(tally: EmbedTally, total: u64, cancelled: bool) -> Ended {
+pub(crate) fn ended_from_tally(tally: EmbedTally, total: u64, cancelled: bool) -> Ended {
     Ended {
         reason: if cancelled {
             EndReason::Cancelled
@@ -354,7 +354,7 @@ fn ended_from_tally(tally: EmbedTally, total: u64, cancelled: bool) -> Ended {
 /// `refused` is the exception because the rows are already in the database when
 /// this runs — `mnema_embed::run` writes a refusal before it propagates anything
 /// — so unlike `indexed` or `removed` there is something real to report.
-fn failed_ending(done: u64, refused: u64, total: u64, message: String) -> Ended {
+pub(crate) fn failed_ending(done: u64, refused: u64, total: u64, message: String) -> Ended {
     Ended {
         refused,
         ..Ended::failed(done, total, message)

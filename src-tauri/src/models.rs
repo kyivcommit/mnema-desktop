@@ -1182,6 +1182,27 @@ pub struct IndexRead {
     pub indexed_files: i64,
     /// Unix seconds. See [`IndexRead::indexed_files`].
     pub last_indexed_at: Option<i64>,
+    /// Whether a scan started reading this index and never got all the way
+    /// round the watched folders.
+    ///
+    /// The reading pass sets the marker before its first walk and clears it only
+    /// once every folder has been visited. It is a row in the index and not a
+    /// field of [`crate::scan_state::ScanState`], which is the whole of what it
+    /// buys: the snapshot is a process's own memory and starts empty, so a
+    /// crash, a power cut or a process killed mid-walk is otherwise
+    /// indistinguishable from a clean start over a finished index.
+    ///
+    /// ⚠️ **It is not [`crate::scan_state::ReadingOutcome::complete`], and the
+    /// two answer different questions.** This one is "were the folders
+    /// visited"; that one is "was everything under them seen and reconciled". A
+    /// pass that walked every folder and met an unreadable subdirectory clears
+    /// this and leaves that `false`, which is the ordinary shape of a healthy
+    /// scan over an archive with something locked in it.
+    ///
+    /// Read inside the same snapshot as the counts above, for the reason
+    /// `pending_chunks` gives: a job committing between two reads would leave
+    /// this section describing a state the index never held.
+    pub scan_incomplete: bool,
 }
 
 /// The index half, read or refused — and never an `Err`, which is the whole
@@ -1297,6 +1318,14 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         // of the index rather than five.
         indexed_files: db.indexed_file_count()?,
         last_indexed_at: db.last_indexed_at()?,
+        // In this snapshot with the counts above, so a window drawing "an
+        // unfinished scan left this many chunks queued" is reading one moment
+        // of the index rather than two.
+        //
+        // `== Some("1")` and not `.is_some()`: the marker is cleared by being
+        // WRITTEN as `"0"`, never by being removed, so a present row is not
+        // evidence of anything on its own.
+        scan_incomplete: db.meta_get(crate::scan_job::SCAN_INCOMPLETE)?.as_deref() == Some("1"),
     }))
 }
 
@@ -1408,6 +1437,7 @@ mod tests {
             search_content_arm: true,
             indexed_files: 0,
             last_indexed_at: None,
+            scan_incomplete: false,
         }
     }
 
