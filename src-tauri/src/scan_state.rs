@@ -200,7 +200,16 @@ pub enum EndedIn {
     rename_all_fields = "camelCase"
 )]
 pub enum EmbedOutcome {
-    /// The scan ended before the embedding phase began.
+    /// The embedding engine was never called.
+    ///
+    /// ⚠️ **Not "the phase was never entered"** — [`ScanReport::ended_in`] is
+    /// what says how far the job got, and this value appears beside BOTH of its
+    /// values. A reading pass that was stopped never reaches the phase at all
+    /// (`ended_in: Reading`); a Stop landing during the key read, or a key read
+    /// that failed in a way that is not the store refusing, ends inside the
+    /// phase with the credential store already asked (`ended_in: Embedding`).
+    /// What the two have in common is the only thing this value claims: no
+    /// chunk was offered to a provider.
     NotReached,
     /// The phase was reached and declined to run, for a reason a person can
     /// act on.

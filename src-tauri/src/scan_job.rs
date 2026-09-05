@@ -417,9 +417,19 @@ fn read_every_root(
     // loop's own check is at the TOP of an iteration, so on the last folder
     // there is no next iteration to ask, and without this line the pass would
     // report a scan that finished and then hand a person's text to the provider
-    // in the phase below. It overwrites `Completed` deliberately: the folders'
-    // own rows keep saying they completed, which they did.
-    if slot.cancel_flag().load(Ordering::SeqCst) {
+    // in the phase below.
+    //
+    // 🔴 **It overwrites `Completed` and only `Completed`**, and the condition
+    // is the finding rather than a tidiness. A pass that ended `Failed`,
+    // `BrokenWorker` or `RulesNotApplied` broke out of the loop carrying the
+    // MESSAGE of the folder that stopped it, and `Cancelled` written over that
+    // leaves a diagnostic sentence about a broken worker filed under a reason
+    // that says a person pressed Stop — with `resume_for` then offering
+    // `Some(Full)` where `RulesNotApplied` owes `None`, a button that spends the
+    // time and fails the same way. The Stop is not lost: the folders' own rows
+    // and the report's `message` still say what happened, and the phase below
+    // is skipped either way because the reason is not `Completed`.
+    if outcome.reason == EndReason::Completed && slot.cancel_flag().load(Ordering::SeqCst) {
         outcome.reason = EndReason::Cancelled;
     }
 
@@ -1950,16 +1960,37 @@ mod tests {
     /// this question with silence whether or not the guard above it survived.
     #[test]
     fn a_stop_during_the_key_read_wins_whatever_the_store_answers() {
-        for (which, answer) in [
-            ("a key", a_key as fn() -> Result<Option<String>, Error>),
-            ("no key", no_key),
-            ("a store that will not answer", a_store_that_will_not_answer),
+        for (which, answer, model) in [
+            (
+                "a key",
+                a_key as fn() -> Result<Option<String>, Error>,
+                true,
+            ),
+            ("no key", no_key, true),
+            (
+                "a store that will not answer",
+                a_store_that_will_not_answer,
+                true,
+            ),
+            // 🔴 The fourth arm, and the only one where a model is NOT adopted.
+            // Without it nothing holds the cancel check ABOVE `active_space()`:
+            // the three arms above all have a model, so the check they cross is
+            // the last thing between the key and the engine, and a phase that
+            // asked "is there a model to embed into?" before putting a keychain
+            // dialog on screen — a natural refactor, with a good reason behind
+            // it — would pass all three. It would tell a person who has entered
+            // no model and pressed Stop at that dialog `Skipped{NoModel}`,
+            // `Completed`, `resume: None`: a scan that says it finished, to
+            // somebody who stopped it, with no way to carry on.
+            ("a key, with no model adopted", a_key, false),
         ] {
             let data = tempfile::tempdir().expect("a data directory");
             let folder = dir_holding(&["a1.txt"]);
             let state = app_in(data.path());
             watch(&state, folder.path());
-            adopt_a_model(&state);
+            if model {
+                adopt_a_model(&state);
+            }
 
             // The Stop lands while the store is being asked — the shape of a
             // person pressing Stop with an authorisation dialog on screen. The
@@ -1987,17 +2018,11 @@ mod tests {
             );
             let (snapshots, settled) = run_scan(&state, Entry::Full, deps);
 
-            let under = under.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let under = under.unwrap_or_else(|| {
-                panic!("no job was running while the store was asked ({which})")
-            });
-            assert!(
-                is_embedding_with_nothing_counted(&under),
-                "the credential store was asked under {under:?}, so a person \
-                 answering an authorisation dialog watches a folder name and a \
-                 reading bar for the whole of it ({which})"
-            );
-
+            // 🔴 The ending FIRST, and the phase the store was asked under
+            // second. The ending is the harm — a scan that tells somebody who
+            // pressed Stop that it completed — and an ordering assertion placed
+            // in front of it would be the line that killed the mutant, leaving
+            // the harm asserted by a line that never had to hold.
             let report = report_of(&settled);
             assert_eq!(
                 report.reason,
@@ -2025,6 +2050,20 @@ mod tests {
                 calls.load(Ordering::SeqCst),
                 0,
                 "the pass was entered after a Stop ({which})"
+            );
+
+            let under = under.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let under = under.unwrap_or_else(|| {
+                panic!(
+                    "the credential store was never asked at all, so nothing was \
+                     waited for under any phase ({which})"
+                )
+            });
+            assert!(
+                is_embedding_with_nothing_counted(&under),
+                "the credential store was asked under {under:?}, so a person \
+                 answering an authorisation dialog watches a folder name and a \
+                 reading bar for the whole of it ({which})"
             );
 
             let phases = phases(&snapshots);
@@ -2581,14 +2620,127 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A Stop during the reading wins over a missing model.
+    /// 🔴 A Stop at the boundary does not overwrite a reading pass that had
+    /// already failed.
+    ///
+    /// The mirror of `a_stop_after_the_last_root_report_still_ends_cancelled_
+    /// with_resume_full`, on the same hook and the same line of code: there,
+    /// every folder completed and the Stop is what ended the scan; here the
+    /// pass had already broken out of its loop carrying the message of the
+    /// folder that stopped it, and the Stop must not take that ending's place.
+    ///
+    /// The pair it separates is "the extraction worker could not be started"
+    /// from "somebody pressed Stop" — reported to the same person, about the
+    /// same run. An unconditional overwrite files the pool's own diagnostic
+    /// sentence under a reason that says a person stopped the scan, which is a
+    /// bug report nobody can act on, and for the endings whose `resume_for` is
+    /// `None` it also offers a button that spends the time and fails
+    /// identically.
+    ///
+    /// The worker path is a name with nothing behind it, which is what
+    /// `Pool::new` refuses — the same failure a broken installation produces,
+    /// reached without one.
+    #[test]
+    fn a_stop_at_the_boundary_does_not_overwrite_a_reading_that_had_already_failed() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = Arc::new(AppState::new(
+            data.path().to_path_buf(),
+            data.path().join("no-such-extraction-worker"),
+            "http://127.0.0.1:1".to_string(),
+            format!(
+                "mnema-desktop-scan-job-test-broken-{}",
+                data.path().display()
+            ),
+        ));
+        state.open_index().expect("the index would not open");
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::downgrade(&state);
+        let _turn = take_boundary_turn(Arc::new({
+            let fired = Arc::clone(&fired);
+            move || {
+                fired.store(true, Ordering::SeqCst);
+                if let Some(state) = stopping.upgrade() {
+                    state.cancel_job();
+                }
+            }
+        }));
+
+        let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&state, Entry::Full, deps);
+
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the hook never ran, so no Stop landed at the boundary and this test \
+             asserted nothing"
+        );
+        let reading = settled
+            .last_reading
+            .clone()
+            .expect("the scan recorded no reading pass");
+        // The premise, on the FOLDER's own row — the one thing the boundary
+        // overwrite cannot reach. Asserted there rather than on the pass, so a
+        // failure below says "the ending was overwritten" and never "the
+        // fixture did not break the pool".
+        assert_eq!(
+            reading.roots.first().map(|root| root.reason),
+            Some(EndReason::Failed),
+            "the fixture was supposed to break the extraction pool and did not, \
+             so nothing below is about a failure being overwritten: {reading:?}"
+        );
+        assert_eq!(
+            reading.reason,
+            EndReason::Failed,
+            "the folder said the extraction pool could not start and the pass \
+             reports that a person pressed Stop: {reading:?}"
+        );
+
+        let report = report_of(&settled);
+        assert_eq!(
+            report.reason,
+            EndReason::Failed,
+            "a Stop at the boundary took the place of a real failure, so the \
+             message below is filed under a reason nobody can act on: {report:?}"
+        );
+        assert!(
+            report
+                .message
+                .as_ref()
+                .is_some_and(|message| message.contains("extraction worker")),
+            "the ending kept a reason and lost the sentence that explains it: \
+             {report:?}"
+        );
+        assert_eq!(report.ended_in, EndedIn::Reading, "{report:?}");
+        assert_eq!(report.embedding, EmbedOutcome::NotReached, "{report:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a pass that never read a folder went on to embed"
+        );
+    }
+
+    /// A reading pass stopped over an index with nothing to embed into is still
+    /// a Stop.
     ///
     /// The pair: "the person stopped it" against "there was nothing to embed
     /// anyway". A scan that reported `Completed` because no model was chosen
     /// would be telling somebody who pressed Stop that their scan finished, and
     /// offering them no way to carry on — `Skipped` resumes as `None`.
+    ///
+    /// ⚠️ **It says nothing about the ORDER inside the embedding phase**, and an
+    /// earlier version of this comment claimed it did. The Stop is raised on a
+    /// `Reading` announcement, so `read_every_root`'s own early return ends the
+    /// job and `embed_after` is never entered: the line that decides this
+    /// outcome is that return, not the cancel check in front of
+    /// `active_space()`. The fourth arm of
+    /// `a_stop_during_the_key_read_wins_whatever_the_store_answers` is what
+    /// holds that ordering, and it needs the Stop to land during the KEY READ
+    /// to reach it at all.
     #[test]
-    fn a_stop_during_the_reading_wins_over_a_missing_model() {
+    fn a_reading_stopped_over_an_index_with_no_model_is_still_a_stop() {
         let data = tempfile::tempdir().expect("a data directory");
         let folder = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
         let state = app_in(data.path());

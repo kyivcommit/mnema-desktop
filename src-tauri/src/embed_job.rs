@@ -81,6 +81,15 @@ pub(crate) const BATCH: usize = 32;
 /// own doc comment argues against for the credential store. The refusal reaches
 /// the window as an ending carrying that crate's sentence, which is the same
 /// route every other failure of the pass takes.
+///
+/// ⚠️ **Not registered.** It is out of `invoke_handler!` as of the scanning
+/// job's embedding phase, so no window can reach it and the `#[tauri::command]`
+/// attribute above is inert. It is kept only because ~48 test functions across
+/// `tests/commands.rs`, `tests/model_commands.rs` and `tests/mask_differential.rs`
+/// drive it as a fixture, and those assert on the `Ended` JSON this `Channel`
+/// carries — a shape the scanning job does not have, since it writes a snapshot
+/// and announces. Task 3b is what moves the fixtures onto the scan job and
+/// deletes this; `ui/` still names it until Task 6.
 #[tauri::command(async)]
 pub fn start_embed_job(
     state: State<'_, AppState>,

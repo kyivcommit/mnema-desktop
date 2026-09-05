@@ -52,6 +52,15 @@ use crate::state::AppState;
 /// but for as long as this call runs `job_status` would report a job
 /// running for a call that was always going to fail — a page polling it at
 /// the wrong moment sees a lie, however short-lived.
+///
+/// ⚠️ **Not registered.** It is out of `invoke_handler!` as of the scanning
+/// job's embedding phase, so no window can reach it and the `#[tauri::command]`
+/// attribute above is inert. It is kept only because ~48 test functions across
+/// `tests/commands.rs`, `tests/model_commands.rs` and `tests/mask_differential.rs`
+/// drive it as a fixture, and those assert on the `Ended` JSON this `Channel`
+/// carries — a shape the scanning job does not have, since it writes a snapshot
+/// and announces. Task 3b is what moves the fixtures onto the scan job and
+/// deletes this; `ui/` still names it until Task 6.
 #[tauri::command(async)]
 pub fn start_walk_job(
     state: State<'_, AppState>,

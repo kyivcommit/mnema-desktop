@@ -350,27 +350,34 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // moved by the time it was read — the same staleness the paragraph above is
     // about, committed one paragraph later.
     //
-    // Measured on this branch: 31 lines, of which one is `app_prefs`' own doc
-    // comment naming the attribute rather than carrying it, so 30 `(async)`
-    // commands — against 5 deliberately blocking ones (`start_probe_job`,
-    // `job_status`, `cancel_job`, `get_locale`, `set_locale`), of which
-    // `cancel_job` is the counterweight below. A grep for the bare
-    // `#[tauri::command]` overcounts in the same way and for the same reason:
-    // three doc comments name it without carrying it, `set_hotkey`'s,
-    // `change_hotkey`'s and the one above `models::key`. The loop below asks 11
-    // of the 30, so 19 are checked by nothing here.
+    // Measured on this branch: 33 lines, of which two are prose naming the
+    // attribute rather than carrying it (`prefs.rs:386` and `:512`), so 31
+    // `(async)` commands — against 5 deliberately blocking ones
+    // (`start_probe_job`, `job_status`, `cancel_job`, `get_locale`,
+    // `set_locale`), of which `cancel_job` is the counterweight below. A grep
+    // for the bare `#[tauri::command]` overcounts in the same way and for the
+    // same reason: three doc comments name it without carrying it,
+    // `set_hotkey`'s, `change_hotkey`'s and the one above `models::key`.
+    //
+    // 🔴 Two of the 31 are NOT in `invoke_handler!` — `start_walk_job` and
+    // `start_embed_job`, unregistered with the scanning job's embedding phase —
+    // so their attributes are inert and they cannot be asked from here at all.
+    // They were on this list until then, and were replaced by `start_scan_job`
+    // rather than dropped: the reason they were here (a person waits on them
+    // from the folder screen while a job holds the index mutex) is now that
+    // command's. That leaves 29 reachable; the loop below asks 10 of them, so
+    // 19 are checked by nothing here.
     //
     // That is a gap this branch did not create and does not close, written
     // down rather than left for the list's shape to imply it was considered.
-    // What the eight above have in common is that a person waits on them from
+    // What the seven above have in common is that a person waits on them from
     // the folder screen while a job holds the index mutex; the three PR 9 ones
     // are here for the sharper reason written beside them. The rest is one
     // enumeration and belongs to whoever widens it.
     for cmd in [
         "open_index",
         "search",
-        "start_walk_job",
-        "start_embed_job",
+        "start_scan_job",
         "list_exclusions",
         "exclude_subfolder",
         "include_subfolder",
@@ -2404,114 +2411,6 @@ fn a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed() {
         ending["reason"],
         json!("completed"),
         "a walk nobody stopped must still complete: {ending}"
-    );
-}
-
-/// The channel a real webview passes is a string of this shape. Nothing
-/// receives the messages here — `run_walk_to_completion` above is what
-/// proves the walk itself works, by calling the command function directly so
-/// its `Channel` has a real callback behind it. What this proves is narrower
-/// and just as necessary: that `start_walk_job` is in `invoke_handler!` at
-/// all, and that its arguments arrive under the name the JavaScript side
-/// sends them by. Neither is implied by the function existing and working
-/// when called directly, the same reason `the_probe_job_is_reachable_
-/// through_the_ipc` exists alongside the tests that call `start_probe_job`
-/// straight from Rust.
-#[test]
-fn the_walk_job_is_reachable_through_the_ipc() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-    let fixture = fixture_dir();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": fixture.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
-
-    call(
-        &webview,
-        "start_walk_job",
-        json!({ "rootId": root, "onProgress": "__CHANNEL__:9" }),
-    )
-    .expect("start_walk_job was rejected");
-
-    let error = call(
-        &webview,
-        "start_walk_job",
-        json!({ "root_id": root, "on_progress": "__CHANNEL__:10" }),
-    )
-    .expect_err("the snake_case argument names were accepted");
-    assert!(
-        error.as_str().unwrap_or_default().contains("rootId"),
-        "the rejection should name the missing argument; it was {error}"
-    );
-
-    // The job started above is real and running over a real (tiny) fixture.
-    // Letting it finish before `app` and the temp dirs drop keeps this test
-    // from racing its own teardown.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        !app.state::<AppState>().job_is_running(),
-        "the walk job never released the slot"
-    );
-}
-
-/// The same narrow question for the embedding job: is it in `invoke_handler!`
-/// at all, and does its one argument arrive under the name JavaScript sends it
-/// by.
-///
-/// It is asked here rather than in `tests/model_commands.rs`, where the job's
-/// behaviour is tested, because that file calls the command function directly
-/// and would stay green through exactly the mistake this catches — a `pub`
-/// command that compiles and is simply missing from a macro's list, which
-/// warns nowhere and fails only on a screen no gate runs.
-///
-/// **The call is expected to fail**, and that is what proves it was reached:
-/// `app_in`'s store has no key in it, so the command refuses for a reason of
-/// its own — `Error::NoKey` — rather than being refused by name before it
-/// runs. Nothing is started and no slot is taken, which is why this test
-/// needs no teardown of its own.
-#[test]
-fn the_embed_job_is_reachable_through_the_ipc() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-
-    let refusal = call(
-        &webview,
-        "start_embed_job",
-        json!({ "onProgress": "__CHANNEL__:11" }),
-    )
-    .expect_err("this application has no key entered, so the job cannot start");
-    assert_ne!(
-        error_text(&refusal),
-        not_registered("start_embed_job"),
-        "the command the window presses Embed to reach is not in `invoke_handler!`"
-    );
-
-    let renamed = call(
-        &webview,
-        "start_embed_job",
-        json!({ "on_progress": "__CHANNEL__:12" }),
-    )
-    .expect_err("the snake_case argument name was accepted");
-    assert!(
-        error_text(&renamed).contains("onProgress"),
-        "the rejection should name the missing argument; it was {renamed}"
-    );
-
-    assert!(
-        !app.state::<AppState>().job_is_running(),
-        "a call that was refused before it started anything left the job slot taken"
     );
 }
 
@@ -11705,9 +11604,14 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_report
     );
 }
 
-/// The narrow question `the_walk_job_is_reachable_through_the_ipc` asks for the
-/// walk: is `start_scan_job` in `invoke_handler!` at all, and does its one
-/// argument arrive under the name and in the spelling the window sends.
+/// The narrow question `the_probe_job_is_reachable_through_the_ipc` asks for the
+/// probe: is `start_scan_job` in `invoke_handler!` at all, and does its one
+/// argument arrive under the name and in the spelling the window sends. Neither
+/// is implied by the function existing and working when called directly.
+///
+/// It is now the ONLY job command a window can reach: `start_walk_job` and
+/// `start_embed_job` were taken out of `invoke_handler!` with the scanning job's
+/// embedding phase, and their own versions of this test went with them.
 ///
 /// `entry` is the argument, and it is an enum rather than a string, so the pair
 /// this separates is "the window's two entry points reach the command" from
