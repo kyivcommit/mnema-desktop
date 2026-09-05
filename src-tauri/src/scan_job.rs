@@ -494,10 +494,14 @@ impl ReadingOutcome {
     /// Adds one folder's answer to the pass.
     ///
     /// `complete` is an AND and every counter is a sum, both over the folders
-    /// that were READ and not over the folders that exist: a pass that stopped
-    /// at the second of seven has nothing to say about the other five, and
-    /// counting them as complete is the claim that would draw a person a
-    /// finished scan over an index missing most of their archive.
+    /// that ANSWERED — this function is the only writer of either, and a folder
+    /// the pass never reached never gets here. So a pass stopped at the second
+    /// of seven leaves `complete` describing the one folder it read, `true` if
+    /// that folder was fine. That is the honest reading of "every folder was
+    /// read completely and reconciled" over a set of one, and it is why
+    /// `roots_read` against `root_count` is the separate question a window has
+    /// to ask as well; [`crate::scan_state::ReadingOutcome::complete`] says so
+    /// on the field itself.
     ///
     /// 🔴 **Two conditions per folder, not one.** A folder counts towards
     /// `complete` only if it was read whole AND it ended `Completed`, because

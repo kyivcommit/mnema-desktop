@@ -294,11 +294,19 @@ pub struct ReadingOutcome {
     /// stay in the index and stay searchable — the same class of leftover an
     /// unreadable subtree produces, arrived at from the other direction.
     ///
-    /// It is therefore `false` in three shapes that a window must not draw as a
-    /// finished scan: a folder only partly seen, a folder never reconciled, and
-    /// a pass that stopped before reaching some of its folders. `reason` is a
-    /// separate question and stays `Completed` in the first two, because the
-    /// JOB did run to the end — see the field above.
+    /// It is therefore `false` in two shapes that a window must not draw as a
+    /// finished scan: a folder only partly seen, and a folder never reconciled.
+    /// `reason` is a separate question and stays `Completed` in both, because
+    /// the JOB did run to the end — see the field above.
+    ///
+    /// ⚠️ **It says nothing about folders the pass never reached**, and the
+    /// quantifier at the top is why: it is `all` over `roots`, which holds only
+    /// the folders that ANSWERED. A pass stopped between two folders breaks
+    /// before it absorbs anything, so a Stop after one healthy folder of seven
+    /// leaves this `true`. The fields that answer "were all of them reached" are
+    /// [`ReadingOutcome::roots_read`] against [`ReadingOutcome::root_count`],
+    /// and a window drawing a finished scan owes both comparisons — this one
+    /// and that one.
     pub complete: bool,
     /// How many folders answered — with a report or with an error. Never more
     /// than `root_count`, and less whenever the pass stopped early.
