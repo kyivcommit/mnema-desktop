@@ -757,13 +757,38 @@ mod tests {
     /// blocks for as long as a job holds the index (a folder removal alone,
     /// on the order of twenty seconds), so a `with_index` call reachable from
     /// there would freeze every window redraw and every menu click for that
-    /// long. It protects only the ONE call site this file writes today —
-    /// renaming the closure, splitting it into a named function, or a
-    /// `with_index` reached indirectly through a function this test cannot
-    /// see into (`tray::refresh_tray` itself, or anything it calls) would
-    /// slip straight past it. A `#[test]` was chosen over nothing because
-    /// nothing is a worse guard still; if a reviewer would rather have this as
-    /// a mutation-harness case instead, that is Task 11's to make, not this
+    /// long.
+    ///
+    /// 🔴 **Review round 1, Important 1 — a first-match `find` picks the wrong
+    /// closure and is unfalsifiable against itself.** Two things were wrong
+    /// with the original version, and both are fixed here rather than only
+    /// documented: (1) `src.find(needle)` took the FIRST occurrence in the
+    /// whole file, so a second `run_on_main_thread(move || {` added anywhere
+    /// earlier in `lib.rs` (Tasks 6/10 both touch `.setup`) would silently
+    /// steal the match and this test would go on passing while the real
+    /// closure grew a `with_index`; (2) the needle was also this test's OWN
+    /// string literal, so `find` could never return `None` and the "moved,
+    /// renamed, or removed" branch was dead code. The fix: search only the
+    /// PRODUCTION half of the file — everything above `#[cfg(test)]`, which
+    /// this test's own source (including its needle and its `with_index`
+    /// literal) never reaches — and require EXACTLY one match there. Zero
+    /// matches (renamed/removed) and two-or-more matches (a second hop stole
+    /// or shares the search) each fail with their own message instead of one
+    /// swallowing the other. The needle is built with `concat!` on top of
+    /// that even so: splitting `"run_on_main_thread"` from `"(move || {"`
+    /// means no future refactor that widens the search region can make this
+    /// test's own source satisfy its own search by accident.
+    ///
+    /// It still protects only the ONE call site this file writes today —
+    /// splitting the closure into a named function, or a `with_index` reached
+    /// indirectly through a function this test cannot see into
+    /// (`tray::refresh_tray` itself, or anything it calls) would slip straight
+    /// past it, and a genuine SECOND `run_on_main_thread` hop added above the
+    /// observer needs a guard of its own (or this one taught to check both) —
+    /// this test can only say "not exactly one," not which one is the real
+    /// observer. A `#[test]` was chosen over nothing because nothing is a
+    /// worse guard still; if a reviewer would rather have this as a
+    /// mutation-harness case instead, that is Task 11's to make, not this
     /// one's.
     #[test]
     fn the_main_thread_closure_never_touches_the_index() {
@@ -771,10 +796,41 @@ mod tests {
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("lib.rs could not read its own source at {path:?}: {e}"));
 
-        let needle = "run_on_main_thread(move || {";
-        let call_at = src
-            .find(needle)
-            .expect("the observer's main-thread hop moved, was renamed, or was removed");
+        // Only the PRODUCTION half of the file is a valid haystack — this
+        // test's own module (its needle literal, its `with_index` literal,
+        // any decoy this test itself might one day contain) sits below
+        // `#[cfg(test)]` and must never be searched, or a match against this
+        // test's own source is indistinguishable from a match against the
+        // real closure.
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        // `concat!` rather than one string literal: the point of restricting
+        // the search to `production` only holds as long as this needle
+        // cannot appear as a contiguous substring of the test's OWN source
+        // (which is excluded here, but a future reader who widens the region
+        // should not get a false green for free) — splitting the call name
+        // from its argument list means no single literal in this file spells
+        // the whole needle out.
+        let needle = concat!("run_on_main_thread", "(move || {");
+
+        let occurrences: Vec<usize> = production.match_indices(needle).map(|(i, _)| i).collect();
+        let call_at = match occurrences.as_slice() {
+            [one] => *one,
+            [] => panic!(
+                "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
+                 was renamed, or was removed"
+            ),
+            many => panic!(
+                "found {} occurrences of `{needle}` above #[cfg(test)] — this guard only knows \
+                 how to check ONE `run_on_main_thread` closure and cannot tell which is the \
+                 observer's; a second call site needs a guard of its own or this one adapted to \
+                 check all of them. Byte offsets: {many:?}",
+                many.len()
+            ),
+        };
         let body_start = call_at + needle.len();
 
         // Balance braces from just after the closure's opening `{` to find
@@ -782,7 +838,7 @@ mod tests {
         // particular length or shape for what is inside.
         let mut depth: i32 = 1;
         let mut body_end = body_start;
-        for (offset, ch) in src[body_start..].char_indices() {
+        for (offset, ch) in production[body_start..].char_indices() {
             match ch {
                 '{' => depth += 1,
                 '}' => {
@@ -801,7 +857,7 @@ mod tests {
              not the invariant it protects"
         );
 
-        let body = &src[body_start..body_end];
+        let body = &production[body_start..body_end];
         assert!(
             !body.contains("with_index"),
             "a `with_index` call reached the main-thread closure — this would block the whole \

@@ -170,6 +170,12 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 /// pluralizes the same as its positive twin rather than panicking or picking
 /// arbitrarily.
 pub fn files_word(lang: Lang, n: i64) -> &'static str {
+    // Review round 1, Minor 3: this used to sit inside the Ukrainian arm
+    // only, which made the doc comment above false for the English one —
+    // `files_word(En, -1)` answered "files" while `files_word(Uk, -1)`
+    // answered «файл». Taken here, before the `match`, so BOTH arms decide
+    // off the magnitude the doc comment promises.
+    let n = n.unsigned_abs();
     match lang {
         Lang::En => {
             if n == 1 {
@@ -179,7 +185,6 @@ pub fn files_word(lang: Lang, n: i64) -> &'static str {
             }
         }
         Lang::Uk => {
-            let n = n.unsigned_abs();
             let last_two = n % 100;
             let last_one = n % 10;
             if (11..=14).contains(&last_two) {
@@ -506,19 +511,45 @@ mod tests {
     /// singular form same as 1, while 11 ends in 1 and IS in 11–14, so it takes
     /// the plural — a naive "n % 10 == 1 → singular" rule would answer «файл»
     /// for both and go red only on this one row.
+    ///
+    /// Review round 1, Minor 5: `0`, `10`, `20`, `100` added — each ends in 0,
+    /// which none of the rows above do, and each is the rule's own boundary
+    /// rather than a value inside one of its bands. `0` in particular is the
+    /// state a fresh install's tray is in, pinned only indirectly before this
+    /// (through `Idle`'s «Проскановано: 0 файлів») — this puts it in the rule's
+    /// own table instead of relying on that one caller to keep exercising it.
     #[test]
     fn ukrainian_file_count_takes_the_slavic_plural() {
         for (n, word) in [
+            (0, "файлів"),
             (1, "файл"),
             (2, "файли"),
             (5, "файлів"),
+            (10, "файлів"),
             (11, "файлів"),
+            (20, "файлів"),
             (21, "файл"),
             (22, "файли"),
             (25, "файлів"),
+            (100, "файлів"),
             (111, "файлів"),
         ] {
             assert_eq!(files_word(Lang::Uk, n), word, "n = {n}");
+        }
+    }
+
+    /// Review round 1, Minor 3: `files_word`'s doc claims the magnitude alone
+    /// decides, in both languages — the negative row is what makes that a
+    /// tested claim rather than a sentence about the Ukrainian arm only.
+    /// −1 takes the singular the SAME as 1 (not "files", which `n == 1`
+    /// alone, without `unsigned_abs`, would have answered); −3 takes the
+    /// plural the same as 3, in both languages at once so a fix that moved
+    /// `unsigned_abs` into only one arm again would still go red here.
+    #[test]
+    fn a_negative_count_pluralizes_the_same_as_its_positive_twin() {
+        for (n, uk, en) in [(-1, "файл", "file"), (-3, "файли", "files")] {
+            assert_eq!(files_word(Lang::Uk, n), uk, "n = {n}");
+            assert_eq!(files_word(Lang::En, n), en, "n = {n}");
         }
     }
 

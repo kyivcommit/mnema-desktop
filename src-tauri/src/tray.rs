@@ -151,7 +151,11 @@ pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String 
                         format!("{} {} %", locale::t(lang, Key::TrayReadingPercent), percent)
                     }
                     None => {
-                        let n = counts.done as i64;
+                        // Review round 1, Minor 4: `as i64` wraps negative
+                        // above `i64::MAX` — unreachable for a real file
+                        // count, but `try_from`/`unwrap_or` says the same
+                        // thing without a cast that can misrepresent one.
+                        let n = i64::try_from(counts.done).unwrap_or(i64::MAX);
                         format!(
                             "{} {} {}",
                             locale::t(lang, Key::TrayReadingCount),
