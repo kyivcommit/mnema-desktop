@@ -336,6 +336,8 @@ test('a fresh embedding pass says it is starting rather than showing 0 of 0, and
   await openWindow();
 
   await emit(embedding({ done: 0, total: 0 }));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(visible(screen.getByTestId('indexing-pass'))).not.toBe('Читання теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts'))).toBe('Вбудовування починається…');
 
   await emit(embedding({ done: 3, total: 10 }));
@@ -540,6 +542,37 @@ test('a lastReading renders in an idle snapshot too, not only an ended one', asy
   expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
 });
 
+// Important 2 (review): the doc comment above `readingBlock` claims it is
+// `null` "exactly when `snapshot.kind === 'running'`", and nothing built that
+// state before now — every running fixture in this file spreads `IDLE_SCAN`,
+// whose `lastReading` is `null`, so "running WITH a `lastReading`" was never
+// exercised. It is not a rare shape: `scan_job.rs` leaves `last_reading`
+// untouched across an `embedOnly` run, so every resumed embedding (the R2-1
+// sequence below included) passes through exactly this pair of states.
+test('a running phase hides the reading block, its root row and its frozen row too, even with a lastReading on hand — and a following ended snapshot brings them all back', async () => {
+  await openWindow();
+  const partlyRead = readingOutcome({
+    reason: 'completed', complete: false,
+    roots: [rootOutcome({
+      rootPath: '/a', complete: false,
+      frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+    })],
+  });
+
+  await emit({ ...embedding({ done: 1, total: 4 }), lastReading: partlyRead });
+
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(screen.queryByTestId('indexing-walk-outcome')).toBeNull();
+  expect(screen.queryByTestId('indexing-root-row')).toBeNull();
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
+
+  await emit(ended({}, partlyRead));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+});
+
 // The reading block's own copy of the busy sentence — sourced from
 // `lastReading.contended`, not from a running phase's live counts — and it is
 // what lets the fact survive past the ending. Both directions.
@@ -547,7 +580,10 @@ test('the reading block\'s own busy sentence survives past the ending, and is si
   await openWindow();
 
   await emit(ended({}, readingOutcome({ contended: 3 })));
-  expect(screen.getByTestId('indexing-contended')).toBeTruthy();
+  expect(visible(screen.getByTestId('indexing-contended'))).toBe(
+    'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав.'
+    + ' Наступне сканування спробує їх знову.',
+  );
 
   await emit(ended({}, readingOutcome({ contended: 0 })));
   expect(screen.queryByTestId('indexing-contended')).toBeNull();
@@ -678,7 +714,13 @@ test('an embedding skipped for no key, no model, or a store that did not answer 
     .toBe('Вбудовування не запущено: сховище ключів не відповіло: locked');
 });
 
-test('an embedding that never reached the phase says nothing at all', async () => {
+// The pair Important 1 separates: `notReached` beside `endedIn: 'reading'`
+// (here) says nothing, because that ending is the reading block's own
+// (`lastReading.reason` names the very same event); `notReached` beside
+// `endedIn: 'embedding'` (the Stop-during-key-read fixture in "the label
+// follows the reason…" above) is the one shape that DOES earn a sentence,
+// because it is the only statement that ending has.
+test('an embedding that never reached the phase, and never left the reading phase either, says nothing at all', async () => {
   await openWindow();
 
   await emit(endedReading('completed'));
@@ -702,6 +744,12 @@ test('the label follows the reason, and the entry follows what the report named 
     { reason: 'cancelled', endedIn: 'embedding', embedding: { kind: 'notReached' }, resume: 'embedOnly' },
     readingOutcome(),
   ));
+  // Stop pressed while the credential store was still being read: the
+  // embedding phase was claimed and never offered a chunk to a provider, but
+  // it DID end, and the reading block above (a completed reading from an
+  // earlier pass) says nothing about it — this sentence is the only place
+  // that stop is stated at all (review, Important 1).
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування зупинено на ваше прохання.');
   expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
   await fireEvent.click(screen.getByTestId('indexing-continue'));
   expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'embedOnly' });
@@ -790,12 +838,15 @@ test('the last reading\'s warning outlives a continued embedding, across an unmo
   expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
 
-  // A LATER reading whose `complete` is true clears both the row and the
-  // frozen list — the warning is sticky, not permanent.
+  // A LATER reading SUPERSEDES the earlier one — the warning is sticky, not
+  // permanent. The top-line sentence goes back to plain `completed` (a new
+  // reading, read in full); the row goes because this reading's own root is
+  // `completed`; the frozen list goes because that root's `frozen` is empty.
   await emit(ended(
     { reason: 'completed', endedIn: 'embedding', embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, resume: null },
     readingOutcome({ reason: 'completed', complete: true }),
   ));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.completed.uk);
   expect(screen.queryByTestId('indexing-root-row')).toBeNull();
   expect(screen.queryByTestId('indexing-frozen')).toBeNull();
 });

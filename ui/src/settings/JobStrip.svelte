@@ -113,7 +113,7 @@
     // fall back to the message this root actually carries, and — because
     // `message` is `Option<String>` on the wire — to the table's own sentence
     // for the kind when there is none, so a row is never blank.
-    return t('indexing_root_failed', { rootPath: root.rootPath, message: root.message ?? t(WALK_ENDED[kind]) });
+    return t('indexing_root_message', { rootPath: root.rootPath, message: root.message ?? t(WALK_ENDED[kind]) });
   }
 
   // A frozen entry PREFIXED with the root it belongs to: `Frozen.prefix` is
@@ -256,9 +256,23 @@
     if (snapshot.kind !== 'ended') return null;
     const report = snapshot.report;
     const embedding = report.embedding;
-    // Not entered at all: neither a walk that broke nor one with nothing left
-    // to embed offered a chunk to a provider, and there is nothing to say.
-    if (embedding.kind === 'notReached') return null;
+    // A report that ended in the READING phase says nothing here, whatever
+    // `embedding` holds — that ending is the reading block's own
+    // (`lastReading.reason` names the very same event), and a `notReached`
+    // sitting beside it is ordinary (the embedding phase was never reached),
+    // not a second thing to announce. Taken FIRST, before `embedding.kind` is
+    // read at all: a `ran`/`skipped` outcome cannot outrank it either
+    // (review, Important 1).
+    if (report.endedIn !== 'embedding') return null;
+    // `notReached` here means the phase was claimed and then stopped before a
+    // chunk was offered to a provider — `scan_job.rs` writes this only with
+    // `cancelled` or `failed`, most often a Stop pressed while the credential
+    // store was still being read. Task 6's strip drew `ENDED[report.reason]`
+    // unconditionally and said so; this is that sentence, restored for the
+    // one phase whose ending would otherwise go unstated.
+    if (embedding.kind === 'notReached') {
+      return { sentence: t(EMBED_ENDED[report.reason]), result: null as string | null };
+    }
     if (embedding.kind === 'skipped') {
       const why = embedding.why;
       if (why.kind === 'noKey') return { sentence: t('indexing_note_no_key'), result: null as string | null };
@@ -268,10 +282,7 @@
         result: null as string | null,
       };
     }
-    // `ran`. Guarded on `endedIn` because the sentence table is the
-    // embedding's own — a `ran` outcome beside `endedIn: 'reading'` is not a
-    // shape this build can explain, so it says nothing rather than guess.
-    if (report.endedIn !== 'embedding') return null;
+    // `ran`.
     return {
       sentence: t(EMBED_ENDED[report.reason]),
       result: t('indexing_embed_result', {

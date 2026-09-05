@@ -73,7 +73,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
   | 'settings_masks_already_stored'
-  | 'indexing_reading_root' | 'indexing_walk_running'
+  | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
@@ -89,7 +89,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
   | 'indexing_frozen_unreadable_directory'
   | 'indexing_roots_read' | 'indexing_root_partly_read' | 'indexing_root_unavailable'
-  | 'indexing_root_volume_missing' | 'indexing_root_failed'
+  | 'indexing_root_volume_missing' | 'indexing_root_message'
   | 'indexing_resume' | 'indexing_retry'
   | 'indexing_note_no_key' | 'indexing_note_no_model'
   | 'indexing_cancel'
@@ -630,7 +630,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // behind it). No trailing full stop: the sentence ends in an interpolated
     // path, and "…/x." reads as part of the path.
     indexing_reading_root: 'Читання теки {rootIndex} з {rootCount}: {rootPath}',
-    indexing_walk_running: 'Триває читання теки.',
     // The embedding pass takes no root and covers the whole index
     // (embed_job.rs), so neither of these two may name the folder that was
     // pressed.
@@ -763,7 +762,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // thing that tells a broken pool, a missing worker binary and a panic
     // apart, per root the same way `indexing_failure_message` does for the
     // whole scan.
-    indexing_root_failed: '{rootPath}: {message}',
+    indexing_root_message: '{rootPath}: {message}',
     // D-m's labels: a person who pressed Stop is RESUMING, one whose scan
     // failed is RETRYING — one word for both would read a failure as their
     // own doing.
@@ -1049,7 +1048,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
     indexing_reading_root: 'Reading folder {rootIndex} of {rootCount}: {rootPath}',
-    indexing_walk_running: 'The folder is being read.',
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_removing: 'Removing the folder {rootPath}…',
@@ -1083,7 +1081,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_root_partly_read: '{rootPath}: partly read',
     indexing_root_unavailable: '{rootPath}: the folder is unavailable',
     indexing_root_volume_missing: '{rootPath}: the volume is missing',
-    indexing_root_failed: '{rootPath}: {message}',
+    indexing_root_message: '{rootPath}: {message}',
     indexing_resume: 'Resume',
     indexing_retry: 'Retry',
     indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
