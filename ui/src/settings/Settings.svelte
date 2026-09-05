@@ -29,11 +29,12 @@
   const jobs = createJobController();
 
   // The settings window can be opened in the middle of a run it never started,
-  // and `set_embedding_model` takes the same slot without ever sending an
-  // ending. `job_status` is the only honest answer to "is something running",
-  // and the controller is careful to write only where it cannot destroy
-  // something better.
-  onMount(() => { void jobs.syncFromStatus(); });
+  // and the tray can start one while it is open. `mount` opens the window's
+  // subscription to `scan-progress` and takes the first snapshot; it is
+  // synchronous and returns a synchronous teardown, which is exactly what
+  // Svelte's `onMount` calls on destroy — an `async` callback would return a
+  // promise Svelte keeps and never calls, leaving the listener behind.
+  onMount(() => jobs.mount());
 
   const modelsLabel = $derived.by(() => { void $locale; return t('settings_nav_models'); });
   const foldersLabel = $derived.by(() => { void $locale; return t('settings_nav_folders'); });

@@ -7,9 +7,9 @@
     listTree, addWatchedFolder, removeWatchedFolder,
     listSubfolders, listExclusions, excludeSubfolder, includeSubfolder,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
-    type TreeListing, type TreeRoot,
+    type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
-  import type { JobController, JobPass, JobPhase } from './jobs';
+  import type { JobController } from './jobs';
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
   //
@@ -522,7 +522,7 @@
   function abandonChangedFolder(rootId: number) {
     patch(rootId, { pending: null });
     rootChanged = true;
-    reread(null); // no ending, so no pass — and no question left to withdraw
+    reread(false); // no ending, so nothing to withdraw
   }
 
   // 🔴 The re-read is not a nicety: a count taken from the listing this window
@@ -839,27 +839,32 @@
   // window; the alternative is a second record of what is open, and
   // `panel.tree` already answers that question.
   //
-  // 🔴 PR 8a, Task 8 fix round 2. `reread`'s `pass` is the ending's own, `null`
-  // only at `onMount` where there is no ending to have a pass. The RE-READ
-  // below stays unconditional — an embedding pass moves `list_exclusions`'
-  // `existsOnDisk` and `list_subfolders` exactly as a walk can (D29 sends the
-  // same rename window through either). The WITHDRAWAL does not: it is spelled
-  // "a scan ended", and only a walk is one. A walk reads ONE folder and moves
-  // the two numbers `Pending` freezes (`jobs.ts`'s own words); an embedding
-  // pass covers the whole index, takes no root, and changes no rule and no file
-  // count for the folder the question is about — so a person's still-open press
-  // has nothing invalidated to withdraw it over. Reviewed and reproduced:
-  // raising an exclude question while a CHAINED embedding pass runs, then
-  // letting that pass end, used to discard the press and print "a scan ended"
-  // when none had. That is why the two live in separate functions, and fix
-  // round 1 then found the second reason they have to.
+  // 🔴 PR 8a, Task 8 fix round 2, and the finding still stands even though the
+  // shape it was written against is gone. The RE-READ below is unconditional —
+  // any phase of a scan moves `list_exclusions`' `existsOnDisk` and
+  // `list_subfolders` (D29 sends the same rename window through either). The
+  // WITHDRAWAL is narrower, because it is spelled "a scan ended": what makes a
+  // pending question wrong is a READING pass having run, which is what moved
+  // the two numbers `Pending` freezes. An embedding pass changes no rule and no
+  // file count for the folder the question is about, so a still-open press has
+  // nothing invalidated to withdraw it over. Reviewed and reproduced: raising
+  // an exclude question while the embedding ran, then letting it end, used to
+  // discard the press and print "a scan ended" when none had.
+  //
+  // ⚠️ **That distinction is NOT drawn in this commit.** The chained pass it
+  // was expressed in terms of no longer exists — a scan is one job with one
+  // ending — so `reread(true)` fires on every one of them, which is the safe
+  // direction and over-eager for an `embedOnly` run. **Task 9** restores it on
+  // `ScanState.readSeq`, the count of reading passes that have ENDED. The two
+  // still live in separate functions, which is what makes that a one-line
+  // change there.
 
-  // 🔴 The question goes, and not in silence, ONLY on a walk's own ending.
-  // Its two numbers were read from a `list_tree` taken BEFORE this scan,
+  // 🔴 The question goes, and not in silence, when a scan ends.
+  // Its two numbers were read from a `list_tree` taken BEFORE that scan,
   // and `Pending` freezes them on purpose: they cannot be corrected in
   // place without renumbering a sentence somebody is part way through
-  // reading, and they cannot be left standing, because a walk ending is
-  // precisely the event that makes them wrong. The include question is no
+  // reading, and they cannot be left standing, because a reading pass ending
+  // is precisely the event that makes them wrong. The include question is no
   // safer — it carries `existsOnDisk`, the one fact the rename that
   // produced this defect invalidated. So the question is withdrawn and the
   // panel says which folder it was about; pressing again asks it afresh
@@ -872,10 +877,10 @@
   // 🔴 Fix round 1, I1. Its own function, called from `reread` BEFORE any I/O
   // starts, and that placement is the whole finding. It used to sit at the top
   // of `rereadPanels`, which runs inside `refresh().then(…)` — so a rejected
-  // `list_tree` at a walk's ending took the withdrawal down with it, and the
-  // ending is consumed exactly once (`seen = phase` advances first), so it
-  // never came back. The next successful `refresh` — a chained embedding
-  // ending, an add, a remove, none of which withdraw anything — then cleared
+  // `list_tree` at a scan's ending took the withdrawal down with it, and the
+  // ending is consumed exactly once (`seen` advances first), so it never came
+  // back. The next successful `refresh` — a later ending, an add, a remove,
+  // none of which withdraw anything — then cleared
   // `loadError` and redrew the panel WITH the question still standing, stating
   // pre-scan numbers as current and carrying no `withdrawnNote` to say a scan
   // had happened underneath it.
@@ -901,11 +906,19 @@
     }
   }
 
-  function reread(pass: JobPass | null) {
+  function reread(withdraw: boolean) {
     // Synchronous, and first: see `withdrawQuestions`. It reads no I/O and
-    // cannot fail, so there is no path on which a walk's ending leaves a
+    // cannot fail, so there is no path on which a scan's ending leaves a
     // pending question standing.
-    if (pass === 'walk') withdrawQuestions();
+    //
+    // The argument was the ending's own PASS until this commit, and the scan
+    // has no passes on the wire any more. It is a boolean until Task 9 keys
+    // this on `readSeq`, which is the fact that actually decides it: a
+    // reading pass ended, so the frozen numbers in a pending question are
+    // wrong. Withdrawing on every ending is the safe direction of that
+    // approximation — a question withdrawn once too often costs a second
+    // press, one left standing states pre-scan numbers as current.
+    if (withdraw) withdrawQuestions();
     // Panels after the roots, never beside them: `refresh` is what deletes the
     // expansion of a root that has gone, and a `list_subfolders` fired for that
     // root would answer with a rejection drawn into a panel about to vanish.
@@ -915,7 +928,7 @@
   }
 
   onMount(() => {
-    reread(null); // no ending yet, so no pass — and no panel is open to withdraw
+    reread(false); // no ending yet, and no panel is open to withdraw
     // Live run, finding 2. Task 7 re-reads after an add and after a remove;
     // the event nobody wired is the one that changes the NUMBER this list shows
     // — a job ending. The row went on stating zero indexed documents while the
@@ -926,30 +939,32 @@
     // it as well — see `rereadPanels`, which is where the second half of this
     // finding is written up.
     //
-    // The RE-READ fires on EVERY ending, not only a walk's, and the reason is
-    // asymmetry rather than caution: a re-read that finds the same numbers
-    // rewrites them invisibly, while a missed one leaves a falsehood a person
-    // can act on. This window does not always know what is running at all
-    // (`runningUnobserved` is the state where it has no channel), so keying the
-    // RE-READ off the pass would be keying it off something it cannot always
-    // see. Endings are rare: at most a handful per run, never one per progress
-    // report.
+    // The RE-READ fires on EVERY ending, and the reason is asymmetry rather
+    // than caution: a re-read that finds the same numbers rewrites them
+    // invisibly, while a missed one leaves a falsehood a person can act on. A
+    // scan is one job over every watched folder and its report names no root,
+    // so there is nothing to narrow the re-read BY in any case. Endings are
+    // rare: at most a handful per run, never one per progress tick.
     //
     // The WITHDRAWAL inside `rereadPanels` is narrower — see its own comment.
     // `phase.pass` is passed through here rather than dropped, because that is
     // the one fact `rereadPanels` needs and this subscription is the only place
     // that has it.
     //
-    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
-    // phase object per event, so a progress report changes the object without
-    // ever being an ending, and an ending is written exactly once. Seeded with
-    // what the store already holds so a section switch back to this list does
-    // not read it twice on the same mount.
-    let seen: JobPhase = get(jobs.state).phase;
-    return jobs.state.subscribe(({ phase }) => {
-      if (phase === seen) return;
-      seen = phase;
-      if (phase.kind === 'ended') reread(phase.pass);
+    // Compared by snapshot IDENTITY, not by kind: the controller replaces the
+    // whole state on every change, so a progress tick changes the object
+    // without ever being an ending, and an ending is written exactly once.
+    // Seeded with what the store already holds so a section switch back to this
+    // list does not read it twice on the same mount.
+    //
+    // ⚠️ Task 9 keys this on `ScanState.readSeq` instead, which is the fact
+    // this list is really after: how many reading passes have ENDED. An ended
+    // snapshot is also what a probe and a removal leave behind.
+    let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
+    return jobs.state.subscribe(({ scan }) => {
+      if (scan.snapshot === seen) return;
+      seen = scan.snapshot;
+      if (scan.snapshot.kind === 'ended') reread(true);
     });
   });
 
@@ -974,11 +989,16 @@
     }
   }
 
-  async function removeFolder(rootId: number) {
+  // The path is the one this row was DRAWN from, never one re-derived here:
+  // the backend deletes the row only while that id still names that path, and a
+  // path derived from the id would agree with it by construction and check
+  // nothing. Task 9 puts a confirmation in front of this; the argument is the
+  // IPC's own and arrives with it.
+  async function removeFolder(rootId: number, path: string) {
     actionError = null;
     rootChanged = false; // what the last press led to stands until the next one
     try {
-      await removeWatchedFolder(rootId);
+      await removeWatchedFolder(rootId, path);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       return;
@@ -1355,12 +1375,18 @@
             aria-expanded={expanded}
             aria-label={expandAriaLabel}
             onclick={() => toggleRoot(root)}>{expandLabel}</button>
+          <!-- ⚠️ This button's own funeral is Task 8, which deletes it along with
+               `scanLabel`, `scanAriaLabel` and their catalogue keys. Until then
+               it over-promises: a scan is ONE job over every watched folder now
+               (`scan_state::Entry`), and the label still names this row's
+               folder. Left rather than reworded because the rewording would be
+               a catalogue key with a one-task life. -->
           <button
             type="button"
             data-testid={`folder-scan-${root.rootId}`}
             aria-label={scanAriaLabel}
-            onclick={() => jobs.scan(root.rootId)}>{scanLabel}</button>
-          <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId)}>{removeLabel}</button>
+            onclick={() => jobs.scan('full')}>{scanLabel}</button>
+          <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId, root.absolutePath)}>{removeLabel}</button>
           {#if panel}
             <div data-testid={`folder-panel-${root.rootId}`}>
               {#if panel.loadError}

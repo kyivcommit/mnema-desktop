@@ -36,6 +36,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }));
 
+// Tauri's event module, which `listenScanProgress` imports dynamically. Faked
+// here so the event NAME and the unwrapping of `e.payload` are exercised
+// through the real wrapper rather than described by it.
+const listen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...a: unknown[]) => listen(...a),
+}));
+
 test('listTree invokes list_tree', async () => {
   invoke.mockResolvedValue({ roots: [], recents: [] });
 
@@ -53,50 +61,81 @@ test('setKey invokes set_key with the typed key', async () => {
   expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
 });
 
-// PR 7 Task 8: the whole event crosses, not one field of it. The mutation this
-// kills is the shape the module used to have — an `onmessage` that read `event`
-// and threw the ending's contents away, which left every reason, count and
-// frozen prefix unavailable to whatever drew the screen.
-const ENDED_PAYLOAD = {
-  reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
-  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
-} as const;
-const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null } as const;
+// PR 9b Task 6: the scan is one job, started from one of two entry points, and
+// it reports through a STATE rather than a channel. The three wrappers below
+// are the whole of that boundary on this side.
+//
+// The state fixture is the shape `scan_state.rs` pins as JSON
+// (`every_snapshot_has_its_wire_shape_pinned`); nothing here is written from a
+// document, and `settings/jobs.test.ts` compares the union's spellings against
+// that file's own enums.
+const SCAN_STATE: ipc.ScanState = {
+  revision: 4, files: 11, readSeq: 1, lastReading: null,
+  snapshot: {
+    kind: 'running', cancellable: true,
+    phase: {
+      kind: 'reading', rootIndex: 1, rootCount: 2, rootPath: '/home/a/notes',
+      counts: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null },
+    },
+  },
+};
 
-test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
+// 🔴 Both entry points, because `embedOnly` is the one this window would break
+// silently: serde REFUSES a variant nobody defined rather than defaulting it
+// (`the_two_entry_points_survive_the_round_trip_under_the_names_the_window_sends`),
+// so a misspelling turns a resumption into an error message. And no channel —
+// the scan has none to report on.
+test('startScanJob sends the entry point it was given, and nothing else', async () => {
   invoke.mockResolvedValue(undefined);
-  const seen: unknown[] = [];
 
-  await ipc.startEmbedJob((e) => seen.push(e));
+  await ipc.startScanJob('full');
+  await ipc.startScanJob('embedOnly');
 
-  const call = invoke.mock.calls.at(-1) as [string, { onProgress: { onmessage: (m: unknown) => void } }];
-  expect(call[0]).toBe('start_embed_job');
-  // The pass covers the whole index: a root id here would be a promise it
-  // cannot keep (embed_job.rs).
-  expect(Object.keys(call[1])).toEqual(['onProgress']);
-  const channel = call[1].onProgress;
-  expect(typeof channel.onmessage).toBe('function');
-
-  channel.onmessage({ event: 'progress', data: PROGRESS_PAYLOAD });
-  channel.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
-
-  expect(seen).toEqual([
-    { event: 'progress', data: PROGRESS_PAYLOAD },
-    { event: 'ended', data: ENDED_PAYLOAD },
-  ]);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'start_scan_job').map((c) => c[1]))
+    .toEqual([{ entry: 'full' }, { entry: 'embedOnly' }]);
+  expect(invoke.mock.calls.at(-1)).toHaveLength(2);
 });
 
-test('startWalkJob sends the root id it was given and forwards the whole event', async () => {
-  invoke.mockResolvedValue(undefined);
-  const seen: unknown[] = [];
+// The whole state crosses, not a boolean. The shape this replaces was
+// `{ running: boolean }`, and a bar fed from a boolean is one that never
+// finishes.
+test('jobStatus asks for the whole scan state with the command name alone', async () => {
+  invoke.mockResolvedValue(SCAN_STATE);
 
-  await ipc.startWalkJob(42, (e) => seen.push(e));
+  const state = await ipc.jobStatus();
 
-  const call = invoke.mock.calls.at(-1) as [string, { rootId: number; onProgress: { onmessage: (m: unknown) => void } }];
-  expect(call[0]).toBe('start_walk_job');
-  expect(call[1].rootId).toBe(42);
-  call[1].onProgress.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
-  expect(seen).toEqual([{ event: 'ended', data: ENDED_PAYLOAD }]);
+  expect(invoke).toHaveBeenCalledWith('job_status');
+  expect(invoke.mock.calls.at(-1)).toHaveLength(1);
+  expect(state).toEqual(SCAN_STATE);
+});
+
+// Both halves of the wrapper: the event NAME it registers on, and the payload
+// it hands the caller. A listener on another name hears nothing, and one that
+// passed the envelope on would give every consumer a state with no revision.
+// The unlisten function comes back untouched, because a caller that cannot
+// unsubscribe leaves a listener on the window for the life of the process.
+test('listenScanProgress subscribes to scan-progress and unwraps the payload', async () => {
+  const stop = vi.fn();
+  listen.mockResolvedValue(stop);
+  const seen: ipc.ScanState[] = [];
+
+  const unlisten = await ipc.listenScanProgress((s) => seen.push(s));
+
+  expect(listen.mock.calls.at(-1)?.[0]).toBe('scan-progress');
+  (listen.mock.calls.at(-1)?.[1] as (e: { payload: ipc.ScanState }) => void)({ payload: SCAN_STATE });
+  expect(seen).toEqual([SCAN_STATE]);
+  expect(unlisten).toBe(stop);
+});
+
+// 🔴 The path travels WITH the id, and both are asserted: `bridge.rs` deletes
+// the row only while that id still names that path, so a call that sent the id
+// alone would be the stale-then-act shape the compare exists to close.
+test('removeWatchedFolder sends the path beside the id', async () => {
+  invoke.mockResolvedValue(3);
+
+  await ipc.removeWatchedFolder(9, '/home/a/notes');
+
+  expect(invoke).toHaveBeenCalledWith('remove_watched_folder', { rootId: 9, path: '/home/a/notes' });
 });
 
 // Both directions on the one thing this command must not need: a channel.
@@ -446,7 +485,7 @@ test('the index read arm carries the file count, the moment, and the refusal cou
   const read: IndexRead = {
     kind: 'read', embeddingModel: 'emb-1', chatModel: null,
     embeddedChunks: 3, embeddedChunksEverywhere: 3, totalChunks: 4,
-    failedChunks: 1, pendingChunks: 2, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 1, pendingChunks: 2, scanIncomplete: false, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   };
 
@@ -463,7 +502,7 @@ test('an index that has never finished indexing states that as null, not as an a
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
     searchTextArm: true, searchContentArm: true,
   };
 
@@ -473,17 +512,22 @@ test('an index that has never finished indexing states that as null, not as an a
   expect('lastIndexedAt' in read).toBe(true);
 });
 
-// 🔴 Each of the four omitted on its own, because "the object is missing
+// 🔴 Each of the five omitted on its own, because "the object is missing
 // something" is satisfied by any one of them and would not notice the other
-// three turning optional. Required and not optional for the reason `ipc.ts`
+// four turning optional. Required and not optional for the reason `ipc.ts`
 // gives over the type: the only substitute for a missing count is `0`, and `0`
 // in front of a person reads as a measured claim this build has not made —
 // a fail-quiet field is a number that is silently always wrong.
-test('the four counts are required, so no fixture can leave one to a default', () => {
+//
+// `scanIncomplete` (PR 9b Task 6) is the fifth, and its default is worse than a
+// wrong number: `false` is the statement that the last scan saw the whole
+// archive, which is exactly the claim a person acts on when they decide their
+// index is complete.
+test('the five index facts are required, so no fixture can leave one to a default', () => {
   const rest = {
     kind: 'read' as const, embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    searchTextArm: true, searchContentArm: true,
+    scanIncomplete: false, searchTextArm: true, searchContentArm: true,
   };
 
   // @ts-expect-error `indexedFiles` is required.
@@ -494,16 +538,21 @@ test('the four counts are required, so no fixture can leave one to a default', (
   const noRefusals: IndexRead = { ...rest, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null };
   // @ts-expect-error `pendingChunks` is required.
   const noQueue: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0, lastIndexedAt: null };
+  const { scanIncomplete: _dropped, ...withoutMarker } = rest;
+  // @ts-expect-error `scanIncomplete` is required.
+  const noMarker: IndexRead = {
+    ...withoutMarker, failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+  };
 
-  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind])
-    .toEqual(['read', 'read', 'read', 'read']);
+  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind, noMarker.kind])
+    .toEqual(['read', 'read', 'read', 'read', 'read']);
 });
 
 test('the index read arm rejects Rust snake_case spellings', () => {
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
     indexed_files: 2,

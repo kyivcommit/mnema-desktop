@@ -1,4 +1,9 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+// Type-only, so nothing here loads Tauri's event module at import time — the
+// one function that needs it imports it dynamically, the way `i18n/index.ts`
+// does, so a test may mock the module and a window that never listens never
+// pays for it.
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 // Wire types — a hand mirror of the Rust serialization pinned in
 // `bridge.rs`/`locator.rs` (see the PR 3/6 wire-pin tests). camelCase + a
@@ -191,7 +196,14 @@ export const setSearchArms = (text: boolean, content: boolean) =>
   invoke<void>('set_search_arms', { text, content });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
-export const removeWatchedFolder = (rootId: number) => invoke<number>('remove_watched_folder', { rootId });
+// The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes
+// the row only while that id still names that path, so a folder swapped out
+// from under a stale window is refused instead of silently removed for the
+// newcomer. The caller sends the path it drew the row from, never one it
+// re-derived — a re-derived path would agree with the id by construction and
+// the compare would check nothing.
+export const removeWatchedFolder = (rootId: number, path: string) =>
+  invoke<number>('remove_watched_folder', { rootId, path });
 export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
   invoke<SourceAround>('source_around', {
     chunkId: c.chunkId, passageText: c.text,
@@ -284,12 +296,26 @@ export type UnreadableCause = 'notOpen' | 'readFailed';
 // finished indexing, and the section renders a sentence for it. An absent
 // field would collapse that into whatever the reader defaulted to — an epoch
 // date, or a blank where a sentence belongs.
+//
+// `scanIncomplete` (`models.rs`, beside `pendingChunks`) is REQUIRED for the
+// reason every count above it is: it is a marker the index CARRIES — written
+// when a reading pass starts and cleared only when one finishes — so a missing
+// field defaulting to `false` would say "the last scan saw the whole archive"
+// about a scan nobody measured. That is the one direction of this field that a
+// person acts on, and the fail-quiet direction of an optional field is exactly
+// the false claim.
 export type IndexSettings =
   | { kind: 'read'; embeddingModel: string | null; chatModel?: string | null;
       embeddedChunks: number; embeddedChunksEverywhere: number; totalChunks: number;
       failedChunks: number; pendingChunks: number; indexedFiles: number; lastIndexedAt: number | null;
+      scanIncomplete: boolean;
       searchTextArm: boolean; searchContentArm: boolean }
   | { kind: 'unreadable'; cause: UnreadableCause; reason: string };
+
+// The `read` arm on its own. Named here rather than re-derived with `Extract`
+// at each call site: `jobs.ts`'s `continueAction` takes one, and three test
+// files already write the same `Extract` by hand.
+export type IndexRead = Extract<IndexSettings, { kind: 'read' }>;
 
 // `Mac` | `Windows` | `Linux` (models.rs:625-629), camelCase per the wire
 // convention every union in this module already follows.
@@ -423,15 +449,19 @@ export type AdoptedModel = {
 export const setEmbeddingModel = (model: string, existingVectors: ExistingVectors) =>
   invoke<AdoptedModel>('set_embedding_model', { model, existingVectors });
 
-// `JobStatus` (bridge.rs). Read after a rejection, never parsed out of one: a
-// command rejection crosses the IPC as its `Display` string alone, so the only
-// honest way to learn whether a job is running is to ask.
-export type JobStatus = { running: boolean };
-export const jobStatus = () => invoke<JobStatus>('job_status');
-
 // ---------------------------------------------------------------------------
-// Job events (`src-tauri/src/job.rs`) — the wire this window watches a walk and
-// an embedding pass on.
+// Job events (`src-tauri/src/job.rs`) — a channel carrying one job's progress
+// and its ending.
+//
+// 🔴 **The scan does not report here any more.** A window learns what a scan is
+// doing from `ScanState` below, which is a STATE and not a stream of edges: a
+// window that reloaded mid-job, a tray built after the job started and a
+// settings strip opened half-way through all had different answers off a
+// channel, and none could be told apart from a job that had never run
+// (`scan_state.rs`'s own header). `start_probe_job` is the one command left
+// that takes a channel, and these types plus `Channel` are kept for it — the
+// window has no wrapper for that command today, so nothing in `ui/` constructs
+// one yet.
 //
 // EVERY shape below was taken from a real serialized payload, not written from
 // a document: a temporary test built each `Ended` through `walk_job.rs`'s own
@@ -521,27 +551,220 @@ export type JobEvent =
   | { event: 'progress'; data: JobProgress }
   | { event: 'ended'; data: JobEnded };
 
-// The channel is created here so that no component has to import Tauri's
-// `Channel`, and the WHOLE event is forwarded — the ending's reason, its counts
-// and its frozen list included. An earlier form of this module read one field
-// (`event`) and dropped the rest, which was honest while nothing rendered a
-// job; a partial mirror in front of a screen that draws endings would look
-// authoritative while being incomplete.
-export const startWalkJob = (rootId: number, onEvent: (event: JobEvent) => void) => {
-  const onProgress = new Channel<JobEvent>();
-  onProgress.onmessage = onEvent;
-  return invoke<void>('start_walk_job', { rootId, onProgress });
+// ---------------------------------------------------------------------------
+// The scan, as ONE value (`src-tauri/src/scan_state.rs`), mirrored in full.
+//
+// Every type below is a hand mirror of a Rust type whose wire shape that file
+// pins as JSON (`every_snapshot_has_its_wire_shape_pinned`,
+// `a_reading_outcome_has_its_wire_shape_pinned`). Mirrored IN FULL and not in
+// the subset a screen draws today, for `JobEnded`'s reason: a partial mirror in
+// front of a surface that draws states looks authoritative while being
+// incomplete.
+//
+// 🔴 Every enum here is `#[serde(tag = "kind", rename_all = "camelCase",
+// rename_all_fields = "camelCase")]`. `rename_all` alone renames the VARIANTS
+// and leaves every struct-variant field in snake_case — which compiles,
+// serialises, and reaches the window as `root_index` beside a correctly spelled
+// `kind`. The Rust side caught that once already; this side spells the fields
+// camelCase because that is what the pinned JSON carries.
+// ---------------------------------------------------------------------------
+
+// Where a scan is asked to begin. Two entry points and not a boolean, because
+// the second is a RESUMPTION: a scan whose reading pass already finished is
+// restarted as `embedOnly`, so a person who stopped the embedding is not made
+// to re-read every folder to get their remaining chunks embedded.
+//
+// It is the one type in this block the window SENDS, so it has to survive the
+// round trip rather than only the way out — Rust refuses an entry point nobody
+// defined rather than defaulting one.
+//
+// A runtime array with the union derived from it, the shape `END_REASONS`
+// already uses: a union and a list kept in step by hand are two places for one
+// fact, and `settings/jobs.test.ts` needs the values at run time to compare
+// them against `scan_state.rs` at all.
+export const ENTRIES = ['full', 'embedOnly'] as const;
+export type Entry = (typeof ENTRIES)[number];
+
+// Which phase a scan was in when it ended. NOT derivable from `reason`, and
+// that is the point: a scan can end `cancelled` in either phase, and the two
+// want different things next — a reading that was stopped has folders left to
+// read, an embedding that was stopped has only chunks left to embed.
+export const ENDED_IN = ['reading', 'embedding'] as const;
+export type EndedIn = (typeof ENDED_IN)[number];
+
+// `job::Progress` under the name the snapshot gives it. An alias and not a
+// second declaration: the counts a running phase carries ARE the progress shape
+// above, and writing the six fields twice is how two mirrors of one Rust struct
+// come to disagree.
+export type Counts = JobProgress;
+
+// The jobs that are not a scan (`scan_state::OtherJob`). A person did not start
+// either, and neither owes a report when it ends; they are here because they
+// hold the same single slot, which is the whole reason a surface has to be able
+// to draw "busy" for them.
+export type OtherJob = 'probe' | 'modelAdoption';
+
+// What the running job is doing, in the terms a person reads. Four variants and
+// not four job types: they are four things a surface has to draw differently. A
+// reading pass has a folder and a position within a set of folders; an
+// embedding pass has neither; a removal has a folder and no counts at all; and
+// the jobs nobody asked for have nothing to draw but the fact that the slot is
+// busy.
+export type Phase =
+  | { kind: 'reading'; rootIndex: number; rootCount: number; rootPath: string; counts: Counts }
+  | { kind: 'embedding'; counts: Counts }
+  | { kind: 'removing'; rootPath: string }
+  | { kind: 'other'; job: OtherJob };
+
+// Why an embedding phase that was REACHED did not run. A closed enumeration
+// rather than a sentence, for `FrozenReason`'s reason: the words a person reads
+// are the window's to choose, and a window given only English has nothing to
+// group, translate or act on. `storeUnavailable` carries a message because that
+// one IS a diagnostic — the credential store refused to answer at all — and
+// there is no closed vocabulary for what an operating system says then.
+export const SKIP_WHY_KINDS = ['noKey', 'noModel', 'storeUnavailable'] as const;
+export type SkipWhy =
+  | { kind: 'noKey' }
+  | { kind: 'noModel' }
+  | { kind: 'storeUnavailable'; message: string };
+
+// What the embedding phase did, if it got that far.
+//
+// ⚠️ `notReached` is NOT "the phase was never entered" — `ScanReport.endedIn`
+// is what says how far the job got, and this value appears beside BOTH of its
+// values. What the two have in common is the only thing it claims: no chunk was
+// offered to a provider. It is a state of its own rather than an absence
+// because a scan whose reading pass broke and a scan that embedded nothing
+// because there was nothing to embed are different answers, and drawing "0
+// embedded" for the first would tell a person their archive is searchable when
+// half of it was never read.
+export type EmbedOutcome =
+  | { kind: 'notReached' }
+  | { kind: 'skipped'; why: SkipWhy }
+  | { kind: 'ran'; done: number; total: number; refused: number };
+
+// What a finished scan has to say for itself.
+//
+// 🔴 The reading is deliberately NOT here: it lives on `ScanState.lastReading`,
+// because the two have different lifetimes. This report is replaced the moment
+// the next job claims the slot, and what the last reading pass established about
+// the index is still true afterwards.
+//
+// `resume` is what entry point would carry on from here, or `null` when there is
+// nothing to carry on from; `scan_job::resume_for` is where that whole table is
+// decided and tested row by row.
+export type ScanReport = {
+  embedding: EmbedOutcome;
+  endedIn: EndedIn;
+  reason: EndReason;
+  message: string | null;
+  resume: Entry | null;
 };
 
-// The re-embedding pass. It takes NO root and covers the whole index
-// (embed_job.rs), so nothing that calls it may promise it embedded only the
-// folder that was pressed. It reads the key first and rejects before claiming
-// the job slot when there is none; a missing *model* is not checked there and
-// arrives instead as `Ended { reason: 'failed', message }`.
-export const startEmbedJob = (onEvent: (event: JobEvent) => void) => {
-  const onProgress = new Channel<JobEvent>();
-  onProgress.onmessage = onEvent;
-  return invoke<void>('start_embed_job', { onProgress });
+// What one watched folder's reading came to. Per folder and not only in
+// aggregate, because the aggregate cannot answer the question a person has: a
+// scan of seven folders reporting `rootUnavailable` says one of them was not
+// there and does not say which.
+export type RootOutcome = {
+  rootPath: string;
+  reason: EndReason;
+  complete: boolean;
+  message: string | null;
+  done: number;
+  total: number;
+  indexed: number;
+  unchanged: number;
+  skipped: number;
+  removed: number;
+  contended: number;
+  frozen: Frozen[];
+};
+
+// What a reading pass concluded, kept apart from the report because it OUTLIVES
+// the job that wrote it.
+//
+// 🔴 `rootsRead` is not `rootCount`, and `complete` is not `reason ===
+// 'completed'`. The two pairs are what stop a window claiming more than the pass
+// established: a pass that stopped at the second of seven folders read two and
+// left five untouched, and a pass that read every folder it was given and met an
+// unreadable subdirectory in one of them ends `completed` and still has not seen
+// the whole archive. Either fact collapsed into the other draws a person a
+// finished scan over an index that is missing something.
+//
+// ⚠️ `complete` is `all` over `roots`, which holds only the folders that
+// ANSWERED — so it says nothing about folders the pass never reached. A window
+// drawing a finished scan owes both comparisons, this one and `rootsRead`
+// against `rootCount`.
+export type ReadingOutcome = {
+  reason: EndReason;
+  complete: boolean;
+  rootsRead: number;
+  rootCount: number;
+  done: number;
+  total: number;
+  indexed: number;
+  unchanged: number;
+  skipped: number;
+  removed: number;
+  contended: number;
+  roots: RootOutcome[];
+};
+
+// The three states the job slot can be in. `ended` is a STATE and not an event,
+// which is the whole difference from the channel it replaces: a job that
+// finished stays finished until the next one starts, so a window opened a minute
+// later still finds out how the scan went rather than an idle application that
+// looks like one that never ran.
+export type ScanSnapshot =
+  | { kind: 'idle' }
+  // `cancellable` is fixed for the life of the job — a phase change does not
+  // make a job that could not be interrupted interruptible — which is why it
+  // sits beside the phase rather than inside it.
+  | { kind: 'running'; phase: Phase; cancellable: boolean }
+  | { kind: 'ended'; report: ScanReport };
+
+// Everything a surface needs to draw the scan, in one read.
+//
+// Every field outside `snapshot` outlives the job that wrote it, and that is why
+// they are here rather than inside it: how many files the index holds and what
+// the last reading pass concluded are still the truth after the job that
+// established them has gone, and a window opened afterwards has nowhere else to
+// get them.
+export type ScanState = {
+  // Bumped by every write and never reset. It exists so a consumer can tell
+  // "nothing has changed since I last looked" from "it changed and changed
+  // back": two reads equal field for field are not evidence that nothing
+  // happened in between.
+  revision: number;
+  files: number;
+  // How many reading passes have ENDED in this process, ever. A consumer that
+  // re-reads the index when a scan has read new documents watches this rather
+  // than `revision`, which moves on every progress tick, and rather than the
+  // snapshot going idle, which also happens when a probe ends.
+  readSeq: number;
+  lastReading: ReadingOutcome | null;
+  snapshot: ScanSnapshot;
+};
+
+// One scan, from one of its two entry points. The command claims the single job
+// slot; a second call while one is running is refused with a sentence.
+export const startScanJob = (entry: Entry) => invoke<void>('start_scan_job', { entry });
+
+// The whole state, asked for rather than waited for. This is what a window
+// opened mid-run reads: `cancel_job`'s effect, a job started from the tray, and
+// a job this window never started all reach it the same way.
+export const jobStatus = () => invoke<ScanState>('job_status');
+
+// Every change to that state, pushed. The payload is the WHOLE `ScanState`, not
+// a delta, so a listener that misses one event is not left reconstructing
+// anything — and `revision` is what says whether the one it just received is
+// newer than what it holds.
+//
+// The module is imported dynamically for `i18n/index.ts`'s reason: a window that
+// never listens does not load it, and a test may replace it.
+export const listenScanProgress = async (cb: (state: ScanState) => void): Promise<UnlistenFn> => {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<ScanState>('scan-progress', (e) => cb(e.payload));
 };
 
 // Takes no channel at all (bridge.rs): stopping a job never depends on owning

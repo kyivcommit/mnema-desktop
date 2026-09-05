@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import Application from './Application.svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
-import type { AppPrefs } from '../lib/ipc';
+import type { AppPrefs, ScanState } from '../lib/ipc';
 
 // The typed wrappers, not the raw `invoke` — the shape `Indexing.test.ts` uses.
 // Every wrapper `Settings.svelte`'s other sections reach for is declared too,
@@ -37,10 +37,17 @@ vi.mock('../lib/ipc', () => ({
   removeMask: vi.fn(),
   addWatchedFolder: vi.fn(),
   removeWatchedFolder: vi.fn(),
-  startWalkJob: vi.fn(),
-  startEmbedJob: vi.fn(),
+  startScanJob: vi.fn(),
   cancelJob: vi.fn(),
+  // The window opens the scan subscription at mount now; left out, `mount`
+  // throws and the whole window fails to render.
+  listenScanProgress: () => Promise.resolve(() => {}),
 }));
+
+// What a process in which nothing has happened yet reports (`ScanState::default`).
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
 
 // 🔴 Annotated `AppPrefs`, for the reason `Indexing.test.ts` annotates
 // `ModelSettings`: every inline fixture in this project's UI suites sits behind
@@ -80,7 +87,7 @@ beforeEach(() => {
   providerModels.mockResolvedValue({ entries: [], unreadable: 0, unreadableRecords: [] });
   listTree.mockResolvedValue({ roots: [], recents: [] });
   listMasks.mockResolvedValue([]);
-  jobStatus.mockResolvedValue({ running: false });
+  jobStatus.mockResolvedValue(IDLE_SCAN);
   setLocale('uk');
 });
 

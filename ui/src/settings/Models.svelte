@@ -9,7 +9,8 @@
     type ModelEntry, type ModelRefusal, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
-  import type { JobController, JobPhase } from './jobs';
+  import type { JobController } from './jobs';
+  import type { ScanSnapshot } from '../lib/ipc';
   // Reused rather than re-derived: `providerReady` is the exact PR 3 ruling
   // this section's green dot owes ("provider + key + a chosen embedding
   // model, fail-safe on null/undefined"), already written and tested for the
@@ -88,26 +89,30 @@
       loadError = e instanceof Error ? e.message : String(e);
     });
     void loadCatalogue('embedding');
-    // The index is asked again whenever a pass ends, because an ending is the
+    // The index is asked again whenever a scan ends, because an ending is the
     // one moment the counts `degraded` is read from can have changed. The
-    // listener that used to do this was handed to `startEmbedJob` by this
-    // component, so it only ever heard a pass THIS section started, and only
+    // listener that used to do this belonged to a channel this component
+    // opened, so it only ever heard a pass THIS section started, and only
     // while this section was mounted. Through the controller it hears every
-    // ending — a walk started from Folders adds chunks to `totalChunks`, and a
-    // chained pass fills the space — which is the same asymmetry argument
+    // ending — a scan started from Folders or from the tray adds chunks to
+    // `totalChunks` and fills the space — which is the same asymmetry argument
     // `Folders.svelte` makes for its own row: a re-read that finds the same
     // numbers rewrites them invisibly, a missed one leaves a falsehood on
     // screen.
     //
-    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
-    // phase object per event, so a progress report changes the object without
-    // ever being an ending. Seeded with what the store already holds, so a
-    // section switch back does not re-read on the same mount.
-    let seen: JobPhase = get(jobs.state).phase;
-    return jobs.state.subscribe(({ phase }) => {
-      if (phase === seen) return;
-      seen = phase;
-      if (phase.kind === 'ended') void refresh().catch(() => {});
+    // Compared by snapshot IDENTITY, not by kind: the controller replaces the
+    // whole state on every change, so a progress tick changes the object
+    // without ever being an ending. Seeded with what the store already holds,
+    // so a section switch back does not re-read on the same mount.
+    //
+    // ⚠️ Task 8 replaces this with `readSeq`, which is the fact this section
+    // actually wants — an ending is also what a probe and a removal leave
+    // behind, and neither adds a chunk to embed.
+    let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
+    return jobs.state.subscribe(({ scan }) => {
+      if (scan.snapshot === seen) return;
+      seen = scan.snapshot;
+      if (scan.snapshot.kind === 'ended') void refresh().catch(() => {});
     });
   });
 
@@ -395,25 +400,28 @@
   // from the estimate shown before the act, and never a re-rendering of it.
   let retiredReport = $state<RetiredSpace[] | null>(null);
   // The backend's own sentence for a rejected `set_embedding_model` or
-  // `start_embed_job`, shown verbatim and never branched on.
+  // `start_scan_job`, shown verbatim and never branched on.
   let changeError = $state<string | null>(null);
   // What `job_status` answered after a rejection. Read, never inferred from
   // the sentence: a rejection crosses the IPC as text, and `claim_job` is a
   // compare-and-exchange that leaves the running job's owner untouched — so a
   // refusal must not draw that job as cancelled or finished.
   let jobRunning = $state(false);
-  // Where the re-embedding pass has got to, read off the CONTROLLER rather than
+  // Where the embedding phase has got to, read off the CONTROLLER rather than
   // held here. Two things follow, and both are the point. It survives a section
   // switch, because the controller does — the pass and the sentence about it no
   // longer disappear from a window whose backend is still running the job. And
-  // it is true of a pass this section did not start: the sentences below are
-  // about the state of the index, not about who pressed what, so a pass chained
-  // off a walk in Folders is the same news to a person standing here.
-  const phase = $derived($jobState.phase);
+  // it is true of a scan this section did not start: the sentences below are
+  // about the state of the index, not about who pressed what, so a scan started
+  // from Folders or from the tray is the same news to a person standing here.
+  const snapshot = $derived($jobState.scan.snapshot);
   const embedPassUnderWay = $derived(
-    (phase.kind === 'starting' || phase.kind === 'running') && phase.pass === 'embed',
+    snapshot.kind === 'running' && snapshot.phase.kind === 'embedding',
   );
-  const embedPassEnded = $derived(phase.kind === 'ended' && phase.pass === 'embed');
+  // `endedIn` and not the embedding OUTCOME: a scan stopped inside the phase
+  // embedded nothing and still got that far, which is the news this sentence
+  // is about (`scan_state::EmbedOutcome`'s own warning).
+  const embedPassEnded = $derived(snapshot.kind === 'ended' && snapshot.report.endedIn === 'embedding');
 
   function chooseEmbeddingModel(model: string) {
     changeError = null;
@@ -460,17 +468,18 @@
       // and never by matching on the message text.
       await refresh().catch(() => {});
       jobRunning = await jobStatus()
-        .then((s) => s.running)
+        .then((s) => s.snapshot.kind === 'running')
         .catch(() => false);
     }
   }
 
-  // 🔴 Through the controller, not through `startEmbedJob` directly. The pass
+  // 🔴 Through the controller, not through `startScanJob` directly. The scan
   // this section starts is a job like any other: it belongs on the window's
-  // strip, where its progress and its Cancel stay reachable from every section.
-  // Started here with a listener of this component's own, it reported to
-  // nobody the moment somebody clicked another section — the strip stayed idle
-  // while the backend job ran on, and there was no way to stop it.
+  // strip, where its progress and its Stop stay reachable from every section.
+  // Started here with a listener of this component's own — which is how it was
+  // done before the channel went — it reported to nobody the moment somebody
+  // clicked another section: the strip stayed idle while the backend job ran
+  // on, and there was no way to stop it.
   //
   // Nothing is caught here. A refusal is the controller's to report, in the
   // same words and the same place as every other refused command; a second
@@ -480,7 +489,11 @@
     // The report of the change that CAUSED this state is about the previous
     // act; once a repair has been asked for, its failure sentence is stale.
     changeError = null;
-    await jobs.embed();
+    // `embedOnly` is the entry point for exactly this: an index whose reading
+    // pass is done and whose chunks are not embedded (`scan_state::Entry`).
+    // Re-reading every folder to reach the same queue would be work nobody
+    // asked for.
+    await jobs.scan('embedOnly');
   }
 
   // **The number before the act, and it is `embeddedChunksEverywhere`.** Not

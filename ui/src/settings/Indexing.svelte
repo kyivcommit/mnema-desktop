@@ -5,7 +5,8 @@
   import type { Key } from '../i18n/catalog';
   import { formatIndexedAt, formatIndexedDate } from '../i18n/recency';
   import { modelSettings, type ModelSettings, type UnreadableCause } from '../lib/ipc';
-  import type { JobController, JobPhase } from './jobs';
+  import type { JobController } from './jobs';
+  import type { ScanSnapshot } from '../lib/ipc';
 
   // §9.3 — the Indexing SECTION: what the index HOLDS, and when it last grew.
   //
@@ -84,36 +85,29 @@
     // (`Indexing.test.ts`, both directions). That is D130's F1 in another
     // component (`requirements.md:977`), and the counter is what answers it.
     //
-    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
-    // phase object per event, so a progress report changes the object without
-    // ever being an ending. Seeded with what the store already holds, so a
-    // section switch back does not re-read on the same mount.
-    let seen: JobPhase = get(jobs.state).phase;
-    const stop = jobs.state.subscribe(({ phase }) => {
-      if (phase === seen) return;
-      seen = phase;
-      if (phase.kind === 'ended') void refresh();
+    // Compared by snapshot IDENTITY, not by kind: the controller replaces the
+    // whole state on every change, so a progress tick changes the object
+    // without ever being an ending. Seeded with what the store already holds,
+    // so a section switch back does not re-read on the same mount.
+    //
+    // ⚠️ Task 8 keys this on `readSeq` as well, which is the fact these numbers
+    // actually follow: an ended snapshot is also what a probe and a folder
+    // removal leave behind, and neither reads a document.
+    let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
+    const stop = jobs.state.subscribe(({ scan }) => {
+      if (scan.snapshot === seen) return;
+      seen = scan.snapshot;
+      if (scan.snapshot.kind === 'ended') void refresh();
     });
     void refresh();
-    // 🔴 The OTHER fact this section draws from, re-read for the same reason
-    // (final review, C-M7). `runningUnobserved` — a pass this window has no
-    // channel for, `job_status` being the only thing that can report it — is
-    // written by `syncFromStatus` alone, and that ran once at the window's own
-    // mount. Without this line a pass that ends after the window opened is
-    // never noticed: the phase stays `runningUnobserved` for the life of the
-    // window, and F4's queue line and its Continue button below stay suppressed
-    // with no way for a person to guess that pressing Cancel would fix it.
-    //
-    // Safe on every other path, and that is the controller's doing rather than
-    // this line's: `syncFromStatus` writes only over `idle`/`runningUnobserved`,
-    // so a pass this window IS watching keeps its counts and its Cancel.
-    //
-    // ⚠️ It does NOT close the state, only the affordance: a person parked on
-    // this section while such a pass ends still sees nothing change until the
-    // next visit, because a mount is the only thing that asks. Closing that
-    // needs something that asks over time, which is a controller lifetime this
-    // window does not have — booked, not silently half-done.
-    void jobs.syncFromStatus();
+    // 🔴 The `job_status` re-read that used to stand here is gone, and nothing
+    // replaced it because nothing has to. It existed for a state that no longer
+    // exists: a pass this window had no channel for, which only a fresh
+    // `job_status` could report, so a pass ending after the window opened was
+    // never noticed and this section's queue line stayed suppressed. The window
+    // now holds a subscription to `scan-progress` opened once by
+    // `Settings.svelte`, and every change to the scan reaches this
+    // subscription while the section is on screen — including the ending.
     // 🔴 Returned, so Svelte tears the subscription down on destroy. This
     // section is inside `Settings.svelte`'s `{#if section === …}` chain, so
     // every nav change unmounts it: without this line each visit leaves a live
@@ -220,9 +214,15 @@
   // the index and has no arm to be read from.
   const refusedRunLine = $derived.by(() => {
     void $locale;
-    const phase = $jobState.phase;
-    if (phase.kind !== 'ended' || phase.ending.refused === 0) return null;
-    return t('indexing_index_refused_run', { count: phase.ending.refused });
+    const snapshot = $jobState.scan.snapshot;
+    if (snapshot.kind !== 'ended') return null;
+    // The refusals of the RUN are the embedding pass's own, and only a pass
+    // that `ran` has any: `notReached` and `skipped` offered no chunk to a
+    // provider at all (`scan_state::EmbedOutcome`), so reading a count off them
+    // would be inventing one.
+    const embedding = snapshot.report.embedding;
+    if (embedding.kind !== 'ran' || embedding.refused === 0) return null;
+    return t('indexing_index_refused_run', { count: embedding.refused });
   });
 
   // F4 (spec §9.3, amended 2026-09-04): the embedding queue —
@@ -237,8 +237,7 @@
   // this line and its button step aside rather than show a count a running
   // pass is already changing.
   const showPending = $derived(
-    read !== null && read.pendingChunks > 0
-      && ($jobState.phase.kind === 'idle' || $jobState.phase.kind === 'ended'),
+    read !== null && read.pendingChunks > 0 && $jobState.scan.snapshot.kind !== 'running',
   );
   const pendingLine = $derived.by(() => {
     void $locale;
@@ -252,14 +251,21 @@
 
   const loadFailedLabel = $derived.by(() => { void $locale; return t('indexing_index_load_failed'); });
 
-  // Through the controller, never `startEmbedJob` directly — `Models.svelte`'s
-  // own `reembed` (`:468-484`) argues why: the pass this button starts belongs
-  // on the window's strip, where its progress and its Cancel stay reachable
-  // from every section. Nothing is caught here for the same reason that
+  // Through the controller, never `startScanJob` directly — `Models.svelte`'s
+  // own `reembed` argues why: the pass this button starts belongs on the
+  // window's strip, where its progress and its Stop stay reachable from every
+  // section. Nothing is caught here for the same reason that
   // argument gives: a refusal is the controller's to report, in the same words
   // and the same place as every other refused command.
   function resumeEmbedding() {
-    void jobs.embed();
+    // `embedOnly`, not a full scan: the queue this button is about is what a
+    // finished reading pass left behind, and re-reading every folder to reach
+    // it would be work nobody asked for (`scan_state::Entry`).
+    //
+    // ⚠️ Task 8 replaces this button and its gate with `continueAction`, which
+    // is what decides between the two entry points from the index's own
+    // markers rather than from the queue count alone.
+    void jobs.scan('embedOnly');
   }
 </script>
 

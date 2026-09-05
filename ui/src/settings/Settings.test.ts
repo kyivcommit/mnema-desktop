@@ -2,18 +2,23 @@ import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-li
 import { expect, test, afterEach, vi } from 'vitest';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
-import type { AppPrefs, ModelSettings } from '../lib/ipc';
+import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 
 // 🔴 Annotated, so the compiler checks it. This fixture crosses a `vi.mock`
 // factory, whose return type is `unknown` — Task 3's three new REQUIRED fields
 // on the `read` arm went unchecked here until the §9.3 section started reading
 // them, and a missing `lastIndexedAt` reached `Intl.DateTimeFormat` as
 // `undefined`.
+// What a process in which nothing has happened yet reports (`ScanState::default`).
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
 const SETTINGS: ModelSettings = {
   key: { kind: 'absent' },
   index: {
     kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
     embeddingModel: null, searchTextArm: true, searchContentArm: false,
   },
   platform: 'linux',
@@ -68,10 +73,13 @@ vi.mock('../lib/ipc', () => ({
   // section Models now reads the job state from would have been mounted beside
   // one. Answering honestly costs nothing and states what these tests assume:
   // nothing is running.
-  jobStatus: () => Promise.resolve({ running: false }),
-  startWalkJob: vi.fn(),
-  startEmbedJob: vi.fn(),
+  jobStatus: () => Promise.resolve(IDLE_SCAN),
+  startScanJob: vi.fn(),
   cancelJob: vi.fn(),
+  // The window opens the scan subscription at mount now. Left out of this mock
+  // the wrapper is `undefined`, `mount` throws, and the whole window fails to
+  // render — the same lesson `jobStatus` above records.
+  listenScanProgress: () => Promise.resolve(() => {}),
   // Task 7 mounts `Application` into the 'application' panel, for the same
   // reason as `jobStatus` above: left out of this mock the wrapper is
   // `undefined`, the call throws, and every test in this file that ever visits

@@ -5,17 +5,21 @@ import Indexing from './Indexing.svelte';
 import Settings from './Settings.svelte';
 import { createJobController } from './jobs';
 import { setLocale } from '../i18n';
-import type { ModelSettings, JobEnded, JobEvent } from '../lib/ipc';
+import type { ModelSettings, ScanReport, ScanState } from '../lib/ipc';
 
 // The typed wrappers, not the raw `invoke` — the shape `Models.test.ts` uses.
 const modelSettings = vi.fn();
 const providerModels = vi.fn();
 const listTree = vi.fn();
 const listMasks = vi.fn();
-const startWalkJob = vi.fn();
-const startEmbedJob = vi.fn();
+const startScanJob = vi.fn();
 const cancelJob = vi.fn();
 const jobStatus = vi.fn();
+const listenScanProgress = vi.fn();
+const unlisten = vi.fn();
+// The `scan-progress` handler the controller registered, kept so a test can
+// deliver the states a real scan would.
+let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   providerModels: (...a: unknown[]) => providerModels(...a),
@@ -33,10 +37,10 @@ vi.mock('../lib/ipc', () => ({
   // The controller imports all four from this module. Left out, each wrapper is
   // `undefined` and every call becomes a TypeError swallowed by a catch — the
   // lesson `Models.test.ts`'s own mock records.
-  startWalkJob: (...a: unknown[]) => startWalkJob(...a),
-  startEmbedJob: (...a: unknown[]) => startEmbedJob(...a),
+  startScanJob: (...a: unknown[]) => startScanJob(...a),
   cancelJob: (...a: unknown[]) => cancelJob(...a),
   jobStatus: (...a: unknown[]) => jobStatus(...a),
+  listenScanProgress: (...a: unknown[]) => listenScanProgress(...a),
 }));
 
 // 🔴 Annotated `ModelSettings`, and that is the point of the annotation rather
@@ -52,7 +56,7 @@ function settings(over: Partial<ModelSettings> = {}): ModelSettings {
       kind: 'read',
       embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
       embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
-      failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+      failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
       searchTextArm: true, searchContentArm: true,
     },
     platform: 'linux',
@@ -87,18 +91,24 @@ beforeEach(() => {
   providerModels.mockReset();
   listTree.mockReset();
   listMasks.mockReset();
-  startWalkJob.mockReset();
-  startEmbedJob.mockReset();
   cancelJob.mockReset();
   jobStatus.mockReset();
   modelSettings.mockResolvedValue(settings());
   providerModels.mockResolvedValue(EMPTY_CATALOGUE);
   listTree.mockResolvedValue({ roots: [], recents: [] });
   listMasks.mockResolvedValue([]);
-  startWalkJob.mockResolvedValue(undefined);
-  startEmbedJob.mockResolvedValue(undefined);
   cancelJob.mockResolvedValue(undefined);
-  jobStatus.mockResolvedValue({ running: false });
+  startScanJob.mockReset();
+  startScanJob.mockResolvedValue(undefined);
+  listenScanProgress.mockReset();
+  unlisten.mockReset();
+  deliver = null;
+  revision = 0;
+  jobStatus.mockResolvedValue(IDLE_SCAN);
+  listenScanProgress.mockImplementation((cb: (state: ScanState) => void) => {
+    deliver = cb;
+    return Promise.resolve(unlisten);
+  });
   setLocale('uk');
 });
 
@@ -112,42 +122,59 @@ afterEach(() => {
 const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const pageText = () => visible(document.body);
 
-const renderSection = (jobs = createJobController()) =>
-  ({ jobs, ...render(Indexing, { props: { jobs } }) });
-
-// A real ending, in the shape `walk_job.rs`'s `ended_from_report` prints.
-const ENDING: JobEnded = {
-  reason: 'cancelled', done: 4, total: 4, skipped: 0, complete: false, frozen: [],
-  indexed: 0, unchanged: 0, refused: 0, removed: 0, message: null,
-};
-const ended = (over: Partial<JobEnded> = {}): JobEvent =>
-  ({ event: 'ended', data: { ...ENDING, ...over } });
-const progress = (): JobEvent => ({
-  event: 'progress',
-  data: { done: 1, total: 4, skipped: 0, refused: 0, contended: 0, secondsLeft: null },
-});
-
-// Drives the controller the way the window does, and takes the channel back.
-// `cancelled` by default so the walk does NOT chain the embedding pass: a chain
-// reads `model_settings` for its own preconditions, and every count below would
-// then be counting two different things.
-async function walkChannel(jobs: ReturnType<typeof createJobController>) {
-  void jobs.scan(1);
-  await waitFor(() => expect(startWalkJob).toHaveBeenCalled());
-  const send = startWalkJob.mock.calls[0][1] as (e: JobEvent) => void;
-  return async (event: JobEvent) => { send(event); await tick(); };
+// 🔴 The controller is MOUNTED, not merely created: `Settings.svelte` is what
+// mounts it in the window, and until it is mounted nothing is listening for the
+// states these tests deliver. The teardown is left to `cleanup`, which unmounts
+// the component; the subscription itself is the window's, not this section's.
+function renderSection(jobs = createJobController()) {
+  jobs.mount();
+  return { jobs, ...render(Indexing, { props: { jobs } }) };
 }
 
-// The embedding pass, for the one case whose ending has to carry `refused`.
-// `job::Progress::refused` is written only by `embed_job.rs` — a walk's ending
-// carries `0` there for good — so this is the only channel on which that
-// sentence can honestly arrive. An embed ending chains nothing, so the `ended`
-// phase it leaves is the last word.
-async function embedChannel(jobs: ReturnType<typeof createJobController>) {
-  void jobs.embed();
-  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
-  const send = startEmbedJob.mock.calls[0][0] as (e: JobEvent) => void;
-  return async (event: JobEvent) => { send(event); await tick(); };
+// Every state is newer than the one before it, because that is the only thing
+// the controller compares (`apply`): a fixture that reused a revision would be
+// dropped as stale and the test would be asserting about the state before it.
+let revision = 0;
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+const runningScan = (): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'running',
+    cancellable: true,
+    phase: {
+      kind: 'embedding',
+      counts: { done: 1, total: 4, skipped: 0, refused: 0, contended: 0, secondsLeft: null },
+    },
+  },
+});
+
+// `cancelled` by default: the ordinary resting state after a stop, and the one
+// that leaves work still owed for the queue line below to be about.
+const endedScan = (over: Partial<ScanReport> = {}): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'ended',
+    report: {
+      embedding: { kind: 'notReached' },
+      endedIn: 'reading',
+      reason: 'cancelled',
+      message: null,
+      resume: null,
+      ...over,
+    },
+  },
+});
+
+// Delivers one state the way the core's own observer does, and lets Svelte draw.
+async function emit(state: ScanState) {
+  if (deliver === null) throw new Error('nothing is listening to scan-progress');
+  deliver(state);
+  await tick();
 }
 
 // ---------------------------------------------------------------------------
@@ -291,17 +318,54 @@ test('an index the provider refused nothing in says nothing about refusals', asy
   expect(pageText()).not.toContain('відхилив');
 });
 
+// 🔴 The other direction of the RUN's own sentence, and the one a suite that
+// only ever ends scans with `Ran` cannot see. `notReached` and `skipped` are
+// not a refusal count of zero: no chunk was offered to a provider at all
+// (`scan_state::EmbedOutcome`), so there is no run to report on. A build that
+// read a number off those arms would tell a person their last scan gave up on
+// chunks that were never sent.
+//
+// The pair is stated in one test because it is one fixture moved: the same
+// ended scan, once with the embedding phase never reached and once with it
+// having run and refused.
+test('an ending whose embedding never ran reports no refusals, and one that ran reports its own', async () => {
+  modelSettings.mockResolvedValue(read({ indexedFiles: 5, failedChunks: 3 }));
+  renderSection();
+  await waitFor(() => expect(screen.getByTestId('indexing-index-failed-chunks')).toBeTruthy());
+
+  await emit(endedScan({ reason: 'cancelled', embedding: { kind: 'notReached' } }));
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBeGreaterThan(1));
+  expect(screen.queryByTestId('indexing-index-refused-run')).toBeNull();
+
+  await emit(endedScan({
+    reason: 'completed', endedIn: 'embedding',
+    embedding: { kind: 'skipped', why: { kind: 'noKey' } },
+  }));
+  await tick();
+  expect(screen.queryByTestId('indexing-index-refused-run')).toBeNull();
+
+  await emit(endedScan({
+    reason: 'completed', endedIn: 'embedding',
+    embedding: { kind: 'ran', done: 3, total: 4, refused: 1 },
+  }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-refused-run')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-index-refused-run'))).toBe(RUN_SENTENCE);
+});
+
 // 🔴 The state a suite without it cannot read: one sentence and two sentences
 // look the same until both scopes are on the screen at once. `job.rs:38-44`
 // says these are two numbers about two scopes, and whichever surface shows them
 // owes each its own words.
 test('a run that gave up on chunks and an index that already had some show two sentences, each about its own subject', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, failedChunks: 3 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-index-failed-chunks')).toBeTruthy());
 
-  const send = await embedChannel(jobs);
-  await send(ended({ reason: 'completed', complete: true, refused: 1 }));
+  await emit(endedScan({
+    reason: 'completed', endedIn: 'embedding',
+    embedding: { kind: 'ran', done: 3, total: 4, refused: 1 },
+  }));
 
   await waitFor(() => expect(screen.getByTestId('indexing-index-refused-run')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-index-refused-run'))).toBe(RUN_SENTENCE);
@@ -318,15 +382,17 @@ test('a run that gave up on chunks and an index that already had some show two s
 // about the index and there is no `read` arm to take it from.
 test('an index that stops being readable still says what the pass that just ended gave up on', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, failedChunks: 3 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-index-failed-chunks')).toBeTruthy());
-  const send = await embedChannel(jobs);
 
   // What the ending's own re-read finds.
   modelSettings.mockResolvedValue(settings({
     index: { kind: 'unreadable', cause: 'notOpen', reason: `gone mid-pass: ${TOKEN}` },
   }));
-  await send(ended({ reason: 'completed', complete: true, refused: 1 }));
+  await emit(endedScan({
+    reason: 'completed', endedIn: 'embedding',
+    embedding: { kind: 'ran', done: 3, total: 4, refused: 1 },
+  }));
 
   await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
   // Kept: its subject is the pass, and the pass really did refuse them.
@@ -398,113 +464,102 @@ test('an empty queue says nothing and offers nothing', async () => {
 // second button offering to start ANOTHER embed here would race it.
 test('a queue is not offered again while a run is already under way', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
 
-  const send = await embedChannel(jobs);
-  await send(progress());
+  await emit(runningScan());
 
   expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
   expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
 });
 
-// The other `starting`/`running`/`runningUnobserved` arm review found
-// unasserted (Important 1): a press has been made and `chain`'s own
-// precondition read of `model_settings` may still be in flight, or
-// `startEmbedJob` itself has not yet called back — the window's own opening
-// answer (`jobs.ts`'s `store.set` before either await), and the callback
-// `onEvent` reacts to has not fired even once. `deferredPromise` (below)
-// leaves `startEmbedJob`'s own promise unsettled so the phase cannot advance
-// past `starting` on its own.
-test('a queue is not offered while the pass is still starting', async () => {
+// ⚠️ The test that stood here — «a queue is not offered while the pass is still
+// starting» — asserted a state that no longer exists. `jobs.ts` had a
+// `starting` phase it wrote itself, in anticipation of a job it had asked for
+// and not yet heard from; the snapshot has no such state, because the core
+// announces the claim and nothing else may invent one. The window between the
+// press and that announcement is one IPC round trip, during which this section
+// still offers the button; a second press is refused by `claim_job` and the
+// refusal reaches the strip as a sentence. **Task 8** rewrites this gate on
+// `continueAction`, which is where that decision belongs.
+
+// The settings window reopened while a scan started elsewhere — from the tray,
+// or before this window existed — is still going. It is the same F4 scenario
+// one step later: a person who stopped a run, closed the window, reopened it,
+// and started another pass from elsewhere before checking back. The queue count
+// on screen is a moment-old read and does not shrink as that run works through
+// it, so the line and its button step aside.
+//
+// Delivered as the SNAPSHOT rather than as a boolean, which is the whole of
+// what this task changed: a window that never started the job hears about it in
+// exactly the same words as one that did.
+test('a queue is not offered while a scan this window did not start is running', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
 
-  const deferred = deferredPromise<void>();
-  startEmbedJob.mockReturnValue(deferred.promise);
-  void jobs.embed();
-  await waitFor(() => expect(startEmbedJob).toHaveBeenCalled());
-  await tick();
-
-  expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
-  expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
-});
-
-// `runningUnobserved` — the settings window reopened while a pass this
-// window has no channel for is still going (`jobs.ts:344-357`,
-// `syncFromStatus`), which is the same F4 scenario one step later: a person
-// who stopped a run, closed the window, reopened it, and started another
-// pass from elsewhere before checking back. No counts are drawn for it and
-// none arrive, so the queue's own line must not either.
-test('a queue is not offered while a job is running unobserved', async () => {
-  modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  const { jobs } = renderSection();
-  await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
-
-  jobStatus.mockResolvedValue({ running: true });
-  await jobs.syncFromStatus();
-  await tick();
+  await emit(runningScan());
 
   expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
   expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
 });
 
 // 🔴 (final review, C-M7) …and it must not stay hidden for the life of the
-// window. `runningUnobserved` is written by `syncFromStatus` alone, which ran
-// once at the window's mount, so a pass this window has no channel for could
-// end and nothing here would ever learn: the strip goes on saying a pass is
-// running and F4's queue line and its Continue button stay suppressed. The
-// recovery existed — pressing Cancel re-reads `job_status` — but nobody would
-// guess it, and the affordance it costs is the one F4 was added for.
+// window — which is exactly what this task fixed rather than worked around.
 //
-// The re-check is on this section's own mount, beside the `model_settings`
-// re-read that is already there for the same reason: both facts this section
-// draws from can have changed while it was off screen, and it re-reads BOTH
-// when a person comes back to it. The controller is careful to write only over
-// `idle`/`runningUnobserved`, so a pass this window IS watching cannot be
-// clobbered by the extra read.
-test('a pass this window could not hear ends, and the section offers the queue again on the next visit', async () => {
+// The defect this test was written for: the running state came from a
+// `job_status` read taken once at the window's mount, so a pass this window had
+// no channel for could END and nothing here would ever learn. The strip went on
+// saying a pass was running and F4's queue line and its Continue button stayed
+// suppressed; the only recovery was pressing Cancel, which nobody would guess.
+// The old fix asked again on every mount of this section, so a person parked
+// here saw nothing change until they navigated away and back.
+//
+// The pair this now separates is «the section learns on the next visit» from
+// «the section learns when it happens». NOTHING is remounted below: the window
+// holds one subscription to `scan-progress` and the ending arrives on it.
+test('a scan this window could not hear ends, and the section offers the queue again without a revisit', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  // The settings window was opened while a pass started elsewhere was running.
-  jobStatus.mockResolvedValue({ running: true });
+  // The settings window was opened while a scan started elsewhere was running.
+  jobStatus.mockResolvedValue({ ...IDLE_SCAN, ...runningScan() });
   const { container } = render(Settings);
   const panel = () => container.querySelector('.spane');
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
   expect(screen.queryByTestId('indexing-resume-embedding')).toBeNull();
 
-  // The pass ends. No ending arrives here — this window has no channel for it —
-  // so the only thing that can say so is a fresh `job_status`.
-  jobStatus.mockResolvedValue({ running: false });
-  await fireEvent.click(screen.getByTestId('settings-nav-models'));
-  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await emit(endedScan());
 
   await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
   expect(visible(panel())).toContain('Ще не вбудовано 5 фрагментів.');
 });
 
-// Through the controller, exactly the way `Models.svelte:468`'s own `reembed`
+// Through the controller, exactly the way `Models.svelte`'s own `reembed`
 // argues: the pass this button starts belongs on the window's strip, where its
-// progress and its Cancel stay reachable from every section, not to a listener
-// this component alone can hear. `scan` is asserted never-called specifically
-// because the folder-scan chain is the OTHER way to reach this same pass, and
-// a button that quietly called the wrong one would still leave the queue
-// embedding — just from underneath a walk nobody asked for.
-test('the resume button starts the embedding pass through the controller, never a scan', async () => {
+// progress and its Stop stay reachable from every section, not to a listener
+// this component alone can hear.
+//
+// 🔴 Both directions on the ENTRY POINT, which is what replaced the old
+// «never a walk» assertion. There is one command now and the argument is the
+// whole difference: `full` would re-read every watched folder to reach the same
+// queue, and this button's own sentence promises only the chunks that are
+// already owed.
+test('the resume button asks for the embedding entry point through the controller', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
   renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
 
   await fireEvent.click(screen.getByTestId('indexing-resume-embedding'));
 
-  await waitFor(() => expect(startEmbedJob).toHaveBeenCalledTimes(1));
-  expect(startWalkJob).not.toHaveBeenCalled();
+  await waitFor(() => expect(startScanJob).toHaveBeenCalledTimes(1));
+  expect(startScanJob).toHaveBeenCalledWith('embedOnly');
+  expect(startScanJob).not.toHaveBeenCalledWith('full');
 });
 
 // The `ended` half of the gate (Important 1, review) — the state the button
-// was written FOR. `refresh()` fires on `phase.kind === 'ended'` and nothing
-// afterwards moves the phase back to `idle`, so a pass cancelled from the
+// was written FOR. `refresh()` fires on an ended snapshot and nothing
+// afterwards moves it back to `idle` — an ending is a STATE that stands until
+// the next job claims the slot (`scan_state.rs`) — so a scan stopped from the
 // window's own strip with chunks still owed lands here and stays here: this
 // is the ordinary resting state after a stop, not a transient one. The queue
 // stays positive across the ending's own re-read on purpose — a completed
@@ -513,12 +568,11 @@ test('the resume button starts the embedding pass through the controller, never 
 // covers.
 test('an ended pass with chunks still owed still shows the line and the button', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
 
-  const send = await embedChannel(jobs);
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  await send(ended({ reason: 'completed', complete: true }));
+  await emit(endedScan({ reason: 'completed' }));
 
   await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-index-pending-chunks'))).toBe(PENDING_SENTENCE);
@@ -527,22 +581,19 @@ test('an ended pass with chunks still owed still shows the line and the button',
 
 // The line and the button re-derive once the pass they started ends, the same
 // re-read every other ending on this section already triggers
-// (`refresh()` on `phase.kind === 'ended'`) — reusing the phase fixtures and
-// the `modelSettings` call-count pattern the refresh tests below pin.
+// (`refresh()` on an ended snapshot) — reusing the state fixtures and the
+// `modelSettings` call-count pattern the refresh tests below pin.
 test('once the resumed pass ends, the section re-reads and the queue reflects what is left', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 5 }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-resume-embedding')).toBeTruthy());
 
-  // Taken AFTER `embedChannel` rather than after the mount: starting an embed
-  // makes its own precondition read of `model_settings` (`jobs.ts`'s `chain`),
-  // which is not the read this test is about. What it pins is the ONE further
-  // read the ending itself triggers — the same `refresh()` on `phase.kind ===
-  // 'ended'` every other ending on this section already causes.
-  const send = await embedChannel(jobs);
+  // What this pins is the ONE further read the ending itself triggers — the
+  // same `refresh()` on an ended snapshot every other ending on this section
+  // already causes.
   const beforeEnding = modelSettings.mock.calls.length;
   modelSettings.mockResolvedValue(read({ indexedFiles: 5, pendingChunks: 0 }));
-  await send(ended({ reason: 'completed', complete: true }));
+  await emit(endedScan({ reason: 'completed' }));
 
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(beforeEnding + 1));
   await waitFor(() => expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull());
@@ -554,26 +605,24 @@ test('once the resumed pass ends, the section re-reads and the queue reflects wh
 // ---------------------------------------------------------------------------
 
 test('an ending re-reads the index, and each further ending re-reads it again', async () => {
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(1));
-  const send = await walkChannel(jobs);
 
-  await send(ended());
+  await emit(endedScan());
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(2));
 
-  await send(ended());
+  await emit(endedScan());
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(3));
 });
 
 // The mirror. A subscriber that re-fetches on every store emission passes the
 // test above and fails here — and it is the only thing that tells the two apart.
 test('a progress report is not an ending and re-reads nothing', async () => {
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(1));
-  const send = await walkChannel(jobs);
 
-  await send(progress());
-  await send(progress());
+  await emit(runningScan());
+  await emit(runningScan());
   await tick();
 
   expect(modelSettings).toHaveBeenCalledTimes(1);
@@ -583,13 +632,13 @@ test('a progress report is not an ending and re-reads nothing', async () => {
 // three times here and satisfies every looser assertion.
 test('a section left behind by a nav change stops listening — three mounts, one ending, one re-read', async () => {
   const jobs = createJobController();
+  jobs.mount();
   render(Indexing, { props: { jobs } }).unmount();
   render(Indexing, { props: { jobs } }).unmount();
   render(Indexing, { props: { jobs } });
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(3));
-  const send = await walkChannel(jobs);
 
-  await send(ended());
+  await emit(endedScan());
 
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(4));
   await tick();
@@ -615,10 +664,9 @@ test('an older read that settles last does not repaint over the newer one', asyn
     return d.promise;
   });
 
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(queue).toHaveLength(1)); // the mount's read
-  const send = await walkChannel(jobs);
-  await send(ended());
+  await emit(endedScan());
   await waitFor(() => expect(queue).toHaveLength(2)); // the ending's read
 
   // Newer first, older last — the order the network is free to choose.
@@ -644,10 +692,9 @@ test('an older read that is refused last does not put a failure over the newer n
     return d.promise;
   });
 
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(queue).toHaveLength(1));
-  const send = await walkChannel(jobs);
-  await send(ended());
+  await emit(endedScan());
   await waitFor(() => expect(queue).toHaveLength(2));
 
   queue[1].resolve(read({ indexedFiles: 42, lastIndexedAt: null }));
@@ -689,14 +736,13 @@ test('a refused read shows the backend sentence and draws no numbers', async () 
 // adds is that it is no longer confirmed.
 test('a re-read that is refused says so beside the numbers it could not confirm, and stops saying it once one succeeds', async () => {
   modelSettings.mockResolvedValue(read({ indexedFiles: 12, lastIndexedAt: null }));
-  const { jobs } = renderSection();
+  renderSection();
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
   expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
-  const send = await walkChannel(jobs);
 
   const SENTENCE = 'the index went away mid-session';
   modelSettings.mockRejectedValue(new Error(SENTENCE));
-  await send(ended());
+  await emit(endedScan());
 
   await waitFor(() => expect(screen.getByTestId('indexing-index-load-failed')).toBeTruthy());
   expect(visible(screen.getByTestId('indexing-index-load-error'))).toBe(SENTENCE);
@@ -704,7 +750,7 @@ test('a re-read that is refused says so beside the numbers it could not confirm,
   expect(visible(screen.getByTestId('indexing-index-files'))).toBe('В індексі 12 файлів.');
 
   modelSettings.mockResolvedValue(read({ indexedFiles: 13, lastIndexedAt: null }));
-  await send(ended());
+  await emit(endedScan());
 
   await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toBe('В індексі 13 файлів.'));
   expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();

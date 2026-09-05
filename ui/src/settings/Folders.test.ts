@@ -5,7 +5,8 @@ import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
 import { tick } from 'svelte';
 import type {
-  StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile, TreeListing, TreeRoot,
+  ScanState, StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile, TreeListing,
+  TreeRoot,
 } from '../lib/ipc';
 
 // Mocked in the shape Arms.test.ts:5-6 / Models.test.ts:13-30 already use —
@@ -21,7 +22,7 @@ const listExclusions = vi.fn();
 const excludeSubfolder = vi.fn();
 const includeSubfolder = vi.fn();
 // The job commands are the REAL wrappers, deliberately: they are what carry
-// the `'start_walk_job'` wire string this file asserts is never sent, and a
+// the `'start_scan_job'` wire string this file asserts is never sent, and a
 // mock of them would make that assertion about this file's own fake.
 vi.mock('../lib/ipc', async (real) => ({
   ...(await real<Record<string, unknown>>()),
@@ -40,25 +41,49 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...a: unknown[]) => open(...a),
 }));
 
-// this ruling’s own guard (P3-6 review), and it is a live one now: Task 8 gave this
-// component a controller that CAN start a walk, and `ipc.ts` exports
-// `startWalkJob`. The assertion still sits at the one boundary every command
-// crosses regardless of what the wrapper is called — the raw `invoke` and the
-// wire string `'start_walk_job'` it carries — because a wrapper renamed in a
-// later task must not quietly retire the guard. `../lib/ipc`'s own real module
-// imports `invoke` from this path, so mocking it here intercepts every call the
-// real job wrappers would make.
+// this ruling’s own guard (P3-6 review), and it is a live one: this component
+// holds a controller that CAN start a scan. The assertion sits at the one
+// boundary every command crosses regardless of what the wrapper is called —
+// the raw `invoke` and the wire string it carries — because a wrapper renamed
+// in a later task must not quietly retire the guard. That renaming has now
+// happened twice: `'start_walk_job'` became `'start_scan_job'` when the scan
+// became one job, and the guard moved with it rather than being deleted.
+// `../lib/ipc`'s own real module imports `invoke` from this path, so mocking
+// it here intercepts every call the real job wrappers would make.
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...a: unknown[]) => invoke(...a),
   Channel: class {},
 }));
 
+// Tauri's event module, which `listenScanProgress` imports dynamically. Faked
+// at the module boundary for the same reason `invoke` is: what the controller
+// registers, and on what name, is the real wrapper's doing.
+const listen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...a: unknown[]) => listen(...a),
+}));
+let deliver: ((state: ScanState) => void) | null = null;
+
 beforeEach(() => {
+  listen.mockReset();
+  deliver = null;
+  revision = 0;
+  listen.mockImplementation((_name: string, cb: (e: { payload: ScanState }) => void) => {
+    deliver = (state: ScanState) => cb({ payload: state });
+    return Promise.resolve(() => {});
+  });
   listTree.mockReset();
   addWatchedFolder.mockReset();
   removeWatchedFolder.mockReset();
   invoke.mockReset();
+  // 🔴 A PROMISE for every command, and a real state for `job_status`. A bare
+  // `mockReset` answers `undefined`, and a mounted controller then calls
+  // `.then` on it — an unhandled rejection that leaves every test green and the
+  // run red. `IDLE_SCAN` is what a process in which nothing has happened yet
+  // reports (`ScanState::default`).
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'job_status' ? IDLE_SCAN : undefined));
   open.mockReset();
   listSubfolders.mockReset();
   listExclusions.mockReset();
@@ -119,9 +144,9 @@ test('adding a folder saves the picked path, the list re-reads, and no job start
   // notice a stray scan — this checks the wire protocol string directly
   // (matched by first argument alone, so it does not depend on a second
   // argument's shape), which stays armed no matter what a future wrapper
-  // around it is named (P3-6 review — the previous form, `startWalkJob`,
-  // named an export that does not exist and could never fail).
-  expect(invoke.mock.calls.some(([command]) => command === 'start_walk_job')).toBe(false);
+  // around it is named (P3-6 review — the previous form named an export that
+  // did not exist and could never fail).
+  expect(invoke.mock.calls.some(([command]) => command === 'start_scan_job')).toBe(false);
 });
 
 test('a cancelled folder dialog calls nothing', async () => {
@@ -157,7 +182,12 @@ test('removing targets that row\'s rootId, not a position, with two roots in the
   // no other accessible name, so the query has to be the qualified one.
   await fireEvent.click(within(screen.getByTestId('folder-row-9')).getByRole('button', { name: 'Remove /synthetic/beta' }));
 
-  expect(removeWatchedFolder).toHaveBeenCalledWith(9);
+  // 🔴 The path travels with the id, and it is the path of THE ROW that was
+  // pressed. `bridge.rs` deletes the row only while that id still names that
+  // path, so an id sent alone would be the stale-then-act shape the compare
+  // exists to close — and a path taken from anywhere but the row a person read
+  // would agree with the id by construction and check nothing.
+  expect(removeWatchedFolder).toHaveBeenCalledWith(9, '/synthetic/beta');
   await waitFor(() => expect(screen.queryByText('/synthetic/beta')).toBeNull());
   expect(screen.getByText('/synthetic/alpha')).toBeTruthy(); // untouched
   expect(listTree).toHaveBeenCalledTimes(2); // re-read after removal
@@ -2188,7 +2218,7 @@ test('a row shut while the check is in flight raises no question when the reply 
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2219,61 +2249,51 @@ test('a row shut while the check is in flight raises no question when the reply 
 // machinery that form cannot reach: several roots open at once, and a question
 // standing on screen when the ending lands.
 //
-// Driven through the REAL controller and the real `startWalkJob`, so what is
+// Driven through the REAL controller and the real `startScanJob`, so what is
 // exercised is the wiring a press goes through rather than a store shaped like
-// one. `model_settings` answers "there is no key", which stops the chained
-// embedding pass inside the controller's own pre-check — a second job would
-// send a second ending, and every assertion below is about what ONE ending
-// does.
-function answerModelSettings() {
-  invoke.mockImplementation((cmd: string) =>
-    Promise.resolve(cmd === 'model_settings' ? { key: { kind: 'absent' } } : undefined));
+// one. The scan is ONE job now — there is no chained second pass and no second
+// ending — so every assertion below is about what one ending does.
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+// 🔴 MOUNTED, not merely created: `Settings.svelte` is what opens the window's
+// subscription, and until it is opened nothing is listening for the state an
+// ending arrives in. `Folders.svelte` only reads the store.
+function renderWatching() {
+  const jobs = createJobController();
+  jobs.mount();
+  return { jobs, ...render(Folders, { props: { jobs } }) };
 }
 
-function endWalk() {
-  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_walk_job');
-  if (call === undefined) throw new Error('start_walk_job was never invoked');
-  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
-    event: 'ended',
-    data: {
-      reason: 'completed', done: 1, total: 1, skipped: 0, refused: 0, complete: true,
-      indexed: 1, unchanged: 0, removed: 0, frozen: [], message: null,
+let revision = 0;
+const endedScan = (): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'ended',
+    report: {
+      embedding: { kind: 'notReached' }, endedIn: 'reading',
+      reason: 'completed', message: null, resume: null,
     },
-  });
-}
+  },
+});
 
-// Fix round 2, I1. The opposite of `answerModelSettings`: a key AND a chosen
-// model, so `jobs.ts`'s own `chain()` does not stop at either precondition and
-// a walk's ending really does start `start_embed_job` — the only way to reach
-// an EMBEDDING pass's own ending through the real controller.
-function answerModelSettingsReady() {
-  invoke.mockImplementation((cmd: string) =>
-    Promise.resolve(cmd === 'model_settings'
-      ? { key: { kind: 'present' }, index: { kind: 'read', embeddingModel: 'emb-1' } }
-      : undefined));
-}
-
-function endEmbed() {
-  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === 'start_embed_job');
-  if (call === undefined) throw new Error('start_embed_job was never invoked');
-  (call[1] as { onProgress: { onmessage: (e: unknown) => void } }).onProgress.onmessage({
-    event: 'ended',
-    data: {
-      reason: 'completed', done: 0, total: 0, skipped: 0, refused: 0, complete: true,
-      indexed: 0, unchanged: 0, removed: 0, frozen: [], message: null,
-    },
-  });
+// Delivers one state the way the core's own observer does. Waits for the
+// subscription first, because `listen` resolves a microtask after `mount`.
+async function endScan() {
+  await waitFor(() => expect(deliver).not.toBeNull());
+  deliver!(endedScan());
 }
 
 test('a job ending re-reads every expanded panel, not only the root whose Scan was pressed', async () => {
   setLocale('en'); // seed, do not inherit
-  answerModelSettings();
   listTree.mockResolvedValue(listing(EMPTY_ROOTS));
   listSubfolders.mockImplementation((rootId: number) =>
     Promise.resolve(subfolders([sub(rootId === 1 ? 'first-before' : 'second-before')])));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await fireEvent.click(screen.getByTestId('folder-expand-2'));
@@ -2281,20 +2301,19 @@ test('a job ending re-reads every expanded panel, not only the root whose Scan w
   await screen.findByTestId('subfolder-2-second-before');
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
-  // Swapped only after the walk has started, so the new names can reach the
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
+  // Swapped only after the scan has started, so the new names can reach the
   // screen only by both panels being READ again.
   listSubfolders.mockImplementation((rootId: number) =>
     Promise.resolve(subfolders([sub(rootId === 1 ? 'first-after' : 'second-after')])));
 
-  endWalk();
+  await endScan();
 
   await screen.findByTestId('subfolder-1-first-after');
   // 🔴 The root nobody pressed Scan on. Narrowing the re-read to the pressed
   // root would leave this panel stale — and there is nothing to narrow it BY:
-  // an `Ending` (`jobs.ts`) carries counts and an outcome and no root at all,
-  // and `runningUnobserved` is the state where this window has no channel to
-  // read one from even in principle.
+  // one scan covers every watched folder (`scan_state::Entry`), and its report
+  // names no root at all.
   expect(screen.getByTestId('subfolder-2-second-after')).toBeTruthy();
   expect(screen.queryByTestId('subfolder-1-first-before')).toBeNull();
   expect(screen.queryByTestId('subfolder-2-second-before')).toBeNull();
@@ -2307,7 +2326,6 @@ test('a job ending re-reads every expanded panel, not only the root whose Scan w
 // word is its own kind of falsehood.
 test('a question standing when a job ends is withdrawn by name, and nothing is stored', async () => {
   setLocale('en'); // seed, do not inherit
-  answerModelSettings();
   listTree.mockResolvedValue(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
     root({ rootId: 2, absolutePath: '/synthetic/other', files: [] }),
@@ -2315,7 +2333,7 @@ test('a question standing when a job ends is withdrawn by name, and nothing is s
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2325,8 +2343,8 @@ test('a question standing when a job ends is withdrawn by name, and nothing is s
   expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
-  endWalk();
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
+  await endScan();
 
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
   expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
@@ -2351,7 +2369,6 @@ test('a question standing when a job ends is withdrawn by name, and nothing is s
 // press it was that came to nothing.
 test('a check still in flight when a job ends raises no question when its reply lands', async () => {
   setLocale('en'); // seed, do not inherit
-  answerModelSettings();
   let release: (v: TreeListing) => void = () => {};
   listTree.mockResolvedValueOnce(listing(EMPTY_ROOTS));
   listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => { release = r; }));
@@ -2359,7 +2376,7 @@ test('a check still in flight when a job ends raises no question when its reply 
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2368,8 +2385,8 @@ test('a check still in flight when a job ends raises no question when its reply 
     .toBe('Checking what this exclusion removes…');
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
-  endWalk();
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
+  await endScan();
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
   expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy();
 
@@ -2384,76 +2401,51 @@ test('a check still in flight when a job ends raises no question when its reply 
   expect(excludeSubfolder).not.toHaveBeenCalled();
 });
 
-// ── Fix round 2, I1 ────────────────────────────────────────────────────────
+// ── Fix round 2, I1 — DELETED HERE, OWED BY TASK 9 ─────────────────────────
 //
-// The withdrawal used to fire on ANY ending, including an embedding pass
-// chained behind a walk (`jobs.ts:223`, `chainsEmbedPass`). Reproduced through
-// the real controller: the walk ends, the embedding pass starts on its own —
-// it takes no root and covers the whole index (`jobs.ts:18-21`) — and while it
-// runs the person raises a fresh question. Nothing about that question is
-// stale: its numbers were read AFTER the walk had already landed. The
-// embedding pass then ends having indexed nothing and changed no rule, and
-// used to discard the question anyway, printing "a scan ended" when none had
-// at that moment.
-test('an embedding pass ending does not withdraw a question raised after the walk that chained it', async () => {
-  setLocale('en'); // seed, do not inherit
-  answerModelSettingsReady();
-  listTree.mockResolvedValue(listing([
-    root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
-  ]));
-  listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
-  listExclusions.mockResolvedValue([]);
-
-  render(Folders, { props: { jobs: createJobController() } });
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await screen.findByTestId('subfolder-1-drop');
-
-  await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
-  endWalk();
-  // The walk's own ending chains the embedding pass.
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
-
-  // Raised WHILE the embedding pass runs — its cost is computed now, after the
-  // walk already landed, so nothing about it is stale.
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
-  await screen.findByTestId('folder-confirm-1');
-
-  endEmbed();
-  await tick();
-  await tick();
-
-  // Both directions: the press survives, and nothing claims a scan ended.
-  expect(screen.getByTestId('folder-confirm-1')).toBeTruthy();
-  expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
-  expect(excludeSubfolder).not.toHaveBeenCalled();
-});
+// The test that stood here was «an embedding pass ending does not withdraw a
+// question raised after the walk that chained it». Its whole subject was the
+// CHAIN: a walk ended, `jobs.ts` started an embedding pass behind it, a person
+// raised a question while that pass ran, and the pass's own ending must not
+// discard it — the question's numbers were read after the walk had already
+// landed, so nothing about them was stale.
+//
+// There is no chain any more. A scan is ONE job with two phases and one ending
+// (`scan_state.rs`), so the sequence this test drove cannot be built. The
+// property it guarded is real and is not guarded right now: this commit
+// withdraws on EVERY ended snapshot, which is the safe direction of the
+// approximation (a question withdrawn once too often costs a second press; one
+// left standing states pre-scan numbers as current) and is over-eager for an
+// `embedOnly` run, which reads no folder.
+//
+// 🔴 **Task 9** is where it comes back, keyed on `ScanState.readSeq` — how many
+// reading passes have ENDED — which is the durable fact the chain was standing
+// in for. Its own fixture states are named in the plan: a question raised after
+// `readSeq` last moved survives an ending that does not move it; an `embedOnly`
+// run withdraws nothing.
 
 // ── Fix round 1, I1 ─────────────────────────────────────────────────────────
 //
 // The withdrawal used to run inside `refresh().then(…)`, so a rejected
-// `list_tree` at a walk's ending took it down with the re-read — and the ending
-// is consumed once (`seen = phase` advances before `reread` is called), so it
-// never came back. The evidence was then wiped by an unrelated success: the
-// chained embedding pass's own ending refreshes fine, clears `loadError`, and
-// redraws the panel with the question still on it, stating numbers a scan has
-// already moved and carrying nothing to say a scan happened.
+// `list_tree` at a scan's ending took it down with the re-read — and the ending
+// is consumed once (`seen` advances before `reread` is called), so it never
+// came back. The evidence was then wiped by an unrelated success: a LATER
+// ending refreshes fine, clears `loadError`, and redraws the panel with the
+// question still on it, stating numbers a scan has already moved and carrying
+// nothing to say a scan happened.
 //
-// The failure is driven through the real controller so the chaining is the
-// product's own: `answerModelSettingsReady` is what lets the walk's ending
-// start the embedding pass.
-test('a walk ending withdraws the question even when the re-read that follows it fails', async () => {
+// The second ending was the chained embedding pass's before this task. There is
+// no chain any more, so it is a second scan's — the same shape of event, and
+// the same "an unrelated success wipes the evidence" sequence.
+test('a scan ending withdraws the question even when the re-read that follows it fails', async () => {
   setLocale('en'); // seed, do not inherit
-  answerModelSettingsReady();
   listTree.mockResolvedValue(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
   ]));
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2461,13 +2453,12 @@ test('a walk ending withdraws the question even when the re-read that follows it
   await screen.findByTestId('folder-confirm-1');
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
 
   // Queued here and not at the top, so it is the re-read AT THE ENDING that
   // fails and nothing earlier consumes it.
   listTree.mockRejectedValueOnce(new Error('the folder list could not be read'));
-  endWalk();
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_embed_job')).toBe(true));
+  await endScan();
 
   // The direction nobody asserted: the failure is visible rather than silent.
   // While it stands, the panel is off screen entirely — which is exactly how
@@ -2475,10 +2466,11 @@ test('a walk ending withdraws the question even when the re-read that follows it
   await waitFor(() => expect(visibleText(screen.getByTestId('folders-load-reason')))
     .toBe('the folder list could not be read'));
 
-  // The unrelated success that used to wipe the evidence: the chained
-  // embedding pass ends, `list_tree` answers, `loadError` clears and the panel
-  // comes back.
-  endEmbed();
+  // The unrelated success that used to wipe the evidence. It was the CHAINED
+  // embedding pass's ending before this task; there is no chain any more, so it
+  // is a second scan's ending — the same shape of event, arriving from a job
+  // this window did not have to start.
+  await endScan();
   await waitFor(() => expect(screen.queryByTestId('folders-load-reason')).toBeNull());
   await screen.findByTestId('folder-panel-1');
 
@@ -2498,14 +2490,13 @@ test('a walk ending withdraws the question even when the re-read that follows it
 // reaches a different arm.
 test('the withdrawn-question note switches language with everything else', async () => {
   setLocale('en'); // seed, do not inherit
-  answerModelSettings();
   listTree.mockResolvedValue(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
   ]));
   listSubfolders.mockResolvedValue(subfolders([sub('drop')]));
   listExclusions.mockResolvedValue([]);
 
-  render(Folders, { props: { jobs: createJobController() } });
+  renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
@@ -2513,8 +2504,8 @@ test('the withdrawn-question note switches language with everything else', async
   await screen.findByTestId('folder-confirm-1');
 
   await fireEvent.click(screen.getByTestId('folder-scan-1'));
-  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_walk_job')).toBe(true));
-  endWalk();
+  await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
+  await endScan();
   await screen.findByTestId('folder-question-withdrawn-1');
 
   setLocale('uk');
