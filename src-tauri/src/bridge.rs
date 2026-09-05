@@ -737,7 +737,7 @@ pub enum MaskAdded {
 /// **The rule this command exists to enforce: a mask is validated before it is
 /// stored**, and a refusal reaches the person as `RulesError`'s own sentence.
 /// A stored mask the walk later refuses is worse than no mask at all: under
-/// [`crate::walk_job::start_walk_job`] it stops the whole walk, and until
+/// [`crate::scan_job::read_roots`] it stops the whole scan, and until
 /// somebody runs one it sits in the editor looking like protection.
 ///
 /// **The candidate alone, in a throwaway `WalkRules`** —

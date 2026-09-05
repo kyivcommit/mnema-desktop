@@ -92,8 +92,9 @@ pub enum Error {
     Index(#[from] mnema_index::Error),
     /// A window sent a `root_id` `watched_root` has no row for — a folder
     /// removed by a second window, or a page that reloaded with a stale id
-    /// still in its own list. `start_walk_job` cannot walk a row number, only
-    /// the path it names.
+    /// still in its own list. `scan_job::read_roots` — and every other
+    /// command that takes a `root_id`, `bridge.rs` and `tree.rs` among them —
+    /// cannot act on a row number, only the path it names.
     #[error("no watched folder with id {0}")]
     UnknownWatchedRoot(i64),
     /// `remove_watched_folder`'s own `path` did not match what `root_id`
@@ -121,14 +122,15 @@ pub enum Error {
     ///   skip silently. That is a claim about rules written by THIS build
     ///   through THAT command, and it was once written here as though it
     ///   were a claim about every stored rule (review round 1, M1).
-    /// - `start_walk_job` runs the same validator over what the database
-    ///   actually holds, because a stored prefix can fail it anyway: written
-    ///   by an older build whose whitelist was narrower (`rules.rs:28-49`
-    ///   describes it growing across three rounds), or written straight
-    ///   through `Db::add_path_exclusion`, which deliberately does not
-    ///   validate. There the refusal stops the whole job rather than one
-    ///   save, which is the conservative direction under D29 — see that call
-    ///   site's own comment.
+    /// - `scan_job::read_roots` runs the same validator over what the
+    ///   database actually holds, because a stored prefix can fail it
+    ///   anyway: written by an older build whose whitelist was narrower
+    ///   (`rules.rs:28-49` describes it growing across three rounds), or
+    ///   written straight through `Db::add_path_exclusion`, which
+    ///   deliberately does not validate. There the refusal stops the whole
+    ///   scan — every watched folder, not one save — which is the
+    ///   conservative direction under D29 — see that call site's own
+    ///   comment.
     /// - `bridge::add_mask` and `tree::mask_preview` run the mask half of the
     ///   same validator over one candidate mask, through
     ///   `WalkRules::none().with_masks(vec![candidate])`. `mask_preview`
@@ -137,10 +139,10 @@ pub enum Error {
     ///   as "this rule would remove nothing". Since fix round 4 it then builds
     ///   the whole rule set the next scan will apply — that root's stored
     ///   prefixes and every stored mask — so it can refuse for a **stored**
-    ///   rule too, the same refusal `start_walk_job` gives one bullet up and
-    ///   for the same reason: a preview cannot put a number on a scan that is
-    ///   going to stop before it starts. The candidate is validated first, so a
-    ///   malformed candidate still gets its own sentence rather than another
+    ///   rule too, the same refusal `scan_job::read_roots` gives one bullet up
+    ///   and for the same reason: a preview cannot put a number on a scan that
+    ///   is going to stop before it starts. The candidate is validated first,
+    ///   so a malformed candidate still gets its own sentence rather than another
     ///   rule's.
     ///
     /// `#[from]` carries `RulesError`'s own sentence unchanged, which is

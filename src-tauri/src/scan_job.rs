@@ -6,9 +6,11 @@
 //! another, start the embedding pass, or nothing. Every one of those decisions
 //! sat between two `claim_job` calls, and `claim_job` clears the cancellation
 //! flag as it takes the slot: a Stop pressed in a gap was not late, it was
-//! erased, and the person's text went to the provider anyway. `start_walk_job`'s
-//! own long comment above `stopped_late` is where that was measured and where
-//! this file was promised. One claim, held across every folder, is what removes
+//! erased, and the person's text went to the provider anyway. The former
+//! `start_walk_job`'s own long comment above its `stopped_late` flag — both
+//! gone since Task 3b deleted the command that owned them — is where that was
+//! measured and where this file was promised; D-h, below, is where the
+//! argument now lives. One claim, held across every folder, is what removes
 //! the gaps rather than narrowing them.
 //!
 //! **What it produces, and where each half lives.** A scan writes two values.
@@ -47,9 +49,10 @@ use crate::walk_job::ended_from_report;
 /// The rules are built here rather than inside the loop because building them
 /// can FAIL — a stored exclusion prefix that `WalkRules::new` refuses — and a
 /// refusal is something the person asking for a scan has to be told about, not
-/// something a thread discovers three folders in. `start_walk_job`'s own
-/// comment on the same call has the whole argument for refusing rather than
-/// walking with the rule silently absent.
+/// something a thread discovers three folders in. [`read_roots`]'s own comment
+/// on the same call, below, has the whole argument for refusing rather than
+/// walking with the rule silently absent — the argument the deleted
+/// `start_walk_job` used to make in its own words before Task 3b.
 pub(crate) struct PreparedRoot {
     pub(crate) id: i64,
     pub(crate) path: PathBuf,
@@ -122,10 +125,11 @@ impl ScanDeps {
 
 /// Reads every watched folder, in order, under one job slot.
 ///
-/// `(async)` for the reason given on [`crate::bridge::open_index`] and repeated
-/// by [`crate::walk_job::start_walk_job`]: this command reads the index before
-/// it spawns anything, and a window-issued command that can wait on the same
-/// mutex must not be the one left running inline on the main thread.
+/// `(async)` for the reason given on [`crate::bridge::open_index`], once
+/// repeated by the deleted `walk_job::start_walk_job` too: this command reads
+/// the index before it spawns anything, and a window-issued command that can
+/// wait on the same mutex must not be the one left running inline on the main
+/// thread.
 #[tauri::command(async)]
 pub fn start_scan_job(state: State<'_, AppState>, entry: Entry) -> Result<(), Error> {
     start(&state, entry)
@@ -150,9 +154,9 @@ pub(crate) const SCAN_INCOMPLETE: &str = "scan.incomplete";
 /// 🔴 **The order of the first three steps is the decision this file is about**
 /// (D-f), and it is not the order that reads most naturally.
 ///
-/// `claim_job` comes FIRST, before the index is read — the opposite of
-/// [`crate::walk_job::start_walk_job`], where every fallible step runs before
-/// the claim so that a call which was always going to fail never has
+/// `claim_job` comes FIRST, before the index is read — the opposite of the
+/// deleted `walk_job::start_walk_job`, where every fallible step ran before
+/// the claim so that a call which was always going to fail never had
 /// `job_status` reporting a running job. That rule is right for a command that
 /// reads one folder's row and is wrong here, because what this reads is the
 /// **whole list of folders**, and the list is what another command is free to
@@ -164,16 +168,18 @@ pub(crate) const SCAN_INCOMPLETE: &str = "scan.incomplete";
 /// what makes the removal command refuse (`Error::JobAlreadyRunning`) instead
 /// of racing.
 ///
-/// The cost is the one `start_walk_job` avoids: a scan that fails on a stored
-/// exclusion prefix has held the slot for the length of one index read. It is
-/// paid deliberately, and the ending is not silent — the slot drops with the
-/// phase still `Reading`, so [`crate::state::JobSlot::drop`]'s policy writes
-/// `Ended { Failed, "the job ended without a report" }` and the window is told
-/// something went wrong rather than being left to notice an idle application.
+/// The cost is the one the deleted `start_walk_job` used to avoid: a scan
+/// that fails on a stored exclusion prefix has held the slot for the length
+/// of one index read. It is paid deliberately, and the ending is not silent
+/// — the slot drops with the phase still `Reading`, so [`crate::state::
+/// JobSlot::drop`]'s policy writes `Ended { Failed, "the job ended without a
+/// report" }` and the window is told something went wrong rather than being
+/// left to notice an idle application.
 ///
-/// `open_job_index` is between the two, for `start_walk_job`'s own reason: a
-/// walk is a sequence of writes that can run for hours and the window has to go
-/// on answering searches, so the job gets a connection of its own.
+/// `open_job_index` is between the two: a scan is a sequence of writes that
+/// can run for hours and the window has to go on answering searches, so the
+/// job gets a connection of its own — the same reason the deleted
+/// `start_walk_job` gave its own walk one.
 pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Result<(), Error> {
     // Resolved on this thread for the reason `ScanDeps::production` gives about
     // the credential reference: `AppState` does not cross into the job.
@@ -237,11 +243,12 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
 /// Every watched folder and the rules it walks under, read under ONE
 /// `with_index` lock.
 ///
-/// One lock rather than one per folder, for the reason `start_walk_job`'s own
-/// read gives at greater length: `Db::delete_watched_root` runs as a single
-/// transaction that cascades a root's exclusion rows away with it, so a path
-/// read before it and an exclusion list read after it describe two different
-/// indexes. The masks join the same read not because they belong to a root —
+/// One lock rather than one per folder: `Db::delete_watched_root` runs as a
+/// single transaction that cascades a root's exclusion rows away with it, so a
+/// path read before it and an exclusion list read after it describe two
+/// different indexes — the same reason the deleted `start_walk_job` read its
+/// own root this way, before there was more than one to read at once. The
+/// masks join the same read not because they belong to a root —
 /// they belong to none (D-c) — but because they are part of the same one
 /// question, "the rules this scan runs under".
 ///
@@ -271,8 +278,9 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
 
     let mut prepared = Vec::with_capacity(rows.len());
     for (id, path, prefixes) in rows {
-        // The same fixed defaults and the same refusal `start_walk_job` uses,
-        // and the refusal is the point: under D29 an indexed file is a file
+        // The same fixed defaults and the same refusal the deleted
+        // `start_walk_job` used, and the refusal is the point: under D29 an
+        // indexed file is a file
         // whose text is sent to a third-party provider, so a rule that will not
         // apply stops the scan rather than being silently absent. `with_masks`
         // REPLACES the mask set, so the whole stored set goes in one call.
@@ -591,9 +599,12 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
     // The size of the queue this run started against, written on every report
     // whether or not the throttle published it — `mnema_embed` measures it once,
     // before it takes anything out of the queue, so it is a fact about the run
-    // and the honest denominator for an ending. See `start_embed_job`'s own
-    // note for what a `0` here stands for and why it is not repaired by a
-    // second measurement.
+    // and the honest denominator for an ending. `0` here (a run stopped in its
+    // first instant, before any report) is deliberately not repaired by
+    // reading the queue again from this side: that would be a second
+    // measurement, taken after the pass stopped, and it could disagree with
+    // the one the run actually used — the deleted `start_embed_job` made the
+    // same choice for the same reason.
     let queue_total = AtomicU64::new(0);
     let started = Instant::now();
     // A plain local rather than an atomic: the pass calls this closure
@@ -881,9 +892,10 @@ impl RootProgress {
     ) -> Option<Progress> {
         contended_seen.store(progress.contended, Ordering::Relaxed);
 
-        // `0` refused, for `start_walk_job`'s own reason: a walk gives no file
-        // up for good, and `WalkProgress::refused` is merged into `skipped`
-        // below rather than carried as the different fact `Progress::refused`
+        // `0` refused, for the reason `walk_job::ended_from_report`'s own
+        // construction of `Ended` still gives: a walk gives no file up for
+        // good, and `WalkProgress::refused` is merged into `skipped` below
+        // rather than carried as the different fact `Progress::refused`
         // names.
         if !job::progress_is_due(
             self.last_report,
@@ -900,8 +912,9 @@ impl RootProgress {
         Some(Progress {
             done: progress.done,
             total: progress.total,
-            // The same merge `start_walk_job` makes: the bar draws one number,
-            // and the itemised difference is what the skip journal is for.
+            // The same merge `walk_job::ended_from_report` still makes: the
+            // bar draws one number, and the itemised difference is what the
+            // skip journal is for.
             skipped: progress.skipped + progress.refused,
             refused: 0,
             contended: progress.contended,

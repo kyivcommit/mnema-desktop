@@ -54,8 +54,10 @@
 //!   `BUILTIN_NAMES`.
 //!
 //! The harness never assembles `WalkRules` itself. Every walk goes through
-//! `walk_job::start_walk_job`, which is what the window calls, so the rules
-//! under test are the ones the product builds.
+//! `scan_job::start_scan_job` (`walk_all`, below), which is what the product
+//! itself calls to read a folder, so the rules under test are the ones the
+//! product builds — `scan_job::read_roots` is where it builds them, the same
+//! place the deleted `walk_job::start_walk_job` used to before Task 3b.
 //!
 //! **What the run must have built, and what it cost.** `Reached` counts the
 //! shapes each seed actually reached and `required` says which of them a

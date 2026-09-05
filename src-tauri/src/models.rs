@@ -135,10 +135,15 @@ pub struct DefaultModels {
 /// [`set_embedding_model`]'s existing shape rather than a new one, so closing it
 /// in this copy alone would leave the same window open one function over while
 /// making this side look as though the rule were kept. And the obvious close —
-/// check first, claim second, which is `start_embed_job`'s own stated ordering —
-/// is paid for by sending a request that can never be used whenever the slot is
-/// taken: that rule's fallible step is a local read, and this one is a network
-/// round trip.
+/// check first, claim second, the ordering the deleted `start_embed_job` used
+/// to state as its own rule — is paid for by sending a request that can never
+/// be used whenever the slot is taken: that rule's fallible step was a local
+/// read, and this one is a network round trip. ⚠️ It is also no longer the
+/// scan job's own rule for the case it replaced `start_embed_job` with:
+/// `scan_job::embed_after`'s `EmbedOnly` entry claims the slot FIRST and
+/// reads the key from the job's own thread after (D-g), the opposite trade,
+/// made because that read can block on a modal authorisation dialog. This
+/// paragraph's citation is history, not a live precedent to match.
 fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
     // Two `let _`, not one: the roles fail separately and neither failing is a
     // reason to leave the other unset.
@@ -433,8 +438,10 @@ pub fn set_embedding_model(
     // job and the run fails.
     //
     // Before there was a command that embeds, no job wrote vectors and a model
-    // change during one was harmless. `start_embed_job` is what made this
-    // reachable, so this is where it is closed.
+    // change during one was harmless. The now-deleted `start_embed_job` was
+    // what first made this reachable; `scan_job::embed_after`'s embedding
+    // phase is what keeps it reachable today, so this is still where it is
+    // closed.
     //
     // `claim_job` and not `job_is_running()`: the second is check-then-act, and
     // the job it checks for can start in the gap. This is the mutual exclusion
@@ -444,11 +451,12 @@ pub fn set_embedding_model(
     // **`let _slot`, never `let _`**: the second drops the slot at once and
     // leaves nothing held at all.
     //
-    // Claimed **after** the key is read, for the reason `start_embed_job`'s own
-    // doc comment gives about that read: the credential store can put an
-    // authorisation dialog on screen, and the slot must not be held while
-    // somebody decides what to do about it. Everything after this point that
-    // touches the index is inside the claim.
+    // Claimed **after** the key is read — this command's own answer to the
+    // same question `scan_job::embed_after`'s D-g answers the other way for
+    // `EmbedOnly` (its own comment is where the trade is argued at length):
+    // the credential store can put an authorisation dialog on screen, and the
+    // slot must not be held while somebody decides what to do about it.
+    // Everything after this point that touches the index is inside the claim.
     let _slot = state.claim_job(
         crate::scan_state::Phase::Other {
             job: crate::scan_state::OtherJob::ModelAdoption,

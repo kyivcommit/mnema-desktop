@@ -427,15 +427,18 @@ pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
 /// **resolves the last unit** — always sent regardless of timing, because a bar
 /// that stops one short of the end looks like a hang.
 ///
-/// Shared by [`run_probe`]'s own loop, `walk_job::start_walk_job`'s progress
-/// closure and `embed_job::start_embed_job`'s. `walk_root` (`mnema-ingest`)
-/// calls its progress callback once per file (twice for a file whose busy
-/// retries were all refused, and once before the loop) with no throttle of
-/// its own —
+/// Shared by [`run_probe`]'s own loop and, since Task 3b folded the walk and
+/// the embed into one job, `scan_job`'s two progress closures —
+/// `RootProgress::observe`'s for the reading pass and `embed_after`'s for the
+/// embedding phase — where `walk_job::start_walk_job` and
+/// `embed_job::start_embed_job` used to call it before either command was
+/// deleted. `walk_root` (`mnema-ingest`) calls its progress callback once per
+/// file (twice for a file whose busy retries were all refused, and once
+/// before the loop) with no throttle of its own —
 /// [`REPORT_INTERVAL`]'s own doc comment names the shape that produces: "a
 /// folder of a hundred thousand files would put a hundred thousand messages
-/// through the IPC" — so whoever owns the channel on the other end of that
-/// callback has to apply this rule, or flood it.
+/// through the IPC" — so whoever owns the callback has to apply this rule, or
+/// flood the observer that reads `AppState::scan_state`.
 ///
 /// ⚠️ **`refused` is in the condition, and that is a repair rather than a
 /// generalisation.** The arm used to read `done == total`, which silently never

@@ -3882,12 +3882,18 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     // have contradicted it. A bar that never moves is not a throttle working
     // well, it is a progress channel that is broken.
     //
-    // Filtered to `done > 0` before the emptiness check for the same reason
-    // `an_uncontended_walk_reports_no_contention_on_any_event` is: the scan
-    // announces two `Reading` snapshots before any file is read (the claim
-    // and the post-`read_roots` update), so the unfiltered vector is never
-    // empty regardless of what the reading pass actually reports — the exact
-    // state the message below names.
+    // Filtered to `done > 0` for the EMPTINESS check only, and for the same
+    // reason `an_uncontended_walk_reports_no_contention_on_any_event` is: the
+    // scan announces two `Reading` snapshots before any file is read (the
+    // claim and the post-`read_roots` update), so the unfiltered vector is
+    // never empty regardless of what the reading pass actually reports — the
+    // exact state the message below names. The upper bound stays over the
+    // UNFILTERED vector: it is asking whether the throttle held down every
+    // snapshot the scan announced, free ones included, not only the ones that
+    // covered a file — filtering it too would let a build that stopped
+    // throttling but still sent its two free announcements slip under `< 15`
+    // on the strength of reports that were never subject to the throttle at
+    // all.
     let real_progress: Vec<_> = progress_events.iter().filter(|p| p.done > 0).collect();
     assert!(
         !real_progress.is_empty(),
@@ -3895,10 +3901,10 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
          would never move: {progress_events:?}"
     );
     assert!(
-        real_progress.len() < 15,
+        progress_events.len() < 15,
         "thirty files produced {} progress events — throttling did not \
-         meaningfully reduce anything: {real_progress:?}",
-        real_progress.len()
+         meaningfully reduce anything: {progress_events:?}",
+        progress_events.len()
     );
     // The exception `job::progress_is_due` always makes: the report that
     // reaches `total` is sent regardless of timing, because a bar that

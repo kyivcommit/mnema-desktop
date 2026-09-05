@@ -305,9 +305,9 @@ mod tests {
     }
 
     /// `message` is the field `ended_from_report` never sets — it belongs to
-    /// the two `Ended::failed` call sites in `start_walk_job`, which have
-    /// actual failure text to give it. A walk the core itself decided the
-    /// ending for has none to invent.
+    /// callers that have actual failure text to give it, like
+    /// `scan_job::failed_root`'s `..Ended::failed(0, 0, message)`. A walk the
+    /// core itself decided the ending for has none to invent.
     #[test]
     fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
