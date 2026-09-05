@@ -253,6 +253,28 @@ describe('i18n', () => {
     expect(en(5)).toBe('5 subfolders are not listed: their names could not be read as text.');
   });
 
+  // Task 9. Two substitutions in one sentence, and the plural is over only one
+  // of them: `#` counts the files the folder holds, and `{path}` has to come
+  // out inside EVERY arm — a placeholder left out of the `few` branch is a
+  // sentence that names no folder at exactly the counts the component reaches
+  // most often, and no component fixture can see the arms it does not hit.
+  // Pinned at 1 / 3 / 5 in Ukrainian (`one`, `few`, `many`) and 1 / 3 in
+  // English, the counts the removal question's own tests use.
+  it('the folder-removal question counts the files it drops in every plural arm, in both locales', () => {
+    setLocale('uk');
+    const uk = (files: number) => t('settings_folders_confirm_remove', { path: '/synthetic/root', files });
+    expect(uk(1)).toBe('Видалити теку /synthetic/root з індексу? 1 файл цієї теки зникне з пошуку.');
+    expect(uk(3)).toBe('Видалити теку /synthetic/root з індексу? 3 файли цієї теки зникнуть з пошуку.');
+    expect(uk(5)).toBe('Видалити теку /synthetic/root з індексу? 5 файлів цієї теки зникнуть з пошуку.');
+
+    setLocale('en');
+    const en = (files: number) => t('settings_folders_confirm_remove', { path: '/synthetic/root', files });
+    expect(en(1)).toBe(
+      'Remove folder /synthetic/root from the index? 1 file from this folder will disappear from search.');
+    expect(en(3)).toBe(
+      'Remove folder /synthetic/root from the index? 3 files from this folder will disappear from search.');
+  });
+
   it('every catalog value is non-empty in both locales', () => {
     for (const loc of ['uk', 'en'] as const) {
       for (const key of Object.keys(messages[loc]) as Key[]) {

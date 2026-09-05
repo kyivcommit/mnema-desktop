@@ -60,6 +60,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
+  | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
+  | 'settings_folders_removing' | 'settings_folders_remove_blocked'
   | 'settings_folders_added_note'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
@@ -501,6 +503,29 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Підтвердити виключення {path}',
     settings_folders_confirm_include_named: 'Підтвердити скасування правила на {path}',
     settings_folders_confirm_cancel_named: 'Залишити {path} як є',
+    // Task 9. Видалення теки — єдина дія на цьому екрані, яка щось ЗАБИРАЄ з
+    // індексу без жодного сканування, тож питання ставиться перед нею так само,
+    // як перед виключенням підтеки. Число заморожене на момент натискання
+    // (`removeQuestion.files`), а слова — ні: речення будується всередині
+    // перебудови під `void $locale`, тож перемикання мови його переписує з тим
+    // самим числом.
+    //
+    // 🔴 Число — це `root.files.length` того рядка, який людина бачила: скільки
+    // файлів цієї теки зараз в індексі. Воно не обіцяє нижньої межі й не
+    // рахує того, що сканування ще не встигло проіндексувати, — саме тому
+    // речення говорить «файли цієї теки», а не «все, що зникне».
+    settings_folders_confirm_remove: '{files, plural, one {Видалити теку {path} з індексу? # файл цієї теки зникне з пошуку.} few {Видалити теку {path} з індексу? # файли цієї теки зникнуть з пошуку.} many {Видалити теку {path} з індексу? # файлів цієї теки зникнуть з пошуку.} other {Видалити теку {path} з індексу? # файла цієї теки зникнуть з пошуку.}}',
+    // Дві теки на екрані — дві кнопки «Підтвердити» з тим самим написом; шлях у
+    // доступній назві лишає їх розрізненними, як у трьох ключах вище.
+    settings_folders_confirm_remove_named: 'Підтвердити видалення {path}',
+    // Стан рядка, поки `remove_watched_folder` не відповів. Стоїть на місці
+    // кнопок цього рядка, а не поруч із ними: натиснути тут більше нема на що,
+    // і кнопка, яка нічого не робить, читається як кнопка, яку не почули.
+    settings_folders_removing: 'Видаляємо…',
+    // Одне речення на весь список, поки триває робота: бекенд відмовляє
+    // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
+    // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
+    settings_folders_remove_blocked: 'Спершу зупиніть сканування',
     // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
@@ -1032,6 +1057,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Confirm excluding {path}',
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
+    settings_folders_confirm_remove: '{files, plural, one {Remove folder {path} from the index? # file from this folder will disappear from search.} other {Remove folder {path} from the index? # files from this folder will disappear from search.}}',
+    settings_folders_confirm_remove_named: 'Confirm removing {path}',
+    settings_folders_removing: 'Removing…',
+    settings_folders_remove_blocked: 'Stop the scan first',
     settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
