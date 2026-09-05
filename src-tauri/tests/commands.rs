@@ -2321,9 +2321,16 @@ fn an_uncontended_walk_reports_no_contention_on_any_event() {
         EndReason::Completed,
         "the scan over the fixture folder did not complete: {report:?}"
     );
+    // The claim and the read-roots update announce two `Reading` snapshots
+    // before any file is read (`scan_job.rs`'s `claim_job` and `slot.update`
+    // calls in `start_inner`), so `progress` itself is never empty — filtered
+    // to reports that actually cover a file (`done > 0`), which is the state
+    // the message below is about.
+    let real_progress: Vec<_> = progress.iter().filter(|p| p.done > 0).collect();
     assert!(
-        !progress.is_empty(),
-        "the scan reported no progress at all, so nothing here is asserting anything"
+        !real_progress.is_empty(),
+        "the scan reported no progress from actually reading a file, so nothing here is \
+         asserting anything: {progress:?}"
     );
     assert!(
         progress.iter().all(|p| p.contended == 0),
@@ -3870,25 +3877,35 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     );
     // Both directions, because the upper bound alone is satisfied by zero and
     // a review measured exactly that: made to send nothing at all, this test
-    // passed — `len() < 15` held and the exactness check below skipped itself
-    // through its own `if let`. A bar that never moves is not a throttle
-    // working well, it is a progress channel that is broken.
+    // passed — `len() < 15` held and the exactness check below found nothing
+    // to disagree with, its `.expect()` never reached by a report that could
+    // have contradicted it. A bar that never moves is not a throttle working
+    // well, it is a progress channel that is broken.
+    //
+    // Filtered to `done > 0` before the emptiness check for the same reason
+    // `an_uncontended_walk_reports_no_contention_on_any_event` is: the scan
+    // announces two `Reading` snapshots before any file is read (the claim
+    // and the post-`read_roots` update), so the unfiltered vector is never
+    // empty regardless of what the reading pass actually reports — the exact
+    // state the message below names.
+    let real_progress: Vec<_> = progress_events.iter().filter(|p| p.done > 0).collect();
     assert!(
-        !progress_events.is_empty(),
-        "thirty files produced no progress events at all — the bar would never move"
+        !real_progress.is_empty(),
+        "thirty files produced no progress events from actually reading a file — the bar \
+         would never move: {progress_events:?}"
     );
     assert!(
-        progress_events.len() < 15,
+        real_progress.len() < 15,
         "thirty files produced {} progress events — throttling did not \
-         meaningfully reduce anything: {progress_events:?}",
-        progress_events.len()
+         meaningfully reduce anything: {real_progress:?}",
+        real_progress.len()
     );
     // The exception `job::progress_is_due` always makes: the report that
     // reaches `total` is sent regardless of timing, because a bar that
     // stops one file short of the end looks like a hang. The last event must
     // already show the true final count — not a stale one the throttle
     // happened to let through earlier and then withheld the correction for.
-    let last = progress_events
+    let last = real_progress
         .last()
         .expect("the emptiness assertion above already established there is one");
     assert_eq!(

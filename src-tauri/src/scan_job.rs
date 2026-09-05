@@ -375,15 +375,15 @@ fn read_every_root(
 
         let contended = contended_seen.load(Ordering::Relaxed);
         let done = match caught {
-            // `false` for `stopped_late`, deliberately: this pass reads the
-            // flag itself, at the top of the next iteration, and a folder that
-            // finished everything it was given DID complete. Rewriting its own
-            // reason to `Cancelled` would lose the one fact the per-folder row
-            // is for — `start_walk_job` had to do it because its job ended
-            // there and the slot changed hands; this one does not.
-            Ok(Ok(report)) => {
-                root_outcome(root_path, &ended_from_report(&report, false, contended))
-            }
+            // `ended_from_report` no longer takes a late-Stop flag at all
+            // (`walk_job.rs`'s own doc comment on it is where that moved): this
+            // pass reads the cancel flag itself, at the top of the next
+            // iteration, and a folder that finished everything it was given
+            // DID complete. Rewriting its own reason to `Cancelled` here would
+            // lose the one fact the per-folder row is for. D-h, below, is
+            // where a Stop landing after the very last folder's report is
+            // still caught — at the PASS's boundary, not this folder's row.
+            Ok(Ok(report)) => root_outcome(root_path, &ended_from_report(&report, contended)),
             Ok(Err(refusal)) => failed_root(root_path, refusal.to_string(), contended),
             Err(panic) => failed_root(root_path, job::panic_message(&*panic), contended),
         };
@@ -1477,7 +1477,6 @@ mod tests {
                 complete: true,
                 stopped: StopReason::Completed,
             },
-            false,
             seen.load(Ordering::Relaxed),
         );
         let root = root_outcome("/somewhere".to_string(), &ended);

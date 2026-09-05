@@ -61,18 +61,21 @@ use crate::job::{self, EndReason, Ended, Frozen};
 /// `Ok(Ok(report))`, the one outcome where the walk itself decided the
 /// ending rather than failing unexplained, so there is no failure text to
 /// carry — see `Ended::message`'s own doc comment for where one comes from.
-/// `stopped_late` is the cancellation flag as it stood when `walk_root`
-/// returned, and it changes exactly one thing: a walk that finished everything
-/// it was given, with a Stop raised too late for `walk_root` to have seen it,
-/// is reported as cancelled rather than completed. The caller's own comment
-/// says why that matters more than it looks; here it is enough that the `Ended`
-/// this produces is byte-for-byte the one an ordinary cancel produces from the
-/// same counters, so nothing downstream needs a third case to tell them apart.
 ///
-/// `complete` still crosses as the walk reported it, and for a late Stop that
-/// is `true`: phase 1 really did read every entry. The two fields answer
-/// different questions — `complete` is about what was SEEN, `reason` about why
-/// the run ENDED — and a late Stop is only ever an answer to the second.
+/// ⚠️ **No late-Stop rewrite here.** The command this function was written
+/// for, `start_walk_job`, used to read the cancellation flag itself after
+/// `walk_root` returned and report a completed walk as `Cancelled` when a Stop
+/// had landed too late for the walk to see it on its own — one folder was one
+/// job, and the slot changed hands the moment it answered, so that read was
+/// the only place left to catch it. The scan job reads every folder under ONE
+/// claim instead, and holds the SAME property one level up: `scan_job.rs`'s
+/// D-h rewrites the whole PASS's reason at the boundary after the last
+/// folder's report, not this function's per-folder one, because a Stop
+/// landing after one folder's report still leaves folders unread that the
+/// pass's own top-of-loop check will catch on the next iteration. A per-folder
+/// rewrite here would be the wrong layer twice over: too early for a Stop
+/// landing after this folder but before the next one starts, and redundant
+/// with D-h for a Stop landing after the very last folder.
 ///
 /// `contended` is the one counter that is **not** in the report and cannot be:
 /// `WalkReport` has no such field, because contention is announced once,
@@ -80,11 +83,10 @@ use crate::job::{self, EndReason, Ended, Frozen};
 /// Every caller of that callback throttles it, so the caller is the only place
 /// the number survives — see [`Ended::contended`] for the rule and
 /// `crate::scan_job::RootProgress` for the counter that keeps it.
-pub(crate) fn ended_from_report(report: &WalkReport, stopped_late: bool, contended: u64) -> Ended {
+pub(crate) fn ended_from_report(report: &WalkReport, contended: u64) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
     let reason = match report.stopped {
-        StopReason::Completed if stopped_late => EndReason::Cancelled,
         StopReason::Completed => EndReason::Completed,
         StopReason::Cancelled => EndReason::Cancelled,
         StopReason::BrokenWorker => EndReason::BrokenWorker,
@@ -167,18 +169,18 @@ mod tests {
     #[test]
     fn contention_reaches_the_ending_from_the_caller_and_not_from_the_report() {
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed), false, 2).contended,
+            ended_from_report(&report(StopReason::Completed), 2).contended,
             2,
             "the count the caller kept was not carried into the ending"
         );
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed), false, 0).contended,
+            ended_from_report(&report(StopReason::Completed), 0).contended,
             0,
             "a walk that met no lock must report none"
         );
         // The rule `Ended::contended` states, on the fixture that can break it:
         // `report(..)` skips 2 and refuses 3, so the ending's `skipped` is 5.
-        let ended = ended_from_report(&report(StopReason::Completed), false, 5);
+        let ended = ended_from_report(&report(StopReason::Completed), 5);
         assert!(
             ended.contended <= ended.skipped,
             "contended {} is above skipped {}, so a surface adding the two \
@@ -207,7 +209,7 @@ mod tests {
         ];
         for (stopped, expected) in cases {
             assert_eq!(
-                ended_from_report(&report(stopped), false, 0).reason,
+                ended_from_report(&report(stopped), 0).reason,
                 expected,
                 "StopReason::{stopped:?} did not become EndReason::{expected:?}"
             );
@@ -222,11 +224,11 @@ mod tests {
     fn completeness_crosses_the_seam_unchanged() {
         let mut walked = report(StopReason::Completed);
         walked.complete = true;
-        assert!(ended_from_report(&walked, false, 0).complete);
+        assert!(ended_from_report(&walked, 0).complete);
 
         walked.complete = false;
         assert!(
-            !ended_from_report(&walked, false, 0).complete,
+            !ended_from_report(&walked, 0).complete,
             "an incomplete walk must not report as one that saw everything, \
              even when it otherwise stopped `Completed`"
         );
@@ -240,7 +242,7 @@ mod tests {
             why: FrozenReason::EmptyDirectory,
         }];
 
-        let ended = ended_from_report(&walked, false, 0);
+        let ended = ended_from_report(&walked, 0);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
         // The exact variant, not merely `Some`: `each_frozen_reason_maps_to_
@@ -282,7 +284,7 @@ mod tests {
     /// swapped field would show up here rather than in `done` alone.
     #[test]
     fn indexed_and_unchanged_cross_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         assert_eq!(ended.indexed, 5);
         assert_eq!(ended.unchanged, 1);
         assert_ne!(ended.indexed, ended.done);
@@ -297,7 +299,7 @@ mod tests {
     /// field on `report(..)` so a swap — not only a drop — would fail here.
     #[test]
     fn removed_crosses_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         assert_eq!(ended.removed, 4);
         assert_ne!(ended.removed, ended.done);
     }
@@ -309,14 +311,14 @@ mod tests {
     #[test]
     fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed), false, 0).message,
+            ended_from_report(&report(StopReason::Completed), 0).message,
             None
         );
     }
 
     #[test]
     fn done_and_total_include_phase_one_refusals_and_skipped_merges_both_kinds() {
-        let ended = ended_from_report(&report(StopReason::Completed), false, 0);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         // found: 8, refused: 3
         assert_eq!(ended.total, 11);
         // indexed: 5, unchanged: 1, skipped: 2, refused: 3
@@ -337,7 +339,7 @@ mod tests {
         walked.skipped = 0;
         walked.refused = 0;
 
-        let ended = ended_from_report(&walked, false, 0);
+        let ended = ended_from_report(&walked, 0);
         assert_eq!(ended.done, 0);
         assert_eq!(ended.total, 0);
         assert_eq!(ended.reason, EndReason::RootUnavailable);
