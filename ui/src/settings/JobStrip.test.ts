@@ -447,8 +447,8 @@ const WALK_SENTENCES: Record<EndReason | 'partlyRead', { uk: string; en: string 
     en: 'The scan stopped: the helper program that reads files stopped answering.',
   },
   rulesNotApplied: {
-    uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
-    en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+    uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не індексували зовсім.',
+    en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not indexed at all.',
   },
   rootUnavailable: {
     uk: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
@@ -630,17 +630,24 @@ test('an unavailable root and a volume-missing root are each their own row, and 
 // own for: `rootRowText` falls back to the reading-outcome table's own
 // wording rather than leaving the row blank or throwing on a wire value the
 // type permits but no fixture above ever names.
-test('a root whose rules were not applied still gets a row rather than a blank one', async () => {
-  await openWindow();
+// Important 1 (Task 10a review, round 1): the fallback text this row draws IS
+// `indexing_walk_ended_rules_not_applied`, the same key the whole-reading
+// outcome line draws — so a locale that renders the outcome line correctly
+// but breaks this fallback (a literal, a stale copy) would still pass every
+// test that only ever checks the outcome line. Both directions, both locales.
+test.each(['uk', 'en'] as const)('a root whose rules were not applied still gets a row rather than a blank one, and both name the outcome the same way (%s)', async (loc) => {
+  await openWindow(loc);
 
   await emit(ended({}, readingOutcome({
+    reason: 'rulesNotApplied', complete: false,
     roots: [
       rootOutcome({ rootPath: '/r', reason: 'rulesNotApplied', complete: false, message: null }),
     ],
   })));
 
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.rulesNotApplied[loc]);
   expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual([
-    `/r: ${WALK_SENTENCES.rulesNotApplied.uk}`,
+    `/r: ${WALK_SENTENCES.rulesNotApplied[loc]}`,
   ]);
 });
 
@@ -651,18 +658,26 @@ test('a root whose rules were not applied still gets a row rather than a blank o
 // sentence rather than saying anything about that root. `indexing_root_cancelled`
 // is its own key now; both directions: the row shows it, and does NOT equal
 // the top sentence a second time.
-test('a cancelled root gets its own row, not a second copy of the top sentence', async () => {
-  await openWindow();
+// Minor 5 (Task 10a review, round 1): `indexing_root_cancelled` pinned in
+// English too, not only Ukrainian — a literal left in the English arm alone
+// would still pass a Ukrainian-only assertion.
+const ROOT_CANCELLED: Record<Loc, string> = {
+  uk: 'індексацію перервано',
+  en: 'indexing was interrupted',
+};
+
+test.each(['uk', 'en'] as const)('a cancelled root gets its own row, not a second copy of the top sentence (%s)', async (loc) => {
+  await openWindow(loc);
 
   await emit(ended({}, readingOutcome({
     reason: 'cancelled', complete: false,
     roots: [rootOutcome({ rootPath: '/c', reason: 'cancelled', complete: false, message: null })],
   })));
 
-  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.cancelled.uk);
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.cancelled[loc]);
   const rows = screen.getAllByTestId('indexing-root-row').map(visible);
-  expect(rows).toEqual(['/c: індексацію перервано']);
-  expect(rows[0]).not.toBe(`/c: ${WALK_SENTENCES.cancelled.uk}`);
+  expect(rows).toEqual([`/c: ${ROOT_CANCELLED[loc]}`]);
+  expect(rows[0]).not.toBe(`/c: ${WALK_SENTENCES.cancelled[loc]}`);
 });
 
 // Both directions, and the crash this guards against: two prefixes under the
@@ -731,6 +746,22 @@ test('an embedding skipped for no key, no model, or a store that did not answer 
   ));
   expect(visible(screen.getByTestId('indexing-embed-outcome')))
     .toBe('Вбудовування не запущено: сховище ключів не відповіло: locked');
+
+  // Minor 5 (Task 10a review, round 1): F11's English wording pinned too —
+  // dropping «у цій теці»/"over this folder" was a change to BOTH arms, and
+  // a Ukrainian-only assertion above would not catch a stale English one.
+  setLocale('en');
+  await tick();
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noKey' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Search by meaning was not started: no provider key is stored. Word search already works.',
+  );
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
+  );
 });
 
 // The pair Important 1 separates: `notReached` beside `endedIn: 'reading'`

@@ -860,6 +860,11 @@ mod tests {
             "Індексація 33 %",
             "integer division must floor, not round"
         );
+        // Minor 4 (Task 10a review, round 1): the renamed variant's ENGLISH
+        // arm, pinned here rather than only in Ukrainian — a rename that
+        // fixed one language and left the other on the old literal would
+        // still pass every test above.
+        assert_eq!(status_label(Lang::En, &reading(48, 200)), "Indexing 24 %");
     }
 
     /// `done == total` reaches exactly 100, never more and never NaN — the
@@ -869,6 +874,7 @@ mod tests {
     #[test]
     fn reading_finished_reads_exactly_one_hundred_percent() {
         assert_eq!(status_label(Lang::Uk, &reading(7, 7)), "Індексація 100 %");
+        assert_eq!(status_label(Lang::En, &reading(7, 7)), "Indexing 100 %");
     }
 
     /// `total == 0` — nothing has answered "how many folders" yet, which is
@@ -882,6 +888,10 @@ mod tests {
         assert_eq!(
             status_label(Lang::Uk, &reading(120, 0)),
             "Індексація: 120 файлів"
+        );
+        assert_eq!(
+            status_label(Lang::En, &reading(120, 0)),
+            "Indexing: 120 files"
         );
     }
 

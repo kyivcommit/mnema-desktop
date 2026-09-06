@@ -936,13 +936,14 @@
   // shape it was written against is gone. The RE-READ below is unconditional —
   // any phase of a scan moves `list_exclusions`' `existsOnDisk` and
   // `list_subfolders` (D29 sends the same rename window through either). The
-  // WITHDRAWAL is narrower, because it is spelled "a scan ended": what makes a
-  // pending question wrong is a READING pass having run, which is what moved
-  // the two numbers `Pending` freezes. An embedding pass changes no rule and no
-  // file count for the folder the question is about, so a still-open press has
-  // nothing invalidated to withdraw it over. Reviewed and reproduced: raising
-  // an exclude question while the embedding ran, then letting it end, used to
-  // discard the press and print "a scan ended" when none had.
+  // WITHDRAWAL is narrower, because it is spelled "indexing has finished and
+  // this panel was read again": what makes a pending question wrong is a
+  // READING pass having run, which is what moved the two numbers `Pending`
+  // freezes. An embedding pass changes no rule and no file count for the
+  // folder the question is about, so a still-open press has nothing
+  // invalidated to withdraw it over. Reviewed and reproduced: raising an
+  // exclude question while the embedding ran, then letting it end, used to
+  // discard the press and print "indexing has finished" when none had.
   //
   // 🔴 That distinction IS drawn, and the fact it is drawn on is
   // `ScanState.readSeq` — how many reading passes have ENDED in this process
@@ -1063,8 +1064,9 @@
     // separate the two rules, and each one costs something real:
     //
     //   • an `embedOnly` run ends like any other and reads no folder, so
-    //     nothing it did made a frozen number wrong. Withdrawing there discards
-    //     a press and prints "a scan ended" over a run that read nothing.
+    //     nothing it did made a frozen number wrong. Withdrawing there
+    //     discards a press and prints "indexing has finished" over a run
+    //     that read nothing.
     //   • the embedding phase of a `full` run arrives as `running` with the
     //     counter ALREADY moved. The reading pass has ended by then, so every
     //     number a question froze is stale — and no `ended` snapshot has been
