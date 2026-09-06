@@ -272,7 +272,11 @@ names_checked=0
 # per case).
 find_pkg_dir() {
   local target="$1" toml
-  local cache="$WORK/pkgdir-$target"
+  # Sanitised the same way the vitest branch names its slurp: a `<target>`
+  # that is a path (a `runner=` written in the wrong position leaves a test
+  # file here) would otherwise make this cache path a directory that does not
+  # exist, and the write would print a raw shell error on top of the verdict.
+  local cache="$WORK/pkgdir-${target//\//_}"
   if [ -f "$cache" ]; then
     if [ -s "$cache" ]; then
       IFS= read -r PKGDIR_RESULT < "$cache"
