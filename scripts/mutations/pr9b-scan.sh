@@ -547,8 +547,13 @@ case_ "the removal must send the path the question was asked about" \
 # not a reading pass so `readSeq` never moves either. Both of the other two
 # triggers are blind to it, and the section went on saying «В індексі 668
 # файлів» over an empty list.
+# ⚠️ Re-quoted in final fix round 2 against the condition area C widened, and
+# the mutant now KEEPS `leftRunning` while dropping `filesChanged` — otherwise
+# it would be two deletions in one case, and the named test would no longer say
+# which of them killed it. A removal's `idle` follows an `ended`, never a
+# `running`, so the arm this mutant keeps cannot rescue it.
 case_ "the window must re-read when the index's own file count moves" \
   ui/src/settings/Settings.svelte \
-  "s~      if \(readSeqChanged \|\| filesChanged \|\| scan\.snapshot\.kind === 'ended'\) void refresh\(\);~      if (readSeqChanged || scan.snapshot.kind === 'ended') void refresh(); // mutant: a removal moves nothing this window watches~" \
-  "if (readSeqChanged || scan.snapshot.kind === 'ended') void refresh(); // mutant: a removal moves nothing this window watches" \
+  "s~      if \(readSeqChanged \|\| filesChanged \|\| leftRunning \|\| scan\.snapshot\.kind === 'ended'\) \{\n        void refresh\(\);\n      \}~      if (readSeqChanged || leftRunning || scan.snapshot.kind === 'ended') \{\n        void refresh(); // mutant: a removal moves nothing this window watches\n      \}~" \
+  "void refresh(); // mutant: a removal moves nothing this window watches" \
   src/settings/Settings.test.ts 'a files count that changed on an idle snapshot re-reads, revealing the queue the vanished report offered' runner=vitest

@@ -314,3 +314,25 @@ function splitFields(body: string): string[] {
   if (cur.trim()) out.push(cur.trim());
   return out;
 }
+
+/// The value of a `pub const <name>: &str = "…";` in a Rust source.
+///
+/// The third shape this module reads, after enum variants and struct fields,
+/// and it exists for a name that is not a TYPE at all: an EVENT name, which
+/// crosses the boundary as a bare string on both sides with no compiler between
+/// them. Rename one half and both halves still build.
+///
+/// Deliberately anchored on `pub const` and on the `&str` type: a `const` that
+/// is not public is not something the other side could be pinning against, and
+/// one whose type changed is one this reader would be quoting out of context.
+export function rustStrConst(rawSource: string, constName: string): string {
+  const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+  const m = new RegExp(`pub const ${constName}\\s*:\\s*&str\\s*=\\s*"([^"]*)"\\s*;`).exec(source);
+  if (!m) {
+    throw new Error(
+      `pub const ${constName}: &str = "…"; not found in the Rust source — it was renamed, `
+      + 'removed, made private, or given another type, and this mirror is now pinning nothing.',
+    );
+  }
+  return m[1];
+}

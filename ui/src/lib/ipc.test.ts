@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
-import { camelOf, camelOfSnake, rustEnumVariants, rustStructFields, rustVariantFields } from './rust-enum';
+import {
+  camelOf, camelOfSnake, rustEnumVariants, rustStrConst, rustStructFields, rustVariantFields,
+} from './rust-enum';
 import type {
   AppPrefs,
   AutostartState,
@@ -21,7 +23,7 @@ import type {
   SubfolderListing,
   SubfolderState,
 } from './ipc';
-import { OTHER_JOBS } from './ipc';
+import { OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -783,6 +785,22 @@ test('every struct variant on the wire is exactly what scan_state.rs defines, fi
       rustVariantFields(SCAN_STATE_RS, enumName, variant).map(camelOfSnake).sort(),
     );
   }
+});
+
+// 🔴 Final review, Area D, Important 1. The `scan-progress` name used to be two
+// independent literals — `lib.rs`'s emit and `ipc.ts`'s listen — with nothing
+// comparing them. That is the failure in this file's whole subject that looks
+// least like a defect: rename one side and the application builds, starts,
+// answers `job_status`, and never delivers another live update. The window
+// draws whatever it read at mount and stops, with no error on either side.
+//
+// `lib.rs` and not `scan_state.rs`, because the name has to be pinned where it
+// is EMITTED. A constant declared beside the type and a literal typed at the
+// emit site would leave exactly the gap this closes.
+const LIB_RS = readFileSync(join(HERE, '../../../src-tauri/src/lib.rs'), 'utf8');
+
+test('the scan-progress event name is the one lib.rs actually emits', () => {
+  expect(SCAN_PROGRESS_EVENT).toBe(rustStrConst(LIB_RS, 'SCAN_PROGRESS_EVENT'));
 });
 
 test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {

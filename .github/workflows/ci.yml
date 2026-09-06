@@ -533,9 +533,12 @@ jobs:
     # subdirectory unreadable.
     #
     # ⚠️ No count of its cases here, and that is the second time this comment
-    # has been wrong about one: it said 31 when the file held 32, and the file
-    # holds 35 now. A number in a comment is a definition, and this one drifts
-    # every time a review adds a guard. Re-derive:
+    # has been wrong about one: it said 31 when the file already held 32, and
+    # two review rounds have added cases since. A number in a comment is a
+    # definition, and this one drifts every time a review adds a guard — which
+    # is why the sentence above no longer names one either, having briefly
+    # replaced the stale number with a fresh one that would go stale the same
+    # way. Re-derive:
     #
     #   grep -c '^case_ ' scripts/mutations/pr9b-scan.sh
     # Measured locally on an Apple M2 Max with `MNEMA_MUTATION_TARGET_DIR`

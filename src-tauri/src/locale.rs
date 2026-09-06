@@ -65,10 +65,16 @@ pub enum Key {
     TrayIndexingCount,   // "Індексація:" / "Indexing:" (+ " N <word>")
     TrayEmbedding,       // "Вбудовування" / "Embedding" (+ " NN %")
     TrayRemoving,        // "Видаляємо теку…" / "Removing folder…" (whole sentence)
-    TrayScanned,         // "Проскановано:" / "Scanned:" (+ " N <word>")
-    TrayShowSearch,      // "Показати пошук" / "Show search"
-    TrayOpenSettings,    // "Відкрити налаштування" / "Open settings"
-    TrayStopIndexing,    // "Зупинити сканування" / "Stop scanning"
+    // D-M1 (final review): the two jobs a person did not ask for. They used to
+    // share the IDLE sentence, so while a probe ran the tray said
+    // "Проскановано: N файлів" with a live Stop directly beneath it — a menu
+    // saying nothing is running over a control that stops something.
+    TrayProbing,      // "Перевірка…" / "Checking…" (whole sentence)
+    TrayAdopting,     // "Змінюємо модель…" / "Changing the model…" (whole sentence)
+    TrayScanned,      // "Проскановано:" / "Scanned:" (+ " N <word>")
+    TrayShowSearch,   // "Показати пошук" / "Show search"
+    TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
+    TrayStopIndexing, // "Зупинити сканування" / "Stop scanning"
     // F4 (Task 10 live run): the tray offered a way to stop a scan and no way
     // to carry one on — the resume button lived only in the settings window.
     TrayResumeScanning, // "Продовжити сканування" / "Continue scanning"
@@ -96,6 +102,8 @@ pub const ALL_KEYS: &[Key] = &[
     Key::TrayIndexingCount,
     Key::TrayEmbedding,
     Key::TrayRemoving,
+    Key::TrayProbing,
+    Key::TrayAdopting,
     Key::TrayScanned,
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
@@ -123,6 +131,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayEmbedding) => "Embedding",
         (Lang::Uk, TrayRemoving) => "Видаляємо теку…",
         (Lang::En, TrayRemoving) => "Removing folder…",
+        (Lang::Uk, TrayProbing) => "Перевірка…",
+        (Lang::En, TrayProbing) => "Checking…",
+        (Lang::Uk, TrayAdopting) => "Змінюємо модель…",
+        (Lang::En, TrayAdopting) => "Changing the model…",
         (Lang::Uk, TrayScanned) => "Проскановано:",
         (Lang::En, TrayScanned) => "Scanned:",
         (Lang::Uk, TrayShowSearch) => "Показати пошук",
@@ -382,6 +394,32 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let _ = app.emit("locale-changed", lang_tag(lang));
 }
 
+/// 🔴 **`#[tauri::command]` with no `(async)`, and that is load-bearing rather
+/// than a default nobody changed.**
+///
+/// A blocking command runs inline on the MAIN THREAD. The language switch this
+/// performs reaches [`apply_choice`] → [`apply_locale`] →
+/// [`crate::tray::swap_tray_menu`] → `build_tray_menu` → `Menu::with_items`,
+/// and `muda::Menu::new` is `MainThreadMarker::new().expect("`muda::Menu` can
+/// only be created on the main thread")`
+/// (`muda-0.19.3/src/platform_impl/macos/mod.rs:130-132`). That is a PANIC on
+/// macOS, not a degradation, and unlike `new_submenu` beside it there is no
+/// `cfg!(test)` bypass. So this command is on the main thread because it is not
+/// `(async)`, and the menu rebuild below it is legal for that reason alone.
+///
+/// **Its sibling does the opposite and documents it**: [`crate::prefs::
+/// set_hotkey`] IS `(async)`, therefore on a worker thread, and therefore hops
+/// through `run_on_main_thread` with a paragraph of its own explaining why. One
+/// caller handling this hazard at length while the other silently depends on
+/// the inverse is how a later reader "harmonises" the two and panics the
+/// language switch. Making this one `(async)` means giving it the same hop.
+///
+/// ⚠️ **No headless test can tell this from the version that panics**, which is
+/// the same limit `set_hotkey`'s own note records: `swap_tray_menu` returns at
+/// its first line when there is no tray, and `mock_builder()` builds none. The
+/// defence is therefore a source-reading one —
+/// `tests::the_locale_command_is_not_async_because_it_rebuilds_the_menu_inline`
+/// below — plus the live run that switches language with the tray up.
 #[tauri::command]
 pub fn set_locale<R: Runtime>(
     app: AppHandle<R>,
@@ -396,6 +434,87 @@ mod tests {
     use super::*;
     // The tests reach the file directly; the module itself no longer does.
     use crate::paths;
+
+    /// 🔴 **The one defence [`set_locale`]'s own doc says it can have**, and it
+    /// reads source because nothing else can see the property.
+    ///
+    /// `set_locale` rebuilds the tray menu on the caller's thread, and
+    /// `muda::Menu::new` panics off the main thread on macOS. It is on the main
+    /// thread because the command is NOT `(async)` — an attribute, not a line
+    /// of code, so no runtime assertion can reach it. And no headless test can
+    /// distinguish the two: `swap_tray_menu` returns at its first line when
+    /// there is no tray, and `mock_builder()` builds none, so under the mock a
+    /// worker-thread rebuild and a main-thread one are observationally
+    /// identical. That is the same limit `prefs::set_hotkey`'s own note
+    /// records, and it is why this is a source guard in the family of the two
+    /// in `lib.rs` rather than a fixture.
+    ///
+    /// The PRODUCTION half only, for those guards' own reason: this test's
+    /// needles are string literals in the module below `#[cfg(test)]`, and a
+    /// match against them is indistinguishable from a match against the
+    /// command. `concat!` on top of that, so no single literal here spells a
+    /// whole needle out.
+    ///
+    /// ⚠️ **The two panics above the assertion are about THIS READER, not about
+    /// the product**, and the difference is worth stating because it would be
+    /// easy to write them up as extra defences. An absent `#[tauri::command]`
+    /// is caught by the compiler long before this test runs — measured:
+    /// deleting it fails the build at `invoke_handler!` with «could not find
+    /// `__cmd__set_locale` in `locale`». What the "no attribute at all" and
+    /// "belongs to another item" branches buy is that this guard REFUSES rather
+    /// than reporting a green about a shape it did not find. The one thing it
+    /// actually defends is the `async`, which compiles either way.
+    #[test]
+    fn the_locale_command_is_not_async_because_it_rebuilds_the_menu_inline() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/locale.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("locale.rs could not read its own source at {path:?}: {e}"));
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        let definition = concat!("pub fn ", "set_locale<R: Runtime>(");
+        let found: Vec<usize> = production
+            .match_indices(definition)
+            .map(|(i, _)| i)
+            .collect();
+        let at = match found.as_slice() {
+            [one] => *one,
+            [] => panic!(
+                "no `{definition}` above #[cfg(test)] — the command moved, was renamed, or                  changed signature, and this guard is now protecting nothing"
+            ),
+            many => panic!(
+                "found {} occurrences of `{definition}` — this guard only knows how to check                  ONE definition. Byte offsets: {many:?}",
+                many.len()
+            ),
+        };
+
+        // The attribute belongs to this definition only if nothing but
+        // whitespace, attributes and doc comments separates the two — a `}`
+        // between them would mean this is some earlier item's attribute.
+        let attribute = concat!("#[tauri::", "command");
+        let opener = production[..at]
+            .rfind(attribute)
+            .unwrap_or_else(|| panic!("`set_locale` carries no `{attribute}…` attribute at all"));
+        let between = &production[opener..at];
+        assert!(
+            !between.contains('}'),
+            "the nearest `{attribute}` above `set_locale` belongs to another item —              `set_locale` is not a command any more:\n{between}"
+        );
+
+        let end = between
+            .find('\n')
+            .unwrap_or_else(|| panic!("the attribute line never ends:\n{between}"));
+        let line = &between[..end];
+        assert!(
+            !line.contains("async"),
+            "`set_locale` is now `{line}`. A command declared `(async)` runs on a WORKER \
+             thread, and this one rebuilds the tray menu inline — `muda::Menu::new` panics off \
+             the main thread on macOS. If it has to become async, it also has to hop through \
+             `run_on_main_thread` the way `prefs::set_hotkey` does."
+        );
+    }
 
     #[test]
     fn primary_subtag_handles_real_os_grammar() {

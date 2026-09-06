@@ -156,7 +156,7 @@ fn lang_menu_items(lang: Lang, choice: LocaleChoice) -> [(&'static str, String, 
 ///
 /// [`ScanState`]: crate::scan_state::ScanState
 pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String {
-    use crate::scan_state::{Phase, ScanSnapshot};
+    use crate::scan_state::{OtherJob, Phase, ScanSnapshot};
 
     match &state.snapshot {
         ScanSnapshot::Running { phase, .. } => match phase {
@@ -202,11 +202,26 @@ pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String 
                 format!("{} {} %", locale::t(lang, Key::TrayEmbedding), percent)
             }
             Phase::Removing { .. } => locale::t(lang, Key::TrayRemoving).to_string(),
-            // Neither the person's own job (Reading/Embedding/Removing draw
-            // their own sentence above) — the slot is taken by a probe or a
-            // model adoption, neither of which is shown, so this reads the
-            // same as Idle/Ended: what the index held as of the last count.
-            Phase::Other { .. } => scanned_label(lang, state.files),
+            // 🔴 D-M1 (final review). These two used to share the IDLE sentence
+            // — «Проскановано: N файлів» — on the reasoning that a probe or a
+            // model adoption is not the person's own scan and is not worth
+            // naming. What that missed is the item directly beneath:
+            // [`stop_enabled`] is true for any `Running { cancellable: true }`
+            // whatever the phase, and `bridge::start_probe_job` claims its slot
+            // cancellable. So while a probe ran the tray said nothing was
+            // running and offered a live Stop under it, and pressing that Stop
+            // cancelled a job the menu had never mentioned. Two items drawn
+            // from ONE snapshot, disagreeing about it.
+            //
+            // Each gets its own sentence rather than one shared «зайнято»,
+            // because the two ask different things of a person: a probe is over
+            // in a moment and wants no action, and a model change is something
+            // they just asked for and are waiting on. Both are whole sentences
+            // with no number — neither carries counts a person could read.
+            Phase::Other { job } => match job {
+                OtherJob::Probe => locale::t(lang, Key::TrayProbing).to_string(),
+                OtherJob::ModelAdoption => locale::t(lang, Key::TrayAdopting).to_string(),
+            },
         },
         ScanSnapshot::Idle | ScanSnapshot::Ended { .. } => scanned_label(lang, state.files),
     }
@@ -1010,25 +1025,39 @@ mod tests {
         assert_eq!(status_label(Lang::En, &removing()), "Removing folder…");
     }
 
-    /// `Other` (a probe or a model adoption) and `Ended` both draw the same
-    /// "Scanned: N" sentence `Idle` does — the person did not ask for either
-    /// job and is shown nothing about it, so the tray reads exactly as it
-    /// would if the slot were empty and the index just held `files` from
-    /// whatever last counted them.
+    /// 🔴 D-M1 (final review). The two jobs a person did not ask for each get a
+    /// sentence of their own, and `Ended` keeps the idle one.
+    ///
+    /// The pair this separates is "the tray names what is holding the slot"
+    /// from "the tray says nothing is running while a Stop under it is live".
+    /// Both used to draw the idle «Проскановано: N файлів» on the reasoning
+    /// that neither job is the person's own scan — but `stop_enabled` is true
+    /// for any `Running { cancellable: true }` whatever the phase, and
+    /// `bridge::start_probe_job` claims its slot cancellable. So the menu said
+    /// nothing was running and offered a control that stopped something, from
+    /// ONE snapshot, in one draw.
+    ///
+    /// `files: 7` on the probe is the half that says these sentences replaced
+    /// the count rather than merely being drawn beside it: the state carries a
+    /// file count and the sentence does not mention it. `Ended` is asserted in
+    /// the same test because it is the arm that legitimately still reads as
+    /// idle — the slot really is free — and a change that gave every non-idle
+    /// snapshot its own words would have taken that with it.
     #[test]
-    fn other_jobs_and_ended_scans_draw_the_scanned_count_same_as_idle() {
-        let want = "Проскановано: 7 файлів";
+    fn the_two_unasked_jobs_name_themselves_while_an_ended_scan_still_reads_as_idle() {
         let probe_with_files = ScanState {
             files: 7,
             ..other(OtherJob::Probe, true)
         };
-        assert_eq!(status_label(Lang::Uk, &probe_with_files), want);
-        assert_eq!(
-            status_label(Lang::Uk, &other(OtherJob::ModelAdoption, false)),
-            "Проскановано: 0 файлів",
-            "Other carries no `files` field of its own — it draws ScanState::files, 0 here"
-        );
-        assert_eq!(status_label(Lang::Uk, &ended(7)), want);
+        assert_eq!(status_label(Lang::Uk, &probe_with_files), "Перевірка…");
+        assert_eq!(status_label(Lang::En, &probe_with_files), "Checking…");
+
+        let adopting = other(OtherJob::ModelAdoption, false);
+        assert_eq!(status_label(Lang::Uk, &adopting), "Змінюємо модель…");
+        assert_eq!(status_label(Lang::En, &adopting), "Changing the model…");
+
+        assert_eq!(status_label(Lang::Uk, &ended(7)), "Проскановано: 7 файлів");
+        assert_eq!(status_label(Lang::En, &ended(7)), "Scanned: 7 files");
     }
 
     /// An `Ended` snapshot whose report names `resume` — the one shape the

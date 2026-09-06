@@ -27,6 +27,21 @@ use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_positioner::{Position, WindowExt as _};
 
+/// The event every [`crate::scan_state::ScanState`] is pushed to the webview on.
+///
+/// 🔴 **A named constant because the other half of this name is in another
+/// language.** `ui/src/lib/ipc.ts` listens for the same string, and until this
+/// existed the two were independent literals with nothing comparing them: rename
+/// one and the application still builds, still starts, still answers
+/// `job_status` — and every live update stops arriving, with no error anywhere.
+/// The window would draw whatever it read at mount and never move again, which
+/// is the failure that looks least like a defect of any in this file.
+///
+/// It is `pub` and used at the emit site below so that
+/// `ui/src/lib/ipc.test.ts` can read THIS file and compare the name that is
+/// actually emitted, rather than a second copy kept beside it.
+pub const SCAN_PROGRESS_EVENT: &str = "scan-progress";
+
 /// Everything the webview is allowed to call, in one place.
 ///
 /// Exposed rather than written inline in [`run`] so that a test drives the same
@@ -673,7 +688,7 @@ pub fn run() -> anyhow::Result<()> {
                 state.set_job_observer(Box::new(move || {
                     let inner = handle.clone();
                     let scan = handle.state::<state::AppState>().scan_state();
-                    let _ = handle.emit("scan-progress", &scan);
+                    let _ = handle.emit(SCAN_PROGRESS_EVENT, &scan);
                     let _ = handle.run_on_main_thread(move || {
                         tray::refresh_tray(&inner);
                     });

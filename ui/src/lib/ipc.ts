@@ -769,9 +769,17 @@ export const jobStatus = () => invoke<ScanState>('job_status');
 //
 // The module is imported dynamically for `i18n/index.ts`'s reason: a window that
 // never listens does not load it, and a test may replace it.
+//
+// 🔴 The NAME is a constant here for the same reason it is one in `lib.rs`: the
+// two halves of it are in different languages, with no compiler between them.
+// Rename one side and everything builds, starts and answers — and no live
+// update ever arrives again, with nothing on either side saying so. `ipc.test.ts`
+// reads `lib.rs` and compares this value against the one the emit site uses.
+export const SCAN_PROGRESS_EVENT = 'scan-progress';
+
 export const listenScanProgress = async (cb: (state: ScanState) => void): Promise<UnlistenFn> => {
   const { listen } = await import('@tauri-apps/api/event');
-  return listen<ScanState>('scan-progress', (e) => cb(e.payload));
+  return listen<ScanState>(SCAN_PROGRESS_EVENT, (e) => cb(e.payload));
 };
 
 // Takes no channel at all (bridge.rs): stopping a job never depends on owning

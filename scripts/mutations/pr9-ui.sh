@@ -144,9 +144,16 @@ case_ "the run's refusals and the index's must not be drawn from one key" \
 # report for the whole of a long pass while answering every "does an ending
 # re-read" assertion correctly. The mirror is still the only thing that can see
 # it, and it is the running tick that moves nothing.
+# ⚠️ Re-quoted a second time in final fix round 2, and the reason is worth
+# recording: the round that MOVED this condition (area C's fourth trigger, any
+# transition out of `running`) gated on `npm test` alone, because nothing it
+# touched was Rust. `mutation-staleness.sh` was not in that gate and did not run
+# until the next commit, so two cases sat stale for one commit. Staleness is
+# cheap and reads every case file regardless of language; it belongs in a UI
+# gate too.
 case_ "the re-read must follow an ending, not every emission of the job store" \
   ui/src/settings/Settings.svelte \
-  "s~      if \(readSeqChanged \|\| filesChanged \|\| scan\.snapshot\.kind === 'ended'\) void refresh\(\);~      void refresh(); // mutant: every emission re-reads~" \
+  "s~      if \(readSeqChanged \|\| filesChanged \|\| leftRunning \|\| scan\.snapshot\.kind === 'ended'\) \{\n        void refresh\(\);\n      \}~      void refresh(); // mutant: every emission re-reads~" \
   "      void refresh(); // mutant: every emission re-reads" \
   src/settings/Settings.test.ts 'a running tick with an unchanged files count does not re-read' runner=vitest
 
