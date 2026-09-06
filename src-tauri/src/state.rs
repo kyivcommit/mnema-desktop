@@ -467,26 +467,32 @@ impl AppState {
     /// beside the phase rather than inside it.
     ///
     /// ⚠️ **A claim overwrites an `Ended` report, and `resume` lives on the
-    /// report — so a job the person did not start takes the tray's «Продовжити
-    /// сканування» away with it.** Accepted, and recorded here rather than
-    /// fixed. The sequence: a scan stopped in its embedding phase ends
-    /// `Cancelled` with `resume: Some(EmbedOnly)`; before the person presses
-    /// Resume they change the embedding model; `models.rs` claims the slot as
-    /// `Phase::Other { ModelAdoption }` and its drop writes `Idle`.
-    /// [`crate::tray::resume_entry`] reads the report and nothing else, so the
-    /// tray item goes dead — while the settings window still offers Continue,
-    /// because D-m falls back to the index's own markers. It is narrow and
-    /// partly self-correcting (a model change re-queues into another space, so
-    /// the old offer is arguably moot), and the honest reading is that `resume`
-    /// is the one value that outlives its job and was left inside the snapshot
-    /// rather than beside `last_reading` where this module's own doctrine puts
-    /// such values.
+    /// report — so a job the person did not start could take the tray's
+    /// «Продовжити сканування» away with it.** The sequence: a scan stopped in
+    /// its embedding phase ends `Cancelled` with `resume: Some(EmbedOnly)`;
+    /// before the person presses Resume they change the embedding model;
+    /// `models.rs` claims the slot as `Phase::Other { ModelAdoption }`.
+    ///
+    /// **The rule, since this claim keeps what it is about to overwrite when
+    /// there would be something worth getting back:** a claim whose `initial`
+    /// is [`Phase::Other`] and whose overwritten snapshot is `Ended { report }`
+    /// with `report.resume.is_some()` keeps that snapshot (see
+    /// [`JobSlot::restore`]); [`JobSlot::finish`] and [`JobSlot::drop`] write it
+    /// back in place of `Idle` when the `Other` job ends. Every other claim —
+    /// `Removing`, `Reading`, `Embedding`, and an `Other` claim over an ending
+    /// with no `resume` — overwrites exactly as before. Two reasons narrow it
+    /// this far rather than restoring any overwritten `Ended`: `Removing` and
+    /// the scan phases are the person's own doing, so their own ending is what
+    /// should stand; and an ending with no `resume` has nothing a probe or an
+    /// adoption should be able to bring back — a stale "no key" sentence
+    /// surviving a key probe that just succeeded would be worse than the
+    /// `Idle` it replaces, not better.
     pub fn claim_job(
         &self,
         initial: crate::scan_state::Phase,
         cancellable: bool,
     ) -> Result<JobSlot, Error> {
-        {
+        let restore = {
             let mut scan = self
                 .scan
                 .lock()
@@ -500,6 +506,22 @@ impl AppState {
             ) {
                 return Err(Error::JobAlreadyRunning);
             }
+            // Decided from what THIS claim is about to overwrite, not from
+            // what `finish` or `Drop` later finds — by then the snapshot is
+            // already `Running` and the `Ended` report this exists to save
+            // would be gone.
+            let restore = if matches!(initial, crate::scan_state::Phase::Other { .. }) {
+                match &scan.snapshot {
+                    crate::scan_state::ScanSnapshot::Ended { report }
+                        if report.resume.is_some() =>
+                    {
+                        Some(scan.snapshot.clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             scan.snapshot = crate::scan_state::ScanSnapshot::Running {
                 phase: initial,
                 cancellable,
@@ -509,7 +531,8 @@ impl AppState {
             // they are what the jobs before this one left behind, and a claim
             // that cleared them would blank a reopened window's only account of
             // the scan that just ran.
-        }
+            restore
+        };
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
@@ -529,6 +552,7 @@ impl AppState {
             observer,
             cancellable,
             finished: false,
+            restore,
         };
         // Through the slot's own `announce`, which is what makes the claim's
         // announcement read the same cell every later one does. After the early
@@ -654,6 +678,21 @@ pub struct JobSlot {
     /// stops [`JobSlot::drop`] from overwriting the report the job just wrote
     /// with the one nobody wrote.
     finished: bool,
+    /// The `Ended` snapshot this claim overwrote, kept because
+    /// [`AppState::claim_job`] decided it was worth getting back — see that
+    /// function's own doc for exactly which claims populate this. `None` for
+    /// every other claim, which is the overwhelming majority: a `Reading`,
+    /// `Embedding` or `Removing` claim never sets it, and neither does an
+    /// `Other` claim over an ending nothing can resume.
+    ///
+    /// Read by [`JobSlot::finish`] (for its `Terminal::Idle` arm only —
+    /// `Terminal::Ended` always writes its own report) and by
+    /// [`JobSlot::drop`] (only in the arm that would otherwise write `Idle`,
+    /// which is the one every claim that could have populated this reaches).
+    /// Both `take()` it rather than clone it: whichever of the two runs is the
+    /// only one that ever will, and a report clung to past that point is a
+    /// leak of exactly the memory this whole mechanism is about.
+    restore: Option<crate::scan_state::ScanSnapshot>,
 }
 
 impl JobSlot {
@@ -712,6 +751,11 @@ impl JobSlot {
     /// be written twice. `files` is `Option` because only a job that counted
     /// them has a number: `None` leaves the last count standing, which is what
     /// a probe and a cancelled pass owe the window.
+    ///
+    /// `Terminal::Idle` writes [`JobSlot::restore`] instead of `Idle` when this
+    /// claim populated it — see `claim_job`'s doc for which claims that is.
+    /// `Terminal::Ended` never consults it: a job that has its own report to
+    /// give always gives that one, not whatever an earlier job left behind.
     pub fn finish(mut self, terminal: crate::scan_state::Terminal, files: Option<i64>) {
         {
             let mut scan = self
@@ -719,7 +763,10 @@ impl JobSlot {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             scan.snapshot = match terminal {
-                crate::scan_state::Terminal::Idle => crate::scan_state::ScanSnapshot::Idle,
+                crate::scan_state::Terminal::Idle => self
+                    .restore
+                    .take()
+                    .unwrap_or(crate::scan_state::ScanSnapshot::Idle),
                 crate::scan_state::Terminal::Ended { report } => {
                     crate::scan_state::ScanSnapshot::Ended { report }
                 }
@@ -848,7 +895,14 @@ impl Drop for JobSlot {
                     },
                 }
             } else {
-                crate::scan_state::ScanSnapshot::Idle
+                // Reached by `Removing` and by every `Other` claim — the two
+                // phases that owe no report of their own. `restore` is `None`
+                // for all of those except the one `claim_job` populated it
+                // for, so this is also the only place that can ever hand one
+                // back.
+                self.restore
+                    .take()
+                    .unwrap_or(crate::scan_state::ScanSnapshot::Idle)
             };
             // A job that vanished is still a job that ended, and the consumer
             // watching this counter has exactly as much to re-read either way —
@@ -868,7 +922,7 @@ mod tests {
 
     use crate::job::{EndReason, Progress};
     use crate::scan_state::{
-        EmbedOutcome, EndedIn, OtherJob, Phase, ReadingOutcome, ScanReport, ScanSnapshot,
+        EmbedOutcome, EndedIn, Entry, OtherJob, Phase, ReadingOutcome, ScanReport, ScanSnapshot,
         ScanState, Terminal,
     };
 
@@ -945,6 +999,21 @@ mod tests {
             reason: EndReason::Failed,
             message: Some("the job ended without a report".to_string()),
             resume: crate::scan_job::resume_for(EndReason::Failed, ended_in),
+        }
+    }
+
+    /// A stopped scan's own ending — `Cancelled`, in the embedding phase — with
+    /// `resume` set to whatever the test needs it to be. This is the shape
+    /// `claim_job`'s restore rule is about: the person pressed Stop, and an
+    /// `Other` claim arriving before they press Resume must not take the offer
+    /// away.
+    fn ended_offering(resume: Option<Entry>) -> ScanReport {
+        ScanReport {
+            embedding: EmbedOutcome::NotReached,
+            ended_in: EndedIn::Embedding,
+            reason: EndReason::Cancelled,
+            message: None,
+            resume,
         }
     }
 
@@ -1427,6 +1496,181 @@ mod tests {
             state.scan_state().snapshot,
             ScanSnapshot::Idle,
             "a model adoption that vanished is not a scan that failed"
+        );
+    }
+
+    /// `claim_job`'s own rule, through `finish`: an `Other` claim over an
+    /// `Ended` report that offers a `resume` must give that report back
+    /// whole, in place of `Idle`, and the tray's «Продовжити сканування» must
+    /// read the offer again once it does.
+    #[test]
+    fn an_other_claim_restores_an_ended_report_that_offers_a_resume() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        let report = ended_offering(Some(Entry::EmbedOnly));
+        seeding.finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+        assert_eq!(
+            state.scan_state().jobs_done,
+            1,
+            "the fixture's own seeding must count as one ended job"
+        );
+        let revision_after_seeding = state.scan_state().revision;
+
+        let probe = state.claim_job(probe(), true).expect("the slot is free");
+        probe.finish(Terminal::Idle, None);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Ended {
+                report: report.clone()
+            },
+            "an Other claim over an ending that offers a resume must give that whole \
+             ending back, not Idle"
+        );
+        assert_eq!(
+            state.scan_state().revision,
+            revision_after_seeding + 2,
+            "the claim and the finish each still bump the revision once, restore or not"
+        );
+        assert_eq!(
+            state.scan_state().jobs_done,
+            2,
+            "the probe's own finish is still counted as a job ending"
+        );
+        assert_eq!(
+            crate::tray::resume_entry(&state.scan_state()),
+            Some(Entry::EmbedOnly),
+            "the tray's resume offer must survive the probe that ran in between"
+        );
+    }
+
+    /// The same rule through `Drop`: a probe that vanishes without calling
+    /// `finish` at all must not be able to erase a resumable ending either —
+    /// `Drop`'s own `Idle` arm is exactly where an `Other` claim without this
+    /// fix would land.
+    #[test]
+    fn an_other_claim_restores_an_ended_report_through_drop_too() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        let report = ended_offering(Some(Entry::Full));
+        seeding.finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+
+        let probe = state.claim_job(probe(), true).expect("the slot is free");
+        drop(probe);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Ended { report },
+            "a probe that vanished without finishing must still give the resumable \
+             ending back"
+        );
+        assert_eq!(
+            state.scan_state().jobs_done,
+            2,
+            "a vanished job is still a job that ended"
+        );
+    }
+
+    /// The other half of the same rule: an ending with nothing to resume has
+    /// nothing worth getting back, so an `Other` claim over one still lands on
+    /// plain `Idle` — exactly as it did before this fix existed.
+    #[test]
+    fn an_other_claim_does_not_restore_an_ending_without_a_resume() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        seeding.finish(
+            Terminal::Ended {
+                report: ended_offering(None),
+            },
+            None,
+        );
+
+        let probe = state.claim_job(probe(), true).expect("the slot is free");
+        probe.finish(Terminal::Idle, None);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "an ending with resume: None has nothing this mechanism should bring back"
+        );
+    }
+
+    /// `Removing` is the person's own doing, not a probe or a model adoption
+    /// arriving uninvited — its own `Idle` ending must stand even when it
+    /// overwrote a resumable scan report, which is why `claim_job`'s rule is
+    /// conditioned on `Phase::Other` specifically and not on "any claim over a
+    /// resumable ending".
+    #[test]
+    fn a_removing_claim_does_not_restore() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        seeding.finish(
+            Terminal::Ended {
+                report: ended_offering(Some(Entry::Full)),
+            },
+            None,
+        );
+
+        let removal = state
+            .claim_job(
+                Phase::Removing {
+                    root_path: "/nonexistent/mnema-removed-root".to_string(),
+                },
+                false,
+            )
+            .expect("the slot is free");
+        removal.finish(Terminal::Idle, None);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a removal's own ending must stand, not a scan's — restore is for Other alone"
+        );
+    }
+
+    /// An `Other` job that has its own `Ended` report to give — a shape no
+    /// production caller reaches today, but one `finish`'s signature allows —
+    /// must give THAT report, never the one this claim kept. `Terminal::Ended`
+    /// is a job speaking for itself; substituting an earlier job's report for
+    /// it would be exactly the bug this whole mechanism exists to avoid, just
+    /// aimed the other way.
+    #[test]
+    fn an_other_jobs_own_ended_report_wins_over_a_kept_one() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        seeding.finish(
+            Terminal::Ended {
+                report: ended_offering(Some(Entry::EmbedOnly)),
+            },
+            None,
+        );
+
+        let probe = state.claim_job(probe(), true).expect("the slot is free");
+        let own_report = ScanReport {
+            reason: EndReason::Failed,
+            ..ScanReport::default()
+        };
+        probe.finish(
+            Terminal::Ended {
+                report: own_report.clone(),
+            },
+            None,
+        );
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Ended { report: own_report },
+            "a job that has its own report to give must give that one, never the kept one"
         );
     }
 

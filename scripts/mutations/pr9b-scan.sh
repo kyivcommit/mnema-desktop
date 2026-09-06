@@ -143,11 +143,32 @@ case_ "an ending must move the revision, or no surface can tell it happened" \
 # window; only a reload recovers, since `mount()` reads `jobStatus` against
 # `apply`'s revision-0 default. The tray is unaffected — it re-reads
 # `scan_state()` — so the two surfaces disagree and only the window is wrong.
+#
+# Task 9c (debt sweep): re-anchored off `owed_a_report`'s own `if` rather than
+# off the `} else { ScanSnapshot::Idle };` text that used to close it — the
+# `Other`-claim restore fix (state-restore.md) put a kept snapshot in that
+# `else` arm instead, so the old anchor stopped matching anything and this case
+# went stale silently green. The new anchor is unique for the same reason the
+# old one was: `scan.snapshot = if let Some(ended_in) = owed_a_report {`
+# appears exactly once in the file, and the non-greedy capture up to the next
+# `scan.revision += 1;` still reaches past the restore arm and the
+# `jobs_done` bump unchanged, deleting only the revision bump itself.
 case_ "a job that vanished must move the revision, or the window never hears it ended" \
   src-tauri/src/state.rs \
-  's~            \} else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n(.*?)            scan\.revision \+= 1;~            } else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n$1            // mutant: a job that vanished leaves the counter where it was~s' \
+  's~scan\.snapshot = if let Some\(ended_in\) = owed_a_report \{\n(.*?)\n            scan\.revision \+= 1;~scan.snapshot = if let Some(ended_in) = owed_a_report {\n$1\n            // mutant: a job that vanished leaves the counter where it was~s' \
   '// mutant: a job that vanished leaves the counter where it was' \
   mnema-desktop 'state::tests::a_reading_job_that_vanished_ends_with_the_report_nobody_wrote' --lib
+
+# Task 9c (debt sweep). The rule `claim_job`'s doc states: an `Other` claim
+# over an `Ended` report offering `resume` keeps it, and `finish`'s
+# `Terminal::Idle` arm is one of the two places obligated to give it back. This
+# mutant deletes exactly that and returns to the old, unconditional `Idle` —
+# the shape this whole mechanism exists to stop being true again.
+case_ "an Other claim's finish gives back what it kept, not plain Idle" \
+  src-tauri/src/state.rs \
+  's~crate::scan_state::Terminal::Idle => self\n                    \.restore\n                    \.take\(\)\n                    \.unwrap_or\(crate::scan_state::ScanSnapshot::Idle\),~crate::scan_state::Terminal::Idle => crate::scan_state::ScanSnapshot::Idle, // mutant: the kept ending is discarded~' \
+  '// mutant: the kept ending is discarded' \
+  mnema-desktop 'state::tests::an_other_claim_restores_an_ended_report_that_offers_a_resume' --lib
 
 # 🔴 `update` is the ONLY write during a running scan: the claim publishes
 # `root_count: 0` and an empty path, and everything after it — the real folder
