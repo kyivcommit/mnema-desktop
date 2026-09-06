@@ -328,14 +328,20 @@
   // `indexing_walk_ended_rules_not_applied` sentence, which itself has no
   // pointer either — so both arms were missing it, and one shared key here
   // fixes both at once rather than two copies free to drift apart.
-  // `endedIn === 'reading'` excludes the one theoretical `embedding` row the
-  // wire's own resumption table still declares (`resume_for`), which no
-  // folder-rule refusal can actually produce.
+  //
+  // `reason` alone is the whole guard, with no `endedIn` half: `rulesNotApplied`
+  // can only ever end a reading. `after_root` (`scan_job.rs`) is the only place
+  // that breaks the walk on it, which is the reading loop; `resume_for`
+  // (`scan_job.rs`) folds `rulesNotApplied` into the same `None` arm regardless
+  // of `endedIn`, so the `(rulesNotApplied, embedding)` row its own exhaustive
+  // test table enumerates is that table checking a function argument no
+  // production caller ever passes together with this reason — not a real
+  // ending this pointer would otherwise misfire on.
   const failureLabel = $derived.by(() => {
     void $locale;
     if (snapshot.kind !== 'ended' || snapshot.report.message === null) return null;
     const message = t('indexing_failure_message', { message: snapshot.report.message });
-    if (snapshot.report.reason === 'rulesNotApplied' && snapshot.report.endedIn === 'reading') {
+    if (snapshot.report.reason === 'rulesNotApplied') {
       return `${message} ${t('indexing_rules_not_applied_pointer')}`;
     }
     return message;

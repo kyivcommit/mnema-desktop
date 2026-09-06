@@ -562,26 +562,6 @@ test('an ordinary failure does not grow the rules pointer', async () => {
     .toBe('Програма повідомила: the worker binary could not be started');
 });
 
-// The other direction on the `endedIn` half: the resumption table
-// (`scan_job::resume_for`) still declares a `rulesNotApplied` row for the
-// embedding phase, even though no folder-rule refusal can reach it in
-// practice — the pointer is about a folder rule, so it must not follow
-// `reason` alone into a phase where nothing was ever read.
-test('the rules pointer does not follow reason alone into the embedding phase', async () => {
-  await openWindow();
-
-  await emit(ended({
-    reason: 'rulesNotApplied', endedIn: 'embedding', message: 'a rule refused', resume: null,
-    // `skipped`/`noKey`, not `notReached`: `embedBlock`'s `notReached` and
-    // `ran` arms both draw `EMBED_ENDED[report.reason]` with no `{reason}`
-    // value, which is a separate, pre-existing gap for the four wire-only
-    // reasons this test has no business tripping over.
-    embedding: { kind: 'skipped', why: { kind: 'noKey' } },
-  }, null));
-
-  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('Програма повідомила: a rule refused');
-});
-
 // 🔴 An ending is a STATE: a scan that finished stays finished until the next
 // job claims the slot, and so does the reading it left behind. The pair this
 // separates is «the window heard the ending» from «the window was opened after
