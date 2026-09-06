@@ -11066,19 +11066,38 @@ fn a_folder_that_is_not_there_does_not_stop_the_folder_after_it() {
     );
 }
 
-/// 🔴 A folder that was stopped part-way still reports what it wrote.
+/// 🔴 A Stop landing between two folders keeps what the first one wrote, and
+/// never opens the second.
 ///
-/// The pair it separates is "stopped after 3 of 3 in this folder, one folder of
-/// two read" from "stopped, and here are some zeroes". They are the same
-/// `reason` and the same slot state; only the counters differ, and the counters
-/// are what a person is owed — they tell them how much of their archive is now
-/// in the index. `Stop` is raised from inside the announcement for the LAST
-/// file of the first folder, so at least one document is written before it
-/// fires and the count cannot pass by being zero.
+/// The pair it separates is "stopped after one folder of two, and here is what
+/// that folder did" from "stopped, and here are some zeroes". Same `reason`,
+/// same slot state; only the counters differ, and the counters are what a
+/// person is owed — they say how much of their archive is now in the index.
+/// `Stop` is raised from inside the announcement for the LAST file of the
+/// first folder, so at least one document is written before it fires and the
+/// count cannot pass by being zero.
 ///
 /// The other half, asserted alongside: the second folder is not read at all.
+///
+/// 🔴 **Renamed at Task 11b fix round 1, because the old name —
+/// `a_cancelled_root_still_counts_what_it_wrote` — described a state this
+/// fixture does not build.** It was read as "a folder cancelled part-way keeps
+/// its counters" and used as the oracle for the mutant that moves
+/// `ReadingOutcome::absorb` below the pass's `break`; measured, that mutant
+/// leaves this test GREEN. The Stop here lands after the folder's last file, so
+/// the folder itself ends `Completed`, `scan_job::after_root` says nothing, and
+/// the pass takes no `break` on that iteration at all — it stops at the TOP of
+/// the next one, with this folder's counters already absorbed. What the fixture
+/// really builds is the boundary BETWEEN two folders. The state the old name
+/// named is built by `a_worker_that_reads_nothing_stops_the_scan_at_the_folder_
+/// that_broke`, where the folder's own report carries the stopping reason, and
+/// that is the case's oracle now.
+///
+/// `roots[0].reason` is asserted below for that reason: it is the fixture's own
+/// PREMISE, and a premise nothing states is a premise the next reader has to
+/// guess at — which is exactly how the wrong oracle was chosen.
 #[test]
-fn a_cancelled_root_still_counts_what_it_wrote() {
+fn a_scan_stopped_between_two_folders_keeps_the_first_ones_counters() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
@@ -11118,6 +11137,17 @@ fn a_cancelled_root_still_counts_what_it_wrote() {
     assert_eq!(reading.reason, EndReason::Cancelled, "{reading:?}");
     assert_eq!(reading.roots_read, 1, "{reading:?}");
     assert_eq!(reading.root_count, 2, "{reading:?}");
+    // The fixture's own premise, stated rather than assumed: the Stop lands
+    // after this folder's last file, so the FOLDER finished and the PASS did
+    // not. If this ever becomes `Cancelled` the fixture has started building a
+    // different state, and every sentence above about the boundary is then
+    // about something else.
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::Completed,
+        "this fixture is about the boundary between two folders, and the first \
+         folder was itself stopped: {reading:?}"
+    );
     assert_eq!(
         reading.roots[0].indexed, 3,
         "the folder that was read before the Stop reported fewer documents than \

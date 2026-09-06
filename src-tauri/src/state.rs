@@ -908,6 +908,15 @@ mod tests {
             .collect()
     }
 
+    /// Every announcement in order, whole. `snapshots` and `announced_files`
+    /// below are projections of this; a test that has to say "and nothing was
+    /// announced between these two" needs the states themselves.
+    fn announced(log: &Log) -> Vec<ScanState> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn announced_files(log: &Log) -> Vec<i64> {
         log.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1355,6 +1364,102 @@ mod tests {
     /// the truth", which a claim that reset the field would make
     /// indistinguishable.
     ///
+    /// 🔴 **An ending moves `revision`, once, and is announced only after it is
+    /// written.**
+    ///
+    /// The pair this separates is "the job ended" from "any surface can tell
+    /// that it ended". `revision` is the ONLY thing that says one read of this
+    /// state is newer than another (see the field's own doc), and
+    /// `ui/src/settings/jobs.ts`'s `apply` keeps the higher one and DROPS
+    /// everything else. So an ending written under the revision the last
+    /// progress tick already carried is an ending the window throws away: the
+    /// strip goes on drawing a running pass, Stop live, over a slot that is
+    /// free — and nothing arrives later to correct it, because the job that
+    /// would have announced again has gone.
+    ///
+    /// Nothing else in this file could see that. The snapshot really does
+    /// change here, so every assertion phrased on `snapshot` alone — which is
+    /// what the observer tests are — passes against an ending that never moved
+    /// the counter. The neighbouring tests pin the bump on `claim_job`
+    /// (`a_refused_claim_announces_nothing`), on `mark_reading_done`
+    /// (`only_a_finished_reading_pass_moves_read_seq`) and on `set_files`
+    /// (below); `finish` was the one write on this type that had none.
+    ///
+    /// **All four shapes `finish` has**, because the bump sits under one of
+    /// them and above the other: `Terminal::Idle` and `Terminal::Ended`, each
+    /// with a file count and without one. A bump written inside the `if let
+    /// Some(files)` arm answers only half of them, and a fixture that always
+    /// passed a count would call that correct.
+    ///
+    /// "Exactly one announcement" and "after the write" come from the same
+    /// place, and that is why `Log` records the whole [`ScanState`] rather than
+    /// its snapshot: one new entry per `finish` says it announced once, and
+    /// that entry carrying the NEW revision says the write came first. An
+    /// announcement fired ahead of the write would record the old number while
+    /// leaving the final state correct.
+    #[test]
+    fn an_ending_moves_the_revision_once_and_is_announced_after_it_is_written() {
+        for (which, terminal, files) in [
+            ("idle, no count", Terminal::Idle, None),
+            ("idle, with a count", Terminal::Idle, Some(11)),
+            (
+                "ended, no count",
+                Terminal::Ended {
+                    report: ScanReport::default(),
+                },
+                None,
+            ),
+            (
+                "ended, with a count",
+                Terminal::Ended {
+                    report: ScanReport::default(),
+                },
+                Some(13),
+            ),
+        ] {
+            let log = Log::default();
+            let state = state();
+            state.set_job_observer(recorder(&log, &state));
+
+            let slot = state.claim_job(probe(), true).expect("the slot is free");
+            let before = state.scan_state().revision;
+            let already_announced = announced(&log).len();
+
+            slot.finish(terminal, files);
+
+            let settled = state.scan_state();
+            assert_eq!(
+                settled.revision,
+                before + 1,
+                "({which}) the ending did not move `revision`, so `jobs.ts`'s \
+                 `apply` would drop it and the window would go on drawing the \
+                 run that has just finished"
+            );
+
+            let since = announced(&log).split_off(already_announced);
+            assert_eq!(
+                since.len(),
+                1,
+                "({which}) an ending announces exactly once: {since:?}"
+            );
+            assert_eq!(
+                since[0].revision, settled.revision,
+                "({which}) the observer looked and found the revision the \
+                 ending had not written yet, so it was told before the write"
+            );
+            assert_eq!(
+                since[0].snapshot, settled.snapshot,
+                "({which}) the observer found a snapshot the ending had not \
+                 written yet"
+            );
+            assert_eq!(
+                since[0].files, settled.files,
+                "({which}) the observer found a file count the ending had not \
+                 written yet"
+            );
+        }
+    }
+
     /// `set_files` is the boot's way in, and it announces: a window opened
     /// before any job runs still has to be told what the index holds.
     #[test]

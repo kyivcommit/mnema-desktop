@@ -20,7 +20,14 @@
 # that number costs when it goes stale. Re-derive:
 #
 #   grep -c '^case_ ' scripts/mutations/pr9b-scan.sh
-#   grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr9b-scan.sh | sort -u
+#   grep -oE "^  mnema-desktop '[^']+'" scripts/mutations/pr9b-scan.sh | sort -u
+#
+# ⚠️ `^  ` is load-bearing in that second line, not tidiness. Unanchored, the
+# pattern also matches the copy of ITSELF written a few lines below (`[^']+`
+# matches `[^`), so the recipe answered 20 where the file holds 19 — a count
+# from a query that read its own instructions. A case invocation's package
+# always sits at the start of a continuation line under two spaces; a comment
+# starts with `#`.
 #
 # ⚠️ **Two test shapes on the cargo side, and the selector is what tells them
 # apart** — the same trap `pr9-shell.sh` documents. The `--lib` cases name unit
@@ -38,13 +45,16 @@
 # CI legs are unix. Which tests those are is taken from the code rather than
 # from this sentence, which would go stale:
 #
-#   for t in $(grep -oE "mnema-desktop '[^']+'" scripts/mutations/pr9b-scan.sh \
+#   for t in $(grep -oE "^  mnema-desktop '[^']+'" scripts/mutations/pr9b-scan.sh \
 #               | sed "s/.*'\(.*\)'/\1/" | sed 's/.*:://' | sort -u); do
 #     grep -rn -B4 "fn ${t}(" src-tauri | grep -q 'cfg(unix)' && echo "$t"
 #   done
 #
-# 🔴 **Two guards the plan asked for are NOT here, and their absence is the
-# claim rather than an omission.** Both are written up in
+# 🔴 **Three guards the plan asked for are NOT here, and their absence is the
+# claim rather than an omission.** The count is three because it was four until
+# fix round 1: the header used to say «two» while listing three, and a fourth —
+# `revision` not bumped on `finish` — was missing from the list altogether,
+# which is the shape this file exists to catch. All of it is written up in
 # `task-11b-report.md`; in short:
 #
 #   • `Pool::new` hoisted above the per-folder loop — the poison-across-roots
@@ -54,6 +64,16 @@
 #     `Folders.svelte`'s `refresh()` — there is no next `await`: everything
 #     after `listTree()` returns is synchronous, so the mutation cannot be
 #     constructed at all.
+#   • the removal's path re-derived from the id before the claim — written,
+#     measured GREEN, removed. `remove_hook` fires AFTER the claim, which is
+#     the window the swap fixture models, so a pre-claim re-derivation still
+#     reads the folder's real path and the compare below still refuses. Not an
+#     equivalent mutant; simply one no fixture here reaches.
+#
+# CLOSED in fix round 1, and named so the list reads as a history rather than
+# as a standing gap: `revision` not bumped on `finish` had no oracle when this
+# file was written. `state::tests::an_ending_moves_the_revision_once_and_is_
+# announced_after_it_is_written` is that oracle now, and the case is below.
 
 # ── The job slot: what a surface is told, and when (Task 1) ──────────────────
 
@@ -73,6 +93,27 @@ case_ "the ending is written before the observer is told, on the ordinary path t
   's~    pub fn finish\(mut self, terminal: crate::scan_state::Terminal, files: Option<i64>\) \{\n~    pub fn finish(mut self, terminal: crate::scan_state::Terminal, files: Option<i64>) \{\n        self.announce(); // mutant: the observer is told before the ending is written\n~; s~        self\.finished = true;\n        self\.announce\(\);~        self.finished = true;~' \
   '// mutant: the observer is told before the ending is written' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
+
+# 🔴 The ending's own `revision` bump, deleted — and every surface goes blind to
+# the ending while the state itself stays perfectly correct. `revision` is the
+# only thing that says one read of `ScanState` is newer than another
+# (`scan_state.rs`'s own field doc), and `ui/src/settings/jobs.ts`'s `apply`
+# keeps the higher one and DROPS everything else: an ending carrying the number
+# the last progress tick already had is an ending the window throws away, so the
+# strip goes on drawing the run, Stop live, over a slot that is free. Nothing
+# arrives later to correct it, because the job that would have announced again
+# has gone.
+#
+# Every assertion phrased on the SNAPSHOT passes under this mutant — the
+# snapshot really does change — which is why this guard was missing until fix
+# round 1 and why the case is anchored on the `if let Some(files)` block above
+# it: `scan.revision += 1;` occurs six times in this file, and five of them are
+# other writes that keep their own bump.
+case_ "an ending must move the revision, or no surface can tell it happened" \
+  src-tauri/src/state.rs \
+  's~            if let Some\(files\) = files \{\n                scan\.files = files;\n            \}\n            scan\.revision \+= 1;\n        \}~            if let Some(files) = files \{\n                scan.files = files;\n            \}\n            // mutant: the ending carries the revision the last tick already had\n        \}~' \
+  '// mutant: the ending carries the revision the last tick already had' \
+  mnema-desktop 'state::tests::an_ending_moves_the_revision_once_and_is_announced_after_it_is_written' --lib
 
 # 🔴 A reading job that vanished, sent back to `Idle`. The window then says the
 # folder was read to the end when it was not — an idle application over an index
