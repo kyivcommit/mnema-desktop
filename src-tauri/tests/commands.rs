@@ -938,6 +938,7 @@ fn the_window_can_ask_whether_a_job_is_running() {
             "revision": 0,
             "files": 0,
             "readSeq": 0,
+            "jobsDone": 0,
             "lastReading": null,
             "snapshot": { "kind": "idle" },
         }),
@@ -955,6 +956,10 @@ fn the_window_can_ask_whether_a_job_is_running() {
             "revision": 1,
             "files": 0,
             "readSeq": 0,
+            // A job that STARTED. Nothing has ended, so the count that says a
+            // job has is still nought — the same reading a claim gets in
+            // `state::tests::every_ending_moves_the_finished_count_once_and_nothing_else_moves_it`.
+            "jobsDone": 0,
             "lastReading": null,
             "snapshot": {
                 "kind": "running",

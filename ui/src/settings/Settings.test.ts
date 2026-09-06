@@ -12,7 +12,7 @@ import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 // `undefined`.
 // What a process in which nothing has happened yet reports (`ScanState::default`).
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 const SETTINGS: ModelSettings = {
@@ -458,8 +458,10 @@ test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; a
   const baseline = modelSettings.mock.calls.length;
 
   const EMBEDDING_COUNTS = { done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null };
+  // `jobsDone: 0` throughout the running half: nothing has ended yet, which is
+  // what leaves `readSeq` as the only thing that can fire the trigger here.
   const runningWithReadSeq = (readSeq: number): ScanState => ({
-    revision: readSeq + 1, files: 0, readSeq, lastReading: null,
+    revision: readSeq + 1, files: 0, readSeq, jobsDone: 0, lastReading: null,
     snapshot: { kind: 'running', cancellable: true, phase: { kind: 'embedding', counts: EMBEDDING_COUNTS } },
   });
 
@@ -474,7 +476,7 @@ test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; a
   // every assertion in this test EXCEPT this one, because every other state
   // here also happens to be a positive case.
   const stillRunningSameReadSeq: ScanState = {
-    revision: 5, files: 0, readSeq: 1, lastReading: null,
+    revision: 5, files: 0, readSeq: 1, jobsDone: 0, lastReading: null,
     snapshot: {
       kind: 'running', cancellable: true,
       phase: { kind: 'embedding', counts: { ...EMBEDDING_COUNTS, done: 2 } },
@@ -484,8 +486,13 @@ test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; a
   await tick();
   expect(modelSettings.mock.calls.length).toBe(baseline + 1); // unchanged: no re-read
 
+  // The job ends here, so `jobsDone` moves with it — the shape the core would
+  // actually send. The re-read below is therefore over-determined, and the
+  // clause it is evidence for is named in the sentence under it rather than
+  // isolated by this fixture; the isolating pair for `ended` alone is the
+  // identical re-emission at the end of this test.
   const endedSameReadSeq: ScanState = {
-    revision: 10, files: 0, readSeq: 1, lastReading: null,
+    revision: 10, files: 0, readSeq: 1, jobsDone: 1, lastReading: null,
     snapshot: {
       kind: 'ended',
       report: {
@@ -542,7 +549,7 @@ test('a files count that changed on an idle snapshot re-reads, revealing the que
   // the baseline the removal's own re-read is measured from, not the claim
   // this test makes.
   const endedEmbeddingCancelled: ScanState = {
-    revision: 20, files: 668, readSeq: 3, lastReading: null,
+    revision: 20, files: 668, readSeq: 3, jobsDone: 0, lastReading: null,
     snapshot: {
       kind: 'ended',
       report: {
@@ -560,7 +567,7 @@ test('a files count that changed on an idle snapshot re-reads, revealing the que
   // not move. This is the ONE state in the sequence a `readSeq`-or-`ended`
   // trigger cannot see at all.
   const idleAfterRemoval: ScanState = {
-    revision: 21, files: 0, readSeq: 3, lastReading: null, snapshot: { kind: 'idle' },
+    revision: 21, files: 0, readSeq: 3, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
   };
   // The re-read this removal earns answers with a queue still pending — the
   // fact the vanished `ended` report is no longer here to say for itself.
@@ -583,7 +590,7 @@ test('a running tick with an unchanged files count does not re-read', async () =
   const baseline = modelSettings.mock.calls.length;
 
   const running: ScanState = {
-    revision: 5, files: 0, readSeq: 0, lastReading: null,
+    revision: 5, files: 0, readSeq: 0, jobsDone: 0, lastReading: null,
     snapshot: {
       kind: 'running', cancellable: true,
       phase: { kind: 'embedding', counts: { done: 1, total: 10, skipped: 0, refused: 0, contended: 0, secondsLeft: null } },
@@ -610,7 +617,15 @@ test('a running tick with an unchanged files count does not re-read', async () =
 // `ended` snapshot exists for it to reach, `readSeq` does not move because it
 // read no folder, and `files` does not move because it deleted no row. All
 // three of the window's named triggers are blind to it, so the fourth is not a
-// fact about the job at all: leaving `running` is the trigger.
+// fact about which job it was at all: a job having ENDED is the trigger.
+//
+// 🔴 Independent review, finding 3: the fourth trigger used to be «the snapshot
+// left `running`», and this fixture was blind to what was wrong with that,
+// because it delivers the `running` snapshot first and so always supplies the
+// edge. `ScanState.jobsDone` replaces it, and the fixtures below now carry the
+// count the core would: 0 while the job runs, 1 once it has ended, and 1 still
+// on the idle snapshot after that — which is what keeps the «once, not once per
+// emission» pair below real rather than satisfied by the snapshot's kind.
 //
 // The probe is the harmless half and is asserted anyway, because the fix is
 // deliberately written without naming any `OtherJob`: one extra
@@ -625,7 +640,7 @@ test('a probe leaving running re-reads once, even though it moved neither counte
   const baseline = modelSettings.mock.calls.length;
 
   const probeRunning: ScanState = {
-    revision: 6, files: 0, readSeq: 0, lastReading: null,
+    revision: 6, files: 0, readSeq: 0, jobsDone: 0, lastReading: null,
     snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'probe' } },
   };
   await emit(probeRunning);
@@ -633,15 +648,16 @@ test('a probe leaving running re-reads once, even though it moved neither counte
   expect(modelSettings.mock.calls.length).toBe(baseline);
 
   const idleAfterProbe: ScanState = {
-    revision: 7, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+    revision: 7, files: 0, readSeq: 0, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' },
   };
   await emit(idleAfterProbe);
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
 
-  // ONCE, not once per emission afterwards: the trigger is the transition, and
-  // an idle snapshot following an idle one is not one.
+  // ONCE, not once per emission afterwards: the trigger is a job ENDING, and a
+  // second idle snapshot with the same count of endings is not one. This is the
+  // assertion a plain "the snapshot is not running" rule would fail.
   const stillIdle: ScanState = {
-    revision: 8, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+    revision: 8, files: 0, readSeq: 0, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' },
   };
   await emit(stillIdle);
   await tick();
@@ -673,7 +689,7 @@ test('a model adoption leaving running re-reads, and the queue it created is off
   // neither of the two named triggers can fire anywhere in this fixture and the
   // transition is the only thing left that could.
   const adoptionRunning: ScanState = {
-    revision: 9, files: 0, readSeq: 0, lastReading: null,
+    revision: 9, files: 0, readSeq: 0, jobsDone: 0, lastReading: null,
     snapshot: {
       kind: 'running', cancellable: false, phase: { kind: 'other', job: 'modelAdoption' },
     },
@@ -686,7 +702,7 @@ test('a model adoption leaving running re-reads, and the queue it created is off
   // nor `files` different from the tick before it.
   modelSettings.mockResolvedValueOnce(readFixture({ pendingChunks: 902, indexedFiles: 12 }));
   const idleAfterAdoption: ScanState = {
-    revision: 10, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+    revision: 10, files: 0, readSeq: 0, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' },
   };
   await emit(idleAfterAdoption);
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
@@ -722,8 +738,12 @@ function deferredPromise<T>() {
   return { promise, resolve, reject };
 }
 
-const endedOnce = (revision: number, readSeq: number): ScanState => ({
-  revision, files: 0, readSeq, lastReading: null,
+// `jobsDone` is a parameter with a default rather than a constant, because a
+// test that emits two endings in a row is emitting two jobs and the core would
+// count them: the default serves the majority that deliver one, and the two
+// tests that deliver a second pass `2` themselves.
+const endedOnce = (revision: number, readSeq: number, jobsDone = 1): ScanState => ({
+  revision, files: 0, readSeq, jobsDone, lastReading: null,
   snapshot: {
     kind: 'ended',
     report: {
@@ -759,7 +779,7 @@ test('an older read that settles last does not repaint over the newer one', asyn
 
   await emit(endedOnce(1, 1));
   await waitFor(() => expect(queue).toHaveLength(1)); // the first ending's read
-  await emit(endedOnce(2, 1)); // a second ending, `readSeq` unchanged
+  await emit(endedOnce(2, 1, 2)); // a second ending, `readSeq` unchanged
   await waitFor(() => expect(queue).toHaveLength(2)); // the second ending's read
 
   // Newer first, older last — the order the network is free to choose.
@@ -816,7 +836,7 @@ test('a live success after a rejection takes the failure banner away and shows t
   await waitFor(() => expect(screen.getByTestId('indexing-index-load-failed')).toBeTruthy());
 
   modelSettings.mockResolvedValueOnce(readFixture({ indexedFiles: 13 }));
-  await emit(endedOnce(2, 1));
+  await emit(endedOnce(2, 1, 2));
 
   await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 13 files.'));
   expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
@@ -842,7 +862,7 @@ test('an older read that is refused last does not overwrite the newer numbers', 
 
   await emit(endedOnce(1, 1));
   await waitFor(() => expect(queue).toHaveLength(1));
-  await emit(endedOnce(2, 1));
+  await emit(endedOnce(2, 1, 2));
   await waitFor(() => expect(queue).toHaveLength(2));
 
   queue[1].resolve(readFixture({ indexedFiles: 42 }));
@@ -1026,7 +1046,7 @@ test('the folder list is read once when the window opens, and not again on a sec
   // The pair: the section IS still listening, so the read it owes a reading
   // pass's ending still happens. A component that had stopped reading
   // altogether would pass the assertion above for the wrong reason.
-  await emit(endedOnce(2, 1));
+  await emit(endedOnce(2, 1, 2));
   await waitFor(() => expect(listTree.mock.calls.length).toBe(2));
 });
 
@@ -1207,4 +1227,76 @@ test('an ending that read no folder leaves the mask question standing', async ()
 
   expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
   expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// 🔴 Independent review, finding 3. The trigger used to be an EDGE — «the
+// snapshot this window last SAW was `running` and this one is not» — and two
+// reachable sequences never supply that edge. A model adoption can start and
+// end inside the window between `jobs.mount` opening the subscription and its
+// first `job_status` answering; and a terminal snapshot can arrive ahead of the
+// older `running` one, which `apply` (`jobs.ts`) then correctly drops. In both
+// the ending is delivered AND accepted, and the section still drew the state
+// from before the adoption. `ScanState.jobsDone` is the same fact stated
+// monotonically, and it cannot be missed.
+//
+// Its ordered-pair control is `a model adoption leaving running re-reads, and
+// the queue it created is offered` above, which delivers the `running` snapshot
+// first and is untouched by this change.
+// ---------------------------------------------------------------------------
+
+// RED, with `jobsDoneChanged` in `Settings.svelte` put back to
+// `seenSnapshot.kind === 'running' && scan.snapshot.kind !== 'running'`: the
+// first `waitFor` below times out, reporting
+// "AssertionError: expected 3 to be 4 // Object.is equality" — the ending was
+// accepted and nothing re-read the index.
+test('an ending whose running snapshot this window never saw still re-reads, and offers the queue the adoption created', async () => {
+  setLocale('en'); // seed, do not inherit
+  modelSettings.mockResolvedValue(
+    readFixture({ indexedFiles: 3, totalChunks: 3, pendingChunks: 0, embeddingModel: null }),
+  );
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+
+  // The state before the adoption: three files, nothing queued, no model. The
+  // window has now acted on `files: 3`, so that trigger is spent.
+  await emit({ revision: 1, files: 3, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
+  await waitFor(() => expect(visible(screen.getByTestId('indexing-index-files'))).toContain('3'));
+  const baseline = modelSettings.mock.calls.length;
+  // The absence of the offer beforehand is what this test is about, so it is
+  // asserted rather than assumed.
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
+
+  // The adoption ran and ended while nothing was listening for its start: the
+  // only snapshot delivered is the terminal one, and it moves neither `files`
+  // nor `readSeq`. What it does move is the count of endings.
+  modelSettings.mockResolvedValue(
+    readFixture({ indexedFiles: 3, totalChunks: 3, pendingChunks: 3, embeddingModel: 'review/model' }),
+  );
+  await emit({ revision: 3, files: 3, readSeq: 0, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' } });
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Continue embedding');
+
+  // The adoption's own `running` snapshot, arriving late and older: `apply`
+  // drops it, this window's subscriber is never called, and nothing is re-read
+  // a second time.
+  await emit({
+    revision: 2, files: 3, readSeq: 0, jobsDone: 0, lastReading: null,
+    snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'modelAdoption' } },
+  });
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline + 1);
+
+  // The pair, and the one this trigger could be written wrong by: a NEWER
+  // running snapshot that carries the same count of endings is a job starting,
+  // not one that ended, and it must re-read nothing. Without it, "re-read
+  // whenever anything arrives" would satisfy every assertion above.
+  await emit({
+    revision: 4, files: 3, readSeq: 0, jobsDone: 1, lastReading: null,
+    snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'modelAdoption' } },
+  });
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline + 1);
 });

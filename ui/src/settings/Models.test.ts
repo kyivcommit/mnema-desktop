@@ -51,7 +51,7 @@ vi.mock('../lib/ipc', () => ({
 // the controller compares (`apply`).
 let revision = 0;
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 const readingScan = (): ScanState => ({
   ...IDLE_SCAN,

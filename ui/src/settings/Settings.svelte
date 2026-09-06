@@ -117,17 +117,16 @@
   );
 
   onMount(() => {
-    // Fired when `scan.readSeq` grows, the snapshot becomes `ended`, or
-    // `scan.files` changes (Minor 1, fix round 1 — this sentence used to name
-    // only the first two, which then read as the whole rule) — deliberately
-    // not "every ending" alone, the rule the old `Scanning.svelte` kept: a
-    // reading pass can end and hand the phase to embedding without the
-    // snapshot itself ever reaching `ended` (`readSeq` is `scan_state.rs`'s own
-    // count of reading passes that have ENDED), and that is exactly the moment
-    // `scanIncomplete`/`indexedFiles` can have moved. An `embedOnly` run's own
-    // ending moves `pendingChunks`/`failedChunks` without moving `readSeq` at
-    // all, which is why `ended` alone still has to trigger this on its own.
-    // The third condition, `files`, is documented where it is checked, below.
+    // Fired when `scan.readSeq` grows, `scan.files` changes, or `scan.jobsDone`
+    // changes — deliberately not "every ending" alone, the rule the old
+    // `Scanning.svelte` kept: a reading pass can end and hand the phase to
+    // embedding without any job ending at all (`readSeq` is `scan_state.rs`'s
+    // own count of reading passes that have ENDED), and that is exactly the
+    // moment `scanIncomplete`/`indexedFiles` can have moved. An `embedOnly`
+    // run's own ending moves `pendingChunks`/`failedChunks` without moving
+    // `readSeq` at all, which is why the count of endings has to trigger this
+    // on its own. The other two conditions are documented where they are
+    // checked, below.
     //
     // Compared by snapshot IDENTITY, not by kind: the controller replaces the
     // whole state on every change, so a progress tick changes the object
@@ -148,37 +147,72 @@
     // changed either). It is watched the same way as the two above — seeded
     // here for the same reason `seenSnapshot`/`seenReadSeq` are.
     let seenFiles = get(jobs.state).scan.files;
+    // 🔴 Independent review, finding 3. The fourth trigger USED to be «the
+    // snapshot left `running`», and that is an EDGE: it needs the previous
+    // snapshot this window saw to have been `running`, and two reachable
+    // sequences deny it that. A model adoption can start and end inside the
+    // window between `jobs.mount` opening the subscription and its first
+    // `jobStatus` answering, so the only snapshot delivered is the terminal
+    // one; and a terminal snapshot can arrive AHEAD of the older `running` one
+    // that `apply` (`jobs.ts`) then correctly drops. The ending was accepted in
+    // both, `readSeq` and `files` stood still, and the section kept the state
+    // from before the adoption — no queue row, and nothing offering to continue
+    // the embedding (`scanning_continue_embedding`) — until some unrelated scan
+    // happened to end.
+    //
+    // `ScanState.jobsDone` is the same fact stated monotonically: how many jobs
+    // have ENDED in this process, moved by `JobSlot::finish` for every terminal
+    // and by its `Drop` (`state.rs`). Whatever this window last saw, a number
+    // it has not acted on says a job has ended since — there is no edge to
+    // miss. Seeded from the store for the reason the three above are: a job
+    // that ended before this window existed is not one that ended under it.
+    let seenJobsDone = get(jobs.state).scan.jobsDone;
     const stop = jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seenSnapshot) return;
-      // 🔴 The fourth trigger, and the one that names no fact about the job at
-      // all: ANY transition out of `running`. `set_embedding_model` claims the
-      // single slot as `Other { ModelAdoption }` and, having no `finish`,
-      // releases it through `Drop` — which for `Other` writes `Idle`, never
-      // `Ended`. It is not a reading pass, so `readSeq` stands still; it deletes
-      // no `path` row, so `files` stands still. All three triggers above are
-      // blind to it, and what it moves is exactly what this section draws:
-      // adopting a different embedding model creates a NEW SPACE, so
-      // `pendingChunks` goes from nought to the whole archive and
-      // `failedChunks` drops to the new space's nought. The section went on
-      // offering nothing over a queue that now covers everything, and showed a
-      // stale `indexing_index_failed_chunks` count from the space that had just
-      // been retired — correcting itself only when some unrelated scan ended.
+      // 🔴 The fourth trigger, and the one that names no fact about which job
+      // it was: ANY job having ENDED since this window last acted.
+      // `set_embedding_model` claims the single slot as
+      // `Other { ModelAdoption }` and, having no `finish`, releases it through
+      // `Drop` — which for `Other` writes `Idle`, never `Ended`. It is not a
+      // reading pass, so `readSeq` stands still; it deletes no `path` row, so
+      // `files` stands still. All three triggers above are blind to it, and
+      // what it moves is exactly what this section draws: adopting a different
+      // embedding model creates a NEW SPACE, so `pendingChunks` goes from
+      // nought to the whole archive and `failedChunks` drops to the new space's
+      // nought. The section went on offering nothing over a queue that now
+      // covers everything, and showed a stale `indexing_index_failed_chunks`
+      // count from the space that had just been retired — correcting itself
+      // only when some unrelated scan ended.
       //
-      // Written as "left running" rather than as a list of `OtherJob`s on
+      // Written as a count of endings rather than as a list of `OtherJob`s on
       // purpose: it covers `ModelAdoption`, the probe, and any job this
       // application gains later, without this file having to know their names.
       // What it costs is one extra `model_settings` after a probe, which
       // changes nothing and rewrites the same numbers invisibly. The three
-      // triggers above are kept: an `ended` snapshot can arrive without this
-      // window having seen the `running` one it followed, and `readSeq` moves
-      // mid-run, where no transition has happened at all.
-      const leftRunning = seenSnapshot.kind === 'running' && scan.snapshot.kind !== 'running';
+      // triggers above are kept: `readSeq` moves mid-run, where no job has
+      // ended at all, and `files` moves on an ending this counter also catches
+      // — kept because it is the field the SECTION draws, and a re-read owed to
+      // a number that changed must not depend on how it came to change.
+      const jobsDoneChanged = scan.jobsDone !== seenJobsDone;
+      seenJobsDone = scan.jobsDone;
       seenSnapshot = scan.snapshot;
       const readSeqChanged = scan.readSeq !== seenReadSeq;
       seenReadSeq = scan.readSeq;
       const filesChanged = scan.files !== seenFiles;
       seenFiles = scan.files;
-      if (readSeqChanged || filesChanged || leftRunning || scan.snapshot.kind === 'ended') {
+      // 🔴 There is no `ended` arm any more, and dropping it is part of the
+      // same fix rather than tidying. `ScanSnapshot::Ended` has exactly two
+      // writers, `JobSlot::finish` and `JobSlot::drop` (`state.rs`), and each
+      // bumps `jobsDone` inside the SAME locked write — so an `ended` snapshot
+      // that reaches this window always carries a `jobsDone` it has not acted
+      // on, and the arm could no longer be the reason anything happened. A
+      // condition that cannot be false reads as a guard and guards nothing.
+      //
+      // Each of the three left has a state the other two cannot reach:
+      // `readSeq` moves mid-run with no job ending, `files` moves without a job
+      // at all (`AppState::set_files`, the boot's count), and `jobsDone` moves
+      // on every ending including the ones that touch neither.
+      if (readSeqChanged || filesChanged || jobsDoneChanged) {
         void refresh();
       }
     });

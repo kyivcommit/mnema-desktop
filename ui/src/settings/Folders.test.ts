@@ -2340,7 +2340,7 @@ test('a row shut while the check is in flight raises no question when the reply 
 // one. The scan is ONE job now — there is no chained second pass and no second
 // ending — so every assertion below is about what one ending does.
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 // 🔴 MOUNTED, not merely created: `Settings.svelte` is what opens the window's

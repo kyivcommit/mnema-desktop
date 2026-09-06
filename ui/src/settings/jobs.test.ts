@@ -40,7 +40,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 const COUNTS: Counts = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null };
 
 const IDLE: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 const idleAt = (revision: number): ScanState => ({ ...IDLE, revision });

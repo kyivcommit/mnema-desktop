@@ -65,7 +65,7 @@ const SETTINGS: ModelSettings = {
 
 // What a process in which nothing has happened yet reports (`ScanState::default`).
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 // 🔴 Annotated `AppPrefs`, for the reason `Scanning.test.ts` annotates

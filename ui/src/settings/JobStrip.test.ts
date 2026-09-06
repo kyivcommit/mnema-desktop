@@ -80,8 +80,14 @@ const EMPTY_CATALOGUE = { entries: [], unreadable: 0, unreadableRecords: [] };
 // last, because the revision is the only thing the controller compares.
 // ---------------------------------------------------------------------------
 let revision = 0;
+// Bumped by `ended` below and by nothing else, the way the core bumps
+// `ScanState::jobs_done`: `JobSlot::finish` and its `Drop` move it and a
+// progress tick does not, so a running fixture leaves it where it was. A
+// module-level counter for the same reason `revision` is one — every state
+// this file emits must carry a number no earlier one carried.
+let jobsDone = 0;
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 const COUNTS: Counts = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null };
@@ -150,6 +156,7 @@ const readingOutcome = (over: Partial<ReadingOutcome> = {}): ReadingOutcome => (
 const ended = (over: Partial<ScanReport> = {}, reading: ReadingOutcome | null = null): ScanState => ({
   ...IDLE_SCAN,
   revision: (revision += 1),
+  jobsDone: (jobsDone += 1),
   lastReading: reading,
   snapshot: {
     kind: 'ended',

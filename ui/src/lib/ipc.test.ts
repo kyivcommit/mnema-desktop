@@ -79,7 +79,7 @@ test('setKey invokes set_key with the typed key', async () => {
 // document, and `settings/jobs.test.ts` compares the union's spellings against
 // that file's own enums.
 const SCAN_STATE: ipc.ScanState = {
-  revision: 4, files: 11, readSeq: 1, lastReading: null,
+  revision: 4, files: 11, readSeq: 1, jobsDone: 0, lastReading: null,
   snapshot: {
     kind: 'running', cancellable: true,
     phase: {
@@ -734,7 +734,7 @@ test('ScanReport is exactly what scan_state.rs defines, field for field', () => 
 });
 
 const SCAN_STATE_FIXTURE: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 test('ScanState is exactly what scan_state.rs defines, field for field', () => {

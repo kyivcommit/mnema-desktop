@@ -727,6 +727,11 @@ impl JobSlot {
             if let Some(files) = files {
                 scan.files = files;
             }
+            // Every ending, whichever `Terminal` it is: the counter is about a
+            // job having FINISHED, not about what it had to say. See
+            // `ScanState::jobs_done` for the consumer that could not be served
+            // by the snapshot alone.
+            scan.jobs_done += 1;
             scan.revision += 1;
         }
         // BEFORE the announcement, not after. An observer may claim the slot the
@@ -845,6 +850,12 @@ impl Drop for JobSlot {
             } else {
                 crate::scan_state::ScanSnapshot::Idle
             };
+            // A job that vanished is still a job that ended, and the consumer
+            // watching this counter has exactly as much to re-read either way —
+            // `Drop` is where a model adoption's own ending is written, since
+            // `Other` has no `finish`. `finish` sets `finished` before it
+            // announces, so a slot bumps this once and never twice.
+            scan.jobs_done += 1;
             scan.revision += 1;
         }
         self.announce();
@@ -1648,6 +1659,103 @@ mod tests {
                  written yet"
             );
         }
+    }
+
+    /// 🔴 **Every ending moves `jobs_done` once, and nothing else moves it at
+    /// all** — the independent review's third finding, on this side of the
+    /// boundary.
+    ///
+    /// A window that re-read the index when a job might have changed it watched
+    /// for a snapshot LEAVING `Running`, which needs the `Running` one to have
+    /// been seen. A model adoption that starts and ends inside the window
+    /// between a subscription opening and its first snapshot arriving is never
+    /// seen running; neither is one whose terminal snapshot arrives ahead of
+    /// the older `Running` that `apply` then rightly drops. The ending was
+    /// delivered and accepted in both, and the section still showed the state
+    /// from before it. A count of endings cannot be missed that way.
+    ///
+    /// **The pairs, and each one is a way to write this wrong:**
+    ///
+    /// - a claim does NOT move it. Bumping on the claim as well would make
+    ///   "a job has ended" and "a job has changed hands" one number, and a
+    ///   consumer would re-read the index on every start.
+    /// - a progress tick and a finished reading pass do NOT move it. Those are
+    ///   `revision` and `read_seq`, and a counter that moved with them would be
+    ///   a third spelling of the first.
+    /// - `Drop` DOES move it. `Other { ModelAdoption }` has no `finish` at all
+    ///   — the adoption in the finding ends here — so a bump written only into
+    ///   `finish` answers every fixture in this file except the one the finding
+    ///   is about.
+    /// - and `finish` moves it for BOTH terminals, not only for `Ended`: a
+    ///   removal and an adoption both end `Idle`, and both change what the
+    ///   section draws.
+    #[test]
+    fn every_ending_moves_the_finished_count_once_and_nothing_else_moves_it() {
+        let state = state();
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a process in which nothing has run has finished nothing"
+        );
+
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a job that STARTED has not ended; a counter that moved here would \
+             make the window re-read the index on every claim"
+        );
+        slot.update(reading());
+        slot.mark_reading_done(a_pass_that_read_one_folder());
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a progress tick and a finished reading pass are `revision` and \
+             `read_seq`; neither is a job ending"
+        );
+
+        slot.finish(Terminal::Idle, None);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            1,
+            "`finish` moves it, and for `Terminal::Idle` as much as for \
+             `Ended` — a removal and a model adoption both end idle"
+        );
+
+        let reported = state.claim_job(reading(), true).expect("the slot is free");
+        reported.finish(
+            Terminal::Ended {
+                report: ScanReport::default(),
+            },
+            Some(5),
+        );
+        assert_eq!(state.scan_state().jobs_done, 2);
+
+        // The half the finding is actually about: `Other { ModelAdoption }`
+        // never calls `finish`, so this is where its ending is written.
+        let vanished = state
+            .claim_job(
+                Phase::Other {
+                    job: OtherJob::ModelAdoption,
+                },
+                false,
+            )
+            .expect("the slot is free");
+        drop(vanished);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            3,
+            "a job that vanished is still a job that ended, and a model \
+             adoption ends no other way"
+        );
+
+        // And `set_files`, which is the boot's write and not a job at all.
+        state.set_files(9);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            3,
+            "counting the index's files is not a job ending"
+        );
     }
 
     /// `set_files` is the boot's way in, and it announces: a window opened

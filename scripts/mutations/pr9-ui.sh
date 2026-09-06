@@ -151,9 +151,13 @@ case_ "the run's refusals and the index's must not be drawn from one key" \
 # until the next commit, so two cases sat stale for one commit. Staleness is
 # cheap and reads every case file regardless of language; it belongs in a UI
 # gate too.
+# ⚠️ And a third time, for the independent review's third finding: the fourth
+# trigger is now `jobsDoneChanged`, a count of endings rather than an edge out
+# of `running`, and the `ended` arm went with it. The mutant is unchanged — the
+# condition removed entirely — and so is the test that kills it.
 case_ "the re-read must follow an ending, not every emission of the job store" \
   ui/src/settings/Settings.svelte \
-  "s~      if \(readSeqChanged \|\| filesChanged \|\| leftRunning \|\| scan\.snapshot\.kind === 'ended'\) \{\n        void refresh\(\);\n      \}~      void refresh(); // mutant: every emission re-reads~" \
+  "s~      if \(readSeqChanged \|\| filesChanged \|\| jobsDoneChanged\) \{\n        void refresh\(\);\n      \}~      void refresh(); // mutant: every emission re-reads~" \
   "      void refresh(); // mutant: every emission re-reads" \
   src/settings/Settings.test.ts 'a running tick with an unchanged files count does not re-read' runner=vitest
 

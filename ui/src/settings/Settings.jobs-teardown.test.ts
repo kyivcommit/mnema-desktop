@@ -27,7 +27,7 @@ import type { ScanState } from '../lib/ipc';
 // first, and every render throws `effect_orphan` before this ever gets to
 // the assertion.
 const jobState = writable<{ scan: ScanState; note: string | null }>({
-  scan: { revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' } },
+  scan: { revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } },
   note: null,
 });
 const controllerMount = vi.fn(() => () => {});
@@ -81,7 +81,7 @@ afterEach(() => {
   cleanup();
   modelSettings.mockReset();
   jobState.set({
-    scan: { revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' } },
+    scan: { revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } },
     note: null,
   });
 });
@@ -107,7 +107,7 @@ test('the window\'s own subscription to jobs.state is torn down on unmount, not 
   // subscriber reads — no `jobs.mount()` guard sits between this call and
   // that subscriber, so only `Settings.svelte`'s own teardown can stop it.
   jobState.set({
-    scan: { revision: 1, files: 0, readSeq: 1, lastReading: null, snapshot: { kind: 'idle' } },
+    scan: { revision: 1, files: 0, readSeq: 1, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } },
     note: null,
   });
   await tick();

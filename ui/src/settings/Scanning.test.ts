@@ -121,7 +121,7 @@ function renderSection(
 // dropped as stale and the test would be asserting about the state before it.
 let revision = 0;
 const IDLE_SCAN: ScanState = {
-  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
 };
 
 const runningScan = (): ScanState => ({

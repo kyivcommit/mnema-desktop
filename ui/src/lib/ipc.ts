@@ -749,6 +749,20 @@ export type ScanState = {
   // than `revision`, which moves on every progress tick, and rather than the
   // snapshot going idle, which also happens when a probe ends.
   readSeq: number;
+  // How many jobs have ENDED in this process, ever — reported or not. Moved by
+  // `JobSlot::finish` for every terminal and by its `Drop`, and by nothing
+  // else: a claim, a progress tick and a reading pass all leave it where it is.
+  //
+  // 🔴 A MONOTONIC fact, where a snapshot is an edge. A consumer that re-reads
+  // the index when a job may have changed it cannot watch for the snapshot
+  // leaving `running`: that needs the `running` one to have been SEEN, and two
+  // reachable sequences deny it — a model adoption starting and ending inside
+  // the window between `mount` opening the subscription and its first snapshot
+  // arriving, and a terminal snapshot arriving ahead of the older `running` one
+  // that `apply` (`settings/jobs.ts`) then rightly drops. The ending is
+  // delivered and accepted in both, and the window went on drawing the state
+  // from before it.
+  jobsDone: number;
   lastReading: ReadingOutcome | null;
   snapshot: ScanSnapshot;
 };

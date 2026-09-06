@@ -43,6 +43,7 @@ const NO_SCAN: ScanState = {
   revision: 0,
   files: 0,
   readSeq: 0,
+  jobsDone: 0,
   lastReading: null,
   snapshot: { kind: 'idle' },
 };

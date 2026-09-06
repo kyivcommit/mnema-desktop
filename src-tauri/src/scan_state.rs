@@ -49,6 +49,32 @@ pub struct ScanState {
     ///
     /// [`JobSlot::mark_reading_done`]: crate::state::JobSlot::mark_reading_done
     pub read_seq: u64,
+    /// How many jobs have ENDED in this process, ever — reported or not.
+    ///
+    /// Moved by [`JobSlot::finish`] for every [`Terminal`] and by
+    /// [`JobSlot::drop`] for the slot nobody reported on, and by nothing else:
+    /// a claim does not move it, a progress tick does not move it, and
+    /// [`AppState::set_files`] does not move it.
+    ///
+    /// 🔴 **A monotonic fact, where the snapshot is an edge.** A consumer that
+    /// re-reads what the index holds whenever a job might have changed it used
+    /// to watch for a snapshot leaving `Running`, which needs the previous
+    /// snapshot it SAW to have been `Running` — and two reachable sequences
+    /// deny it that. A model adoption can start and end inside the window
+    /// between a subscription being opened and its first snapshot arriving; and
+    /// a terminal snapshot can arrive before an older `Running` one, which the
+    /// consumer then correctly drops as stale. In both, the ending is delivered
+    /// and accepted and the edge is never seen, so the settings window went on
+    /// showing the state from before the adoption — no queue row, and no offer
+    /// to continue embedding — until some unrelated scan happened to end.
+    ///
+    /// This counter cannot be missed that way: whatever the consumer saw
+    /// before, a number it has not acted on yet says a job has ended since.
+    ///
+    /// [`JobSlot::finish`]: crate::state::JobSlot::finish
+    /// [`JobSlot::drop`]: crate::state::JobSlot
+    /// [`AppState::set_files`]: crate::state::AppState::set_files
+    pub jobs_done: u64,
     /// What the last reading pass concluded, or `None` before the first one in
     /// this process. Survives the pass, the job and the next claim, for the
     /// same reason `files` does: it is what a window opened afterwards reads.
@@ -751,6 +777,7 @@ mod tests {
         assert_eq!(fresh.revision, 0);
         assert_eq!(fresh.files, 0);
         assert_eq!(fresh.read_seq, 0);
+        assert_eq!(fresh.jobs_done, 0);
         assert_eq!(fresh.last_reading, None);
         assert_eq!(fresh.snapshot, ScanSnapshot::Idle);
         assert_eq!(
@@ -759,6 +786,7 @@ mod tests {
                 "revision": 0,
                 "files": 0,
                 "readSeq": 0,
+                "jobsDone": 0,
                 "lastReading": null,
                 "snapshot": { "kind": "idle" },
             })

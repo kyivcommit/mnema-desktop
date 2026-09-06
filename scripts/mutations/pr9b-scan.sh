@@ -114,7 +114,7 @@ case_ "the ending is written before the observer is told, on the ordinary path t
 # other writes that keep their own bump.
 case_ "an ending must move the revision, or no surface can tell it happened" \
   src-tauri/src/state.rs \
-  's~            if let Some\(files\) = files \{\n                scan\.files = files;\n            \}\n            scan\.revision \+= 1;\n        \}~            if let Some(files) = files \{\n                scan.files = files;\n            \}\n            // mutant: the ending carries the revision the last tick already had\n        \}~' \
+  's~            if let Some\(files\) = files \{\n                scan\.files = files;\n            \}\n(.*?)            scan\.revision \+= 1;\n        \}~            if let Some(files) = files \{\n                scan.files = files;\n            \}\n$1            // mutant: the ending carries the revision the last tick already had\n        \}~s' \
   '// mutant: the ending carries the revision the last tick already had' \
   mnema-desktop 'state::tests::an_ending_moves_the_revision_once_and_is_announced_after_it_is_written' --lib
 
@@ -129,6 +129,12 @@ case_ "an ending must move the revision, or no surface can tell it happened" \
 # Each is anchored on the lines above the bump rather than on the bump itself:
 # `scan.revision += 1;` occurs six times in this file and nothing else about
 # them differs.
+#
+# ⚠️ Both were re-quoted for the independent review's third finding: the
+# `jobs_done` bump now sits between the anchor and `scan.revision += 1;`, so
+# each pattern spans it with a capture rather than naming it — what the mutant
+# deletes is still the revision bump alone, and the counter's own two cases are
+# at the foot of this file.
 
 # 🔴 The worst of the three. A scan that panics or returns through `?` inside the
 # reading pass leaves its ending to `Drop` — and there is NO LATER WRITE, because
@@ -139,7 +145,7 @@ case_ "an ending must move the revision, or no surface can tell it happened" \
 # `scan_state()` — so the two surfaces disagree and only the window is wrong.
 case_ "a job that vanished must move the revision, or the window never hears it ended" \
   src-tauri/src/state.rs \
-  's~            \} else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n            scan\.revision \+= 1;~            } else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n            // mutant: a job that vanished leaves the counter where it was~' \
+  's~            \} else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n(.*?)            scan\.revision \+= 1;~            } else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n$1            // mutant: a job that vanished leaves the counter where it was~s' \
   '// mutant: a job that vanished leaves the counter where it was' \
   mnema-desktop 'state::tests::a_reading_job_that_vanished_ends_with_the_report_nobody_wrote' --lib
 
@@ -547,20 +553,42 @@ case_ "the removal must send the path the question was asked about" \
 # not a reading pass so `readSeq` never moves either. Both of the other two
 # triggers are blind to it, and the section went on saying «В індексі 668
 # файлів» over an empty list.
-# ⚠️ Re-quoted in final fix round 2 against the condition area C widened, and
-# the mutant now KEEPS `leftRunning` while dropping `filesChanged` — otherwise
-# it would be two deletions in one case, and the named test would no longer say
-# which of them killed it.
+# ⚠️ Re-quoted twice: once in final fix round 2, and again for the independent
+# review's third finding, which replaced the `leftRunning` edge with
+# `jobsDoneChanged` and dropped the `ended` arm (it could no longer be the
+# reason anything happened — see `Settings.svelte`). The mutant is unchanged in
+# kind: it KEEPS the other arms and drops `filesChanged` alone, so the named
+# test says which arm killed it rather than two deletions sharing the credit.
 #
 # What separates them is the FIXTURE, not production: a real removal claims
-# `Running { Removing }` first (`bridge.rs`), so in the application a removal's
-# `idle` does follow a `running` and `leftRunning` would fire for it. The named
-# test delivers an `ended` and then the removal's `idle` with no running tick
-# between, so the kept arm is never true there and only `filesChanged` can
-# answer. An earlier draft of this comment said the opposite about production
-# and would have sent the next reader looking for a transition that is there.
+# `Running { Removing }` first (`bridge.rs`) and ends through `finish`, so in
+# the application `jobsDone` moves for it too. The named test delivers an
+# `ended` and then the removal's `idle` with the SAME `jobsDone`, so the kept
+# arms are never true there and only `filesChanged` can answer. An earlier
+# draft of this comment said the opposite about production and would have sent
+# the next reader looking for a transition that is there.
 case_ "the window must re-read when the index's own file count moves" \
   ui/src/settings/Settings.svelte \
-  "s~      if \(readSeqChanged \|\| filesChanged \|\| leftRunning \|\| scan\.snapshot\.kind === 'ended'\) \{\n        void refresh\(\);\n      \}~      if (readSeqChanged || leftRunning || scan.snapshot.kind === 'ended') \{\n        void refresh(); // mutant: a removal moves nothing this window watches\n      \}~" \
+  "s~      if \(readSeqChanged \|\| filesChanged \|\| jobsDoneChanged\) \{\n        void refresh\(\);\n      \}~      if (readSeqChanged || jobsDoneChanged) \{\n        void refresh(); // mutant: a removal moves nothing this window watches\n      \}~" \
   "void refresh(); // mutant: a removal moves nothing this window watches" \
   src/settings/Settings.test.ts 'a files count that changed on an idle snapshot re-reads, revealing the queue the vanished report offered' runner=vitest
+
+# 🔴 The independent review's third finding, on the Rust side of it. The count
+# of endings is what the window now re-reads on, and `finish` is the half every
+# ordinary job ends through — a bump written only into `Drop` would leave every
+# scan, every removal and every `embedOnly` run invisible to it while the model
+# adoption the finding is about still worked, which is the shape that would
+# have shipped unnoticed.
+case_ "every ending moves the count of finished jobs, finish included" \
+  src-tauri/src/state.rs \
+  's~            scan\.jobs_done \+= 1;\n            scan\.revision \+= 1;\n        \}\n        // BEFORE the announcement~            // mutant: only a vanished job is counted\n            scan.revision += 1;\n        \}\n        // BEFORE the announcement~' \
+  '// mutant: only a vanished job is counted' \
+  mnema-desktop 'state::tests::every_ending_moves_the_finished_count_once_and_nothing_else_moves_it' --lib
+
+# And the other half: `Other { ModelAdoption }` has no `finish` at all, so a
+# bump written only into `finish` misses exactly the job the finding is about.
+case_ "a job that vanished is counted as an ending too" \
+  src-tauri/src/state.rs \
+  's~            // A job that vanished is still a job that ended(.*?)\n            scan\.jobs_done \+= 1;~            // mutant: a vanished job is not counted~s' \
+  '// mutant: a vanished job is not counted' \
+  mnema-desktop 'state::tests::every_ending_moves_the_finished_count_once_and_nothing_else_moves_it' --lib
