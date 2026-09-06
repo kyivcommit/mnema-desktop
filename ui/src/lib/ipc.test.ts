@@ -672,6 +672,25 @@ test('app prefs reject Rust snake_case spellings', () => {
 // `keyof` the struct — not a list copied out by hand a second time — compared
 // against the Rust field names read out of `scan_state.rs` and converted
 // through the same `camelCase` rule serde applies.
+//
+// Task 11a fix round 1 (Minor 1). **Two DIFFERENT failures, in two DIFFERENT
+// places, and this file's own `test()`s below only ever produce one of them.**
+// A field renamed on the ipc.ts side alone (the TS type changes, nothing in
+// Rust does) breaks the FIXTURE'S OWN compilation — `SCAN_STATE_FIXTURE:
+// ScanState = {...}` gains a missing-property or excess-property error — and
+// that surfaces as a `tsc`/`svelte-check` diagnostic under `npm run check`,
+// never as a failing `test()` here (`vitest`'s transform does not
+// type-check, so the fixture would still run with whatever shape it has).
+// A field renamed on the RUST side alone is the opposite: it compiles cleanly
+// on both sides (there is no shared compiler), so nothing but the `test()`s
+// below catch it, as a `vitest` assertion failure under `npm test`. The gate
+// in `task-11-dispatch.md` runs both, in that order, for exactly this reason
+// — either alone leaves one of the two directions unguarded.
+//
+// `rustStructFields` also throws, rather than answering silently wrong, on a
+// field-level `#[serde(rename = "…")]` it has no way to express — the same
+// refusal `rustEnumVariants` makes for a variant-level rename, and pinned the
+// same way in `rust-enum.test.ts`.
 // ---------------------------------------------------------------------------
 
 const SCAN_STATE_RS = readFileSync(join(HERE, '../../../src-tauri/src/scan_state.rs'), 'utf8');

@@ -988,10 +988,16 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
   // call, the one `jobs.scan`'s own catch handler makes after `start_scan_job`
   // is refused.
   let jobStatusCalls = 0;
+  // `null` until the mount itself has settled — measured below, not assumed
+  // here. While it is `null`, every `job_status` call is one of the mount's
+  // own (the fast-paint read and the one behind `listenScanProgress`'s
+  // resolution), so all of them answer idle.
+  let mountCalls: number | null = null;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'job_status') {
       jobStatusCalls += 1;
-      return Promise.resolve(jobStatusCalls <= 2 ? IDLE_SCAN : reading());
+      const stillMounting = mountCalls === null || jobStatusCalls <= mountCalls;
+      return Promise.resolve(stillMounting ? IDLE_SCAN : reading());
     }
     const r = replies[cmd];
     if (r instanceof Error) return Promise.reject(r);
@@ -1000,6 +1006,12 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
   await openWindow();
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
   await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+  // The mount's own reads, measured from the fixture rather than assumed as a
+  // fixed count: whatever `jobStatusCalls` reached by the time the window has
+  // settled is the mount's, and only a call after this point is the THIRD one
+  // the test is actually about — `jobs.scan`'s own catch handler, after
+  // `start_scan_job` is refused below.
+  mountCalls = jobStatusCalls;
 
   await fireEvent.click(screen.getByTestId('scanning-scan'));
 

@@ -137,3 +137,19 @@ test('camelOfSnake turns snake_case into camelCase and leaves a single word alon
   expect(camelOfSnake('roots_read')).toBe('rootsRead');
   expect(camelOfSnake('reason')).toBe('reason');
 });
+
+// Task 11a fix round 1 (Minor 1). The field-level twin of the enum reader's
+// own refusal: without this, a `#[serde(rename = "…")]` on a field reaches
+// `camelOfSnake` unnoticed, and the pin compares two lists that both look
+// complete while quietly holding the wrong name for one of them — a false
+// GREEN this throw turns into a loud failure instead.
+test('a field-level serde rename is refused, the way a variant-level one is', () => {
+  const renamed = `
+pub struct Sample {
+    pub first: String,
+    #[serde(rename = "second_thing")]
+    pub second: bool,
+}
+`;
+  expect(() => rustStructFields(renamed, 'Sample')).toThrow(/explicit #\[serde\(rename/);
+});

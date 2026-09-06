@@ -965,16 +965,17 @@ mod tests {
                 ),
             }
         };
-        // Balanced on the BLANKED source, not the raw one: a brace inside a
-        // comment inside the handler (a doc comment's own example, say) would
-        // otherwise count toward the depth the raw walk balances against,
-        // closing `handler` early or late without either failure mode saying
-        // so — `blank_comments` preserves every byte offset (its own
-        // `debug_assert_eq!` says so), so the length it returns slices
-        // `production` exactly the same as balancing the raw text would, for
-        // every handler that has no such comment, and correctly for the one
-        // that does.
-        let handler_len = balanced_len(&blank_comments(&production[handler_at..]));
+        // Balanced on the BLANKED source, not the raw one, through
+        // `handler_region_len` below — a HELPER rather than the composition
+        // written out here, because Fix round 1 (Important 1) found that
+        // writing it out here left the fix unguarded: reverting this one line
+        // to `balanced_len(&production[handler_at..])` left both this guard
+        // AND its own fixture test green, since the fixture called
+        // `balanced_len`/`blank_comments` on its own rather than through
+        // whatever this line actually does. Routed through one function, the
+        // fixture drives the exact code this guard runs, and a revert here
+        // breaks both together.
+        let handler_len = handler_region_len(&production[handler_at..]);
         let handler = &production[handler_at..handler_at + handler_len];
         // 🔴 **Comments are blanked before the search, byte for byte.** The
         // arm's own comment explains the fix in the words `scan_job::start`,
@@ -1054,6 +1055,21 @@ mod tests {
         open + 1 + balanced_len_from_inside(&src[open + 1..])
     }
 
+    /// `balanced_len`, but on a COMMENT-BLANKED copy of `source` — the region
+    /// `the_menu_handler_starts_a_scan_only_off_the_main_thread` slices its
+    /// `handler` with, and the one function its own fixture test below drives
+    /// directly, so the two cannot drift apart. A brace inside a comment
+    /// inside the region (a doc comment's own example, say) would otherwise
+    /// count toward the depth a RAW walk balances against, closing the region
+    /// early or late without either failure mode saying so — `blank_comments`
+    /// preserves every byte offset (its own `debug_assert_eq!` says so), so
+    /// the length this returns slices the ORIGINAL `source` exactly the same
+    /// as balancing the raw text would, for a region that has no such
+    /// comment, and correctly for one that does.
+    fn handler_region_len(source: &str) -> usize {
+        balanced_len(&blank_comments(source))
+    }
+
     /// The byte length of the region from `src`'s start (already INSIDE one
     /// open brace) up to, but not including, the `}` that closes it.
     fn balanced_len_from_inside(src: &str) -> usize {
@@ -1076,10 +1092,19 @@ mod tests {
     }
 
     /// The case `the_menu_handler_starts_a_scan_only_off_the_main_thread`'s
-    /// fix (balancing `handler` on the BLANKED source) exists for, exercised
-    /// on a fixture string rather than on the real handler — a comment
-    /// carrying its own unbalanced `}` belongs in a test, not in production
-    /// source that guard is supposed to leave alone.
+    /// fix exists for, exercised on a fixture string rather than on the real
+    /// handler — a comment carrying its own unbalanced `}` belongs in a test,
+    /// not in production source that guard is supposed to leave alone.
+    ///
+    /// 🔴 **Drives `handler_region_len` itself, not `balanced_len`/
+    /// `blank_comments` composed here a second time.** Fix round 1 (Important
+    /// 1): the first version of this test called `balanced_len(&blank_comments(
+    /// src))` directly, so reverting the GUARD's own line — `handler_len =
+    /// balanced_len(&production[handler_at..])`, skipping the blank — left
+    /// both the real guard AND this test green, since neither exercised the
+    /// other's code. `handler_region_len` is the one function both this test
+    /// and the guard call now, so a revert of it (in either place) breaks
+    /// them together.
     #[test]
     fn balancing_a_brace_inside_a_comment_needs_the_blanked_source() {
         let src = "before { // a stray } inside a comment\n    real body\n} after";
@@ -1097,9 +1122,9 @@ mod tests {
              down the failure mode the fix avoids, not a property to keep"
         );
         assert_eq!(
-            balanced_len(&blank_comments(src)),
+            handler_region_len(src),
             real_brace,
-            "balancing the BLANKED source must close on the REAL brace, not the one a comment \
+            "handler_region_len must close on the REAL brace, not the one a comment \
              happens to hold"
         );
     }

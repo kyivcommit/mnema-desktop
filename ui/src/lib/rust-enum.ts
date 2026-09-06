@@ -112,14 +112,19 @@ export const camelOf = (pascal: string): string => pascal.charAt(0).toLowerCase(
 // read as one.
 //
 // Reads only `pub <name>: <Type>,` fields at the struct's own top level. A
-// private field is invisible to it — the same trade `rustEnumVariants` makes
-// for a variant-level rename it cannot see — but every field mirrored by
-// `ipc.ts` is `pub`, because a private one cannot reach `serde::Serialize` at
-// all. Depth is tracked over `{}`, `()` AND `<>` so a field typed
-// `Option<Vec<T>>` does not have its own brackets mistaken for the struct's
-// closing brace or its own comma mistaken for a field separator; it does NOT
-// distinguish `<`/`>` as brackets from `<`/`>` as comparison or shift
-// operators, which is not a shape any field type in this codebase takes.
+// private field is invisible to it, but every field mirrored by `ipc.ts` is
+// `pub`, because a private one cannot reach `serde::Serialize` at all. Depth
+// is tracked over `{}`, `()` AND `<>` so a field typed `Option<Vec<T>>` does
+// not have its own brackets mistaken for the struct's closing brace or its
+// own comma mistaken for a field separator; it does NOT distinguish `<`/`>`
+// as brackets from `<`/`>` as comparison or shift operators, which is not a
+// shape any field type in this codebase takes.
+//
+// A field-level `#[serde(rename = "…")]` is refused with a thrown error
+// rather than answered wrong, the same way `rustEnumVariants` refuses one on
+// a variant: this reader derives every wire name with serde's CamelCase rule
+// alone, and a silent rename would make the pin compare two lists that both
+// look complete while one of them quietly holds the wrong name.
 export function rustStructFields(rawSource: string, structName: string): string[] {
   const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
   const m = new RegExp(`pub struct ${structName}\\s*\\{`).exec(source);
@@ -138,6 +143,23 @@ export function rustStructFields(rawSource: string, structName: string): string[
     }
   }
   const body = source.slice(start, i - 1);
+
+  // Task 11a fix round 1 (Minor 1). Without this, a field-level
+  // `#[serde(rename = "…")]` reaches `camelOfSnake` unnoticed: this reader
+  // derives every wire name with serde's snake_case→camelCase rule alone and
+  // has no way to express an explicit rename, so the pin would keep comparing
+  // two lists that both look complete and quietly compare the wrong names —
+  // a false GREEN, not a thrown error. `rustEnumVariants` refuses the same
+  // shape on a variant for the identical reason; this is its field-level
+  // twin.
+  if (/#\[serde\([^)]*\brename\s*=/.test(body)) {
+    throw new Error(
+      `${structName} now carries an explicit #[serde(rename = "…")] on a field. This mirror ` +
+      'derives wire names with serde\'s CamelCase rule alone and cannot express a rename — teach '
+      + 'camelOfSnake about it, or pin that field\'s wire name in the caller, before trusting this '
+      + 'test again.',
+    );
+  }
 
   const fields: string[] = [];
   let d = 0;
