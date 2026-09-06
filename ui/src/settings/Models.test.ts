@@ -673,6 +673,34 @@ test('the mount failure sentence follows a language switch too', async () => {
   expect(after).toContain('the settings window could not reach the core');
 });
 
+// `loadError`'s own doc comment claimed it "survives no re-read: nothing on
+// this screen can retry it" — true only of the mount read. The re-read the
+// section fires when a scan ends (`onMount`'s `jobs.state.subscribe`) used to
+// route a rejection through `.catch(() => {})`, dropping it on the floor: the
+// mount's own rejection reached the screen, a later one after a scan ended
+// did not. Both directions asserted: the sentence appears, and the settings a
+// successful mount already rendered are not blanked out from under it — a
+// stale panel says less than a fresh one but more than an empty one, and
+// `settings` itself is never touched by a failed `refresh()` (only a
+// successful one assigns it), so the panel below the sentence is exactly what
+// the last good read produced.
+test('a rejected re-read after a scan ends leaves the sentence on screen, and the last good settings stay', async () => {
+  setLocale('en');
+  await renderWith(settings({ key: { kind: 'present' } }));
+  // The mount succeeded: something concrete is on screen before the scan ends,
+  // so "stay" below is a real claim about a rendered panel, not a vacuous one.
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+
+  modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
+  emit(endedScan());
+
+  await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
+  expect(screen.getByTestId('model-load-reason').textContent)
+    .toBe('the settings window could not reach the core');
+  // The panel the mount rendered is still there, not replaced by an empty one.
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+});
+
 // ---------------------------------------------------------------------------
 // Review P3-8: `startEditing` clears `actionError` and `cancelEditing` did
 // not, so a failed Save followed by Cancel left the failure sentence beside a

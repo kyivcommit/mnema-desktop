@@ -54,13 +54,21 @@
   // shown verbatim beside the control — never branched on, only displayed
   // (§10 / the umbrella rejection rule).
   let actionError = $state<string | null>(null);
-  // A rejected read of `model_settings`. Everything below is gated on
-  // `settings`, so a rejection on mount used to leave the panel literally
-  // empty — the failure went to the console, which nobody on the other side of
-  // this window opens. It is bounded but real: the command itself cannot fail
-  // (`model_settings` returns `ModelSettings`, not `Result`), so what arrives
-  // here is an IPC-layer failure. Held apart from `actionError` because it
-  // survives no re-read: nothing on this screen can retry it.
+  // A rejected read of `model_settings`, from EITHER caller of `refresh()` —
+  // the mount read below and the scan-ended re-read further down both route
+  // through `reportLoadFailure`. It is bounded but real: the command itself
+  // cannot fail (`model_settings` returns `ModelSettings`, not `Result`), so
+  // what arrives here is an IPC-layer failure. Held apart from `actionError`
+  // because nothing on this screen offers a manual retry for it — the
+  // scan-ended re-read is the only thing that ever tries again, on its own
+  // schedule, not a button a person presses.
+  //
+  // 🔴 Left open rather than fixed here: a successful re-read never clears
+  // this. A mount that fails and a LATER scan-ended re-read that succeeds
+  // would show the fresh panel beside a stale "could not be read" sentence —
+  // a claim outliving its own guard. Out of scope for the fix this comment
+  // sits beside, which is about the opposite order (a re-read failing AFTER
+  // a successful mount): named here so it is not mistaken for unconsidered.
   let loadError = $state<string | null>(null);
   let removal = $state<KeyRemoval['kind'] | null>(null);
 
@@ -82,12 +90,25 @@
     settings = s;
   }
 
+  // §10: a rejection arrives as a sentence, never as a kind. Shown verbatim,
+  // beside a catalogue sentence naming what failed; never branched on. One
+  // place for every caller of `refresh()`, mount and the scan-ended re-read
+  // below alike — `loadError`'s own doc comment above once claimed it
+  // "survives no re-read", which was true of the mount call only because the
+  // OTHER caller swallowed its rejection instead of routing it here.
+  //
+  // `settings` itself needs no handling on this path: `refresh()` assigns it
+  // only on the success branch, so a rejected re-read leaves whatever
+  // `settings` a previous successful read produced exactly as it was. The
+  // panel below stays on screen, stale, beside this sentence — a blank panel
+  // would say less than the last confirmed numbers do, and the sentence
+  // already says the confirmation itself just failed.
+  function reportLoadFailure(e: unknown) {
+    loadError = e instanceof Error ? e.message : String(e);
+  }
+
   onMount(() => {
-    // §10: a rejection arrives as a sentence, never as a kind. Shown verbatim,
-    // beside a catalogue sentence naming what failed; never branched on.
-    refresh().catch((e) => {
-      loadError = e instanceof Error ? e.message : String(e);
-    });
+    refresh().catch(reportLoadFailure);
     void loadCatalogue('embedding');
     // The index is asked again whenever a scan ends, because an ending is the
     // one moment the counts `degraded` is read from can have changed. The
@@ -108,7 +129,7 @@
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;
       seen = scan.snapshot;
-      if (scan.snapshot.kind === 'ended') void refresh().catch(() => {});
+      if (scan.snapshot.kind === 'ended') void refresh().catch(reportLoadFailure);
     });
   });
 
