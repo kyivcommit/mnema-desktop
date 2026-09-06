@@ -263,7 +263,7 @@ test('nothing on screen until something has happened, and the strip the moment i
   await emit(reading());
 
   expect(strip()).not.toBeNull();
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
 });
 
 // The pair this separates: a phase this build genuinely has no words for
@@ -282,7 +282,7 @@ test('a probe or model-adoption phase this build has no words for offers only St
   expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
 
   await emit(reading());
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
 });
 
 // ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ test('a running reading phase names the folder and its position, a running remov
   await openWindow();
 
   await emit(reading({}, true, { rootIndex: 2, rootCount: 5, rootPath: '/x' }));
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 2 з 5: /x');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 2 з 5: /x');
   expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
 
@@ -312,7 +312,7 @@ test('the running line reads as words, with the counts in them', async () => {
 
   await emit(reading({ done: 3, total: 8, skipped: 1, refused: 0 }));
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 });
@@ -337,7 +337,7 @@ test('a fresh embedding pass says it is starting rather than showing 0 of 0, and
 
   await emit(embedding({ done: 0, total: 0 }));
   expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
-  expect(visible(screen.getByTestId('indexing-pass'))).not.toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).not.toBe('Індексація теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts'))).toBe('Вбудовування починається…');
 
   await emit(embedding({ done: 3, total: 10 }));
@@ -408,7 +408,7 @@ test('Stop asks the backend, and the ending that follows is what says it stopped
 
   expect(calls('cancel_job')).toHaveLength(1);
   expect(calls('cancel_job')[0]).toHaveLength(1); // the command name alone
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
 
   await emit(endedReading('cancelled'));
 
@@ -427,12 +427,12 @@ test('Stop asks the backend, and the ending that follows is what says it stopped
 // split of `completed`, never reachable through `reason` alone.
 const WALK_SENTENCES: Record<EndReason | 'partlyRead', { uk: string; en: string }> = {
   completed: {
-    uk: 'Теку прочитано повністю.',
-    en: 'The folder was read in full.',
+    uk: 'Теку проіндексовано повністю.',
+    en: 'The folder was indexed in full.',
   },
   partlyRead: {
-    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
-    en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+    uk: 'Теку проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folder was only partly indexed: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
   },
   cancelled: {
     uk: 'Сканування зупинено на ваше прохання.',
@@ -569,7 +569,7 @@ test('a running phase hides the reading block, its root row and its frozen row t
   await emit(ended({}, partlyRead));
 
   expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
-  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
   expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
 });
 
@@ -593,7 +593,7 @@ test('the folders-read count shows only when the reading actually names a root c
   await openWindow();
 
   await emit(ended({}, readingOutcome({ rootsRead: 2, rootCount: 3 })));
-  expect(visible(screen.getByTestId('indexing-roots-read'))).toBe('Тек прочитано 2 з 3');
+  expect(visible(screen.getByTestId('indexing-roots-read'))).toBe('Проіндексовано тек: 2 з 3');
 
   await emit(ended({}, readingOutcome({ rootsRead: 0, rootCount: 0 })));
   expect(screen.queryByTestId('indexing-roots-read')).toBeNull();
@@ -626,24 +626,43 @@ test('an unavailable root and a volume-missing root are each their own row, and 
   expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub — прочиталася порожньою');
 });
 
-// The two `walk_job.rs`-only kinds a root row has no sentence of its own for:
-// `rootRowText` falls back to the reading-outcome table's own wording rather
-// than leaving the row blank or throwing on a wire value the type permits but
-// no fixture above ever names.
-test('a root that ended cancelled, or with its rules not applied, still gets a row rather than a blank one', async () => {
+// The one `walk_job.rs`-only kind a root row still has no sentence of its
+// own for: `rootRowText` falls back to the reading-outcome table's own
+// wording rather than leaving the row blank or throwing on a wire value the
+// type permits but no fixture above ever names.
+test('a root whose rules were not applied still gets a row rather than a blank one', async () => {
   await openWindow();
 
   await emit(ended({}, readingOutcome({
     roots: [
-      rootOutcome({ rootPath: '/c', reason: 'cancelled', complete: false, message: null }),
       rootOutcome({ rootPath: '/r', reason: 'rulesNotApplied', complete: false, message: null }),
     ],
   })));
 
   expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual([
-    `/c: ${WALK_SENTENCES.cancelled.uk}`,
     `/r: ${WALK_SENTENCES.rulesNotApplied.uk}`,
   ]);
+});
+
+// F6 (Task 10 live run): a cancelled root used to fall to the SAME fallback
+// as `rulesNotApplied` above, whose own wording is `WALK_SENTENCES.cancelled`
+// — the exact sentence `readingBlock.sentence` already draws once for the
+// whole reading, so a cancelled root's own row silently repeated the top
+// sentence rather than saying anything about that root. `indexing_root_cancelled`
+// is its own key now; both directions: the row shows it, and does NOT equal
+// the top sentence a second time.
+test('a cancelled root gets its own row, not a second copy of the top sentence', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    reason: 'cancelled', complete: false,
+    roots: [rootOutcome({ rootPath: '/c', reason: 'cancelled', complete: false, message: null })],
+  })));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.cancelled.uk);
+  const rows = screen.getAllByTestId('indexing-root-row').map(visible);
+  expect(rows).toEqual(['/c: індексацію перервано']);
+  expect(rows[0]).not.toBe(`/c: ${WALK_SENTENCES.cancelled.uk}`);
 });
 
 // Both directions, and the crash this guards against: two prefixes under the
@@ -688,7 +707,7 @@ test('the partly-read sentence survives a successful embedding', async () => {
   ));
 
   expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
-  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
   expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування всього індексу завершено.');
   expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
@@ -699,12 +718,12 @@ test('an embedding skipped for no key, no model, or a store that did not answer 
 
   await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noKey' } }, endedIn: 'embedding' }));
   expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
-    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
   );
 
   await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
   expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
-    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
   );
 
   await emit(ended(
@@ -856,7 +875,7 @@ test('the last reading\'s warning outlives a continued embedding, across an unmo
   await emit(cancelledInEmbedding);
 
   expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
-  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
   expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
 
   // Unmount and remount between the stop and the resume.
@@ -875,7 +894,7 @@ test('the last reading\'s warning outlives a continued embedding, across an unmo
     partlyRead, // UNCHANGED — the reading this embedding resumed from is untouched by it.
   ));
 
-  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: прочитано частково']);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
   expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
   expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
@@ -948,7 +967,7 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
   await fireEvent.click(screen.getByTestId('scanning-scan'));
 
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
   expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
 });
 
@@ -969,7 +988,7 @@ test('a scan survives switching sections, and Stop still stops it afterwards', a
   await fireEvent.click(screen.getByTestId('settings-nav-models'));
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Читання теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 
@@ -1059,7 +1078,7 @@ test('a language switch during a scan reaches the line, the counts, the estimate
   setLocale('en');
   await tick();
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Reading folder 1 of 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Indexing folder 1 of 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Processed 3 of 8. Skipped: 1. Given up on: 0.');
   expect(visible(screen.getByTestId('indexing-contended'))).toBe(
@@ -1090,7 +1109,7 @@ test('a language switch while ended re-renders the reading block, the embedding 
   await tick();
 
   expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.en);
-  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: partly read']);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: indexed partly']);
   expect(visible(screen.getByTestId('indexing-embed-outcome')))
     .toBe('The embedding pass broke off because something went wrong.');
   expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('The program reported: boom');

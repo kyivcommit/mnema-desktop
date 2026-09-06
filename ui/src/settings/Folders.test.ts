@@ -2499,7 +2499,7 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
 
   await waitFor(() => expect(screen.queryByTestId('folder-confirm-1')).toBeNull());
   expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
     + ' read again. Press again if you still want to.',
   );
   // Withdrawn, not answered: a question taken off the screen must not store the
@@ -2791,7 +2791,7 @@ test('a reading pass ending withdraws the question even when the re-read that fo
 
   expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'The question about “drop” has been withdrawn: a scan ended and this panel was'
+    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
     + ' read again. Press again if you still want to.',
   );
   expect(excludeSubfolder).not.toHaveBeenCalled();
@@ -2827,7 +2827,7 @@ test('the withdrawn-question note switches language with everything else', async
   await tick();
 
   expect(visibleText(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
-    'Питання про «drop» знято: сканування закінчилося, і цю панель перечитано.'
+    'Питання про «drop» знято: індексацію закінчено, і цю панель перечитано.'
     + ' Натисніть ще раз, якщо це досі потрібно.',
   );
 });
@@ -3256,7 +3256,7 @@ test('a re-read that keeps this row\'s identity leaves the removal question stan
   await waitFor(() => expect(screen.getByText('/synthetic/renamed')).toBeTruthy());
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
     + ' the list was read again. Press again if you still want to.',
   );
   expect(removeWatchedFolder).not.toHaveBeenCalled();
@@ -3281,7 +3281,7 @@ test('a removal question about a root that leaves the listing is withdrawn by na
   await waitFor(() => expect(screen.queryByText('/synthetic/root')).toBeNull());
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
     + ' the list was read again. Press again if you still want to.',
   );
   expect(removeWatchedFolder).not.toHaveBeenCalled();
@@ -3383,7 +3383,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   await runEmbeddingAt(0); // a job takes the slot while the question is open
   await tick();
 
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Stop the scan first');
+  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
   expect(removeButton('/synthetic/root').disabled).toBe(true);
   expect(removeButton('/synthetic/other').disabled).toBe(true);
   expect(confirm().disabled).toBe(true);
@@ -3392,7 +3392,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   // has its own: it is a separate `t()` call behind a separate `void $locale`.
   setLocale('uk');
   await tick();
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Спершу зупиніть сканування');
+  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Кнопка «Видалити» запрацює після зупинки сканування.');
   setLocale('en');
   await tick();
 
@@ -3437,7 +3437,7 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   // is collapsed here, as it is in the common case, so a note claiming a panel
   // had been re-read named something nobody could see.
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'The question about folder “/synthetic/root” has been withdrawn: a scan ended and'
+    'The question about folder “/synthetic/root” has been withdrawn: indexing has finished and'
     + ' the list was read again. Press again if you still want to.',
   );
   // And the panel's own note is not on screen at all: two keys, two subjects.
@@ -3449,7 +3449,7 @@ test('the removal question is withdrawn when a reading pass ends, and says which
   setLocale('uk');
   await tick();
   expect(visibleText(screen.getByTestId('folders-remove-withdrawn'))).toBe(
-    'Питання про теку «/synthetic/root» знято: сканування закінчилося, і список перечитано.'
+    'Питання про теку «/synthetic/root» знято: індексацію закінчено, і список перечитано.'
     + ' Натисніть ще раз, якщо це досі потрібно.',
   );
   setLocale('en');
@@ -3551,7 +3551,7 @@ test('the blocked sentence is drawn only where there is a «Remove» for it to e
   await runEmbeddingAt(0);
   await tick();
 
-  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('Stop the scan first');
+  expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
   expect(removeButton('/synthetic/root').disabled).toBe(true);
 
   // And the third state, which `roots.length` alone cannot tell from the

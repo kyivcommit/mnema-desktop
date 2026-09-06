@@ -108,9 +108,15 @@
     if (kind === 'partlyRead') return t('indexing_root_partly_read', { rootPath: root.rootPath });
     if (kind === 'rootUnavailable') return t('indexing_root_unavailable', { rootPath: root.rootPath });
     if (kind === 'volumeMissing') return t('indexing_root_volume_missing', { rootPath: root.rootPath });
-    // `failed`, `brokenWorker`, and the two `walk_job.rs`-only kinds a root has
-    // no sentence of its own for (`cancelled`, `rulesNotApplied`): all four
-    // fall back to the message this root actually carries, and — because
+    // F6 (Task 10 live run): `cancelled` used to fall to the generic message
+    // below, whose own fallback is `WALK_ENDED['cancelled']` — the SAME
+    // sentence `readingBlock.sentence` already draws once for the whole
+    // reading, so a cancelled root's own row repeated the top sentence
+    // verbatim rather than saying anything about that root in particular.
+    if (kind === 'cancelled') return t('indexing_root_cancelled', { rootPath: root.rootPath });
+    // `failed`, `brokenWorker`, and `rulesNotApplied` — the one
+    // `walk_job.rs`-only kind still with no sentence of its own: it falls
+    // back to the message this root actually carries, and — because
     // `message` is `Option<String>` on the wire — to the table's own sentence
     // for the kind when there is none, so a row is never blank.
     return t('indexing_root_message', { rootPath: root.rootPath, message: root.message ?? t(WALK_ENDED[kind]) });

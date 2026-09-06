@@ -148,7 +148,11 @@ pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String 
                 // draws a count instead of attempting `done / 0`.
                 match counts.done.saturating_mul(100).checked_div(counts.total) {
                     Some(percent) => {
-                        format!("{} {} %", locale::t(lang, Key::TrayReadingPercent), percent)
+                        format!(
+                            "{} {} %",
+                            locale::t(lang, Key::TrayIndexingPercent),
+                            percent
+                        )
                     }
                     None => {
                         // Review round 1, Minor 4: `as i64` wraps negative
@@ -158,7 +162,7 @@ pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String 
                         let n = i64::try_from(counts.done).unwrap_or(i64::MAX);
                         format!(
                             "{} {} {}",
-                            locale::t(lang, Key::TrayReadingCount),
+                            locale::t(lang, Key::TrayIndexingCount),
                             n,
                             locale::files_word(lang, n)
                         )
@@ -850,13 +854,10 @@ mod tests {
     /// sentence appears.
     #[test]
     fn reading_with_a_known_total_draws_a_percentage() {
-        assert_eq!(
-            status_label(Lang::Uk, &reading(48, 200)),
-            "Читання теки 24 %"
-        );
+        assert_eq!(status_label(Lang::Uk, &reading(48, 200)), "Індексація 24 %");
         assert_eq!(
             status_label(Lang::Uk, &reading(1, 3)),
-            "Читання теки 33 %",
+            "Індексація 33 %",
             "integer division must floor, not round"
         );
     }
@@ -867,7 +868,7 @@ mod tests {
     /// would visibly miss 100.
     #[test]
     fn reading_finished_reads_exactly_one_hundred_percent() {
-        assert_eq!(status_label(Lang::Uk, &reading(7, 7)), "Читання теки 100 %");
+        assert_eq!(status_label(Lang::Uk, &reading(7, 7)), "Індексація 100 %");
     }
 
     /// `total == 0` — nothing has answered "how many folders" yet, which is
@@ -880,7 +881,7 @@ mod tests {
     fn reading_with_no_known_total_draws_a_count() {
         assert_eq!(
             status_label(Lang::Uk, &reading(120, 0)),
-            "Читання теки: 120 файлів"
+            "Індексація: 120 файлів"
         );
     }
 

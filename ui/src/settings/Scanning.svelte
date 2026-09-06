@@ -172,7 +172,20 @@
   // Always `resume`, never `retry`: `jobs.ts` gives a `where: 'section'` result
   // only from the index's own markers, neither of which ever carries a
   // failure to retry — a marker says work is owed, not that anything failed.
-  const continueLabel = $derived.by(() => { void $locale; return t('indexing_resume'); });
+  //
+  // F2 (Task 10 live run): the two `where: 'section'` arms are not one offer.
+  // The marker arm (`entry === 'full'`) resumes a half-read archive — the
+  // same word the strip's own resume button uses (`indexing_resume`) — but
+  // the queue arm (`entry === 'embedOnly'`) resumes ONLY the embedding pass,
+  // and the shared label promised the wrong half of the work to a person who
+  // had nothing left to read. `scanning_continue_embedding` is that arm's own
+  // key.
+  const continueLabel = $derived.by(() => {
+    void $locale;
+    return t(sectionAction !== null && sectionAction.entry === 'embedOnly'
+      ? 'scanning_continue_embedding'
+      : 'indexing_resume');
+  });
   const incompleteLabel = $derived.by(() => { void $locale; return t('scanning_incomplete'); });
   // The existing queue sentence, drawn only for the `embedOnly` offer — the
   // `full` offer's own sentence is `incompleteLabel` above, and the two never

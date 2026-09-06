@@ -92,9 +92,9 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
   | 'indexing_frozen_unreadable_directory'
   | 'indexing_roots_read' | 'indexing_root_partly_read' | 'indexing_root_unavailable'
-  | 'indexing_root_volume_missing' | 'indexing_root_message'
+  | 'indexing_root_volume_missing' | 'indexing_root_message' | 'indexing_root_cancelled'
   | 'indexing_resume' | 'indexing_retry'
-  | 'scanning_scan' | 'scanning_incomplete'
+  | 'scanning_scan' | 'scanning_incomplete' | 'scanning_continue_embedding'
   | 'indexing_note_no_key' | 'indexing_note_no_model'
   | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
@@ -429,7 +429,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // сканування — це саме та подія, після якої вони брешуть. Мовчки прибрати
     // питання не можна: натиск людини зник би без сліду. Тому питання знімають
     // і кажуть, про яку теку воно було.
-    settings_folders_question_withdrawn: 'Питання про «{path}» знято: сканування закінчилося, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
+    settings_folders_question_withdrawn: 'Питання про «{path}» знято: індексацію закінчено, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // ── PR 8a, Task 6: що коштує виключення, сказане ДО збереження ──────────
     //
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
@@ -533,14 +533,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Одне речення на весь список, поки триває робота: бекенд відмовляє
     // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
     // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
-    settings_folders_remove_blocked: 'Спершу зупиніть сканування',
+    settings_folders_remove_blocked: 'Кнопка «Видалити» запрацює після зупинки сканування.',
     // 🔴 Рев'ю раунду 1 (m3). Власний ключ, а не `settings_folders_question_withdrawn`.
     // Речення те саме за змістом, але останнє підрядне називає, ЩО перечитано:
     // питання про підтеку живе в панелі, і панель справді перечитують; питання
     // про видалення живе під списком, і рядок, до якого воно належить, у
     // звичайному випадку згорнутий — жодної панелі на екрані немає й жодної не
     // читали. Спільний рядок казав людині про панель, якої вона не бачить.
-    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: сканування закінчилося, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
+    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: індексацію закінчено, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
@@ -671,7 +671,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reads, and `rootIndex` is the folder being read now, not how many are
     // behind it). No trailing full stop: the sentence ends in an interpolated
     // path, and "…/x." reads as part of the path.
-    indexing_reading_root: 'Читання теки {rootIndex} з {rootCount}: {rootPath}',
+    indexing_reading_root: 'Індексація теки {rootIndex} з {rootCount}: {rootPath}',
     // The embedding pass takes no root and covers the whole index
     // (embed_job.rs), so neither of these two may name the folder that was
     // pressed.
@@ -712,7 +712,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
     indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
-    indexing_walk_ended_completed: 'Теку прочитано повністю.',
+    indexing_walk_ended_completed: 'Теку проіндексовано повністю.',
     // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
     // the whole tree, so what stopped being seen is still searchable. That is
     // why the word "done" cannot appear here.
@@ -744,7 +744,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `frozen: []`, and on the completed walk that does show it reconciliation
     // ran everywhere except the prefixes it goes on to name. Same class, two
     // different true scopes; each decided on its own evidence.
-    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    indexing_walk_ended_partly_read: 'Теку проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
     indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
     indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
     // The four sentences below are not about a malfunction: they are decisions
@@ -793,13 +793,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `ended` alike (D-e), and outliving the report that ends beside it.
     // No trailing full stop on `indexing_roots_read`: it sits ahead of the
     // result sentence on its own line, not as that sentence's own clause.
-    indexing_roots_read: 'Тек прочитано {rootsRead} з {rootCount}',
+    indexing_roots_read: 'Проіндексовано тек: {rootsRead} з {rootCount}',
     // One row per root whose reading did not simply complete
     // (`readingKind(root) !== 'completed'`) — each names its own path, because
     // the aggregate cannot say WHICH folder the fact is about.
-    indexing_root_partly_read: '{rootPath}: прочитано частково',
+    indexing_root_partly_read: '{rootPath}: проіндексовано частково',
     indexing_root_unavailable: '{rootPath}: тека недоступна',
     indexing_root_volume_missing: '{rootPath}: том відсутній',
+    // F6 (Task 10 live run): a cancelled root used to fall through to
+    // `indexing_root_message`'s own fallback, `WALK_ENDED['cancelled']` — the
+    // very sentence `readingBlock.sentence` already draws once for the whole
+    // reading. A root row and the reading's own outcome sentence saying the
+    // same thing twice read as an error in this component, not as agreement.
+    indexing_root_cancelled: '{rootPath}: індексацію перервано',
     // `failed`/`brokenWorker` at the root — `job.rs`'s `message` is the one
     // thing that tells a broken pool, a missing worker binary and a panic
     // apart, per root the same way `indexing_failure_message` does for the
@@ -817,12 +823,21 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // a half-read archive says so before it says anything about what is
     // waiting to be embedded, because embedding what is there and leaving the
     // unread half invisible would be the worse silence of the two.
-    scanning_incomplete: 'Попереднє сканування не дочитало теки.',
-    // The walk runs regardless, because word search needs neither a key
-    // nor a model — so each sentence names what is absent and what already
-    // works.
-    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
-    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+    scanning_incomplete: 'Попереднє сканування не завершило індексацію тек.',
+    // F2 (Task 10 live run): the QUEUE arm of `continueAction`
+    // (`entry: 'embedOnly'`, `where: 'section'`) used to share `indexing_resume`
+    // with the marker arm (`entry: 'full'`), so a person offered to resume the
+    // embedding queue alone read a button that said only «Продовжити» — the
+    // same word a half-read archive's own resume button says, promising the
+    // wrong half of the work. This key is that arm's own, and it alone: the
+    // marker arm still keeps `indexing_resume`.
+    scanning_continue_embedding: 'Продовжити вбудовування',
+    // F11 (Task 10 live run, owner's ruling): «у цій теці» claimed a scope this
+    // sentence never had — word search covers every watched folder, not the
+    // one this note happens to be drawn beside — so the clause is dropped
+    // rather than corrected to name all of them.
+    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
+    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
     indexing_cancel: 'Зупинити',
     // §9.3, PR 9 Task 6 — the Scanning SECTION (called Indexing before Task
     // 8), which says what the index holds. Every key here is
@@ -1051,7 +1066,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rule_remove: 'Remove the rule',
     settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
-    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: a scan ended and this panel was read again. Press again if you still want to.',
+    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: indexing has finished and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_include_checking: 'Checking that this is still the same folder…',
     // 🔴 Fix round 6. Used to also claim "and the list has been re-read" —
@@ -1075,8 +1090,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_remove: '{files, plural, one {Remove folder {path} from the index? # file from this folder will disappear from search.} other {Remove folder {path} from the index? # files from this folder will disappear from search.}}',
     settings_folders_confirm_remove_named: 'Confirm removing {path}',
     settings_folders_removing: 'Removing…',
-    settings_folders_remove_blocked: 'Stop the scan first',
-    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: a scan ended and the list was read again. Press again if you still want to.',
+    settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
+    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
     settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
@@ -1103,7 +1118,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
-    indexing_reading_root: 'Reading folder {rootIndex} of {rootCount}: {rootPath}',
+    indexing_reading_root: 'Indexing folder {rootIndex} of {rootCount}: {rootPath}',
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_removing: 'Removing the folder {rootPath}…',
@@ -1112,8 +1127,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
-    indexing_walk_ended_completed: 'The folder was read in full.',
-    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+    indexing_walk_ended_completed: 'The folder was indexed in full.',
+    indexing_walk_ended_partly_read: 'The folder was only partly indexed: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
     indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
     indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',
@@ -1133,17 +1148,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'a symbolic link, never entered',
     indexing_frozen_empty_directory: 'read as empty',
     indexing_frozen_unreadable_directory: 'could not be read',
-    indexing_roots_read: 'Folders read: {rootsRead} of {rootCount}',
-    indexing_root_partly_read: '{rootPath}: partly read',
+    indexing_roots_read: 'Folders indexed: {rootsRead} of {rootCount}',
+    indexing_root_partly_read: '{rootPath}: indexed partly',
     indexing_root_unavailable: '{rootPath}: the folder is unavailable',
     indexing_root_volume_missing: '{rootPath}: the volume is missing',
+    indexing_root_cancelled: '{rootPath}: indexing was interrupted',
     indexing_root_message: '{rootPath}: {message}',
     indexing_resume: 'Resume',
     indexing_retry: 'Retry',
     scanning_scan: 'Scan',
-    scanning_incomplete: 'The previous scan did not finish reading the folders.',
-    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
-    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
+    scanning_incomplete: 'The previous scan did not finish indexing the folders.',
+    scanning_continue_embedding: 'Continue embedding',
+    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search already works.',
+    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',

@@ -61,21 +61,21 @@ pub enum Key {
     // the ONE place that picks between them and appends the number and, for
     // the count-carrying two, the plural word `files_word` below computes —
     // this catalog holds only the fixed words, never a number.
-    TrayReadingPercent, // "Читання теки" / "Reading folder" (+ " NN %")
-    TrayReadingCount,   // "Читання теки:" / "Reading folder:" (+ " N <word>")
-    TrayEmbedding,      // "Вбудовування" / "Embedding" (+ " NN %")
-    TrayRemoving,       // "Видаляємо теку…" / "Removing folder…" (whole sentence)
-    TrayScanned,        // "Проскановано:" / "Scanned:" (+ " N <word>")
-    TrayShowSearch,     // "Показати пошук" / "Show search"
-    TrayOpenSettings,   // "Відкрити налаштування" / "Open settings"
-    TrayStopIndexing,   // "Зупинити сканування" / "Stop scanning"
-    TrayQuit,           // "Вийти" / "Quit"
-    MenuLanguage,       // submenu title "Мова" / "Language"
-    LangAuto,           // "Авто (система)" / "Auto (system)"
-    SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,      // "Закрити налаштування" / "Close Settings"
-    MenuEdit,           // "Редагувати" / "Edit"
-    MenuWindow,         // "Вікно" / "Window"
+    TrayIndexingPercent, // "Індексація" / "Indexing" (+ " NN %")
+    TrayIndexingCount,   // "Індексація:" / "Indexing:" (+ " N <word>")
+    TrayEmbedding,       // "Вбудовування" / "Embedding" (+ " NN %")
+    TrayRemoving,        // "Видаляємо теку…" / "Removing folder…" (whole sentence)
+    TrayScanned,         // "Проскановано:" / "Scanned:" (+ " N <word>")
+    TrayShowSearch,      // "Показати пошук" / "Show search"
+    TrayOpenSettings,    // "Відкрити налаштування" / "Open settings"
+    TrayStopIndexing,    // "Зупинити сканування" / "Stop scanning"
+    TrayQuit,            // "Вийти" / "Quit"
+    MenuLanguage,        // submenu title "Мова" / "Language"
+    LangAuto,            // "Авто (система)" / "Auto (system)"
+    SettingsTitle,       // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,       // "Закрити налаштування" / "Close Settings"
+    MenuEdit,            // "Редагувати" / "Edit"
+    MenuWindow,          // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
     // here, and not in `error.rs` with every other rejection sentence, because
     // each answers a PRESS a person made and there is a better sentence for it
@@ -89,8 +89,8 @@ pub enum Key {
 }
 
 pub const ALL_KEYS: &[Key] = &[
-    Key::TrayReadingPercent,
-    Key::TrayReadingCount,
+    Key::TrayIndexingPercent,
+    Key::TrayIndexingCount,
     Key::TrayEmbedding,
     Key::TrayRemoving,
     Key::TrayScanned,
@@ -111,10 +111,10 @@ pub const ALL_KEYS: &[Key] = &[
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
     match (lang, key) {
-        (Lang::Uk, TrayReadingPercent) => "Читання теки",
-        (Lang::En, TrayReadingPercent) => "Reading folder",
-        (Lang::Uk, TrayReadingCount) => "Читання теки:",
-        (Lang::En, TrayReadingCount) => "Reading folder:",
+        (Lang::Uk, TrayIndexingPercent) => "Індексація",
+        (Lang::En, TrayIndexingPercent) => "Indexing",
+        (Lang::Uk, TrayIndexingCount) => "Індексація:",
+        (Lang::En, TrayIndexingCount) => "Indexing:",
         (Lang::Uk, TrayEmbedding) => "Вбудовування",
         (Lang::En, TrayEmbedding) => "Embedding",
         (Lang::Uk, TrayRemoving) => "Видаляємо теку…",

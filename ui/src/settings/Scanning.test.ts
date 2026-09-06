@@ -362,12 +362,15 @@ test('an incomplete scan outranks a waiting queue: one «Продовжити»,
   expect(startScanJob).toHaveBeenCalledWith('full');
 });
 
-// idle + a queue alone: the queue line and «Продовжити» resume embedding only.
+// idle + a queue alone: the queue line and «Продовжити вбудовування» resume
+// embedding only — F2 (Task 10 live run): this arm's own key
+// (`scanning_continue_embedding`), never `indexing_resume`, which is the
+// marker arm's own promise to resume a half-read archive.
 test('a waiting queue with no incomplete marker offers to resume embedding, not a full scan', async () => {
   renderSection(read({ scanIncomplete: false, pendingChunks: 10 }));
 
   await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
-  expect(visible(screen.getByTestId('scanning-continue'))).toBe(t('indexing_resume'));
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe(t('scanning_continue_embedding'));
   expect(visible(screen.getByTestId('indexing-index-pending-chunks')))
     .toBe(t('indexing_index_pending_chunks', { count: 10 }));
   expect(screen.queryByTestId('scanning-incomplete')).toBeNull();
@@ -459,7 +462,7 @@ test('the scan button, the incomplete sentence and the continue button all follo
   renderSection(read({ scanIncomplete: true, pendingChunks: 10 }));
   await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
   expect(visible(screen.getByTestId('scanning-scan'))).toBe('Сканувати');
-  expect(visible(screen.getByTestId('scanning-incomplete'))).toBe('Попереднє сканування не дочитало теки.');
+  expect(visible(screen.getByTestId('scanning-incomplete'))).toBe('Попереднє сканування не завершило індексацію тек.');
   expect(visible(screen.getByTestId('scanning-continue'))).toBe('Продовжити');
 
   setLocale('en');
@@ -467,7 +470,7 @@ test('the scan button, the incomplete sentence and the continue button all follo
 
   expect(visible(screen.getByTestId('scanning-scan'))).toBe('Scan');
   expect(visible(screen.getByTestId('scanning-incomplete')))
-    .toBe('The previous scan did not finish reading the folders.');
+    .toBe('The previous scan did not finish indexing the folders.');
   expect(visible(screen.getByTestId('scanning-continue'))).toBe('Resume');
 });
 
@@ -484,6 +487,27 @@ test('the queue row follows the language too, when the offer is to resume embedd
 
   expect(visible(screen.getByTestId('indexing-index-pending-chunks')))
     .toBe('5 chunks are not embedded yet.');
+});
+
+// F2 (Task 10 live run): both `where: 'section'` arms, by their OWN visible
+// text, held in one test so a fix that merged the two keys back together
+// would fail one of the two assertions. The marker arm (`full`) says
+// «Продовжити» — the same word the strip's own resume button says — and the
+// queue arm (`embedOnly`) says «Продовжити вбудовування», because it resumes
+// only the embedding half, never a folder that still needs reading.
+test('the marker arm says «Продовжити», the queue arm says «Продовжити вбудовування», never the other one\'s word', async () => {
+  renderSection(read({ scanIncomplete: true, pendingChunks: 0 }));
+  await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Продовжити');
+  cleanup();
+
+  renderSection(read({ scanIncomplete: false, pendingChunks: 5 }));
+  await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Продовжити вбудовування');
+
+  setLocale('en');
+  await tick();
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Continue embedding');
 });
 
 // A rejected read (§10: a rejection arrives as a sentence, never as a kind).
