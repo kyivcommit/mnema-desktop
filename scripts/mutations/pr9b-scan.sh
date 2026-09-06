@@ -550,8 +550,15 @@ case_ "the removal must send the path the question was asked about" \
 # ⚠️ Re-quoted in final fix round 2 against the condition area C widened, and
 # the mutant now KEEPS `leftRunning` while dropping `filesChanged` — otherwise
 # it would be two deletions in one case, and the named test would no longer say
-# which of them killed it. A removal's `idle` follows an `ended`, never a
-# `running`, so the arm this mutant keeps cannot rescue it.
+# which of them killed it.
+#
+# What separates them is the FIXTURE, not production: a real removal claims
+# `Running { Removing }` first (`bridge.rs`), so in the application a removal's
+# `idle` does follow a `running` and `leftRunning` would fire for it. The named
+# test delivers an `ended` and then the removal's `idle` with no running tick
+# between, so the kept arm is never true there and only `filesChanged` can
+# answer. An earlier draft of this comment said the opposite about production
+# and would have sent the next reader looking for a transition that is there.
 case_ "the window must re-read when the index's own file count moves" \
   ui/src/settings/Settings.svelte \
   "s~      if \(readSeqChanged \|\| filesChanged \|\| leftRunning \|\| scan\.snapshot\.kind === 'ended'\) \{\n        void refresh\(\);\n      \}~      if (readSeqChanged || leftRunning || scan.snapshot.kind === 'ended') \{\n        void refresh(); // mutant: a removal moves nothing this window watches\n      \}~" \

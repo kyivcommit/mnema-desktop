@@ -773,6 +773,8 @@ test('every struct variant on the wire is exactly what scan_state.rs defines, fi
       kind: 'reading', rootIndex: 0, rootCount: 0, rootPath: '', counts: PROGRESS_FIXTURE,
     }],
     ['Phase', 'Embedding', { kind: 'embedding', counts: PROGRESS_FIXTURE }],
+    ['Phase', 'Removing', { kind: 'removing', rootPath: '' }],
+    ['Phase', 'Other', { kind: 'other', job: 'probe' }],
     ['ScanSnapshot', 'Running', {
       kind: 'running', phase: { kind: 'embedding', counts: PROGRESS_FIXTURE }, cancellable: true,
     }],

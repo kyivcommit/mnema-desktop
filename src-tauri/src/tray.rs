@@ -227,10 +227,12 @@ pub fn status_label(lang: Lang, state: &crate::scan_state::ScanState) -> String 
     }
 }
 
-/// «Проскановано: N файлів» / "Scanned: N files" — the sentence three of
-/// [`status_label`]'s five branches share (Idle, Ended, and the running-but-
-/// unshown `Other` phase), factored out once rather than written three times
-/// so the three cannot drift apart from each other.
+/// «Проскановано: N файлів» / "Scanned: N files" — the sentence the two branches
+/// with no job to name share (Idle and Ended), factored out once rather than
+/// written twice so the two cannot drift apart from each other.
+///
+/// It was three until D-M1 gave `Phase::Other` its own words: a probe and a
+/// model adoption used to read as idle here, above a Stop that was live.
 fn scanned_label(lang: Lang, files: i64) -> String {
     format!(
         "{} {} {}",
