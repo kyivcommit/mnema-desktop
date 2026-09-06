@@ -302,10 +302,16 @@ case_ "a caret is globset's other negation, so the scan must step over it too" \
 # with the exclusions it was given and none of the masks: every file a person
 # masked stays indexed, the walk reports `completed`, and under D29 the text
 # they asked to hold back keeps going to a third-party provider.
+# Rewritten at Task 11b: `walk_job::start_walk_job` was deleted by Task 3b, and
+# the masks now reach the rules through `scan_job::read_roots`, which reads them
+# once for the whole scan and hands a clone to every folder. The mutation moved
+# with them, from the READ to the point of USE — `with_masks` is where a mask
+# set becomes rules, and emptying it there is the same walk with none of the
+# person's masks applied.
 case_ "the walk must read the stored masks, not walk without them" \
-  src-tauri/src/walk_job.rs \
-  's{            db\.list_masks\(\)\?,}{            Vec::new(),}' \
-  '            Vec::new(),' \
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = WalkRules::new(true, true, prefixes)?.with_masks(Vec::new())?; // mutant: the walk runs with no masks at all}' \
+  'with_masks(Vec::new())?; // mutant: the walk runs with no masks at all' \
   mnema-desktop 'a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name' --test commands
 
 # 🔴 Fix round 1, B1. The set truncated to its first stored mask rather than
@@ -314,10 +320,11 @@ case_ "the walk must read the stored masks, not walk without them" \
 # file that runs a walk stores exactly one mask, so this mutant survived the
 # whole package until `a_walk_applies_every_stored_mask_not_only_the_first`
 # stored two: `*.pdf`, which the mutant keeps, and `*.tmp`, which it drops.
+# Rewritten at Task 11b, same move as the case above.
 case_ "the walk must apply every stored mask, not only the first" \
-  src-tauri/src/walk_job.rs \
-  's{            db\.list_masks\(\)\?,}{            db.list_masks()?.into_iter().take(1).collect::<Vec<_>>(), /* mutant */}' \
-  '/* mutant */' \
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = WalkRules::new(true, true, prefixes)?.with_masks(masks.clone().into_iter().take(1).collect())?; /* mutant: only the first mask */}' \
+  '/* mutant: only the first mask */' \
   mnema-desktop 'a_walk_applies_every_stored_mask_not_only_the_first' --test commands
 
 # 🔴 D-c's directory ruling, end to end. The `is_file()` half of the mask
@@ -340,10 +347,13 @@ case_ "a mask must never prune a directory that shares its name" \
 # build whose `validate_mask` was narrower. Under the mutant the walk runs with
 # EVERY mask silently absent — not just the bad one — and reports `completed`,
 # which under D29 is every file the person masked going to a provider.
+# Rewritten at Task 11b, same move as the two cases above. The test's name still
+# says «walk» and that is right: what a bad mask refuses is the folder's rules,
+# and the scan carries the refusal out as its own ending.
 case_ "a stored mask that no longer validates must refuse the walk, not be walked around" \
-  src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = \{ let r = WalkRules::new(true, true, user_prefixes)?; r.clone().with_masks(masks).unwrap_or(r) \};}' \
-  'r.clone().with_masks(masks).unwrap_or(r)' \
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = \{ let r = WalkRules::new(true, true, prefixes)?; r.clone().with_masks(masks.clone()).unwrap_or(r) \};}' \
+  'r.clone().with_masks(masks.clone()).unwrap_or(r)' \
   mnema-desktop 'a_stored_mask_that_no_longer_validates_refuses_the_walk' --test commands
 
 # `remove_mask`'s answer, replaced by a constant `true`. The window renders

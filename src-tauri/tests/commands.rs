@@ -11,9 +11,10 @@ mod support;
 /// for why a shared module cannot hold something only one binary uses.
 #[path = "support/app.rs"]
 mod app;
-use app::{
-    NO_CREDENTIAL, NO_PROVIDER, app_in, call, indexed_paths, job_channel, main_webview,
-    run_walk_and_capture_ending, run_walk_to_completion,
+use app::{NO_CREDENTIAL, NO_PROVIDER, app_in, call, indexed_paths, job_channel, main_webview};
+use support::scan::{
+    reading_of, report_of, run_scan_capturing_snapshots, run_scan_watching, scan_to_completion,
+    scan_with,
 };
 
 use std::path::PathBuf;
@@ -22,9 +23,13 @@ use std::time::Duration;
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, Segment, SourceKind};
 use mnema_desktop::bridge;
+use mnema_desktop::job::EndReason;
 use mnema_desktop::models::{IndexSettings, UnreadableCause, model_settings, set_key};
+use mnema_desktop::scan_job;
+use mnema_desktop::scan_state::{
+    EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState, SkipWhy,
+};
 use mnema_desktop::state::AppState;
-use mnema_desktop::walk_job;
 use mnema_mock_provider::{MockServer, Reply, one_vector};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
@@ -316,16 +321,18 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     let webview = main_webview(&app);
     let here = std::thread::current().id();
 
-    // `start_walk_job` joins this list rather than the blocking one below:
-    // unlike `start_probe_job`, it reads the root's path through
-    // `with_index` before it ever spawns a thread. `start_embed_job` joins it
-    // for a sharper version of the same reason — it reads the *credential
-    // store* before it spawns anything, and on macOS that store can put an
-    // authorisation dialog on screen and wait for a person to answer it. The
-    // body below is `{"query": ""}` for every command in this loop, which is
-    // neither job's shape — the point here is only which thread answers, and a
-    // rejection for missing arguments answers from the same place a success
-    // would.
+    // `start_scan_job` joins this list rather than the blocking one below,
+    // for the sharper version of `start_probe_job`'s own reason: it reads the
+    // index — the list of watched folders — before it ever spawns a thread,
+    // and its embedding phase reads the *credential store* on the way, which
+    // on macOS can put an authorisation dialog on screen and wait for a
+    // person to answer it. Task 3b is what retired the two commands that used
+    // to carry this reason separately, `start_walk_job` and `start_embed_job`
+    // — see the paragraph below for where they went. The body below is
+    // `{"query": ""}` for every command in this loop, which is not
+    // `start_scan_job`'s own shape either — the point here is only which
+    // thread answers, and a rejection for missing arguments answers from the
+    // same place a success would.
     //
     // 🔴 Fix round 1, I6. The four PR 8a commands were added to the shell and
     // not to this list. Measured: removing `(async)` from all four left
@@ -340,8 +347,11 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     //
     // ⚠️ **This list is not every `(async)` command, and saying so is part of
     // the finding.** Re-derive it rather than trusting the arithmetic below,
-    // which has already gone stale once — it said 23 while the tree held 27,
-    // because four commands arrived between the measurement and the reading:
+    // which has already gone stale twice — first it said 23 while the tree
+    // held 27, because four commands arrived between the measurement and the
+    // reading; then Task 3b deleted the two commands the second version of
+    // this paragraph was built around, which is what made THAT arithmetic
+    // wrong without changing a single number in it:
     //
     //     grep -c 'tauri::command(async)' src-tauri/src/*.rs
     //
@@ -350,27 +360,32 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
     // moved by the time it was read — the same staleness the paragraph above is
     // about, committed one paragraph later.
     //
-    // Measured on this branch: 31 lines, of which one is `app_prefs`' own doc
-    // comment naming the attribute rather than carrying it, so 30 `(async)`
-    // commands — against 5 deliberately blocking ones (`start_probe_job`,
+    // Measured on this branch: 33 lines, of which FOUR are prose naming the
+    // attribute rather than carrying it — `prefs.rs:386` and `:512`, and two
+    // more Task 3b's own file headers added, `walk_job.rs:7` and
+    // `embed_job.rs:16`, each quoting the deleted commands' old signatures as
+    // history — so 29 `(async)` commands, and **all 29 are registered**: the
+    // two that once were not, `start_walk_job` and `start_embed_job`, are
+    // gone along with the commands themselves, not merely unregistered.
+    // Against them are 5 deliberately blocking ones (`start_probe_job`,
     // `job_status`, `cancel_job`, `get_locale`, `set_locale`), of which
     // `cancel_job` is the counterweight below. A grep for the bare
     // `#[tauri::command]` overcounts in the same way and for the same reason:
     // three doc comments name it without carrying it, `set_hotkey`'s,
-    // `change_hotkey`'s and the one above `models::key`. The loop below asks 11
-    // of the 30, so 19 are checked by nothing here.
+    // `change_hotkey`'s and the one above `models::key`.
     //
-    // That is a gap this branch did not create and does not close, written
-    // down rather than left for the list's shape to imply it was considered.
-    // What the eight above have in common is that a person waits on them from
-    // the folder screen while a job holds the index mutex; the three PR 9 ones
-    // are here for the sharper reason written beside them. The rest is one
-    // enumeration and belongs to whoever widens it.
+    // The loop below asks 10 of the 29 reachable `(async)` commands, so 19
+    // are checked by nothing here — a gap this branch did not create and does
+    // not close, written down rather than left for the list's shape to imply
+    // it was considered. What the seven non-PR-9 ones have in common is that
+    // a person waits on them from the folder screen while a job holds the
+    // index mutex; the three PR 9 ones are here for the sharper reason
+    // written beside them. The rest is one enumeration and belongs to
+    // whoever widens it.
     for cmd in [
         "open_index",
         "search",
-        "start_walk_job",
-        "start_embed_job",
+        "start_scan_job",
         "list_exclusions",
         "exclude_subfolder",
         "include_subfolder",
@@ -906,6 +921,12 @@ fn the_window_can_ask_whether_a_job_is_running() {
     // What a page that reloaded mid-job has to ask. Its channel belonged to the
     // page that started the job and is gone, so this is its only way to find out
     // whether it should be drawing one.
+    //
+    // Asserted on the JSON the IPC actually produces, not on a Rust value, and
+    // that is the pair of states it separates: the core and the window agreeing
+    // on a type, against their agreeing on the wire. A field that stopped being
+    // camelCase, or a `kind` that changed spelling, compiles and reaches the
+    // page as a snapshot it cannot match on.
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
@@ -913,7 +934,16 @@ fn the_window_can_ask_whether_a_job_is_running() {
 
     assert_eq!(
         call(&webview, "job_status", json!({})).expect("job_status was rejected"),
-        json!({ "running": false })
+        json!({
+            "revision": 0,
+            "files": 0,
+            "readSeq": 0,
+            "jobsDone": 0,
+            "lastReading": null,
+            "snapshot": { "kind": "idle" },
+        }),
+        "a window opened before anything has run is told so in fields it can \
+         draw, not by an absence it has to interpret"
     );
 
     let (channel, events) = job_channel();
@@ -922,7 +952,21 @@ fn the_window_can_ask_whether_a_job_is_running() {
 
     assert_eq!(
         call(&webview, "job_status", json!({})).expect("job_status was rejected"),
-        json!({ "running": true }),
+        json!({
+            "revision": 1,
+            "files": 0,
+            "readSeq": 0,
+            // A job that STARTED. Nothing has ended, so the count that says a
+            // job has is still nought — the same reading a claim gets in
+            // `state::tests::every_ending_moves_the_finished_count_once_and_nothing_else_moves_it`.
+            "jobsDone": 0,
+            "lastReading": null,
+            "snapshot": {
+                "kind": "running",
+                "cancellable": true,
+                "phase": { "kind": "other", "job": "probe" },
+            },
+        }),
         "a page reloading now would draw an idle window over a running job"
     );
 
@@ -1105,7 +1149,7 @@ fn search_returns_citations_not_ids() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
 
     let answer = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     let hits = answer["hits"]
@@ -1192,7 +1236,7 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
 
     let text_dir = fixture_dir();
     let webview = main_webview(&app);
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
@@ -1200,7 +1244,15 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
     .expect("add_watched_folder was rejected")
     .as_i64()
     .expect("add_watched_folder did not return an id");
-    run_walk_to_completion(&app, root);
+    // `scan_with`, not `scan_to_completion`: the reading pass indexes the
+    // fixture file regardless (`read_every_root` runs it to completion before
+    // ever entering the embedding phase), but the embedding phase now runs as
+    // part of the SAME job — Task 3b's own consequence of folding the walk
+    // and the embed into one — and the dangling `active_space` this test set
+    // up on purpose fails it, at the index layer, before any request reaches
+    // the mock provider. That failure is not this test's subject; the search
+    // command's own content arm hitting the same dangling space is.
+    scan_with(app.handle(), Entry::Full);
 
     let answer = call(&webview, "search", json!({ "query": "fox" }))
         .expect("a dangling active_space must not reject the whole command");
@@ -1247,6 +1299,13 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
     let server = MockServer::new(vec![
         // `set_key` checks the key against `/credits` before it stores it.
         Reply::ok(CREDITS),
+        // The scan job's own embedding phase, which now runs as part of
+        // `Entry::Full` immediately after the reading pass queues this
+        // fixture's one chunk — Task 3b's own consequence of folding the walk
+        // and the embed into one job. Answered plainly and drained below,
+        // before the probe is spawned, so its own `server.request()` still
+        // waits on the ONE call this test is actually about.
+        Reply::ok(&one_vector(DIM)),
         // The content arm's one embed, held in flight until the probe releases it.
         Reply::gated(barrier.clone(), &one_vector(DIM)),
     ]);
@@ -1277,7 +1336,7 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
 
     let text_dir = fixture_dir();
     let webview = main_webview(&app);
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
@@ -1285,7 +1344,11 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
     .expect("add_watched_folder was rejected")
     .as_i64()
     .expect("add_watched_folder did not return an id");
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
+    // Drains the scan job's own embed of this fixture's one chunk, so the
+    // probe's own `server.request()` below is not handed a request that
+    // already finished before the probe even existed.
+    server.request();
 
     // The probe runs on its own thread and reaches the managed state through the
     // app handle — `AppState` is neither `Clone` nor `Send`, but `AppHandle`
@@ -1603,7 +1666,7 @@ fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = fixture_dir();
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
@@ -1611,7 +1674,7 @@ fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
     .expect("add_watched_folder was rejected")
     .as_i64()
     .expect("add_watched_folder did not return an id");
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
 
     // Both arms on (the default) — the content arm is what hits the broken
     // store; the text arm is the one that must survive it.
@@ -1661,8 +1724,15 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
     const MODEL: &str = "baai/bge-m3";
     const DIM: usize = 1024;
 
-    // set_key's /credits, then the ask's query embed (content arm on).
-    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS), Reply::ok(&one_vector(DIM))]);
+    // set_key's /credits, then the scan job's own embedding phase (Task 3b's
+    // consequence of folding the walk and the embed into one job — it embeds
+    // this fixture's one chunk as soon as the reading pass queues it), then
+    // the ask's query embed (content arm on).
+    let server = MockServer::new(vec![
+        Reply::ok(ASK_CREDITS),
+        Reply::ok(&one_vector(DIM)),
+        Reply::ok(&one_vector(DIM)),
+    ]);
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
@@ -1698,7 +1768,7 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
         json!({ "text": true, "content": true }),
     )
     .expect("set_search_arms was rejected");
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
@@ -1706,13 +1776,19 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
     .unwrap()
     .as_i64()
     .unwrap();
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
 
-    // Drain set_key's own /credits so the next request read is the ask's embed.
+    // Drain set_key's own /credits, then the scan job's own embed of this
+    // fixture's one chunk, so the next request read is the ask's own embed.
     let credits = server.request();
     assert!(
         credits.contains("/credits"),
         "the one setup request is the key check: {credits}"
+    );
+    let scan_embed = server.request();
+    assert!(
+        scan_embed.contains("/embeddings"),
+        "the scan job's own embedding phase did not reach the provider: {scan_embed}"
     );
 
     let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
@@ -2140,37 +2216,33 @@ fn search_rejects_a_blank_query_before_any_retrieval() {
     );
 }
 
-/// Starts a real walk over `root_id` and returns every `progress` payload the
-/// window would have received, in order, followed by the `ended` one.
+/// Runs a scan and returns every `Reading` phase's progress counts the window
+/// would have been shown, in order, followed by the state the scan settled
+/// in.
 ///
-/// `run_walk_and_capture_ending` throws the progress events away, which is
-/// exactly what the two tests below are about.
-fn run_walk_capturing_progress(
+/// The scan-job replacement for the old `run_walk_capturing_progress`: a scan
+/// has no channel, so what a window would have seen is read off the
+/// `Running { phase: Reading { counts, .. }, .. }` snapshots an observer sees
+/// as they happen — `support::scan::run_scan_watching`'s own doc comment is
+/// where that mechanism lives. The settled `ScanState` rather than only its
+/// report, so a caller can read `reading_of` as well as `report_of` — the
+/// counts a progress bar drew live only up to `ReadingOutcome::done`.
+fn run_scan_capturing_reading_progress(
     app: &tauri::App<MockRuntime>,
-    root_id: i64,
     within: Duration,
-) -> (Vec<Value>, Value) {
-    let state = app.state::<AppState>();
-    let (channel, events) = job_channel();
-    walk_job::start_walk_job(state, root_id, channel).expect("the walk would not start");
-
-    // Every arm named, and no catch-all. `JobEvent` has exactly two variants
-    // today (`job.rs`), so a catch-all filing anything non-`ended` under
-    // progress would be right by accident — and would go on being right-looking
-    // if a third variant were added and quietly counted as a progress report.
-    let mut progress = Vec::new();
-    loop {
-        match events.recv_timeout(within) {
-            Ok(event) if event["event"] == json!("ended") => {
-                return (progress, event["data"].clone());
-            }
-            Ok(event) if event["event"] == json!("progress") => {
-                progress.push(event["data"].clone());
-            }
-            Ok(event) => panic!("the walk sent an event this test cannot classify: {event}"),
-            Err(_) => panic!("the walk never told the window it ended: {progress:?}"),
-        }
-    }
+) -> (Vec<mnema_desktop::job::Progress>, ScanState) {
+    let (snapshots, settled) = run_scan_capturing_snapshots(app.handle(), Entry::Full, within);
+    let progress = snapshots
+        .iter()
+        .filter_map(|state| match &state.snapshot {
+            ScanSnapshot::Running {
+                phase: Phase::Reading { counts, .. },
+                ..
+            } => Some(counts.clone()),
+            _ => None,
+        })
+        .collect();
+    (progress, settled)
 }
 
 /// `WalkProgress::contended` must reach the window as `Progress::contended`
@@ -2184,7 +2256,7 @@ fn run_walk_capturing_progress(
 /// `0` here cannot pass — and a `contended` field that merely exists cannot
 /// either.
 ///
-/// The walk then ends `failed`: the skip write meets the same lock, which
+/// The scan then ends `failed`: the skip write meets the same lock, which
 /// `mnema-ingest`'s own `a_skip_write_that_meets_the_same_lock_leaves_the_
 /// file_in_neither_place` is about. That ending is not this test's subject and
 /// is asserted only so the run is accounted for.
@@ -2196,18 +2268,16 @@ fn a_walk_that_meets_a_busy_index_says_so_on_the_wire() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    .expect("add_watched_folder was rejected");
 
     // A second connection to the same index, holding the write lock the way a
     // folder being added in another window would. Taken AFTER the setup above,
-    // and released only once the walk has ended.
+    // and released only once the scan has ended.
     let window = app
         .state::<AppState>()
         .open_job_index()
@@ -2215,22 +2285,19 @@ fn a_walk_that_meets_a_busy_index_says_so_on_the_wire() {
     window.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
     window.insert_watched_root("/Volumes/Second").unwrap();
 
-    let (progress, ending) = run_walk_capturing_progress(&app, root, Duration::from_secs(60));
+    let (progress, settled) = run_scan_capturing_reading_progress(&app, Duration::from_secs(60));
     window.conn().execute_batch("COMMIT").unwrap();
+    let report = report_of(&settled);
 
-    // Strictly, like the mirror below: a field that is absent arrives as
-    // `Null`, and `as_u64().unwrap_or(0)` would read that as a number. The
-    // comparison is against the JSON value itself, so a dropped field fails
-    // here rather than passing as a zero somebody has to notice is missing.
     assert!(
-        progress.iter().any(|p| p["contended"] == json!(1)),
-        "the walk met the held lock and no progress event carried it: \
-         {progress:?} (ending {ending})"
+        progress.iter().any(|p| p.contended == 1),
+        "the scan met the held lock and no progress event carried it: \
+         {progress:?} (report {report:?})"
     );
     assert_eq!(
-        ending["reason"],
-        json!("failed"),
-        "the skip write met the same lock, so the walk cannot have completed: {ending}"
+        report.reason,
+        EndReason::Failed,
+        "the skip write met the same lock, so the scan cannot have completed: {report:?}"
     );
 }
 
@@ -2245,251 +2312,52 @@ fn an_uncontended_walk_reports_no_contention_on_any_event() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    .expect("add_watched_folder was rejected");
 
-    let (progress, ending) = run_walk_capturing_progress(&app, root, Duration::from_secs(20));
+    let (progress, settled) = run_scan_capturing_reading_progress(&app, Duration::from_secs(20));
+    let report = report_of(&settled);
 
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the walk over the fixture folder did not complete: {ending}"
+        report.reason,
+        EndReason::Completed,
+        "the scan over the fixture folder did not complete: {report:?}"
+    );
+    // The claim and the read-roots update announce two `Reading` snapshots
+    // before any file is read (`scan_job.rs`'s `claim_job` and `slot.update`
+    // calls in `start_inner`), so `progress` itself is never empty — filtered
+    // to reports that actually cover a file (`done > 0`), which is the state
+    // the message below is about.
+    let real_progress: Vec<_> = progress.iter().filter(|p| p.done > 0).collect();
+    assert!(
+        !real_progress.is_empty(),
+        "the scan reported no progress from actually reading a file, so nothing here is \
+         asserting anything: {progress:?}"
     );
     assert!(
-        !progress.is_empty(),
-        "the walk reported no progress at all, so nothing here is asserting anything"
-    );
-    assert!(
-        progress.iter().all(|p| p["contended"] == json!(0)),
+        progress.iter().all(|p| p.contended == 0),
         "nothing held the index's write lock, so no event may report contention: {progress:?}"
     );
 }
 
-/// Runs a real walk over `root_id` and raises the cancellation flag from
-/// inside the progress callback of the LAST file, returning the ending.
-///
-/// The interleaving is built, not waited for. `walk_root` calls its progress
-/// callback synchronously on the walk's own thread, and `Channel::new`'s
-/// closure runs on whichever thread sends — so the `cancel_job()` below
-/// happens *inside* `walk_root`, on the walk's thread, at a point this
-/// function chooses. `walk.rs:450` is the only place the flag is read between
-/// files, and it is read at the TOP of the loop: a report with `done == total`
-/// is emitted at the BOTTOM of the last iteration, after which no further read
-/// ever happens. That is the exact gap a person's Stop falls into, and there
-/// is no sleep anywhere in it.
-///
-/// `total > 0` guards the pre-loop report, which sends `done == 0` with
-/// `total == 0` for an empty root and would otherwise cancel before phase 2
-/// had begun — the ordinary cancel, not the one this is about.
-fn run_walk_cancelling_on_the_last_report(
-    app: &tauri::App<MockRuntime>,
-    root_id: i64,
-    within: Duration,
-) -> Value {
-    let handle = app.handle().clone();
-    let (tx, rx) = mpsc::channel();
-    let channel = Channel::new(move |body| {
-        let json: Value = body.deserialize().expect("the job event was not JSON");
-        if json["event"] == json!("progress") {
-            let done = json["data"]["done"]
-                .as_u64()
-                .expect("progress without done");
-            let total = json["data"]["total"]
-                .as_u64()
-                .expect("progress without total");
-            if total > 0 && done == total {
-                handle.state::<AppState>().cancel_job();
-            }
-        }
-        let _ = tx.send(json);
-        Ok(())
-    });
-
-    let state = app.state::<AppState>();
-    walk_job::start_walk_job(state, root_id, channel).expect("the walk would not start");
-
-    loop {
-        match rx.recv_timeout(within) {
-            Ok(event) if event["event"] == json!("ended") => return event["data"].clone(),
-            Ok(_) => continue,
-            Err(_) => panic!("the walk never told the window it ended"),
-        }
-    }
-}
-
-/// A Stop that lands after the walk's last look at the flag is still a Stop.
-///
-/// What this distinguishes: a walk that saw every file and then heard Stop,
-/// against the same walk that heard nothing. Both traverse identically and
-/// both make `walk_root` return `StopReason::Completed`; only the flag differs.
-/// Without the post-walk read in `walk_job.rs` the first ends `completed`, the
-/// window chains the embedding pass (`jobs.ts`, `chainsEmbedPass`), `claim_job`
-/// clears the flag on the way in, and the person's explicit Stop has been spent
-/// sending their text to a provider.
-///
-/// The mirror below is the half that makes it mean something: the same root,
-/// the same fixture, no late cancel, ends `completed`. A shell that simply
-/// reported every walk as cancelled would pass the first assertion and fail
-/// that one.
-#[test]
-fn a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-    // One file, so there is exactly one bottom-of-loop report and no top-of-loop
-    // read after it.
-    let fixture = fixture_dir();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": fixture.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
-
-    let ending = run_walk_cancelling_on_the_last_report(&app, root, Duration::from_secs(20));
-    assert_eq!(
-        ending["reason"],
-        json!("cancelled"),
-        "a Stop that landed after the walk's last cancellation check was forgotten: {ending}"
-    );
-
-    // The other direction, on a second root of the same shape: nothing raises
-    // the flag, and the very same code path must report the walk it really was.
-    let untouched = fixture_dir();
-    let second = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": untouched.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
-
-    let ending = run_walk_and_capture_ending(&app, second);
-    assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "a walk nobody stopped must still complete: {ending}"
-    );
-}
-
-/// The channel a real webview passes is a string of this shape. Nothing
-/// receives the messages here — `run_walk_to_completion` above is what
-/// proves the walk itself works, by calling the command function directly so
-/// its `Channel` has a real callback behind it. What this proves is narrower
-/// and just as necessary: that `start_walk_job` is in `invoke_handler!` at
-/// all, and that its arguments arrive under the name the JavaScript side
-/// sends them by. Neither is implied by the function existing and working
-/// when called directly, the same reason `the_probe_job_is_reachable_
-/// through_the_ipc` exists alongside the tests that call `start_probe_job`
-/// straight from Rust.
-#[test]
-fn the_walk_job_is_reachable_through_the_ipc() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-    let fixture = fixture_dir();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": fixture.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
-
-    call(
-        &webview,
-        "start_walk_job",
-        json!({ "rootId": root, "onProgress": "__CHANNEL__:9" }),
-    )
-    .expect("start_walk_job was rejected");
-
-    let error = call(
-        &webview,
-        "start_walk_job",
-        json!({ "root_id": root, "on_progress": "__CHANNEL__:10" }),
-    )
-    .expect_err("the snake_case argument names were accepted");
-    assert!(
-        error.as_str().unwrap_or_default().contains("rootId"),
-        "the rejection should name the missing argument; it was {error}"
-    );
-
-    // The job started above is real and running over a real (tiny) fixture.
-    // Letting it finish before `app` and the temp dirs drop keeps this test
-    // from racing its own teardown.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        !app.state::<AppState>().job_is_running(),
-        "the walk job never released the slot"
-    );
-}
-
-/// The same narrow question for the embedding job: is it in `invoke_handler!`
-/// at all, and does its one argument arrive under the name JavaScript sends it
-/// by.
-///
-/// It is asked here rather than in `tests/model_commands.rs`, where the job's
-/// behaviour is tested, because that file calls the command function directly
-/// and would stay green through exactly the mistake this catches — a `pub`
-/// command that compiles and is simply missing from a macro's list, which
-/// warns nowhere and fails only on a screen no gate runs.
-///
-/// **The call is expected to fail**, and that is what proves it was reached:
-/// `app_in`'s store has no key in it, so the command refuses for a reason of
-/// its own — `Error::NoKey` — rather than being refused by name before it
-/// runs. Nothing is started and no slot is taken, which is why this test
-/// needs no teardown of its own.
-#[test]
-fn the_embed_job_is_reachable_through_the_ipc() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-
-    let refusal = call(
-        &webview,
-        "start_embed_job",
-        json!({ "onProgress": "__CHANNEL__:11" }),
-    )
-    .expect_err("this application has no key entered, so the job cannot start");
-    assert_ne!(
-        error_text(&refusal),
-        not_registered("start_embed_job"),
-        "the command the window presses Embed to reach is not in `invoke_handler!`"
-    );
-
-    let renamed = call(
-        &webview,
-        "start_embed_job",
-        json!({ "on_progress": "__CHANNEL__:12" }),
-    )
-    .expect_err("the snake_case argument name was accepted");
-    assert!(
-        error_text(&renamed).contains("onProgress"),
-        "the rejection should name the missing argument; it was {renamed}"
-    );
-
-    assert!(
-        !app.state::<AppState>().job_is_running(),
-        "a call that was refused before it started anything left the job slot taken"
-    );
-}
+// 🔴 `a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed`
+// lived here, over `walk_job::start_walk_job`'s own `stopped_late` read. Task
+// 3b deletes it rather than converting it: the property it guarded — a Stop
+// that lands after a folder's last progress report is not lost to the walk
+// re-reading the flag one line too late — is now `scan_job.rs`'s own D-h, held
+// at the scan's boundary rather than inside one folder's walk, and it is
+// guarded there by `scan_job::tests::
+// a_stop_raised_in_the_last_progress_event_ends_cancelled_and_never_embeds`
+// (the loss this test caught) and `scan_job::tests::
+// a_stop_after_the_last_root_report_still_ends_cancelled_with_resume_full`
+// (the boundary AFTER the last root's report, which `walk_job.rs` had no
+// counterpart for at all — a scan-only race). The mirror half — an
+// uninterrupted pass still completes — has no shortage of guards left in this
+// file; every other `scan_to_completion` call is one.
 
 /// `remove_watched_folder` is not on this task's list for completeness: it
 /// is the first thing that reaches `Db::delete_watched_root` from outside a
@@ -2516,15 +2384,19 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     let before = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
     assert!(
         !before["hits"].as_array().unwrap().is_empty(),
         "the fixture was never indexed, so removing it proves nothing"
     );
 
-    let removed = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
-        .expect("remove_watched_folder was rejected");
+    let removed = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": fixture.path().display().to_string() }),
+    )
+    .expect("remove_watched_folder was rejected");
     assert_eq!(
         removed,
         json!(1),
@@ -2536,6 +2408,105 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
         after["hits"],
         json!([]),
         "a document survived the folder that owned it being removed"
+    );
+}
+
+/// 🔴 The pair of states this separates: a removal that finds the slot free
+/// versus one that finds a probe already holding it. Task 4's whole point is
+/// that `remove_watched_folder` claims the job slot BEFORE it touches the
+/// index, so a job already running must refuse it the same way it refuses a
+/// second `start_probe_job` (`only_one_job_runs_at_a_time`) — and, unlike
+/// that test, the assertion that matters here is not just the error: the row
+/// must still be there afterwards, because a version that checked the slot
+/// but deleted anyway regardless of the outcome would also produce this
+/// error text.
+#[test]
+fn a_deletion_while_the_slot_is_held_is_refused_without_a_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let state = app.state::<AppState>();
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let path = fixture.path().display().to_string();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": path.clone() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+
+    let (channel, _events) = job_channel();
+    bridge::start_probe_job(state.clone(), channel).expect("the probe would not start");
+
+    let error = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": path }),
+    )
+    .expect_err("a deletion went through while the job slot was held by the probe");
+    assert_eq!(error, json!("a job is already running"));
+
+    assert!(
+        state
+            .with_index(|db| db.watched_root_path(root))
+            .expect("reading the root back")
+            .is_some(),
+        "the root was deleted despite the refusal above"
+    );
+
+    bridge::cancel_job(state.clone());
+}
+
+/// 🔴 The pair of states this separates: `{"rootId", "path"}` reaching the
+/// command versus `{"rootId"}` alone. `remove_watched_folder` gained `path`
+/// so that a stale caller cannot delete whatever now sits at an id (Task 4);
+/// a caller that could still omit it would be exactly that stale caller,
+/// unable to say which folder it meant. serde's own rejection is what
+/// enforces this — the field is required, not merely documented — so this
+/// pins the sentence naming it rather than trusting a doc comment to.
+#[test]
+fn removing_a_folder_through_the_ipc_needs_the_path_and_answers_with_the_doomed_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let fixture = fixture_dir();
+    let path = fixture.path().display().to_string();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": path.clone() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    scan_to_completion(app.handle());
+
+    let missing_path = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
+        .expect_err("a call with no `path` field was accepted");
+    assert_eq!(
+        missing_path,
+        json!(
+            "invalid args `path` for command `remove_watched_folder`: command \
+             remove_watched_folder missing required key path"
+        )
+    );
+
+    let removed = call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": path }),
+    )
+    .expect("remove_watched_folder was rejected");
+    assert_eq!(
+        removed,
+        json!(1),
+        "the doomed count did not cross the IPC unchanged"
     );
 }
 
@@ -3296,8 +3267,9 @@ fn excluding_the_empty_string_is_refused_and_does_not_change_the_row_count() {
     );
 }
 
-/// A `rootId` `watched_root` has no row for — the same refusal
-/// `start_walk_job` already gives, reused here rather than surfacing the
+/// A `rootId` `watched_root` has no row for — the same
+/// `Error::UnknownWatchedRoot` every other command over a root id answers
+/// with (`bridge.rs`, `tree.rs`), reused here rather than surfacing the
 /// foreign-key violation `Db::add_path_exclusion` would otherwise hit.
 #[test]
 fn excluding_under_an_unknown_root_id_is_refused() {
@@ -3386,7 +3358,7 @@ fn including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went() {
 /// words: "a symlink, a dangling symlink, a FIFO, a socket or a device." It
 /// is journalled and the walk continues, which this test leans on twice:
 /// once for `skips` to have a row to return, and once for
-/// `run_walk_to_completion`'s own assertion that the walk still completes.
+/// `scan_to_completion`'s own assertion that the scan still completes.
 #[cfg(unix)]
 #[test]
 fn skips_reports_what_the_walk_could_not_read() {
@@ -3412,7 +3384,7 @@ fn skips_reports_what_the_walk_could_not_read() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
 
     let skips = call(&webview, "skips", json!({ "rootId": root })).expect("skips was rejected");
     let skips = skips.as_array().expect("skips did not return an array");
@@ -3465,7 +3437,7 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
         return;
     }
 
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
@@ -3474,19 +3446,19 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
         .expect("unlocking the subdirectory so the temp dir can be cleaned up");
 
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the walk did not even stop cleanly, so this proves nothing about `complete`: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the scan did not even stop cleanly, so this proves nothing about `complete`: {reading:?}"
     );
-    assert_eq!(
-        ending["complete"],
-        json!(false),
-        "an unreadable subdirectory must not report as a walk that saw everything: {ending}"
+    assert!(
+        !reading.complete,
+        "an unreadable subdirectory must not report as a scan that saw everything: {reading:?}"
     );
 }
 
@@ -3519,7 +3491,7 @@ fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     assert_eq!(
         indexed_paths(&app, root),
         vec!["drop/dropped.txt".to_string(), "keep/kept.txt".to_string()],
@@ -3533,16 +3505,16 @@ fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
     )
     .expect("exclude_subfolder was rejected");
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(1),
-        "the walk did not reconcile away the newly excluded file: {ending}"
+        reading.removed, 1,
+        "the scan did not reconcile away the newly excluded file: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -3586,7 +3558,7 @@ fn a_walk_applies_every_stored_exclusion_not_only_the_first() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     assert_eq!(
         indexed_paths(&app, root),
         vec![
@@ -3616,16 +3588,16 @@ fn a_walk_applies_every_stored_exclusion_not_only_the_first() {
         "both rules must actually be stored, or this test is about one rule again"
     );
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(2),
-        "the walk applied fewer rules than were stored, or more: {ending}"
+        reading.removed, 2,
+        "the scan applied fewer rules than were stored, or more: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -3658,9 +3630,9 @@ fn a_walk_with_no_exclusion_stored_removes_nothing() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     // The precondition, asserted rather than assumed (review round 1, I1).
-    // `run_walk_to_completion` promises only `reason == "completed"`, which a
+    // `scan_to_completion` promises only `reason == Completed`, which a
     // walk that indexed nothing satisfies — and with nothing in the index,
     // `removed == 0` below holds trivially and the final contents assertion
     // is satisfied by the SECOND walk's own indexing. Measured in review
@@ -3681,16 +3653,16 @@ fn a_walk_with_no_exclusion_stored_removes_nothing() {
         "this control is only a control if the root really has no rule on it"
     );
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(0),
-        "a second walk over an unchanged folder with no rule deleted something: {ending}"
+        reading.removed, 0,
+        "a second scan over an unchanged folder with no rule deleted something: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -3699,89 +3671,20 @@ fn a_walk_with_no_exclusion_stored_removes_nothing() {
     );
 }
 
-/// A stored prefix that `WalkRules::new` refuses makes the job REFUSE TO
-/// START, with the sentence, rather than walking with the rule silently
-/// absent.
-///
-/// The state is reachable, and only one way: `Db::add_path_exclusion`
-/// deliberately does not validate — validation lives at
-/// `bridge::exclude_subfolder`, the one place a person is standing there to
-/// fix it — so this writes the bad prefix through the `Db` method and never
-/// through the command. That is also how a real one arrives: a rule stored
-/// by an older build, whose validator was narrower than today's (the
-/// whitelist in `rules.rs` grew across three review rounds, each one turning
-/// prefixes that used to be accepted into prefixes that are not).
-///
-/// Refusing is the conservative direction under D29 and it is asserted in
-/// both halves: the walk must not run, AND the index must still hold
-/// everything it held before — a refusal that also emptied the index would
-/// satisfy "the walk did not run" just as well.
-#[test]
-fn a_stored_exclusion_that_no_longer_validates_refuses_the_walk() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-
-    let fixture = keep_and_drop_dir();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": fixture.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
-
-    run_walk_to_completion(&app, root);
-    let before = indexed_paths(&app, root);
-    assert_eq!(
-        before.len(),
-        2,
-        "the first walk did not index the fixture, so the refusal below proves nothing"
-    );
-
-    let state = app.state::<AppState>();
-    state
-        .with_index(|db| db.add_path_exclusion(root, ".."))
-        .expect("writing an unvalidated prefix straight to the index");
-
-    let (channel, _events) = job_channel();
-    let refusal = walk_job::start_walk_job(state.clone(), root, channel)
-        .expect_err("a walk started even though a stored prefix cannot become a rule");
-    // The whole sentence, not a substring of it (review round 1, M3). All
-    // eight `RulesError` variants open with `exclusion rule {prefix:?}` —
-    // the whole enum, `rules.rs:50-129`, not the `52-80` first written here,
-    // which stopped after four of them and so certified half of what the
-    // word "every" was doing (review round 2, N3). A substring therefore
-    // proves "some `RulesError` about `..`" rather than which one — the same
-    // weakening `excluding_dotdot_is_refused_and_stores_nothing` already
-    // carries a round-1 note about. The sentence crosses the
-    // `Error::InvalidRule` seam unchanged (`#[error("{0}")]`,
-    // `error.rs:101` — it was cited as `:60` by the same commit that pushed
-    // it down fourteen lines, review round 2, N2, and PR 8b's doc growth moved
-    // it again without the citation following), so equality costs nothing
-    // here either.
-    assert_eq!(
-        refusal.to_string(),
-        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
-         or `..`",
-        "the refusal should be RulesError::DotComponent's own sentence, whole"
-    );
-
-    assert!(
-        !state.job_is_running(),
-        "the refused walk took the job slot on its way out"
-    );
-    assert_eq!(
-        indexed_paths(&app, root),
-        before,
-        "the refused walk changed the index, so something ran before it refused"
-    );
-}
+// 🔴 `a_stored_exclusion_that_no_longer_validates_refuses_the_walk` lived
+// here, over `walk_job::start_walk_job`'s own refusal path — the slot was
+// never claimed on this path (`start_walk_job` validated every fallible step
+// BEFORE `claim_job`), so the old assertions were "the walk did not run" and
+// "the index is unchanged". The scan job's D-f deliberately claims the slot
+// FIRST (`scan_job.rs`'s own long comment on `start_inner` is the argument),
+// so the byte-identical fixture and refusal sentence are now pinned, with the
+// extra fact D-f owes, by `a_stored_exclusion_that_no_longer_validates_
+// refuses_the_scan_and_still_reports_it` further down in this file — it is
+// not merely a stronger version of this test, it is this test's own scenario
+// run against `scan_job::start_scan_job`.
 
 /// Review round 1, M5. The blank prefix is the THIRD outcome at
-/// `walk_job.rs`'s `WalkRules::new` call, and until this test nothing
+/// `scan_job::read_roots`'s `WalkRules::new` call, and until this test nothing
 /// anywhere pinned it: a stored prefix either becomes a rule or refuses the
 /// job — except the empty string, which does neither. `validate_prefix`
 /// answers `Ok(None)` for it, deliberately not a `RulesError`
@@ -3817,7 +3720,7 @@ fn a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     let before = indexed_paths(&app, root);
     assert_eq!(
         before,
@@ -3829,16 +3732,16 @@ fn a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything() {
         .with_index(|db| db.add_path_exclusion(root, ""))
         .expect("writing a blank prefix straight to the index");
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "a blank stored row must not stop the walk — it names no folder to protect: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "a blank stored row must not stop the scan — it names no folder to protect: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(0),
-        "a rule that names no folder must not remove anything: {ending}"
+        reading.removed, 0,
+        "a rule that names no folder must not remove anything: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -3893,7 +3796,7 @@ fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     assert_eq!(
         indexed_paths(&app, root),
         vec![
@@ -3911,22 +3814,21 @@ fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
     )
     .expect("exclude_subfolder was rejected");
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
-    assert_eq!(
-        ending["frozen"],
-        json!([]),
+    assert!(
+        reading.roots.iter().all(|r| r.frozen.is_empty()),
         "the excluded folder is still on disk with both its files in it, so nothing about it \
-         is ambiguous — freezing it would make the exclusion a no-op: {ending}"
+         is ambiguous — freezing it would make the exclusion a no-op: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(2),
-        "both files under the excluded folder should have been reconciled away: {ending}"
+        reading.removed, 2,
+        "both files under the excluded folder should have been reconciled away: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -3963,45 +3865,40 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
         )
         .expect("writing a fixture file");
     }
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    .expect("add_watched_folder was rejected");
 
-    let state = app.state::<AppState>();
-    let (channel, events) = job_channel();
-    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
-
-    let mut progress_events = Vec::new();
-    let ending = loop {
-        match events.recv_timeout(Duration::from_secs(30)) {
-            Ok(event) if event["event"] == json!("progress") => {
-                progress_events.push(event["data"].clone());
-            }
-            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
-            Ok(_) => continue,
-            Err(_) => panic!("the walk never told the window it ended"),
-        }
-    };
+    let (progress_events, settled) =
+        run_scan_capturing_reading_progress(&app, Duration::from_secs(30));
+    let reading = reading_of(&settled);
 
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the walk over thirty files did not complete: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the scan over thirty files did not complete: {reading:?}"
     );
-    // Both directions, because the upper bound alone is satisfied by zero and
-    // a review measured exactly that: made to send nothing at all, this test
-    // passed — `len() < 15` held and the exactness check below skipped itself
-    // through its own `if let`. A bar that never moves is not a throttle
-    // working well, it is a progress channel that is broken.
-    assert!(
-        !progress_events.is_empty(),
-        "thirty files produced no progress events at all — the bar would never move"
-    );
+    // Both directions, because the upper bound alone is satisfied by zero — a
+    // build that stopped sending progress entirely would still hold `len() <
+    // 15`. A bar that never moves is not a throttle working well, it is a
+    // progress channel that is broken.
+    //
+    // Filtered to `done > 0` for the EMPTINESS check only, and for the same
+    // reason `an_uncontended_walk_reports_no_contention_on_any_event` is: the
+    // scan announces two `Reading` snapshots before any file is read (the
+    // claim and the post-`read_roots` update), so the unfiltered vector is
+    // never empty regardless of what the reading pass actually reports — the
+    // exact state the message below names. The upper bound stays over the
+    // UNFILTERED vector: it is asking whether the throttle held down every
+    // snapshot the scan announced, free ones included, not only the ones that
+    // covered a file — filtering it too would let a build that stopped
+    // throttling but still sent its two free announcements slip under `< 15`
+    // on the strength of reports that were never subject to the throttle at
+    // all.
+    let real_progress: Vec<_> = progress_events.iter().filter(|p| p.done > 0).collect();
     assert!(
         progress_events.len() < 15,
         "thirty files produced {} progress events — throttling did not \
@@ -4013,54 +3910,38 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     // stops one file short of the end looks like a hang. The last event must
     // already show the true final count — not a stale one the throttle
     // happened to let through earlier and then withheld the correction for.
-    let last = progress_events
-        .last()
-        .expect("the emptiness assertion above already established there is one");
+    //
+    // The emptiness check and the exactness check used to be two separate
+    // assertions, and the first was rescued by the second: deleting it left
+    // `real_progress.last().expect(...)` to panic on the same empty vector
+    // anyway, so its own mutant died on a neighbour rather than on itself.
+    // One `match` names the field this test is actually about either way.
+    let last = match real_progress.last() {
+        Some(last) => last,
+        None => panic!(
+            "thirty files produced no progress events from actually reading a file — the bar \
+             would never move: {progress_events:?}"
+        ),
+    };
     assert_eq!(
-        last["done"], ending["done"],
-        "the last progress event before Ended did not show the true count: {last}"
+        last.done, reading.done,
+        "the last progress event before the scan ended did not show the true count: {last:?}"
     );
 }
 
-/// `JobSlot::drop` clears `AppState::running`, and the contract the backend
-/// offers is that a second walk can start the instant the first says it is
-/// over — a window is free to re-enable Start inside the very handler that
-/// receives `Ended`. None does yet: the indexing surface is PR 7's, and this
-/// test holds the backend half so that surface can be written without
-/// measuring the race again. Before the slot was dropped ahead of the send,
-/// this raced: the
-/// slot was still held for however long remained of the spawned thread's
-/// body, and a second `start_walk_job` issued in that gap was refused with
-/// `a job is already running`, even though the first walk had just been
-/// reported finished.
-#[test]
-fn a_second_walk_can_start_the_instant_the_first_says_it_ended() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-
-    let fixture = fixture_dir();
-    let root = state
-        .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
-        .expect("insert_watched_root failed");
-
-    let (first_channel, first_events) = job_channel();
-    walk_job::start_walk_job(state.clone(), root, first_channel)
-        .expect("the first walk would not start");
-
-    loop {
-        match first_events.recv_timeout(Duration::from_secs(20)) {
-            Ok(event) if event["event"] == json!("ended") => break,
-            Ok(_) => continue,
-            Err(_) => panic!("the first walk never told the window it ended"),
-        }
-    }
-
-    let (second_channel, _second_events) = job_channel();
-    walk_job::start_walk_job(state.clone(), root, second_channel)
-        .expect("a second walk was refused the instant the first said it ended");
-}
+// 🔴 `a_second_walk_can_start_the_instant_the_first_says_it_ended` lived here,
+// over the race `walk_job.rs`'s own `drop(slot)` comment measured: a
+// two-part ending — a slot dropped on one line, `Ended` sent over the
+// channel a moment later — left a gap a second `start_walk_job` could be
+// refused in even though the window had just been told the first was over.
+// The scan job has no such gap to have: `JobSlot::finish` writes the `Ended`
+// snapshot BEFORE it announces (`state.rs`), so `job_is_running()` is already
+// false by the time any observer — the one a window's own handler would be —
+// hears the ending at all. That ordering, and a claim made from INSIDE the
+// observer that hears it, is `state::tests::
+// an_announcement_is_read_as_the_fact_not_replayed_as_the_edge`'s whole
+// subject; it is a stronger reproduction of this test's race than a real scan
+// over a fixture folder could add.
 
 /// Gap 1 from the task-12 review, exercised through a real walk rather than
 /// only through `Ended::failed` itself. The missing path below is contrived
@@ -4087,29 +3968,22 @@ fn a_missing_worker_binary_reports_why_in_the_message() {
     state.open_index().expect("the index opens");
 
     let fixture = fixture_dir();
-    let root = state
+    state
         .with_index(|db| db.insert_watched_root(&fixture.path().display().to_string()))
         .expect("insert_watched_root failed");
 
-    let (channel, events) = job_channel();
-    walk_job::start_walk_job(state.clone(), root, channel).expect("the walk would not start");
-
-    let ending = loop {
-        match events.recv_timeout(Duration::from_secs(20)) {
-            Ok(event) if event["event"] == json!("ended") => break event["data"].clone(),
-            Ok(_) => continue,
-            Err(_) => panic!("the walk never told the window it ended"),
-        }
-    };
+    let settled = scan_with(app.handle(), Entry::Full);
+    let report = report_of(&settled);
 
     assert_eq!(
-        ending["reason"],
-        json!("failed"),
-        "a missing worker binary must stop the walk, not be treated as a per-file skip: {ending}"
+        report.reason,
+        EndReason::Failed,
+        "a missing worker binary must stop the scan, not be treated as a per-file skip: {report:?}"
     );
-    let message = ending["message"]
-        .as_str()
-        .expect("a failed walk must carry a message the window can render");
+    let message = report
+        .message
+        .as_deref()
+        .expect("a failed scan must carry a message the window can render");
     assert!(
         message.contains("nonexistent/mnema-extract-worker"),
         "the message does not name the worker path that could not be started: {message}"
@@ -9325,10 +9199,10 @@ fn mask_preview_understates_documents_behind_an_in_tree_gitignore() {
 }
 
 /// 🔴 **Both halves of the rule set, and this is the other half.** A stored
-/// path exclusion is per-root and is applied by the very same walk
-/// (`walk_job.rs` reads prefixes and masks under one lock, as one question), so
-/// a preview that reads only the masks understates the loss in exactly the way
-/// the sibling above pins for masks.
+/// path exclusion is per-root and is applied by the very same scan
+/// (`scan_job::read_roots` reads prefixes and masks under one lock, as one
+/// question), so a preview that reads only the masks understates the loss in
+/// exactly the way the sibling above pins for masks.
 ///
 /// `pair` is indexed at `Archive/report.txt` and at `report.md`. With `Archive`
 /// excluded for this root, `Archive/report.txt` is already going on the next
@@ -9549,9 +9423,9 @@ fn mask_preview_does_not_treat_a_file_named_like_a_build_directory_as_pruned() {
 }
 
 /// The preview refuses on a **stored** rule that no longer validates, exactly as
-/// `start_walk_job` refuses the walk on one — because it now builds the same
-/// rule set that walk would build, and a preview cannot honestly put a number
-/// on a scan that is going to stop before it starts.
+/// `scan_job::read_roots` refuses the scan on one — because it now builds the
+/// same rule set that scan would build, and a preview cannot honestly put a
+/// number on a scan that is going to stop before it starts.
 ///
 /// Both stored halves, and both are reachable the same one way: `Db::add_mask`
 /// and `Db::add_path_exclusion` deliberately do not validate, because
@@ -9705,7 +9579,7 @@ fn a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     assert_eq!(
         indexed_paths(&app, root),
         vec![
@@ -9718,16 +9592,16 @@ fn a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name() {
 
     call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(1),
-        "the walk did not reconcile away the newly masked file: {ending}"
+        reading.removed, 1,
+        "the scan did not reconcile away the newly masked file: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -9737,15 +9611,20 @@ fn a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name() {
 }
 
 /// 🔴 A mask is GLOBAL: one rule removes matching files under every watched
-/// folder, each on its own next scan.
+/// folder, in the one scan that reads them.
 ///
-/// Both halves are asserted, and the second is the one a per-root
-/// implementation would fail: after the first root is walked its PDF is gone
-/// and the second root's is still there — *because nothing has walked it yet*,
-/// not because the mask does not reach it. Then the second root is walked and
-/// its PDF goes too. That middle state is exactly what the editor must not let
-/// a person read as "the mask only applied to one folder", and it is why the
-/// sentence Task 11 owes has two halves.
+/// 🔴 **Rewritten for the scan job, not merely converted (Task 3b).** The
+/// original test — `run_walk_to_completion(&app, roots[0])` then `roots[1]`
+/// separately — proved the global reach two ways: the first root lost its
+/// file while the second, not yet re-walked, still had it; then the second
+/// lost its file on its own later walk. That middle state is now
+/// unreachable through the product's own surface: `scan_job::start_scan_job`
+/// takes no `root_id`, it reads every watched folder under ONE claim
+/// (`scan_job.rs`'s own header), so there is no way to scan one watched root
+/// while leaving another untouched by that same job. The property that
+/// survives — and the one a per-root implementation would still fail — is
+/// this: ONE scan, over both roots, must take the masked file from both, not
+/// merely the first one it happens to iterate.
 #[test]
 fn a_mask_removes_matching_files_under_every_watched_root_on_that_roots_next_scan() {
     let dir = tempfile::tempdir().unwrap();
@@ -9765,9 +9644,9 @@ fn a_mask_removes_matching_files_under_every_watched_root_on_that_roots_next_sca
         .expect("add_watched_folder was rejected")
         .as_i64()
         .expect("add_watched_folder did not return an id");
-        run_walk_to_completion(&app, root);
         roots.push(root);
     }
+    scan_to_completion(app.handle());
     for root in &roots {
         assert!(
             indexed_paths(&app, *root).contains(&"report.pdf".to_string()),
@@ -9777,27 +9656,18 @@ fn a_mask_removes_matching_files_under_every_watched_root_on_that_roots_next_sca
 
     call(&webview, "add_mask", json!({ "pattern": "*.pdf" })).expect("add_mask was rejected");
 
-    run_walk_to_completion(&app, roots[0]);
-    assert!(
-        !indexed_paths(&app, roots[0]).contains(&"report.pdf".to_string()),
-        "the walked root must have lost its masked file"
-    );
-    assert!(
-        indexed_paths(&app, roots[1]).contains(&"report.pdf".to_string()),
-        "the root nothing has walked yet must be untouched: a mask takes effect \
-         on each root's own next scan, and the window must not imply one scan \
-         settles it"
-    );
-
-    run_walk_to_completion(&app, roots[1]);
-    assert!(
-        !indexed_paths(&app, roots[1]).contains(&"report.pdf".to_string()),
-        "the second root's own scan must apply the same global mask"
-    );
-    assert!(
-        indexed_paths(&app, roots[1]).contains(&"archive.pdf/keep.txt".to_string()),
-        "and must still leave the folder that merely shares the mask's name alone"
-    );
+    scan_to_completion(app.handle());
+    for root in &roots {
+        assert!(
+            !indexed_paths(&app, *root).contains(&"report.pdf".to_string()),
+            "the scan must take the masked file from every watched root, not only the \
+             first one it reads: {root}"
+        );
+        assert!(
+            indexed_paths(&app, *root).contains(&"archive.pdf/keep.txt".to_string()),
+            "and must still leave the folder that merely shares the mask's name alone: {root}"
+        );
+    }
 }
 
 /// A stored mask that no longer validates refuses the walk rather than letting
@@ -9829,14 +9699,17 @@ fn a_stored_mask_that_no_longer_validates_refuses_the_walk() {
         .with_index(|db| db.add_mask("logs/*.tmp"))
         .expect("writing a mask the command layer would have refused");
 
-    let (channel, _events) = job_channel();
-    let refused = walk_job::start_walk_job(app.state::<AppState>(), root, channel)
-        .expect_err("a walk under an invalid stored mask must be refused");
+    let refused = scan_job::start_scan_job(app.state::<AppState>(), Entry::Full)
+        .expect_err("a scan under an invalid stored mask must be refused");
     assert_eq!(
         refused.to_string(),
         "file mask \"logs/*.tmp\" cannot contain `/` — a mask names a file, and a folder \
          is excluded with an exclusion rule instead",
         "the refusal must carry RulesError's own sentence"
+    );
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "the refused scan kept the job slot"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -9846,11 +9719,12 @@ fn a_stored_mask_that_no_longer_validates_refuses_the_walk() {
 }
 
 /// 🔴 B1 — a walk is never exercised with more than one stored mask. The call
-/// at `walk_job.rs:149` passes the whole vector to a single `.with_masks(masks)`
-/// and that is correct, but every OTHER walk fixture in this file stores
-/// exactly one mask, so a mutant that truncates the stored set to its first
-/// element (`db.list_masks()?.into_iter().take(1).collect::<Vec<_>>()`) leaves
-/// the entire package green. This is the exact twin of the exclusion side's
+/// in `scan_job::read_roots` passes the whole vector to a single
+/// `.with_masks(masks.clone())` and that is correct, but every OTHER walk
+/// fixture in this file stores exactly one mask, so a mutant that truncates
+/// the stored set to its first element
+/// (`db.list_masks()?.into_iter().take(1).collect::<Vec<_>>()`) leaves the
+/// entire package green. This is the exact twin of the exclusion side's
 /// "every stored prefix must reach `WalkRules::new`, not only the first"
 /// (`scripts/mutations/pr8-exclusions.sh`), and the mask layer inherited the
 /// code shape without inheriting the guard.
@@ -9894,7 +9768,7 @@ fn a_walk_applies_every_stored_mask_not_only_the_first() {
     .as_i64()
     .expect("add_watched_folder did not return an id");
 
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
     assert_eq!(
         indexed_paths(&app, root),
         vec![
@@ -9911,17 +9785,17 @@ fn a_walk_applies_every_stored_mask_not_only_the_first() {
             .unwrap_or_else(|e| panic!("add_mask({pattern}) was rejected: {e}"));
     }
 
-    let ending = run_walk_and_capture_ending(&app, root);
+    let settled = scan_with(app.handle(), Entry::Full);
+    let reading = reading_of(&settled);
     assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the second walk did not finish, so its counts prove nothing: {ending}"
+        reading.reason,
+        EndReason::Completed,
+        "the second scan did not finish, so its counts prove nothing: {reading:?}"
     );
     assert_eq!(
-        ending["removed"],
-        json!(2),
-        "the walk did not reconcile away both masked files, only truncating to \
-         the first stored mask would leave one of them behind: {ending}"
+        reading.removed, 2,
+        "the scan did not reconcile away both masked files, only truncating to \
+         the first stored mask would leave one of them behind: {reading:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),
@@ -10889,7 +10763,7 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
     assert_eq!(before["index"]["lastIndexedAt"], json!(null));
 
     let fixture = two_file_fixture_dir();
-    let root = call(
+    call(
         &webview,
         "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
@@ -10897,7 +10771,7 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
     .expect("add_watched_folder was rejected")
     .as_i64()
     .expect("add_watched_folder did not return an id");
-    run_walk_to_completion(&app, root);
+    scan_to_completion(app.handle());
 
     let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
     let listing = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
@@ -10968,3 +10842,955 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
     assert!(after["index"].get("last_indexed_at").is_none(), "{after}");
     assert!(after["index"].get("pending_chunks").is_none(), "{after}");
 }
+
+// ------------------------------------------------------------ the scanning job
+
+/// A watched folder holding one indexable file per name given, each with text
+/// of its own.
+///
+/// Distinct text per file rather than one string repeated: content addressing
+/// makes two files with the same bytes ONE document, so a fixture of identical
+/// files would count as fewer indexed documents than it has files and every
+/// count below would be about the wrong thing.
+fn dir_holding(names: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temp dir for the scan fixture");
+    for name in names {
+        std::fs::write(
+            dir.path().join(name),
+            format!("the text of {name}, and nothing else"),
+        )
+        .expect("writing a scan fixture file");
+    }
+    dir
+}
+
+/// Adds `path` as a watched folder through the command the window uses, and
+/// answers with the id the index gave it.
+fn watch(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
+    call(
+        webview,
+        "add_watched_folder",
+        json!({ "path": path.display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id")
+}
+
+/// Which folder each `Reading` announcement was about, in the order they were
+/// announced.
+fn reading_positions(snapshots: &[ScanState]) -> Vec<u64> {
+    snapshots
+        .iter()
+        .filter_map(|state| match &state.snapshot {
+            ScanSnapshot::Running {
+                phase: Phase::Reading { root_index, .. },
+                ..
+            } => Some(*root_index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 🔴 Two watched folders, one job, one reading pass.
+///
+/// The pair of states this separates is "one scan read both folders" from "two
+/// scans, one per folder" — which is what the chain this replaces produced, and
+/// which is indistinguishable from the first if you look only at the index. So
+/// the assertions are about the JOB and not only about the files: `readSeq`
+/// rises by exactly one across the whole run (two passes would move it twice),
+/// the announcements walk from folder 1 to folder 2 without going back, and one
+/// `ReadingOutcome` accounts for both folders at once.
+#[test]
+fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt", "b3.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let before = app.state::<AppState>().scan_state().read_seq;
+    let (snapshots, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass at all");
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert_eq!(reading.roots_read, 2, "{reading:?}");
+    assert_eq!(reading.root_count, 2, "{reading:?}");
+    assert_eq!(reading.indexed, 6, "{reading:?}");
+    // The positive half of the pair the two folder-failure tests assert: two
+    // folders read whole and reconciled make the pass complete. Without this a
+    // `complete` hardcoded to `false` would satisfy both of those and mean
+    // nothing.
+    assert!(
+        reading.complete,
+        "two healthy folders were read whole and reconciled, and the pass says \
+         otherwise: {reading:?}"
+    );
+    assert!(
+        reading.roots.iter().all(|root| root.complete),
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading
+            .roots
+            .iter()
+            .map(|r| r.root_path.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            first.path().display().to_string(),
+            second.path().display().to_string(),
+        ],
+        "the pass must account for the folders it read, in the order it read them"
+    );
+
+    assert_eq!(
+        settled.read_seq,
+        before + 1,
+        "two folders under one job are ONE reading pass; {} passes were recorded",
+        settled.read_seq - before
+    );
+    assert_eq!(settled.files, 6, "{settled:?}");
+
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Completed);
+    // The reading is what this test is about, and the ending records where the
+    // JOB got to — which is the embedding phase, entered and declined. `app_in`
+    // has no key in its store, so the phase reached the first question it asks
+    // and answered it. `NotReached` here would mean the scan stopped after the
+    // folders, which is a different job and one this build no longer has.
+    assert_eq!(
+        report.embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoKey
+        },
+        "{report:?}"
+    );
+    assert_eq!(report.ended_in, EndedIn::Embedding);
+    assert_eq!(
+        report.resume, None,
+        "a scan that read everything and has no key to embed with has nothing \
+         for a next one to pick up"
+    );
+
+    let positions = reading_positions(&snapshots);
+    assert!(
+        positions.contains(&1) && positions.contains(&2),
+        "the window was never shown both folders: {positions:?}"
+    );
+    assert!(
+        positions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the pass went back to an earlier folder, which is what a restarted \
+         scan looks like: {positions:?}"
+    );
+
+    assert_eq!(indexed_paths(&app, first_id).len(), 3);
+    assert_eq!(indexed_paths(&app, second_id).len(), 3);
+}
+
+/// A folder that is not there does not stop the folder after it.
+///
+/// The pair it separates is "one ejected disk costs you one folder" from "one
+/// ejected disk costs you the whole scan". Both directions are asserted,
+/// because the second half is what makes the first mean anything: the first
+/// folder's rows are still there afterwards (a scan that reconciled against an
+/// absent folder would delete them all) AND the second folder was read.
+#[test]
+fn a_folder_that_is_not_there_does_not_stop_the_folder_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["gone1.txt", "gone2.txt"]);
+    let first_id = watch(&webview, first.path());
+    scan_to_completion(app.handle());
+    let rows_before = indexed_paths(&app, first_id);
+    assert_eq!(
+        rows_before.len(),
+        2,
+        "nothing was indexed under the first folder, so its survival below \
+         proves nothing"
+    );
+
+    // The folder goes away between one scan and the next — an ejected volume,
+    // a folder deleted by hand.
+    std::fs::remove_dir_all(first.path()).expect("removing the first watched folder");
+
+    let second = dir_holding(&["b1.txt", "b2.txt"]);
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::RootUnavailable,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots_read, 2,
+        "the folder after the missing one was never read: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id),
+        rows_before,
+        "the missing folder's rows were treated as deleted files"
+    );
+    assert_eq!(
+        indexed_paths(&app, second_id).len(),
+        2,
+        "the readable folder after the missing one was not indexed"
+    );
+
+    // The pass ran to the end, and the archive is still not fully accounted
+    // for. `reason` answers the first question and `complete` the second, and a
+    // window that reads only the first draws a finished scan over an index
+    // holding rows for a folder nothing reconciled.
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert!(
+        !reading.roots[0].complete,
+        "a folder that was not there was not read whole, whatever it says: \
+         {reading:?}"
+    );
+    assert!(
+        !reading.complete,
+        "a folder that was never reconciled leaves rows nothing checked, so the \
+         pass is not complete: {reading:?}"
+    );
+}
+
+/// 🔴 A Stop landing between two folders keeps what the first one wrote, and
+/// never opens the second.
+///
+/// The pair it separates is "stopped after one folder of two, and here is what
+/// that folder did" from "stopped, and here are some zeroes". Same `reason`,
+/// same slot state; only the counters differ, and the counters are what a
+/// person is owed — they say how much of their archive is now in the index.
+/// `Stop` is raised from inside the announcement for the LAST file of the
+/// first folder, so at least one document is written before it fires and the
+/// count cannot pass by being zero.
+///
+/// The other half, asserted alongside: the second folder is not read at all.
+///
+/// 🔴 **Renamed at Task 11b fix round 1, because the old name —
+/// `a_cancelled_root_still_counts_what_it_wrote` — described a state this
+/// fixture does not build.** It was read as "a folder cancelled part-way keeps
+/// its counters" and used as the oracle for the mutant that moves
+/// `ReadingOutcome::absorb` below the pass's `break`; measured, that mutant
+/// leaves this test GREEN. The Stop here lands after the folder's last file, so
+/// the folder itself ends `Completed`, `scan_job::after_root` says nothing, and
+/// the pass takes no `break` on that iteration at all — it stops at the TOP of
+/// the next one, with this folder's counters already absorbed. What the fixture
+/// really builds is the boundary BETWEEN two folders. The state the old name
+/// named is built by `a_worker_that_reads_nothing_stops_the_scan_at_the_folder_
+/// that_broke`, where the folder's own report carries the stopping reason, and
+/// that is the case's oracle now.
+///
+/// `roots[0].reason` is asserted below for that reason: it is the fixture's own
+/// PREMISE, and a premise nothing states is a premise the next reader has to
+/// guess at — which is exactly how the wrong oracle was chosen.
+#[test]
+fn a_scan_stopped_between_two_folders_keeps_the_first_ones_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt", "b3.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) = run_scan_watching(
+        app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        |state, now| {
+            if let ScanSnapshot::Running {
+                phase:
+                    Phase::Reading {
+                        root_index: 1,
+                        counts,
+                        ..
+                    },
+                ..
+            } = &now.snapshot
+                && counts.total >= 3
+                && counts.done == counts.total
+            {
+                state.cancel_job();
+            }
+        },
+    );
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+    assert_eq!(reading.reason, EndReason::Cancelled, "{reading:?}");
+    assert_eq!(reading.roots_read, 1, "{reading:?}");
+    assert_eq!(reading.root_count, 2, "{reading:?}");
+    // The fixture's own premise, stated rather than assumed: the Stop lands
+    // after this folder's last file, so the FOLDER finished and the PASS did
+    // not. If this ever becomes `Cancelled` the fixture has started building a
+    // different state, and every sentence above about the boundary is then
+    // about something else.
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::Completed,
+        "this fixture is about the boundary between two folders, and the first \
+         folder was itself stopped: {reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].indexed, 3,
+        "the folder that was read before the Stop reported fewer documents than \
+         it wrote: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id).len(),
+        3,
+        "the counters and the index disagree, so one of them is invented"
+    );
+    assert!(
+        indexed_paths(&app, second_id).is_empty(),
+        "the folder after the Stop was read anyway"
+    );
+
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Cancelled);
+    assert_eq!(
+        report.resume,
+        Some(Entry::Full),
+        "a reading pass that was stopped has folders left to read"
+    );
+}
+
+/// A worker that cannot read anything stops the scan at the folder that broke,
+/// and the folder keeps its counters.
+///
+/// The pair it separates is "eight files proved the install is broken" from
+/// "forty thousand files each proved it separately" — D44's counter is what
+/// makes the first one true, and this asserts the scan honours it rather than
+/// carrying the same broken worker into the next folder. `done` below is the
+/// evidence the folder really worked before it gave up; a scan that reported
+/// zeroes for the folder that broke would pass a bare `reason` assertion.
+#[cfg(unix)]
+#[test]
+fn a_worker_that_reads_nothing_stops_the_scan_at_the_folder_that_broke() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let app = app_with_a_worker_that_reads_nothing(dir.path(), scratch.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    // Nine, not three: the threshold is `(configured_workers * 2).max(8)` and
+    // the default pool has two workers, so eight consecutive crashes are what
+    // trips it — see `mnema-ingest`'s own
+    // `a_worker_that_answers_nothing_useful_stops_the_walk`.
+    let names: Vec<String> = (0..9).map(|i| format!("f{i}.txt")).collect();
+    let first = dir_holding(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    let second = dir_holding(&["b1.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let (_, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(120));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(reading.reason, EndReason::BrokenWorker, "{reading:?}");
+    assert_eq!(reading.roots_read, 1, "{reading:?}");
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::BrokenWorker,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].total, 9,
+        "the folder's own phase-1 count was lost: {reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].done, 8,
+        "the folder gave up at the threshold and the count of what it got \
+         through was lost: {reading:?}"
+    );
+    assert!(
+        indexed_paths(&app, first_id).is_empty(),
+        "a worker that reads nothing indexed something"
+    );
+    assert!(
+        indexed_paths(&app, second_id).is_empty(),
+        "the scan carried a broken worker into the next folder"
+    );
+    assert_eq!(
+        report_of(&settled).resume,
+        Some(Entry::Full),
+        "an install that has to be repaired is still something to run again"
+    );
+}
+
+/// 🔴 A folder emptied between the ingest and the reconcile pauses, keeps the
+/// counters it earned, and does not stop the folder after it.
+///
+/// D33's ambiguity: an unmounted volume and a mass delete are the same thing
+/// from here, and the answer is a pause rather than a guess. What this
+/// fixture adds over `mnema-ingest`'s own is the phase-2 counters — the folder
+/// is emptied AFTER its files were indexed, so `VolumeMissing` arrives on a
+/// folder that really did read nine files' worth of work, and a scan that
+/// zeroed the folder because its ending was not `Completed` would fail here.
+///
+/// The emptying is done from inside the announcement for the folder's last
+/// file, which `walk_root` makes on its own thread between phase 2 and phase 3.
+#[test]
+fn a_folder_emptied_after_its_files_were_read_pauses_and_keeps_its_counters() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let first = dir_holding(&["a1.txt", "a2.txt", "a3.txt"]);
+    let second = dir_holding(&["b1.txt", "b2.txt"]);
+    let first_id = watch(&webview, first.path());
+    let second_id = watch(&webview, second.path());
+
+    let vanishing = first.path().to_path_buf();
+    let (_, settled) = run_scan_watching(
+        app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |_, now| {
+            if let ScanSnapshot::Running {
+                phase:
+                    Phase::Reading {
+                        root_index: 1,
+                        counts,
+                        ..
+                    },
+                ..
+            } = &now.snapshot
+                && counts.total >= 3
+                && counts.done == counts.total
+            {
+                for entry in std::fs::read_dir(&vanishing).expect("listing the folder") {
+                    let _ = std::fs::remove_file(entry.expect("a directory entry").path());
+                }
+            }
+        },
+    );
+
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+    assert_eq!(
+        reading.roots[0].reason,
+        EndReason::VolumeMissing,
+        "{reading:?}"
+    );
+    assert_eq!(
+        reading.roots[0].indexed, 3,
+        "the folder read three files before it vanished and the count was lost: \
+         {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, first_id).len(),
+        3,
+        "the pause did not hold: the rows for a folder that may be an unmounted \
+         volume were deleted"
+    );
+    assert_eq!(
+        reading.roots_read, 2,
+        "one folder that may be unmounted stopped the whole scan: {reading:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, second_id).len(),
+        2,
+        "the folder after the paused one was not read"
+    );
+    // 🔴 The two questions, and the reason the folder's own `complete` cannot
+    // be the aggregate's. The walk SAW the whole folder before it vanished, so
+    // the folder reports `complete: true` — and phase 3 never ran, so the rows
+    // for the three files that are now gone are still in the index and still
+    // searchable. The pass is therefore NOT complete, and `reason` stays
+    // `Completed` because the job itself ran to the end.
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert!(
+        reading.roots[0].complete,
+        "phase 1 read the whole folder before it was emptied, so this is the \
+         one stop reason whose folder is complete and whose pass is not: \
+         {reading:?}"
+    );
+    assert!(
+        !reading.complete,
+        "a folder that may be an unmounted volume was left unreconciled, and \
+         nothing at the top level says so: {reading:?}"
+    );
+}
+
+/// 🔴 «Completed» is not «saw everything», and the pair is asserted on the
+/// same counters.
+///
+/// Two folders that end the same way and indexed the same number of files: one
+/// readable file each, `reason: completed` each. The first also holds a
+/// subdirectory nothing can read. Phase 2 finished everything phase 1 could
+/// hand it, so both end `Completed` — and `complete` is what tells them apart.
+/// A scan that folded the two questions together, or that let the pass's own
+/// `complete` follow its `reason`, draws a person a finished scan over an index
+/// missing whatever is under that subdirectory.
+///
+/// `done` and `total` are deliberately NOT asserted equal between the two: the
+/// unreadable subdirectory is itself an entry phase 1 turned away, so the first
+/// folder counts one more of them. That difference is real, and claiming the
+/// two folders differ in `complete` alone would be a sentence this fixture does
+/// not support.
+///
+/// Asserted on the JSON `job_status` answers with, because that is the value
+/// the window actually reads.
+#[cfg(unix)]
+#[test]
+fn a_folder_with_an_unreadable_subdirectory_completes_without_claiming_it_saw_everything() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let partly = dir_holding(&["seen.txt"]);
+    let locked = partly.path().join("locked");
+    std::fs::create_dir(&locked).expect("creating the subdirectory");
+    std::fs::write(locked.join("hidden.txt"), "text nothing will read")
+        .expect("writing inside the subdirectory");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("making the subdirectory unreadable");
+
+    let whole = dir_holding(&["also-seen.txt"]);
+    watch(&webview, partly.path());
+    watch(&webview, whole.path());
+
+    let (_, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    // Restored before anything can fail below, so the temporary directory can
+    // still be cleaned up when it does.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("restoring the subdirectory");
+
+    let status = call(&webview, "job_status", json!({})).expect("job_status was rejected");
+    let roots = status["lastReading"]["roots"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the reading pass named no folders: {status}"))
+        .clone();
+    assert_eq!(roots.len(), 2, "{status}");
+
+    for (which, root) in roots.iter().enumerate() {
+        assert_eq!(
+            root["reason"],
+            json!("completed"),
+            "folder {which} did not complete: {status}"
+        );
+        assert_eq!(
+            root["indexed"],
+            json!(1),
+            "folder {which} indexed something other than its one readable file: {status}"
+        );
+    }
+    assert_eq!(
+        roots[0]["complete"],
+        json!(false),
+        "the folder with the unreadable subdirectory claims it saw everything: {status}"
+    );
+    assert_eq!(
+        roots[1]["complete"],
+        json!(true),
+        "the folder nothing was wrong with is being reported as partly read, so \
+         `complete` is not measuring anything: {status}"
+    );
+    assert_eq!(
+        status["lastReading"]["complete"],
+        json!(false),
+        "one folder that was not fully seen must make the pass not fully seen: {status}"
+    );
+    assert_eq!(
+        status["lastReading"]["reason"],
+        json!("completed"),
+        "the pass finished everything it could, which is a different question: {status}"
+    );
+
+    let _ = settled;
+}
+
+/// An index with no watched folders is a scan that read none, said so, and did
+/// not fall over.
+///
+/// The pair it separates is "nothing to read" from "something went wrong":
+/// zero folders is an ordinary state — a fresh installation is in it — and the
+/// pass must end `Completed` with the counts to match rather than as a failure
+/// or a panic that leaves `JobSlot::drop` to write the ending.
+#[test]
+fn a_scan_with_no_watched_folders_reads_none_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let (_, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(30));
+    let reading = settled
+        .last_reading
+        .clone()
+        .expect("the scan recorded no reading pass");
+
+    assert_eq!(reading.reason, EndReason::Completed, "{reading:?}");
+    assert_eq!(reading.root_count, 0, "{reading:?}");
+    assert_eq!(reading.roots_read, 0, "{reading:?}");
+    assert!(reading.roots.is_empty(), "{reading:?}");
+    assert!(
+        reading.complete,
+        "a pass with nothing to miss cannot have missed anything: {reading:?}"
+    );
+    assert_eq!(
+        report_of(&settled).message,
+        None,
+        "an empty index is not a defect report"
+    );
+}
+
+/// A stored prefix that `WalkRules::new` refuses stops the scan before it
+/// spawns — and the slot it had already taken says so.
+///
+/// This is the cost D-f accepts, asserted rather than assumed: the scan claims
+/// the slot BEFORE it reads the index, so a refusal happens with the slot in
+/// hand. The pair it separates is "the refusal was reported" from "the refusal
+/// left an application that looks idle over a scan that never ran" —
+/// `JobSlot::drop`'s policy is what turns the second into the first, and this
+/// is the only caller that reaches it on purpose.
+#[test]
+fn a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let fixture = dir_holding(&["a1.txt", "a2.txt"]);
+    let root = watch(&webview, fixture.path());
+    scan_to_completion(app.handle());
+    let before = indexed_paths(&app, root);
+    assert_eq!(before.len(), 2, "the fixture was not indexed");
+
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.add_path_exclusion(root, ".."))
+        .expect("writing an unvalidated prefix straight to the index");
+
+    let refusal = scan_job::start_scan_job(state.clone(), Entry::Full)
+        .expect_err("a scan started even though a stored prefix cannot become a rule");
+    assert_eq!(
+        refusal.to_string(),
+        "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+         or `..`",
+        "the refusal should be RulesError::DotComponent's own sentence, whole"
+    );
+
+    assert!(
+        !state.job_is_running(),
+        "the refused scan kept the job slot"
+    );
+    // 🔴 The three halves the final review found unasserted, and the reason
+    // they are three. This test used to pin only that an ending EXISTS and that
+    // it is not `Completed`, which `Failed` satisfied — and `Failed` was what
+    // the slot's own drop policy wrote, having discarded the refusal through
+    // `?`. What a person then read was the internal English diagnostic «the job
+    // ended without a report» beside a «Повторити» that re-reads the same
+    // stored rule and fails identically, which is the exact row the resumption
+    // table closes on purpose.
+    let report = report_of(&state.scan_state());
+    assert_eq!(
+        report.reason,
+        EndReason::RulesNotApplied,
+        "a stored rule that will refuse every time is not a defect the scan can \
+         retry its way out of, and `Failed` is what the drop policy writes when \
+         the refusal was thrown away: {report:?}"
+    );
+    assert_eq!(
+        report.message.as_deref(),
+        Some(
+            "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+             or `..`"
+        ),
+        "the window must be given the refusal's own sentence, which names the \
+         rule, and not a diagnostic about a report nobody wrote: {report:?}"
+    );
+    assert_eq!(
+        report.resume, None,
+        "a retry re-reads the same stored rule and fails the same way, so the \
+         button must not be offered at all: {report:?}"
+    );
+    assert_eq!(
+        report.ended_in,
+        EndedIn::Reading,
+        "the refusal happened before any folder was read: {report:?}"
+    );
+    assert_eq!(
+        indexed_paths(&app, root),
+        before,
+        "the refused scan changed the index, so something ran before it refused"
+    );
+}
+
+/// The narrow question `the_probe_job_is_reachable_through_the_ipc` asks for the
+/// probe: is `start_scan_job` in `invoke_handler!` at all, and does its one
+/// argument arrive under the name and in the spelling the window sends. Neither
+/// is implied by the function existing and working when called directly.
+///
+/// It is now the ONLY job command a window can reach: `start_walk_job` and
+/// `start_embed_job` were taken out of `invoke_handler!` with the scanning job's
+/// embedding phase, and their own versions of this test went with them.
+///
+/// `entry` is the argument, and it is an enum rather than a string, so the pair
+/// this separates is "the window's two entry points reach the command" from
+/// "one of them is refused as an unknown variant". A value nobody defined must
+/// be refused rather than defaulted — a `walk` silently read as `full` would be
+/// a resumption that re-read the archive.
+#[test]
+fn the_scan_job_is_reachable_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    call(&webview, "start_scan_job", json!({ "entry": "full" }))
+        .expect("start_scan_job was rejected");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while app.state::<AppState>().job_is_running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !app.state::<AppState>().job_is_running(),
+        "the scan job never released the slot"
+    );
+
+    let error = call(&webview, "start_scan_job", json!({ "entry": "walk" }))
+        .expect_err("an entry point nobody defined was accepted");
+    assert!(
+        error
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown variant"),
+        "the rejection should be serde's own sentence about the variant; it was {error}"
+    );
+}
+
+/// 🔴 The real credential store, reached from the job thread and reached under
+/// the right name.
+///
+/// Every test of the phase itself hands it a store of its own, so all of them
+/// stay green if [`ScanDeps::production`] asks the wrong question — a reference
+/// that is not the one this application files its key under answers `Ok(None)`
+/// for a store holding a key, and every scan skips with `noKey` for ever. The
+/// pair that catches it needs both halves of one fixture: the same application,
+/// the same scan, and a key that is either there or not.
+///
+/// A model is deliberately never adopted, so the half WITH a key stops at the
+/// next question rather than reaching a provider. `noModel` against `noKey` is
+/// therefore the whole assertion, and neither value can be produced by the
+/// other's path.
+#[test]
+fn a_scan_reads_the_key_from_the_store_this_application_files_it_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a1.txt"]);
+    watch(&webview, folder.path());
+
+    let (_, without) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+    assert_eq!(
+        report_of(&without).embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoKey
+        },
+        "this application has no key entered: {without:?}"
+    );
+
+    // The key, filed exactly where this application files it — which is the
+    // fact under test.
+    mnema_secrets::store(app.state::<AppState>().credential_ref(), "a-key")
+        .expect("writing the key into the test store");
+
+    let (_, with) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+    assert_eq!(
+        report_of(&with).embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoModel
+        },
+        "the scan did not find the key this application had just stored, so the \
+         phase is reading some other reference: {with:?}"
+    );
+}
+
+/// 🔴 The real embedding pass, reached from the job thread with this
+/// application's own provider address.
+///
+/// The fake pass every other test injects proves the phase's decisions and
+/// nothing about whether the production one is wired to anything: a
+/// `ScanDeps::production` whose `embed` did nothing at all would leave all of
+/// them green and would leave every real scan reporting a finished embedding
+/// over an archive with no vectors in it.
+///
+/// The provider here is [`NO_PROVIDER`] — port 1, which refuses the connection
+/// at once — so what is asserted is that the pass really ran and really tried:
+/// an ending of `failed` with a sentence, in the embedding phase, resuming as
+/// the cheap half. The pair it separates from is `completed` with nothing sent,
+/// which is what a pass that was never entered would produce.
+#[test]
+fn a_scan_with_a_key_and_a_model_runs_the_real_embedding_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "a-key").expect("writing the key");
+    state
+        .with_index(|db| db.adopt_embedding_model("a-model", 8, "a-ref", "chunker-v1"))
+        .expect("adopting a model");
+
+    let folder = dir_holding(&["a1.txt"]);
+    watch(&webview, folder.path());
+
+    let (_, settled) =
+        run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    // The premise: the reading really did queue something for the pass to try
+    // to embed. Without it the pass would empty an empty queue and complete,
+    // and every assertion below would be about a run that had nothing to do.
+    let space = state
+        .with_index(|db| db.active_space())
+        .expect("reading the active space")
+        .expect("a model was adopted, so there is a space");
+    assert!(
+        state
+            .with_index(|db| db.queued_chunk_count(space))
+            .expect("counting the queue")
+            > 0,
+        "the reading pass queued nothing, so this test is not about an \
+         embedding pass at all"
+    );
+
+    let report = report_of(&settled);
+    assert_eq!(
+        report.ended_in,
+        EndedIn::Embedding,
+        "the scan never reached the embedding phase: {report:?}"
+    );
+    assert_eq!(
+        report.reason,
+        EndReason::Failed,
+        "nothing is listening on this application's provider address, so a pass \
+         that really ran cannot have completed: {report:?}"
+    );
+    assert!(
+        report
+            .message
+            .as_ref()
+            .is_some_and(|message| !message.is_empty()),
+        "the pass failed and said nothing about why: {settled:?}"
+    );
+    assert_eq!(
+        report.resume,
+        Some(Entry::EmbedOnly),
+        "a failed embedding leaves only chunks to embed: {report:?}"
+    );
+    assert!(
+        matches!(report.embedding, EmbedOutcome::Ran { .. }),
+        "a pass that ran and failed is not a pass that was never reached: \
+         {report:?}"
+    );
+    assert_eq!(
+        state
+            .with_index(|db| db.meta_get("scan.incomplete"))
+            .expect("reading the marker")
+            .as_deref(),
+        Some("0"),
+        "the folder was visited, so the marker clears whatever the embedding \
+         went on to do"
+    );
+}
+
+/// 🔴 An unfinished scan leaves a mark the settings screen can read, and the
+/// mark survives the process that made it.
+///
+/// The pair it separates is "a scan is half-done over this index" from "the
+/// last scan finished", and nothing else in the application can answer it after
+/// a crash: [`ScanState`] is a process's own memory and starts empty, so a
+/// power cut in the middle of a walk is indistinguishable from a clean start.
+///
+/// All three states are asserted, because two of them are spelled differently
+/// and mean the same thing: the marker is CLEARED by being written `"0"` and
+/// never by being removed, so an implementation reading `.is_some()` would
+/// report every index that has ever been scanned as unfinished for ever.
+///
+/// Asserted on the JSON, because a `rename_all` that stopped applying would
+/// leave `read.scanIncomplete` `undefined` on the window's side and the warning
+/// would silently never render — the same silence `pendingChunks` records one
+/// test up.
+#[test]
+fn an_unfinished_scan_leaves_a_mark_the_settings_screen_can_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let state = app.state::<AppState>();
+
+    let fresh = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        fresh["index"]["scanIncomplete"],
+        json!(false),
+        "an index no scan has ever touched is not an index with a half-done \
+         scan on it: {fresh}"
+    );
+
+    state
+        .with_index(|db| db.meta_set("scan.incomplete", "1"))
+        .expect("setting the marker");
+    let during = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        during["index"]["scanIncomplete"],
+        json!(true),
+        "the mark a scan leaves behind never reaches the window: {during}"
+    );
+
+    state
+        .with_index(|db| db.meta_set("scan.incomplete", "0"))
+        .expect("clearing the marker");
+    let after = call(&webview, "model_settings", json!({})).expect("model_settings was rejected");
+    assert_eq!(
+        after["index"]["scanIncomplete"],
+        json!(false),
+        "the marker is cleared by being written `0`, never by being removed, so \
+         a present row is not evidence of anything: {after}"
+    );
+
+    // Wire shape, both directions, for the reason the file-count test gives.
+    assert!(after["index"].get("scan_incomplete").is_none(), "{after}");
+}
+
+#[cfg(unix)]
+use app::app_with_a_worker_that_reads_nothing;

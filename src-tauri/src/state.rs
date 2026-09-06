@@ -11,14 +11,24 @@ use crate::error::Error;
 /// the three places it appears, because those three have to agree — the field,
 /// the setter's argument and [`JobSlot`]'s own copy.
 ///
-/// 🔴 **It carried a `bool` and could not.** [`JobSlot::drop`] stores `false`
-/// before it announces, so an incoming job can claim the slot in between and
-/// announce its own start first: the two announcements then arrive `true`,
+/// 🔴 **It carried a `bool` and could not.** [`JobSlot::drop`] writes the
+/// ending before it announces, so an incoming job can claim the slot in between
+/// and announce its own start first: the two announcements then arrive `true`,
 /// `false` while the slot is HELD, and a consumer replaying the last edge
-/// disables «Зупинити сканування» for the whole of a job that is running. The
-/// walk → embed handoff is exactly that sequence. Every consumer must therefore
-/// ask [`AppState::job_is_running`] at the moment it acts, which is what
-/// [`crate::tray::StopItem::replace`] already does for the same reason and what
+/// disables «Зупинити сканування» for the whole of a job that is running.
+///
+/// ⚠️ **The sequence this used to name — the walk → embed handoff — no longer
+/// exists**, and the rule does. Task 3b made a scan ONE claim, with the slot
+/// MOVED into `scan_job::embed_after` rather than given back and taken again,
+/// so there is no production pair of jobs handing the slot over any more. What
+/// still reaches this ordering is a claim on one thread racing a `Drop` on
+/// another: `models.rs`'s model-adoption claim can land in exactly the gap a
+/// scan's `Drop` leaves between its write and its announcement. The test named
+/// below builds that interleaving from inside the observer rather than
+/// observing it in production, which is what keeps the property guarded now
+/// that no shipped sequence demonstrates it. Every consumer must therefore
+/// read [`AppState::scan_state`] at the moment it acts, which is what
+/// [`crate::tray::refresh_tray`] already does for the same reason and what
 /// `state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge`
 /// pins. With no boolean to replay, the ordering of two announcements cannot
 /// decide what the tray ends up saying.
@@ -73,9 +83,19 @@ pub struct AppState {
     /// draws a person whose index is broken the sentence written for the
     /// ordinary state at start-up.
     boot_open_error: Mutex<Option<String>>,
-    /// Whether the single job slot is taken. Separate from `cancel`, which is
-    /// about a job that is already running.
-    running: Arc<AtomicBool>,
+    /// What the application is doing, and what the jobs before it left behind.
+    ///
+    /// The single job slot is the `Running` arm of
+    /// [`crate::scan_state::ScanSnapshot`] and not a boolean beside it, which is
+    /// what makes "the slot is taken" and "this is what it is taken for" one
+    /// fact rather than two that can disagree. An `Arc` because [`JobSlot`]
+    /// holds a clone for the life of the job and holds no reference back to this
+    /// struct.
+    ///
+    /// Separate from `cancel`, which is about a job that is already running and
+    /// stays an atomic: `mnema_ingest::walk_root` takes a `&AtomicBool`, and a
+    /// job asks it in a tight loop where a mutex has nothing to offer.
+    scan: Arc<Mutex<crate::scan_state::ScanState>>,
     cancel: Arc<AtomicBool>,
     /// The interface locale (§D129): the persisted choice and what it resolves
     /// to. Set once at start-up by `resolve_effective` (Task 6) and again by
@@ -101,13 +121,24 @@ pub struct AppState {
     autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
     /// Who to tell when the job slot changes hands, if anybody asked.
     ///
-    /// An `Arc` rather than the `Box` [`AppState::set_job_observer`] takes,
-    /// because [`JobSlot`] carries its own clone for the life of the job:
-    /// `Box<dyn Fn(…)>` is not `Clone`, and looking the observer up again at
-    /// drop time would need a reference back to this struct that `JobSlot`
-    /// deliberately does not hold. `None` is the default and stays the default
-    /// under `cargo test` — nothing but `.setup` installs one.
-    job_observer: Mutex<Option<Arc<JobObserver>>>,
+    /// An `Arc` around the cell as well as around the observer inside it, and
+    /// the outer one is the whole of the independent review's first finding.
+    /// [`JobSlot`] used to carry a clone of the observer AS IT STOOD at the
+    /// moment of the claim, which is `None` for every job claimed before
+    /// `.setup` reaches [`AppState::set_job_observer`] — and `boot_index` runs
+    /// its model auto-setup, which claims `Other { ModelAdoption }`, on exactly
+    /// that side of the line (`lib.rs:611` against `lib.rs:688`). That slot's
+    /// `Drop` wrote `Idle` and told nobody, so a window that read
+    /// `Running { Other }` at mount stayed on it for the life of the process:
+    /// no «Сканувати», no removal, and no Stop for a job that was over.
+    ///
+    /// Carrying the CELL instead of its contents is what makes the slot read
+    /// the observer that is installed at the moment it speaks rather than the
+    /// one that was installed when it was claimed. `Box<dyn Fn(…)>` is still
+    /// not `Clone`, which is why the inner `Arc` stays. `None` is the default
+    /// and stays the default under `cargo test` — nothing but `.setup` installs
+    /// one.
+    job_observer: Arc<Mutex<Option<Arc<JobObserver>>>>,
     /// Serialises a whole hotkey change against another one.
     ///
     /// Separate from `hotkey` above, and that is the point: `hotkey` is held for
@@ -132,7 +163,7 @@ impl AppState {
             credential_ref,
             db: Mutex::new(None),
             boot_open_error: Mutex::new(None),
-            running: Arc::new(AtomicBool::new(false)),
+            scan: Arc::new(Mutex::new(crate::scan_state::ScanState::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             // Safe default; overwritten at startup by `resolve_effective`
             // before any window draws (Task 6).
@@ -155,7 +186,7 @@ impl AppState {
             }),
             shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
-            job_observer: Mutex::new(None),
+            job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
         }
     }
@@ -418,41 +449,141 @@ impl AppState {
         Ok(f(db)?)
     }
 
-    /// Takes the single job slot, or reports that it is already taken.
+    /// Takes the single job slot for `initial`, or reports that it is already
+    /// taken.
     ///
     /// One job at a time is the model. PDF extraction is serialised within the
     /// process (D35) and the index takes one writer, so a second job would spend
     /// its life waiting on both.
-    pub fn claim_job(&self) -> Result<JobSlot, Error> {
-        self.running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Error::JobAlreadyRunning)?;
+    ///
+    /// The phase is an argument rather than something the job sets afterwards
+    /// because the announcement fires before this returns: an observer that
+    /// looked between a claim and a first `update` would find a job running with
+    /// nothing to say about it, and the strip it draws would flicker through a
+    /// state no job was ever in.
+    ///
+    /// `cancellable` is fixed here for the life of the job — see
+    /// [`crate::scan_state::ScanSnapshot::Running`]'s own field for why it sits
+    /// beside the phase rather than inside it.
+    ///
+    /// ⚠️ **A claim overwrites an `Ended` report, and `resume` lives on the
+    /// report — so a job the person did not start takes the tray's «Продовжити
+    /// сканування» away with it.** Accepted, and recorded here rather than
+    /// fixed. The sequence: a scan stopped in its embedding phase ends
+    /// `Cancelled` with `resume: Some(EmbedOnly)`; before the person presses
+    /// Resume they change the embedding model; `models.rs` claims the slot as
+    /// `Phase::Other { ModelAdoption }` and its drop writes `Idle`.
+    /// [`crate::tray::resume_entry`] reads the report and nothing else, so the
+    /// tray item goes dead — while the settings window still offers Continue,
+    /// because D-m falls back to the index's own markers. It is narrow and
+    /// partly self-correcting (a model change re-queues into another space, so
+    /// the old offer is arguably moot), and the honest reading is that `resume`
+    /// is the one value that outlives its job and was left inside the snapshot
+    /// rather than beside `last_reading` where this module's own doctrine puts
+    /// such values.
+    pub fn claim_job(
+        &self,
+        initial: crate::scan_state::Phase,
+        cancellable: bool,
+    ) -> Result<JobSlot, Error> {
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Check and write under ONE lock. Two — a `job_is_running()` and
+            // then a write — is check-then-act, and two callers can both pass
+            // the check.
+            if matches!(
+                scan.snapshot,
+                crate::scan_state::ScanSnapshot::Running { .. }
+            ) {
+                return Err(Error::JobAlreadyRunning);
+            }
+            scan.snapshot = crate::scan_state::ScanSnapshot::Running {
+                phase: initial,
+                cancellable,
+            };
+            scan.revision += 1;
+            // `files`, `read_seq` and `last_reading` are deliberately untouched:
+            // they are what the jobs before this one left behind, and a claim
+            // that cleared them would blank a reopened window's only account of
+            // the scan that just ran.
+        }
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
-        // After the `?` above, so a refused claim announces nothing: the caller
-        // that lost never held the slot, and an announcement from it would
-        // enable a control on behalf of a job that does not exist. Cloned out
-        // from under the lock before the call, so an observer is never run while
-        // this mutex is held.
-        let observer = self
-            .job_observer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        // The CELL, not the observer inside it. A slot that copied the current
+        // observer here would be deaf to one installed afterwards, which is the
+        // review's first finding — see `job_observer`'s own note. Cloning an
+        // `Arc` takes no lock at all, so nothing here can run an observer while
+        // a mutex is held either.
+        let observer = self.job_observer.clone();
         // The slot exists BEFORE anything is told the slot is taken. An observer
         // is free to act on the state the moment it hears — including claiming
         // and releasing it again — and the struct that gives the slot back must
         // be built by then, not after the announcement has returned.
         let slot = JobSlot {
-            running: self.running.clone(),
+            scan: self.scan.clone(),
             cancel: self.cancel.clone(),
             observer,
+            cancellable,
+            finished: false,
         };
-        if let Some(f) = &slot.observer {
+        // Through the slot's own `announce`, which is what makes the claim's
+        // announcement read the same cell every later one does. After the early
+        // return above, so a refused claim announces nothing: the caller that
+        // lost never held the slot, and an announcement from it would enable a
+        // control on behalf of a job that does not exist.
+        slot.announce();
+        Ok(slot)
+    }
+
+    /// The whole of what the application is doing, copied out.
+    ///
+    /// By value rather than behind a guard, for the reason [`AppState::
+    /// with_index`] gives about the index: a caller holding this lock across a
+    /// command would be holding it against the job that writes to it.
+    pub fn scan_state(&self) -> crate::scan_state::ScanState {
+        self.scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records how many files the index holds, without a job.
+    ///
+    /// The boot's way in: a window opened before anything has run still has to
+    /// be told what the index already holds, and there is no
+    /// [`JobSlot::finish`] to carry the number for it.
+    pub fn set_files(&self, files: i64) {
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scan.files = files;
+            scan.revision += 1;
+        }
+        self.announce();
+    }
+
+    /// The observer as it stands, cloned out from under its own lock so that
+    /// nothing calls it while any lock here is held.
+    fn observer(&self) -> Option<Arc<JobObserver>> {
+        self.job_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Tells whoever asked to go and look. Call sites must already have released
+    /// `scan`: an observer reads [`AppState::scan_state`], which takes that same
+    /// lock.
+    fn announce(&self) {
+        if let Some(f) = self.observer() {
             f();
         }
-        Ok(slot)
     }
 
     /// Registers who to tell when the job slot changes hands. Installed once,
@@ -476,10 +607,19 @@ impl AppState {
 
     /// Whether the job slot is taken.
     ///
-    /// Reaches the window through the `job_status` command, which is what a page
-    /// that reloaded mid-job asks to find out whether it should be drawing one.
+    /// The narrow question, for the callers that only have a narrow thing to do
+    /// with the answer — the tray's Stop item is either enabled or it is not.
+    /// The window is handed the whole of [`AppState::scan_state`] through the
+    /// `job_status` command instead, because "a job is running" is not enough to
+    /// draw one.
     pub fn job_is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        matches!(
+            self.scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot,
+            crate::scan_state::ScanSnapshot::Running { .. }
+        )
     }
 }
 
@@ -489,42 +629,248 @@ impl AppState {
 /// half-way through still frees the slot instead of locking the application out
 /// of indexing until it is restarted.
 pub struct JobSlot {
-    running: Arc<AtomicBool>,
+    /// The same `Arc` [`AppState`] holds, so a write through this slot IS a
+    /// write to the application's state and not a copy of it that has to be
+    /// reconciled later.
+    scan: Arc<Mutex<crate::scan_state::ScanState>>,
     cancel: Arc<AtomicBool>,
-    /// The observer as it stood when this slot was claimed, carried rather than
-    /// looked up: this struct holds no reference to [`AppState`], and giving it
-    /// one to reach a field at drop time would be a larger change than a clone
-    /// of an `Arc`. `None` when nobody registered, which is what keeps every
-    /// existing caller silent.
-    observer: Option<Arc<JobObserver>>,
+    /// The state's observer CELL, shared rather than copied out of — the same
+    /// `Arc` [`AppState`] holds, so what this slot announces to is whoever is
+    /// registered at the moment it speaks and not whoever was registered when
+    /// it was claimed. This struct still holds no reference to [`AppState`];
+    /// one `Arc` of the field is all it needs. Empty when nobody has
+    /// registered, which is what keeps every existing caller silent.
+    ///
+    /// 🔴 The copy this replaces is the review's first finding: a slot claimed
+    /// during `boot_index`, before `.setup` installs the observer, ended
+    /// without a word and left a window that had read `Running` stuck on it.
+    observer: Arc<Mutex<Option<Arc<JobObserver>>>>,
+    /// Carried rather than re-read out of the snapshot on every `update`. It
+    /// cannot change for the life of the job, and re-reading it would need an
+    /// arm for "the snapshot is not `Running`" — a state this slot's own
+    /// existence rules out, and so an arm no test could ever reach.
+    cancellable: bool,
+    /// Whether [`JobSlot::finish`] has already written an ending. It is what
+    /// stops [`JobSlot::drop`] from overwriting the report the job just wrote
+    /// with the one nobody wrote.
+    finished: bool,
 }
 
 impl JobSlot {
     pub fn cancel_flag(&self) -> &AtomicBool {
         &self.cancel
     }
+
+    /// Replaces what the running job says it is doing.
+    ///
+    /// Touches neither `read_seq` nor `last_reading`: a progress tick is not a
+    /// reading pass ending, and a consumer watching for the second must not be
+    /// woken by the first.
+    pub fn update(&self, phase: crate::scan_state::Phase) {
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scan.snapshot = crate::scan_state::ScanSnapshot::Running {
+                phase,
+                cancellable: self.cancellable,
+            };
+            scan.revision += 1;
+        }
+        self.announce();
+    }
+
+    /// Records that a reading pass has ended, and what it concluded.
+    ///
+    /// Called once per reading pass, by the pass, as it ends — not by
+    /// [`JobSlot::finish`], because a job may read several folders and each of
+    /// them is a pass that a consumer has to be able to act on before the job is
+    /// over.
+    ///
+    /// 🔴 **One write, under one lock.** `last_reading` and `read_seq` are two
+    /// halves of one fact: a consumer that saw the counter move and then read a
+    /// `last_reading` belonging to the pass before it would attribute one pass's
+    /// conclusions to another. Splitting this into two locked writes is what
+    /// would make that window exist.
+    pub fn mark_reading_done(&self, outcome: crate::scan_state::ReadingOutcome) {
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scan.last_reading = Some(outcome);
+            scan.read_seq += 1;
+            scan.revision += 1;
+        }
+        self.announce();
+    }
+
+    /// Gives the slot back with something to say for the job.
+    ///
+    /// Takes `self`, so the slot cannot be used afterwards and the ending cannot
+    /// be written twice. `files` is `Option` because only a job that counted
+    /// them has a number: `None` leaves the last count standing, which is what
+    /// a probe and a cancelled pass owe the window.
+    pub fn finish(mut self, terminal: crate::scan_state::Terminal, files: Option<i64>) {
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            scan.snapshot = match terminal {
+                crate::scan_state::Terminal::Idle => crate::scan_state::ScanSnapshot::Idle,
+                crate::scan_state::Terminal::Ended { report } => {
+                    crate::scan_state::ScanSnapshot::Ended { report }
+                }
+            };
+            if let Some(files) = files {
+                scan.files = files;
+            }
+            // Every ending, whichever `Terminal` it is: the counter is about a
+            // job having FINISHED, not about what it had to say. See
+            // `ScanState::jobs_done` for the consumer that could not be served
+            // by the snapshot alone.
+            scan.jobs_done += 1;
+            scan.revision += 1;
+        }
+        // BEFORE the announcement, not after. An observer may claim the slot the
+        // moment it hears — `models.rs`'s model adoption is the claim that can
+        // still do it, now that Task 3b's single claim has left no walk → embed
+        // handoff to point at — and this `self` is dropped after the
+        // announcement returns. A `Drop` that still thought it owed an ending
+        // would then write one over the job that had already started.
+        self.finished = true;
+        self.announce();
+    }
+
+    /// Tells whoever asked to go and look. Call sites must already have released
+    /// `scan`, for the reason [`AppState::announce`] gives.
+    ///
+    /// Read from the shared cell on EVERY announcement, never once at the
+    /// claim: the observer is installed by `.setup`, and jobs exist before
+    /// `.setup` runs. Cloned out from under its own lock before the call, so
+    /// nothing runs an observer while a mutex here is held — an observer is
+    /// free to claim the slot, and claiming takes locks.
+    fn announce(&self) {
+        let observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(f) = observer {
+            f();
+        }
+    }
 }
 
 impl Drop for JobSlot {
+    /// 🔴 **A job that vanished is not a job that finished.**
+    ///
+    /// A panic, an early return, or a thread that simply ends leaves the slot to
+    /// this, and this has no report to write. Writing `Idle` for a scan would
+    /// tell the user the folder was read to the end when it was not: an idle
+    /// window over an index missing whatever the job never reached, and nothing
+    /// left to correct it. So the two phases that owe a report get one saying
+    /// exactly what happened — that nobody wrote it — and the phases that owe
+    /// none go back to idle.
+    ///
+    /// ⚠️ **`files` is not written here, and cannot be**: a [`JobSlot`] holds no
+    /// database connection, so there is nothing to recount with. A scan that
+    /// indexed a thousand files and then panicked therefore leaves the settings
+    /// screen showing the count from before it, for the rest of the process —
+    /// [`AppState::set_files`] runs once at boot and nothing recounts until the
+    /// next job finishes. That is the same under-claiming trade `embedding:
+    /// NotReached` makes two dozen lines below, and it is written down for the
+    /// same reason: silence here would leave the next reader unable to tell a
+    /// decision from an oversight.
+    ///
+    /// The ending is written BEFORE the announcement, not after: an observer
+    /// reads the state for itself and must find the truth this drop has already
+    /// made. It is also what lets an incoming job claim the slot between the
+    /// write and the announcement — the handoff whose ordering is the reason
+    /// nothing is passed to an observer (see [`JobObserver`]). This runs on the
+    /// job's own thread, which is why the installed observer hands the work to
+    /// the main thread and returns rather than blocking here — see
+    /// `tray::refresh_tray`.
     fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-        // After the slot is free, not before: an observer asks
-        // `job_is_running()` for itself, and it must find the truth this drop
-        // has already made. It is also what lets an incoming job claim the slot
-        // between the store and the announcement — the handoff whose ordering is
-        // the reason nothing is passed here (see [`JobObserver`]). This runs on
-        // the job's own thread, which is why the installed observer hands the
-        // work to the main thread and returns rather than blocking here — see
-        // `tray::StopItem`.
-        if let Some(f) = &self.observer {
-            f();
+        if self.finished {
+            return;
         }
+        // Which phase it vanished from, not merely whether it owed anything:
+        // the report says where the job was, and the two phases are resumed
+        // from different places — see `scan_job::resume_for`. The note sits
+        // above the block rather than beside the binding it is about, because
+        // `scripts/mutations/pr9-shell.sh` quotes the lock and that binding as
+        // one adjacent block; a comment between them leaves the case matching
+        // nothing, and a case that matches nothing proves nothing while still
+        // reporting green.
+        {
+            let mut scan = self
+                .scan
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owed_a_report = match scan.snapshot {
+                crate::scan_state::ScanSnapshot::Running {
+                    phase: crate::scan_state::Phase::Reading { .. },
+                    ..
+                } => Some(crate::scan_state::EndedIn::Reading),
+                crate::scan_state::ScanSnapshot::Running {
+                    phase: crate::scan_state::Phase::Embedding { .. },
+                    ..
+                } => Some(crate::scan_state::EndedIn::Embedding),
+                _ => None,
+            };
+            scan.snapshot = if let Some(ended_in) = owed_a_report {
+                crate::scan_state::ScanSnapshot::Ended {
+                    report: crate::scan_state::ScanReport {
+                        // ⚠️ `NotReached` even for a job that vanished DURING
+                        // the embedding phase, and that is the conservative
+                        // direction rather than an accurate one: nothing here
+                        // knows how far that pass got, and the two ways to be
+                        // wrong are not symmetric. Under-claiming leaves a
+                        // person told nothing was embedded when some of it was,
+                        // and `resume` below sends them back to finish it;
+                        // over-claiming would tell them their archive is
+                        // searchable when it is not.
+                        embedding: crate::scan_state::EmbedOutcome::NotReached,
+                        ended_in,
+                        reason: crate::job::EndReason::Failed,
+                        // English, and here rather than in `locale.rs`, for the
+                        // reason every sentence in `error.rs` is: it is a
+                        // diagnostic about a defect, not a sentence written for
+                        // a person to act on.
+                        message: Some("the job ended without a report".to_string()),
+                        resume: crate::scan_job::resume_for(
+                            crate::job::EndReason::Failed,
+                            ended_in,
+                        ),
+                    },
+                }
+            } else {
+                crate::scan_state::ScanSnapshot::Idle
+            };
+            // A job that vanished is still a job that ended, and the consumer
+            // watching this counter has exactly as much to re-read either way —
+            // `Drop` is where a model adoption's own ending is written, since
+            // `Other` has no `finish`. `finish` sets `finished` before it
+            // announces, so a slot bumps this once and never twice.
+            scan.jobs_done += 1;
+            scan.revision += 1;
+        }
+        self.announce();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::job::{EndReason, Progress};
+    use crate::scan_state::{
+        EmbedOutcome, EndedIn, OtherJob, Phase, ReadingOutcome, ScanReport, ScanSnapshot,
+        ScanState, Terminal,
+    };
 
     /// An `AppState` with nothing but paths — the observer contract touches no
     /// index, no provider and no credential store, so the four arguments are
@@ -542,13 +888,76 @@ mod tests {
         ))
     }
 
+    /// A phase for the tests whose subject is the slot rather than the work:
+    /// [`Phase::Other`] is the one phase whose ending owes the user no report,
+    /// so a test that uses it is asserting about the protocol and not about the
+    /// Drop policy.
+    fn probe() -> Phase {
+        Phase::Other {
+            job: OtherJob::Probe,
+        }
+    }
+
+    /// A reading phase with nothing read yet, which is what
+    /// [`AppState::claim_job`]'s callers pass at the moment they claim.
+    fn reading() -> Phase {
+        Phase::Reading {
+            root_index: 0,
+            root_count: 1,
+            root_path: "/nonexistent/mnema-reading-root".to_string(),
+            counts: Progress::default(),
+        }
+    }
+
+    /// A reading outcome with something in every field the slot has to carry
+    /// unchanged, so that a slot storing a blank one — or the one from the pass
+    /// before — is a failure rather than an equality between two defaults.
+    fn a_pass_that_read_one_folder() -> ReadingOutcome {
+        ReadingOutcome {
+            reason: EndReason::VolumeMissing,
+            complete: false,
+            roots_read: 1,
+            root_count: 3,
+            done: 4,
+            total: 5,
+            indexed: 2,
+            unchanged: 1,
+            skipped: 1,
+            removed: 6,
+            contended: 1,
+            roots: Vec::new(),
+        }
+    }
+
+    /// What [`JobSlot::drop`] writes for a phase that owed a report and never
+    /// produced one. Written out here so that the Drop tests compare against
+    /// one spelling rather than several.
+    ///
+    /// Takes the phase it vanished from, because the report names it: a job
+    /// that disappeared out of the reading pass and one that disappeared out of
+    /// the embedding pass are resumed from different places, and a fixture that
+    /// spelled one answer for both would let the two swap without a test
+    /// noticing.
+    fn report_nobody_wrote(ended_in: EndedIn) -> ScanReport {
+        ScanReport {
+            embedding: EmbedOutcome::NotReached,
+            ended_in,
+            reason: EndReason::Failed,
+            message: Some("the job ended without a report".to_string()),
+            resume: crate::scan_job::resume_for(EndReason::Failed, ended_in),
+        }
+    }
+
     /// What the observer FOUND when it looked, once per announcement and in
     /// order, so a test can say what was there AND that nothing else was
     /// announced.
     ///
     /// It records a read rather than an argument because there is no argument:
-    /// see [`JobObserver`] for the handoff that took it away.
-    type Log = Arc<Mutex<Vec<bool>>>;
+    /// see [`JobObserver`] for the handoff that took it away. It records the
+    /// whole [`ScanState`] rather than only the snapshot because `files` and
+    /// `revision` change without the snapshot changing at all, and an
+    /// announcement about one of those is still an announcement.
+    type Log = Arc<Mutex<Vec<ScanState>>>;
 
     /// Poison-recovering rather than `unwrap`, and not for tidiness: a failed
     /// assertion here poisons the log while `JobSlot` is still alive, and the
@@ -559,91 +968,181 @@ mod tests {
         let sink = log.clone();
         let weak = Arc::downgrade(state);
         Box::new(move || {
-            let running = weak
+            let seen = weak
                 .upgrade()
                 .expect("the state outlives its own observer")
-                .job_is_running();
+                .scan_state();
             sink.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(running)
+                .push(seen)
         })
     }
 
+    fn snapshots(log: &Log) -> Vec<ScanSnapshot> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|state| state.snapshot.clone())
+            .collect()
+    }
+
+    /// Every announcement in order, whole. `snapshots` and `announced_files`
+    /// below are projections of this; a test that has to say "and nothing was
+    /// announced between these two" needs the states themselves.
+    fn announced(log: &Log) -> Vec<ScanState> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn announced_files(log: &Log) -> Vec<i64> {
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|state| state.files)
+            .collect()
+    }
+
     /// The whole contract in the order a job lives it: a look after the claim
-    /// finds the slot taken, and a look after it is given back finds it free.
-    /// Both announcements, because an implementation that fired only the first
-    /// would leave the tray offering to stop a job that has finished — which is
-    /// the failure this observer exists to prevent, not a hypothetical.
+    /// finds the slot taken AND finds what it was taken for, and a look after
+    /// it is given back finds it free. Both announcements, because an
+    /// implementation that fired only the first would leave the tray offering
+    /// to stop a job that has finished — which is the failure this observer
+    /// exists to prevent, not a hypothetical.
+    ///
+    /// The pair of states it separates is "the snapshot was written, then the
+    /// observer was told" against "the observer was told, then the snapshot was
+    /// written": the observer READS `scan_state()` rather than being handed
+    /// anything, so an announcement that fires before the write records the
+    /// previous snapshot and the assertion below fails on the value.
     #[test]
     fn the_observer_hears_a_job_start_and_finish() {
         let log = Log::default();
         let state = state();
         state.set_job_observer(recorder(&log, &state));
 
-        let slot = state.claim_job().expect("the slot is free");
+        let slot = state.claim_job(probe(), true).expect("the slot is free");
         assert_eq!(
-            *log.lock().unwrap(),
-            [true],
-            "claiming must announce itself"
+            snapshots(&log),
+            [ScanSnapshot::Running {
+                phase: probe(),
+                cancellable: true,
+            }],
+            "claiming must announce itself, and the announcement must find the \
+             phase the job was claimed for"
         );
 
-        drop(slot);
+        slot.finish(Terminal::Idle, None);
         assert_eq!(
-            *log.lock().unwrap(),
-            [true, false],
+            snapshots(&log),
+            [
+                ScanSnapshot::Running {
+                    phase: probe(),
+                    cancellable: true,
+                },
+                ScanSnapshot::Idle
+            ],
             "releasing must announce itself too"
         );
     }
 
-    /// A refused claim announces NOTHING. This is the assertion that separates
-    /// "notify when the slot changes hands" from "notify on every call": the
-    /// second caller never held the slot, so an announcement from it would
-    /// enable a control on behalf of a job that does not exist, and the first
-    /// job's own `Drop` would then be the only thing left to disable it.
+    /// A refused claim announces NOTHING and changes nothing. This is the
+    /// assertion that separates "notify when the slot changes hands" from
+    /// "notify on every call": the second caller never held the slot, so an
+    /// announcement from it would enable a control on behalf of a job that does
+    /// not exist, and the first job's own `Drop` would then be the only thing
+    /// left to disable it.
+    ///
+    /// `revision` is asserted in both directions — it grows on the claim that
+    /// was accepted and stands still on the one that was refused — because a
+    /// `revision` that never moved at all would satisfy the second half on its
+    /// own while making every consumer of the snapshot blind.
     #[test]
     fn a_refused_claim_announces_nothing() {
         let log = Log::default();
         let state = state();
         state.set_job_observer(recorder(&log, &state));
 
-        let held = state.claim_job().expect("the slot is free");
+        let idle = state.scan_state().revision;
+        let held = state.claim_job(probe(), true).expect("the slot is free");
+        let claimed = state.scan_state().revision;
         assert!(
-            state.claim_job().is_err(),
+            claimed > idle,
+            "an accepted claim is a change, and a consumer polling `revision` \
+             has to be able to see it"
+        );
+
+        assert!(
+            state.claim_job(reading(), true).is_err(),
             "a second claim must be refused while the first is held"
         );
         assert_eq!(
-            *log.lock().unwrap(),
-            [true],
+            state.scan_state().revision,
+            claimed,
+            "the refusal changed nothing, so it must not look like a change"
+        );
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Running {
+                phase: probe(),
+                cancellable: true,
+            },
+            "the refused claim must not have overwritten the running job's phase"
+        );
+        assert_eq!(
+            snapshots(&log),
+            [ScanSnapshot::Running {
+                phase: probe(),
+                cancellable: true,
+            }],
             "the refusal must not have announced anything"
         );
 
         // And the still-held slot is the one that speaks on the way out: one
         // announcement, not two.
         drop(held);
-        assert_eq!(*log.lock().unwrap(), [true, false]);
+        assert_eq!(
+            snapshots(&log),
+            [
+                ScanSnapshot::Running {
+                    phase: probe(),
+                    cancellable: true,
+                },
+                ScanSnapshot::Idle
+            ]
+        );
     }
 
-    /// 🔴 **The walk → embed handoff, with the outgoing job announcing LAST.**
+    /// 🔴 **An incoming claim landing inside an outgoing `Drop`, with the
+    /// outgoing job announcing LAST.**
     ///
-    /// `JobSlot::drop` stores `false` and only then announces, so between those
-    /// two an incoming job can claim the slot and announce its own `true`. The
-    /// announcements then arrive in the order `true`, `true`, `false` while the
-    /// slot is HELD, and a consumer that replays the last edge disables
-    /// «Зупинити сканування» for the whole of a job that is running — the tray
-    /// then offers no way to stop a scan until the next job boundary.
+    /// ⚠️ This used to be titled «the walk → embed handoff», which was the
+    /// production sequence that demonstrated it until Task 3b made a scan one
+    /// claim and moved the slot into the embedding phase instead. The
+    /// interleaving is still reachable — a model adoption claiming the slot
+    /// while a scan's `Drop` is between its write and its announcement — and
+    /// this fixture CONSTRUCTS it rather than waiting for it, which is why the
+    /// property survived the sequence that used to witness it.
+    ///
+    /// `JobSlot::drop` writes the ending and only then announces, so between
+    /// those two an incoming job can claim the slot and announce its own start.
+    /// The announcements then arrive `running`, `running`, `idle` while the slot
+    /// is HELD, and a consumer that replays the last edge disables «Зупинити
+    /// сканування» for the whole of a job that is running — the tray then offers
+    /// no way to stop a scan until the next job boundary.
     ///
     /// The interleaving is driven from inside the second announcement rather
     /// than from a second thread on purpose: what makes the window reachable is
-    /// the ORDER of the two announcements, and the store that precedes them is
+    /// the ORDER of the two announcements, and the write that precedes them is
     /// what lets the incoming claim win. A thread would add a schedule to wait
     /// on and prove the same thing.
     ///
     /// What the fake records is what it READ, never what it was passed. That is
     /// the whole assertion: an announcement is a signal to go and look, and the
-    /// fact a look finds after the handoff is that a job is running.
+    /// fact a look finds after the interleaving is that a job is running.
     #[test]
     fn an_announcement_is_read_as_the_fact_not_replayed_as_the_edge() {
-        let log = Log::default();
+        let log: Arc<Mutex<Vec<bool>>> = Arc::default();
         let state = Arc::new(state());
         // Where the incoming job's slot is parked so that it is still HELD when
         // the outgoing announcement is read. Dropping it inside the observer
@@ -664,7 +1163,7 @@ mod tests {
                 *held
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
-                    st.claim_job()
+                    st.claim_job(probe(), true)
                         .expect("the outgoing slot is free before it announces"),
                 );
             }
@@ -673,7 +1172,7 @@ mod tests {
                 .push(st.job_is_running());
         }));
 
-        let outgoing = state.claim_job().expect("the slot is free");
+        let outgoing = state.claim_job(probe(), true).expect("the slot is free");
         drop(outgoing);
 
         assert_eq!(
@@ -707,11 +1206,600 @@ mod tests {
     #[test]
     fn a_state_with_no_observer_claims_and_releases_as_before() {
         let state = state();
-        let slot = state.claim_job().expect("the slot is free");
+        let slot = state.claim_job(probe(), true).expect("the slot is free");
         assert!(state.job_is_running());
-        assert!(state.claim_job().is_err());
+        assert!(state.claim_job(probe(), true).is_err());
         drop(slot);
         assert!(!state.job_is_running());
-        state.claim_job().expect("the slot is free again");
+        state
+            .claim_job(probe(), true)
+            .expect("the slot is free again");
+    }
+
+    /// 🔴 **A slot claimed before anybody was listening announces to the
+    /// listener installed after it** — the independent review's first finding,
+    /// in the order its probe reproduced it.
+    ///
+    /// `boot_index` starts on its own thread (`lib.rs:611`) and its model
+    /// auto-setup claims the slot as `Other { ModelAdoption }` before asking
+    /// the provider anything (`models.rs:164-173`); `.setup` installs the
+    /// observer afterwards (`lib.rs:688`). A slot that COPIED the observer at
+    /// claim time therefore held nothing for the whole of that job, so the
+    /// `Drop` that wrote `Idle` told nobody — and a window whose two mount-time
+    /// reads of `job_status` both landed inside that job stayed on
+    /// `Running { Other }` for the life of the process, with «Сканувати»
+    /// hidden, removal blocked, and no Stop offered for a job of that kind.
+    ///
+    /// The pair of states this separates is "the slot carries the observer it
+    /// was claimed with" against "the slot reads the observer installed at the
+    /// moment it speaks". Both directions are asserted: nothing is announced
+    /// while nobody is listening, exactly one announcement carries the ending,
+    /// and the next job — claimed with the observer already in place — still
+    /// announces its own two.
+    #[test]
+    fn a_slot_claimed_before_the_observer_still_announces_its_ending() {
+        let log = Log::default();
+        let state = state();
+
+        // Claimed with nothing listening at all, the way boot's model adoption
+        // is. `cancellable: false` is that job's own value.
+        let slot = state.claim_job(probe(), false).expect("the slot is free");
+        assert!(state.job_is_running());
+
+        state.set_job_observer(recorder(&log, &state));
+        assert_eq!(
+            snapshots(&log),
+            [],
+            "installing an observer is not itself an announcement: the claim \
+             happened before it and there is nothing to replay"
+        );
+
+        drop(slot);
+        assert_eq!(
+            snapshots(&log),
+            [ScanSnapshot::Idle],
+            "the ending must reach the observer installed after the claim, and \
+             exactly once"
+        );
+        assert!(
+            !state.job_is_running(),
+            "and what a look finds when it hears is the slot given back"
+        );
+
+        // The probe's own control, and the other direction: an observer that
+        // was in place for the whole of a job still hears both of its edges, so
+        // the assertion above is about WHEN the observer is read and not about
+        // a slot that announces less than it used to.
+        let next = state
+            .claim_job(probe(), false)
+            .expect("the slot is free again");
+        drop(next);
+        assert_eq!(
+            snapshots(&log),
+            [
+                ScanSnapshot::Idle,
+                ScanSnapshot::Running {
+                    phase: probe(),
+                    cancellable: false,
+                },
+                ScanSnapshot::Idle
+            ]
+        );
+    }
+
+    /// 🔴 **A reading job that vanished against a reading job that reported.**
+    ///
+    /// A panic, a `?` on the way out, or a thread that simply ends leaves the
+    /// slot to `Drop`, and `Drop` has nothing to report. Writing `Idle` there
+    /// would say the scan finished — the user would be shown an idle window
+    /// over a folder that was never read to the end. The ending is written
+    /// instead, as the failure it is, and only for the two phases that owe a
+    /// report.
+    ///
+    /// The other direction is the same fixture with `finish` called: the report
+    /// the job wrote survives, which is what says `Drop` did not overwrite it
+    /// afterwards.
+    ///
+    /// 🔴 **`revision` is asserted across the drop, and this is the write where
+    /// that matters most.** `ui/src/settings/jobs.ts`'s `apply` keeps the
+    /// strictly greater revision and drops everything else, so a `Drop` that
+    /// wrote the ending without moving the counter reaches the window and is
+    /// thrown away — with the state itself left perfectly correct, which is why
+    /// the snapshot assertion above cannot see it. `finish` has the same
+    /// exposure and its own test
+    /// (`an_ending_moves_the_revision_once_and_is_announced_after_it_is_written`);
+    /// **`Drop` is the worse half of the pair**, because it is the one write no
+    /// later write follows: the job that would have announced again has gone,
+    /// so the strip goes on drawing a reading pass with Stop live over a slot
+    /// that is free until the window is reloaded.
+    #[test]
+    fn a_reading_job_that_vanished_ends_with_the_report_nobody_wrote() {
+        let state = state();
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        let claimed = state.scan_state().revision;
+        drop(slot);
+        let vanished = state.scan_state();
+        assert_eq!(
+            vanished.snapshot,
+            ScanSnapshot::Ended {
+                report: report_nobody_wrote(EndedIn::Reading),
+            },
+            "a reading job that ended without a report is a failure, not an idle \
+             application"
+        );
+        assert_eq!(
+            vanished.revision,
+            claimed + 1,
+            "the vanished job wrote its ending without moving `revision`, so \
+             `jobs.ts`'s `apply` drops it — and nothing follows a job that has \
+             gone, so the window draws the reading pass for ever"
+        );
+
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        slot.finish(
+            Terminal::Ended {
+                report: ScanReport::default(),
+            },
+            None,
+        );
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Ended {
+                report: ScanReport::default(),
+            },
+            "the report the job wrote must survive its own slot being dropped"
+        );
+    }
+
+    /// The embedding half of the pair above: the phase differs, the obligation
+    /// does not. An embedding pass that vanished has left chunks unembedded,
+    /// and vector search answers for fewer of them than the window shows.
+    #[test]
+    fn an_embedding_job_that_vanished_ends_with_the_report_nobody_wrote() {
+        let state = state();
+        drop(
+            state
+                .claim_job(
+                    Phase::Embedding {
+                        counts: Progress::default(),
+                    },
+                    true,
+                )
+                .expect("the slot is free"),
+        );
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Ended {
+                report: report_nobody_wrote(EndedIn::Embedding),
+            }
+        );
+        state
+            .claim_job(probe(), true)
+            .expect("the slot is free again");
+    }
+
+    /// The other side of the Drop policy, and the reason it is a policy rather
+    /// than one branch: a probe and a model adoption owe the user no report at
+    /// all, so an ending written for them would put a failure on screen that
+    /// belongs to nothing the user asked for.
+    ///
+    /// Task 11a (debt sweep). `claim_job` and `drop` used to be checked only
+    /// through the state AFTER the drop, dropped in the very statement that
+    /// claimed it (`drop(state.claim_job(...).expect(...))`) — so this test
+    /// never looked at what the slot held while it was still alive. A `Drop`
+    /// that did nothing at all, from a phase `claim_job` never actually wrote
+    /// as `Running` in the first place, would leave the same `Idle` this test
+    /// checks for: it would be proving Drop's policy by leaning on a claim it
+    /// never itself confirmed. Each phase is now claimed into a binding, its
+    /// running state asserted, and only then dropped — so this test stands on
+    /// its own precondition instead of a neighbour's.
+    #[test]
+    fn a_job_with_nothing_to_report_goes_back_to_idle_when_it_vanishes() {
+        let state = state();
+        let probe_slot = state.claim_job(probe(), true).expect("the slot is free");
+        assert!(
+            state.job_is_running(),
+            "the probe must actually be running before it vanishes, or dropping it proves \
+             nothing about the Drop policy"
+        );
+        drop(probe_slot);
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a probe that vanished is not a scan that failed"
+        );
+
+        let adoption_slot = state
+            .claim_job(
+                Phase::Other {
+                    job: OtherJob::ModelAdoption,
+                },
+                false,
+            )
+            .expect("the slot is free again");
+        assert!(
+            state.job_is_running(),
+            "the model adoption must actually be running before it vanishes, or dropping it \
+             proves nothing about the Drop policy"
+        );
+        drop(adoption_slot);
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a model adoption that vanished is not a scan that failed"
+        );
+    }
+
+    /// Removal is the third phase with nothing to report: it is not a scan, and
+    /// a folder taken out of the index that fails half-way is reported by the
+    /// command that asked for it, which has a caller to answer.
+    ///
+    /// Task 11a (debt sweep): the same fix as the pair above, and for the same
+    /// reason — the slot is claimed into a binding and its running state
+    /// asserted before it is dropped, so the `Idle` this test checks for is
+    /// proven to be `Drop`'s own transition rather than a state the removal
+    /// was never actually claimed into.
+    #[test]
+    fn a_removal_that_vanished_goes_back_to_idle() {
+        let state = state();
+        let slot = state
+            .claim_job(
+                Phase::Removing {
+                    root_path: "/nonexistent/mnema-removed-root".to_string(),
+                },
+                false,
+            )
+            .expect("the slot is free");
+        assert!(
+            state.job_is_running(),
+            "the removal must actually be running before it vanishes, or dropping it proves \
+             nothing about the Drop policy"
+        );
+        drop(slot);
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a removal that vanished is not a scan that failed"
+        );
+        state
+            .claim_job(probe(), true)
+            .expect("the slot is free again");
+    }
+
+    /// 🔴 **`read_seq` counts reading passes that ENDED, and nothing else.**
+    ///
+    /// The pair it separates is "a reading pass has finished since I last
+    /// looked" against "something about the job changed": a consumer that
+    /// re-reads the index when `read_seq` moves would re-read it on every
+    /// progress tick if `update` moved it too, and would never re-read it at
+    /// all if `mark_reading_done` did not.
+    ///
+    /// The second pair, asserted after `finish`: `last_reading` survives the job
+    /// that recorded it and the next claim. A `claim_job` that cleared it leaves
+    /// a reopened window with no answer about the scan that just ran.
+    ///
+    /// The outcome recorded is a filled one rather than the default, so the
+    /// transition pinned is not merely `None` to `Some`: a slot that stored a
+    /// blank outcome, or the one from a pass before it, fails here too.
+    #[test]
+    fn only_a_finished_reading_pass_moves_read_seq() {
+        let state = state();
+        assert_eq!(state.scan_state().read_seq, 0);
+        assert_eq!(state.scan_state().last_reading, None);
+
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        let claimed = state.scan_state();
+        assert_eq!(
+            claimed.read_seq, 0,
+            "claiming the slot is not a reading pass ending"
+        );
+        assert_eq!(claimed.last_reading, None);
+
+        slot.update(reading());
+        let ticked = state.scan_state();
+        assert_eq!(
+            ticked.read_seq, 0,
+            "progress inside a reading pass is not the pass ending"
+        );
+        // 🔴 Read HERE, between the two calls, and compared step by step rather
+        // than end to end. `update` and `mark_reading_done` each bump
+        // `revision`, and a single `done.revision > claimed.revision` at the
+        // bottom is satisfied by EITHER of them alone: delete `update`'s and the
+        // sequence is 1, 1, 2; delete `mark_reading_done`'s and it is 1, 2, 2.
+        // Both pass. That is a guard standing on its neighbour's defence, and
+        // the two writes are separated below by naming the transition each one
+        // owes.
+        assert_eq!(
+            ticked.revision,
+            claimed.revision + 1,
+            "a progress tick that does not move `revision` is a tick \
+             `jobs.ts`'s `apply` throws away — and `update` is the ONLY write \
+             during a running scan, so the strip would draw «0 of 0» over an \
+             empty folder name for the whole of it"
+        );
+
+        slot.mark_reading_done(a_pass_that_read_one_folder());
+        let done = state.scan_state();
+        assert_eq!(
+            done.read_seq, 1,
+            "the pass ended, which is the one thing that moves this"
+        );
+        assert_eq!(done.last_reading, Some(a_pass_that_read_one_folder()));
+        assert_eq!(
+            done.revision,
+            ticked.revision + 1,
+            "the pass ended with no snapshot change of its own, so `revision` \
+             is the only thing that can carry it — unbumped, the window never \
+             learns the reading pass finished and the partial-read warning \
+             never appears"
+        );
+
+        slot.finish(Terminal::Idle, None);
+        state.set_files(9);
+        let later = state.scan_state();
+        assert_eq!(
+            later.read_seq, 1,
+            "neither the job ending nor a file count is a reading pass"
+        );
+        assert_eq!(later.last_reading, Some(a_pass_that_read_one_folder()));
+
+        let next = state.claim_job(reading(), true).expect("the slot is free");
+        let after_next_claim = state.scan_state();
+        assert_eq!(
+            after_next_claim.read_seq, 1,
+            "a new job does not un-read the pass before it"
+        );
+        assert_eq!(
+            after_next_claim.last_reading,
+            Some(a_pass_that_read_one_folder()),
+            "a claim that cleared this leaves a reopened window with no answer \
+             about the scan that just ran"
+        );
+        drop(next);
+    }
+
+    /// How many files the index holds is a fact about the index, not about the
+    /// job that last counted them: it must outlive the job, and the next job's
+    /// claim must not blank it. The pair separated is "no job has run yet" —
+    /// where zero is the truth — from "a job ran and the count it left is still
+    /// the truth", which a claim that reset the field would make
+    /// indistinguishable.
+    ///
+    /// 🔴 **An ending moves `revision`, once, and is announced only after it is
+    /// written.**
+    ///
+    /// The pair this separates is "the job ended" from "any surface can tell
+    /// that it ended". `revision` is the ONLY thing that says one read of this
+    /// state is newer than another (see the field's own doc), and
+    /// `ui/src/settings/jobs.ts`'s `apply` keeps the higher one and DROPS
+    /// everything else. So an ending written under the revision the last
+    /// progress tick already carried is an ending the window throws away: the
+    /// strip goes on drawing a running pass, Stop live, over a slot that is
+    /// free — and nothing arrives later to correct it, because the job that
+    /// would have announced again has gone.
+    ///
+    /// Nothing else in this file could see that. The snapshot really does
+    /// change here, so every assertion phrased on `snapshot` alone — which is
+    /// what the observer tests are — passes against an ending that never moved
+    /// the counter. The neighbouring tests pin the bump on `claim_job`
+    /// (`a_refused_claim_announces_nothing`), on `mark_reading_done`
+    /// (`only_a_finished_reading_pass_moves_read_seq`) and on `set_files`
+    /// (below); `finish` was the one write on this type that had none.
+    ///
+    /// **All four shapes `finish` has**, because the bump sits under one of
+    /// them and above the other: `Terminal::Idle` and `Terminal::Ended`, each
+    /// with a file count and without one. A bump written inside the `if let
+    /// Some(files)` arm answers only half of them, and a fixture that always
+    /// passed a count would call that correct.
+    ///
+    /// "Exactly one announcement" and "after the write" come from the same
+    /// place, and that is why `Log` records the whole [`ScanState`] rather than
+    /// its snapshot: one new entry per `finish` says it announced once, and
+    /// that entry carrying the NEW revision says the write came first. An
+    /// announcement fired ahead of the write would record the old number while
+    /// leaving the final state correct.
+    #[test]
+    fn an_ending_moves_the_revision_once_and_is_announced_after_it_is_written() {
+        for (which, terminal, files) in [
+            ("idle, no count", Terminal::Idle, None),
+            ("idle, with a count", Terminal::Idle, Some(11)),
+            (
+                "ended, no count",
+                Terminal::Ended {
+                    report: ScanReport::default(),
+                },
+                None,
+            ),
+            (
+                "ended, with a count",
+                Terminal::Ended {
+                    report: ScanReport::default(),
+                },
+                Some(13),
+            ),
+        ] {
+            let log = Log::default();
+            let state = state();
+            state.set_job_observer(recorder(&log, &state));
+
+            let slot = state.claim_job(probe(), true).expect("the slot is free");
+            let before = state.scan_state().revision;
+            let already_announced = announced(&log).len();
+
+            slot.finish(terminal, files);
+
+            let settled = state.scan_state();
+            assert_eq!(
+                settled.revision,
+                before + 1,
+                "({which}) the ending did not move `revision`, so `jobs.ts`'s \
+                 `apply` would drop it and the window would go on drawing the \
+                 run that has just finished"
+            );
+
+            let since = announced(&log).split_off(already_announced);
+            assert_eq!(
+                since.len(),
+                1,
+                "({which}) an ending announces exactly once: {since:?}"
+            );
+            assert_eq!(
+                since[0].revision, settled.revision,
+                "({which}) the observer looked and found the revision the \
+                 ending had not written yet, so it was told before the write"
+            );
+            assert_eq!(
+                since[0].snapshot, settled.snapshot,
+                "({which}) the observer found a snapshot the ending had not \
+                 written yet"
+            );
+            assert_eq!(
+                since[0].files, settled.files,
+                "({which}) the observer found a file count the ending had not \
+                 written yet"
+            );
+        }
+    }
+
+    /// 🔴 **Every ending moves `jobs_done` once, and nothing else moves it at
+    /// all** — the independent review's third finding, on this side of the
+    /// boundary.
+    ///
+    /// A window that re-read the index when a job might have changed it watched
+    /// for a snapshot LEAVING `Running`, which needs the `Running` one to have
+    /// been seen. A model adoption that starts and ends inside the window
+    /// between a subscription opening and its first snapshot arriving is never
+    /// seen running; neither is one whose terminal snapshot arrives ahead of
+    /// the older `Running` that `apply` then rightly drops. The ending was
+    /// delivered and accepted in both, and the section still showed the state
+    /// from before it. A count of endings cannot be missed that way.
+    ///
+    /// **The pairs, and each one is a way to write this wrong:**
+    ///
+    /// - a claim does NOT move it. Bumping on the claim as well would make
+    ///   "a job has ended" and "a job has changed hands" one number, and a
+    ///   consumer would re-read the index on every start.
+    /// - a progress tick and a finished reading pass do NOT move it. Those are
+    ///   `revision` and `read_seq`, and a counter that moved with them would be
+    ///   a third spelling of the first.
+    /// - `Drop` DOES move it. `Other { ModelAdoption }` has no `finish` at all
+    ///   — the adoption in the finding ends here — so a bump written only into
+    ///   `finish` answers every fixture in this file except the one the finding
+    ///   is about.
+    /// - and `finish` moves it for BOTH terminals, not only for `Ended`: a
+    ///   removal and an adoption both end `Idle`, and both change what the
+    ///   section draws.
+    #[test]
+    fn every_ending_moves_the_finished_count_once_and_nothing_else_moves_it() {
+        let state = state();
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a process in which nothing has run has finished nothing"
+        );
+
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a job that STARTED has not ended; a counter that moved here would \
+             make the window re-read the index on every claim"
+        );
+        slot.update(reading());
+        slot.mark_reading_done(a_pass_that_read_one_folder());
+        assert_eq!(
+            state.scan_state().jobs_done,
+            0,
+            "a progress tick and a finished reading pass are `revision` and \
+             `read_seq`; neither is a job ending"
+        );
+
+        slot.finish(Terminal::Idle, None);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            1,
+            "`finish` moves it, and for `Terminal::Idle` as much as for \
+             `Ended` — a removal and a model adoption both end idle"
+        );
+
+        let reported = state.claim_job(reading(), true).expect("the slot is free");
+        reported.finish(
+            Terminal::Ended {
+                report: ScanReport::default(),
+            },
+            Some(5),
+        );
+        assert_eq!(state.scan_state().jobs_done, 2);
+
+        // The half the finding is actually about: `Other { ModelAdoption }`
+        // never calls `finish`, so this is where its ending is written.
+        let vanished = state
+            .claim_job(
+                Phase::Other {
+                    job: OtherJob::ModelAdoption,
+                },
+                false,
+            )
+            .expect("the slot is free");
+        drop(vanished);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            3,
+            "a job that vanished is still a job that ended, and a model \
+             adoption ends no other way"
+        );
+
+        // And `set_files`, which is the boot's write and not a job at all.
+        state.set_files(9);
+        assert_eq!(
+            state.scan_state().jobs_done,
+            3,
+            "counting the index's files is not a job ending"
+        );
+    }
+
+    /// `set_files` is the boot's way in, and it announces: a window opened
+    /// before any job runs still has to be told what the index holds.
+    #[test]
+    fn the_file_count_outlives_the_job_that_counted_it() {
+        let log = Log::default();
+        let state = state();
+        state.set_job_observer(recorder(&log, &state));
+        assert_eq!(state.scan_state().files, 0);
+
+        let slot = state.claim_job(reading(), true).expect("the slot is free");
+        slot.finish(
+            Terminal::Ended {
+                report: ScanReport::default(),
+            },
+            Some(42),
+        );
+        assert_eq!(state.scan_state().files, 42);
+
+        let next = state.claim_job(probe(), true).expect("the slot is free");
+        assert_eq!(
+            state.scan_state().files,
+            42,
+            "a new job does not blank the count the last one left"
+        );
+        next.finish(Terminal::Idle, None);
+        assert_eq!(
+            state.scan_state().files,
+            42,
+            "an ending that counted nothing does not blank it either"
+        );
+
+        let before = state.scan_state().revision;
+        state.set_files(7);
+        assert_eq!(state.scan_state().files, 7);
+        assert!(
+            state.scan_state().revision > before,
+            "a count nobody can see changed is a count nobody re-reads"
+        );
+        assert_eq!(
+            announced_files(&log),
+            [0, 42, 42, 42, 7],
+            "every write to the snapshot announces itself, `set_files` included"
+        );
     }
 }

@@ -4,9 +4,21 @@
 # Cases are added by the task that adds the test they protect, so this file
 # grows through the cycle rather than being written once at the end.
 
+# Anchored on the line THIS sweep is immediately followed by, not on the
+# sweep call alone: task 4 (PR 9b) factored `delete_watched_root`'s own sweep
+# into a shared `delete_watched_root_in`, which contains the identical
+# `crate::space::delete_vectors_for_document_in(tx, id)?;` line — a bare match
+# on that line alone now selects both call sites and
+# `scripts/mutation-staleness.sh` refuses it (`MATCHES MORE THAN ONCE`). The
+# two functions differ on the very next line: `clear_document_content_in`
+# runs straight into `tx.execute("DELETE FROM page ...)`, while
+# `delete_watched_root_in` has a comment there before its own (different)
+# `tx.execute("DELETE FROM document ...)`. Folding that next line into the
+# match is what makes this case unique to its own site again, the same shape
+# the two cases below it already use for the reverse reason.
 case_ "write: a rebuild takes its document's vectors with it (D88)" \
   crates/mnema-index/src/write.rs \
-  's{        crate::space::delete_vectors_for_document_in\(tx, id\)\?;\n}{}' \
+  's{        crate::space::delete_vectors_for_document_in\(tx, id\)\?;\n        tx\.execute\("DELETE FROM page WHERE document_id = \?1", params!\[id\]\)\?;\n}{        tx.execute("DELETE FROM page WHERE document_id = ?1", params![id])?;\n}' \
   'of no foreign key, so nothing else reaches it.
         tx.execute("DELETE FROM page' \
   mnema-index 'clearing_a_document_takes_its_vectors' --test citation
@@ -1036,18 +1048,24 @@ case_ "models: the settings must read the refusal count, not report zero (T8)" \
   'failed_chunks: 0, // mutant: the refusal count is never asked' \
   mnema-desktop 'a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it' --test model_commands
 
-# The ordering `start_walk_job` argues for and this command inherits: every
-# fallible step before the slot is claimed. Reading the credential store can put
-# a modal authorisation dialog on screen, so claiming first disables Start and
-# refuses a walk for as long as somebody leaves it unanswered — for a call that
-# then fails with `NoKey` anyway.
-case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
-  src-tauri/src/embed_job.rs \
-  's{    let key = crate::models::key\(&state\)\?;\n    let base = state\.provider_base\(\)\.to_string\(\);\n\n    let slot = state\.claim_job\(\)\?;}{    let slot = state.claim_job()?;\n\n    let key = crate::models::key(\&state)?;\n    let base = state.provider_base().to_string();}' \
-  '    let slot = state.claim_job()?;
-
-    let key = crate::models::key(&state)?;' \
-  mnema-desktop 'the_key_is_read_before_the_job_slot_is_taken' --test model_commands
+# 🔴 RETIRED at Task 11b — «embed_job: the key must be read before the job slot
+# is claimed (T8)». Not stale in the ordinary sense: the DECISION it pinned was
+# reversed, and the case was pinning the wrong side of it.
+#
+# `start_embed_job` and its `the_key_is_read_before_the_job_slot_is_taken` are
+# both gone (PR 9b), and the embedding phase is now the tail of the scan job:
+# `scan_job::embed_after`, which reads the key on the JOB's own thread, after
+# the claim, and under the phase it belongs to. That is D-g, and it is the
+# opposite ordering for a reason this case's own rationale states without
+# following: a dialog waited for in FRONT of the claim is a minute with Start
+# disabled and no job to show for it. Waited for behind the claim, it is a
+# minute under an announced `Embedding` phase, with Stop live — and step 3 of
+# D-g is what makes that Stop win whatever the store eventually answers.
+#
+# Its carrier is `scan_job::tests::a_stop_during_the_key_read_wins_whatever_the_
+# store_answers`, and the three mutants that hold the new order are
+# `scripts/mutations/pr9b-scan.sh`'s: the announcement before the read, the Stop
+# check between the read and the classification, and that check existing at all.
 
 # The claim `set_embedding_model` takes although it is not a job. Without it a
 # model change lands mid-run: `mnema_embed::run` holds the space id it read at
@@ -1062,7 +1080,7 @@ case_ "embed_job: the key must be read before the job slot is claimed (T8)" \
 # (`left: Some(2), right: Some(1)`), not the one about which error came back.
 case_ "models: a model change must not be possible while a job holds the slot (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
 
@@ -1070,7 +1088,7 @@ case_ "models: a model change must not be possible while a job holds the slot (T
 # One case per test, since `case_` names one at a time.
 case_ "models: a model change must not be possible while a pass is writing (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\)\?;}{    let _slot = ();}' \
+  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
 

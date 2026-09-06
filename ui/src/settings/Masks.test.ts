@@ -1,6 +1,10 @@
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Masks from './Masks.svelte';
+// A real controller, the way `Folders.test.ts` builds one: nothing here mounts
+// it, so it opens no subscription and answers no IPC — what the component takes
+// it for is the store's seeded `readSeq`.
+import { createJobController } from './jobs';
 import { setLocale, t } from '../i18n';
 
 // Mocked as the typed wrappers, in the shape `Folders.test.ts:13-34` uses:
@@ -67,7 +71,7 @@ function visibleText(el: HTMLElement): string {
 async function mount(masks: string[] = []) {
   setLocale('en'); // seed, do not inherit: a sibling switching the language must not decide this test
   listMasks.mockResolvedValue(masks);
-  const rendered = render(Masks);
+  const rendered = render(Masks, { props: { jobs: createJobController() } });
   await waitFor(() => expect(listMasks).toHaveBeenCalled());
   return rendered;
 }
@@ -737,7 +741,7 @@ test('the older of two overlapping list reads writes nothing', async () => {
   maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
   addMask.mockResolvedValue({ kind: 'stored' });
 
-  render(Masks);
+  render(Masks, { props: { jobs: createJobController() } });
   await waitFor(() => expect(listMasks).toHaveBeenCalledTimes(1));
 
   // An add starts a newer read while the mount read is still on the wire, and
@@ -765,7 +769,7 @@ test('a list that cannot be read says so, and does not claim there are no masks'
   setLocale('en'); // seed, do not inherit
   listMasks.mockRejectedValue(new Error('the index is not open'));
 
-  const { container } = render(Masks);
+  const { container } = render(Masks, { props: { jobs: createJobController() } });
 
   await waitFor(() => expect(screen.getByTestId('masks-load-reason')).toBeTruthy());
   expect(screen.getByTestId('masks-load-reason').textContent).toBe('the index is not open');
@@ -787,7 +791,7 @@ test('a read that fails is not the last word: a later successful read replaces i
   maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
   addMask.mockResolvedValue({ kind: 'stored' });
 
-  render(Masks);
+  render(Masks, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByTestId('masks-load-reason')).toBeTruthy());
 
   listMasks.mockResolvedValue(['*.pdf']);
@@ -832,7 +836,7 @@ test('the section does not claim the list is empty while the first read is still
   setLocale('en'); // seed, do not inherit
   listMasks.mockReturnValue(new Promise<string[]>((resolve) => { release = resolve; }));
 
-  const { container } = render(Masks);
+  const { container } = render(Masks, { props: { jobs: createJobController() } });
   await waitFor(() => expect(listMasks).toHaveBeenCalled());
   expect(visibleText(container)).not.toContain('No file mask has been added yet.');
 

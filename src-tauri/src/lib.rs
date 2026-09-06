@@ -14,6 +14,8 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod scan_job;
+pub mod scan_state;
 pub mod shortcut;
 pub mod state;
 pub mod tray;
@@ -21,8 +23,24 @@ mod tree;
 pub mod walk_job;
 
 use anyhow::Context as _;
+use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_positioner::{Position, WindowExt as _};
+
+/// The event every [`crate::scan_state::ScanState`] is pushed to the webview on.
+///
+/// 🔴 **A named constant because the other half of this name is in another
+/// language.** `ui/src/lib/ipc.ts` listens for the same string, and until this
+/// existed the two were independent literals with nothing comparing them: rename
+/// one and the application still builds, still starts, still answers
+/// `job_status` — and every live update stops arriving, with no error anywhere.
+/// The window would draw whatever it read at mount and never move again, which
+/// is the failure that looks least like a defect of any in this file.
+///
+/// It is `pub` and used at the emit site below so that
+/// `ui/src/lib/ipc.test.ts` can read THIS file and compare the name that is
+/// actually emitted, rather than a second copy kept beside it.
+pub const SCAN_PROGRESS_EVENT: &str = "scan-progress";
 
 /// Everything the webview is allowed to call, in one place.
 ///
@@ -60,8 +78,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_rerank_model,
         models::set_chat_model,
         models::model_settings,
-        walk_job::start_walk_job,
-        embed_job::start_embed_job,
+        scan_job::start_scan_job,
         locale::get_locale,
         locale::set_locale,
         prefs::app_prefs,
@@ -205,6 +222,29 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::
     std::thread::spawn(move || {
         models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
     })
+}
+
+/// How many files the index holds, read once so `.setup` can seed
+/// [`state::AppState::set_files`] before [`tray::build_tray`] draws the first
+/// menu — without this, a person reopening an already-indexed archive would
+/// see the tray's status line claim `0` files until the next job happened to
+/// run.
+///
+/// A free function over `&AppState` rather than inline in `.setup`, for the
+/// same reason [`manage_state`]/[`boot_index`] are: `.setup` needs a live
+/// Tauri `App` to reach at all (`tests/commands.rs`'s `app_in` never runs it —
+/// see this crate's own `AppState::with_index` doc), so the only way to unit
+/// test what it does is to give each step its own name and callable shape.
+///
+/// **`0` on every failure — an unopened index included — never a panic.**
+/// `.setup` calls this after `boot_index`, whose own `open_index` call is
+/// synchronous (only the default-model adoption it spawns runs on a thread of
+/// its own, deliberately not waited on) — but a boot whose open failed
+/// outright still has to draw a tray, and `with_index` refuses with
+/// `IndexNotOpen` exactly then. `0` is honest either way: nothing has been
+/// counted, which is also literally true of a fresh index.
+pub fn boot_files(state: &state::AppState) -> i64 {
+    state.with_index(|db| db.indexed_file_count()).unwrap_or(0)
 }
 
 /// Shows the launcher and focuses it, returning whether the launcher window was
@@ -467,11 +507,48 @@ pub fn run() -> anyhow::Result<()> {
             // storing the flag (`state.rs`'s `cancel_job`), and `claim_job`
             // clears that flag *after* it has won the slot, so a press with
             // nothing running cannot reach into the next job. The item is
-            // enabled only while a job runs (`tray::StopItem`) so as not to
-            // offer a control that does nothing, which is a different concern
-            // from safety.
-            "stop_indexing" => {
+            // enabled only while a cancellable job runs (`tray::stop_enabled`,
+            // drawn by `tray::refresh_tray`) so as not to offer a control that
+            // does nothing, which is a different concern from safety.
+            tray::STOP_ID => {
                 app.state::<state::AppState>().cancel_job();
+            }
+            // F4 (Task 10c): the other half of the pair above — the tray could
+            // stop a scan and not carry one on, so a person who pressed Stop
+            // here had to open the settings window to find «Продовжити».
+            // `scan_job::start` is handed in rather than reached for inside:
+            // it is the same function `start_scan_job` calls, so a tray press
+            // and the window's button start the same scan. What entry that is,
+            // and whether a press starts anything at all, is
+            // `scan_job::resume_scan`'s decision and is tested there — the item
+            // is enabled only when the ended report names a resume
+            // (`tray::resume_enabled`, drawn by `tray::refresh_tray`), and a
+            // press on a snapshot that has moved on since the draw is refused
+            // and logged, not shown (§6).
+            //
+            // 🔴 **On a thread of its own, and that is not a nicety.** This
+            // handler runs on the main thread. `scan_job::start` reaches
+            // `start_inner`, which claims the slot, opens a job index and runs
+            // `read_roots` — a `with_index` call that blocks for as long as
+            // another job holds the connection (a folder removal alone, on the
+            // order of twenty seconds). Inline, a press would freeze every
+            // window redraw and every other menu click for that time. This is
+            // the same thing `start_scan_job` buys with
+            // `#[tauri::command(async)]`, which exists for exactly this reason
+            // (`bridge::open_index`'s doc): a call that can wait on that mutex
+            // must not be the one left running inline on the main thread.
+            // `std::thread::spawn` rather than the async runtime because the
+            // work is blocking and synchronous either way, and this is the
+            // shape `refresh_tray`'s own hop already uses. Nothing is awaited:
+            // the press's whole answer is the scan starting, which the tray
+            // learns about through the job observer like every other surface.
+            // `the_menu_handler_starts_a_scan_only_off_the_main_thread` is the
+            // guard.
+            tray::RESUME_ID => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    scan_job::resume_scan(&app.state::<state::AppState>(), scan_job::start);
+                });
             }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
@@ -564,50 +641,66 @@ pub fn run() -> anyhow::Result<()> {
                 );
                 let _ = prefs::install_hotkey(&state);
             }
-            // §8: the tray's «Зупинити сканування». `build_tray` hands back the
-            // item so that it can be reached again later; the slot it goes into
-            // is what a language change replaces, so nothing here or below ever
-            // captures the item itself.
-            let stop = tray::build_tray(app.handle())?;
-            app.manage(tray::StopItem(std::sync::Mutex::new(Some(stop))));
+            // §9.3/Task 5: seed how many files the index already holds BEFORE
+            // the tray is built, so the very first menu this application draws
+            // reads «Проскановано: N файлів» from a real count rather than
+            // `ScanState::default()`'s `files: 0` — a person reopening an
+            // already-indexed archive would otherwise see "0 files" flash
+            // before the first job ever ran. Must run before `build_tray`,
+            // which reads `scan_state()` to seed the status line's initial
+            // text; `boot_files` is a free function precisely so this line is
+            // unit-testable without a `.setup` to run it in.
             {
                 let state = app.state::<state::AppState>();
-                // 🔴 The closure captures the handle and NOTHING else. The item
-                // is read out of managed state on every call, because a
-                // language change during a job rebuilds the whole tray menu and
-                // puts a different item in that slot; a captured one would
-                // outlive its own menu and the visible item would keep offering
-                // to stop a job that had finished.
+                let files = boot_files(&state);
+                state.set_files(files);
+            }
+            // §8: the tray's «Зупинити сканування» and its status line.
+            // `build_tray` manages `TrayItems` itself now (Task 5) — nothing
+            // here or below captures either item directly, since a language
+            // change during a job rebuilds the whole tray menu and would leave
+            // a captured handle addressing an item that is in no menu.
+            tray::build_tray(app.handle())?;
+            {
+                let state = app.state::<state::AppState>();
+                // 🔴 The closure captures the handle and NOTHING else — see
+                // `tray::refresh_tray`'s own doc for why it re-reads
+                // `AppState` itself rather than being handed a value: a
+                // language change during a job rebuilds the whole tray menu,
+                // and a value captured here could be the announcement that
+                // arrived before that rebuild.
                 //
-                // It dispatches and returns rather than calling `set_enabled`
-                // itself. `set_enabled` hops to the main thread and waits, and
-                // the announcement from `JobSlot::drop` fires on the job's own
-                // thread — where that wait would hold the job thread until the
-                // event loop got round to it. From the main thread Tauri runs
-                // the task inline, so a claim's own announcement costs nothing
-                // either way.
+                // It dispatches and returns rather than redrawing inline.
+                // `set_text`/`set_enabled` hop to the main thread and wait,
+                // and the announcement from `JobSlot::drop` fires on the
+                // job's own thread — where that wait would hold the job
+                // thread until the event loop got round to it.
                 //
-                // 🔴 **The task asks `job_is_running()` where it acts, and is
-                // handed nothing to replay** — `state::JobObserver`'s own doc
-                // has the handoff that took the boolean away. Two announcements
-                // posted in either order then leave the item saying the same
-                // thing, because the last task to run reads the fact as it
-                // stands rather than the edge that woke it.
+                // The emit happens OFF the main thread, on the job's own —
+                // `state`/`job.rs` stay free of Tauri types, and `emit` does
+                // not need the main thread the way a menu redraw does. It may
+                // fire the same revision twice if two announcements race
+                // (`state::JobObserver`'s own doc has why two announcements
+                // can arrive in either order) — harmless: a window that
+                // re-draws from an unchanged `ScanState` draws the same thing
+                // it already had.
                 let handle = app.handle().clone();
                 state.set_job_observer(Box::new(move || {
                     let inner = handle.clone();
+                    let scan = handle.state::<state::AppState>().scan_state();
+                    let _ = handle.emit(SCAN_PROGRESS_EVENT, &scan);
                     let _ = handle.run_on_main_thread(move || {
-                        let running = inner.state::<state::AppState>().job_is_running();
-                        tray::set_stop_enabled(&inner, running);
+                        tray::refresh_tray(&inner);
                     });
                 }));
                 // Seeded AFTER the observer is installed, which is what makes
                 // "nothing is missed between the two" a fact about the order
                 // rather than a claim that nothing can have claimed the slot
                 // this early. A claim arriving between these two statements
-                // announces itself, and this seed then reads the same fact its
-                // task would.
-                tray::set_stop_enabled(app.handle(), state.job_is_running());
+                // announces itself through the observer above, and this seed
+                // then redraws from the same fact that announcement would
+                // have read.
+                tray::refresh_tray(app.handle());
             }
             // The settings window's native title in the resolved language. It is
             // hidden at start-up, so this is what it shows the first time it is
@@ -640,4 +733,414 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `AppState` pointed at a fresh temp directory — enough for
+    /// `open_index`/`with_index` and nothing more: no provider, no
+    /// credential store, the same trade `state.rs`'s own observer-test
+    /// helper makes, because `boot_files` touches neither.
+    fn state_in(dir: &std::path::Path) -> state::AppState {
+        state::AppState::new(
+            dir.to_path_buf(),
+            std::path::PathBuf::from("/nonexistent/mnema-boot-files-worker"),
+            "http://127.0.0.1:0".to_string(),
+            "mnema-desktop-boot-files-test".to_string(),
+        )
+    }
+
+    /// The pair `boot_files` exists to tell apart: an index that already
+    /// holds files (the seed a person reopening an already-indexed archive
+    /// needs) against one that was never opened at all (a boot before
+    /// `boot_index` ran, or one where the open itself failed) — both
+    /// directions, so a `boot_files` that always answered `0`, or one that
+    /// panicked instead of falling back, would go red on one row or the
+    /// other rather than passing by accident.
+    #[test]
+    fn boot_files_counts_an_open_index_and_falls_back_to_zero_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+
+        assert_eq!(
+            boot_files(&state),
+            0,
+            "no index has been opened yet — nothing to count, and not a panic"
+        );
+
+        state.open_index().expect("the index opens");
+        state
+            .with_index(|db| {
+                let root = db.insert_watched_root("/tmp/mnema-boot-files-fixture")?;
+                for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
+                    let id = format!("{i:064x}");
+                    db.insert_document(&id, "text/plain", 1, mnema_core::SourceKind::Document)?;
+                    db.set_document_status(&id, mnema_index::DocumentStatus::Indexed)?;
+                    db.insert_path(
+                        root,
+                        name,
+                        &id,
+                        mnema_core::OnDisk {
+                            size_bytes: 1,
+                            mtime: 1,
+                        },
+                        "text",
+                        1,
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("the fixture writes");
+
+        assert_eq!(
+            boot_files(&state),
+            3,
+            "three indexed files were seeded into the now-open index"
+        );
+    }
+
+    /// 🔴 **Brittle by design — a text-matching guard, not a type-level one.**
+    /// It reads `lib.rs`'s own source and asserts that the ONE `with_index`
+    /// substring never appears inside the `.setup` observer's
+    /// `run_on_main_thread` closure — the invariant `tray::refresh_tray`'s own
+    /// doc names: that closure runs on the main thread, and `with_index`
+    /// blocks for as long as a job holds the index (a folder removal alone,
+    /// on the order of twenty seconds), so a `with_index` call reachable from
+    /// there would freeze every window redraw and every menu click for that
+    /// long.
+    ///
+    /// 🔴 **Review round 1, Important 1 — a first-match `find` picks the wrong
+    /// closure and is unfalsifiable against itself.** Two things were wrong
+    /// with the original version, and both are fixed here rather than only
+    /// documented: (1) `src.find(needle)` took the FIRST occurrence in the
+    /// whole file, so a second `run_on_main_thread(move || {` added anywhere
+    /// earlier in `lib.rs` (Tasks 6/10 both touch `.setup`) would silently
+    /// steal the match and this test would go on passing while the real
+    /// closure grew a `with_index`; (2) the needle was also this test's OWN
+    /// string literal, so `find` could never return `None` and the "moved,
+    /// renamed, or removed" branch was dead code. The fix: search only the
+    /// PRODUCTION half of the file — everything above `#[cfg(test)]`, which
+    /// this test's own source (including its needle and its `with_index`
+    /// literal) never reaches — and require EXACTLY one match there. Zero
+    /// matches (renamed/removed) and two-or-more matches (a second hop stole
+    /// or shares the search) each fail with their own message instead of one
+    /// swallowing the other. The needle is built with `concat!` on top of
+    /// that even so: splitting `"run_on_main_thread"` from `"(move || {"`
+    /// means no future refactor that widens the search region can make this
+    /// test's own source satisfy its own search by accident.
+    ///
+    /// It still protects only the ONE call site this file writes today —
+    /// splitting the closure into a named function, or a `with_index` reached
+    /// indirectly through a function this test cannot see into
+    /// (`tray::refresh_tray` itself, or anything it calls) would slip straight
+    /// past it, and a genuine SECOND `run_on_main_thread` hop added above the
+    /// observer needs a guard of its own (or this one taught to check both) —
+    /// this test can only say "not exactly one," not which one is the real
+    /// observer. A `#[test]` was chosen over nothing because nothing is a
+    /// worse guard still; if a reviewer would rather have this as a
+    /// mutation-harness case instead, that is Task 11's to make, not this
+    /// one's.
+    #[test]
+    fn the_main_thread_closure_never_touches_the_index() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lib.rs could not read its own source at {path:?}: {e}"));
+
+        // Only the PRODUCTION half of the file is a valid haystack — this
+        // test's own module (its needle literal, its `with_index` literal,
+        // any decoy this test itself might one day contain) sits below
+        // `#[cfg(test)]` and must never be searched, or a match against this
+        // test's own source is indistinguishable from a match against the
+        // real closure.
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        // `concat!` rather than one string literal: the point of restricting
+        // the search to `production` only holds as long as this needle
+        // cannot appear as a contiguous substring of the test's OWN source
+        // (which is excluded here, but a future reader who widens the region
+        // should not get a false green for free) — splitting the call name
+        // from its argument list means no single literal in this file spells
+        // the whole needle out.
+        let needle = concat!("run_on_main_thread", "(move || {");
+
+        let occurrences: Vec<usize> = production.match_indices(needle).map(|(i, _)| i).collect();
+        let call_at = match occurrences.as_slice() {
+            [one] => *one,
+            [] => panic!(
+                "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
+                 was renamed, or was removed"
+            ),
+            many => panic!(
+                "found {} occurrences of `{needle}` above #[cfg(test)] — this guard only knows \
+                 how to check ONE `run_on_main_thread` closure and cannot tell which is the \
+                 observer's; a second call site needs a guard of its own or this one adapted to \
+                 check all of them. Byte offsets: {many:?}",
+                many.len()
+            ),
+        };
+        let body_start = call_at + needle.len();
+
+        // Balance braces from just after the closure's opening `{` to find
+        // where the closure body ends, so this does not have to assume any
+        // particular length or shape for what is inside.
+        let mut depth: i32 = 1;
+        let mut body_end = body_start;
+        for (offset, ch) in production[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            depth == 0,
+            "the closure's braces never balanced — this guard's own brace-matching broke, \
+             not the invariant it protects"
+        );
+
+        let body = &production[body_start..body_end];
+        assert!(
+            !body.contains("with_index"),
+            "a `with_index` call reached the main-thread closure — this would block the whole \
+             application for as long as a job holds the index. Closure body:\n{body}"
+        );
+    }
+    /// 🔴 **The second region of the same brittle guard above, and for a
+    /// harder-won reason.** Review round 1, Important 1: the `"resume"` arm
+    /// called `scan_job::resume_scan` inline on the main thread, and the start
+    /// it leads to is not cheap — `scan_job::start_inner` claims the slot,
+    /// opens a job index and runs `read_roots`, which is a `with_index` call.
+    /// `with_index` blocks for as long as another job holds the connection (a
+    /// folder removal alone, on the order of twenty seconds), so the press
+    /// would have frozen every window redraw and every other menu click for
+    /// that long. The window never had this defect: `start_scan_job` is
+    /// `#[tauri::command(async)]` precisely so that a command which waits on
+    /// that mutex is not left running inline on the main thread. The tray now
+    /// buys the same thing with `std::thread::spawn`.
+    ///
+    /// The guard is the whole `on_menu_event` handler, not just the one arm:
+    /// EVERY occurrence of the needles below anywhere in that handler must sit
+    /// inside a spawned closure. A future arm that starts a scan of its own
+    /// inline is the same defect and is caught by the same assertion, without
+    /// this test having to know the arm exists.
+    ///
+    /// 🔴 **The needles are the CALL, not the function's name alone.** The
+    /// review named `scan_job::start(` — that literal appears nowhere, because
+    /// `start` is passed to `resume_scan` as a function REFERENCE and never
+    /// called from this file at all, so a guard built on it would be a guard
+    /// that cannot fail. `resume_scan(` is the call this handler actually
+    /// makes, and the bare `scan_job::start` is kept beside it so that handing
+    /// the starter to anything else in this handler is caught too.
+    ///
+    /// Its limits are the neighbouring guard's: it protects the call sites
+    /// this file WRITES. A start reached indirectly through a function this
+    /// test cannot see into slips past, and so does a spawn hidden behind a
+    /// helper of another name.
+    #[test]
+    fn the_menu_handler_starts_a_scan_only_off_the_main_thread() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lib.rs could not read its own source at {path:?}: {e}"));
+
+        // The production half only, for `the_main_thread_closure_never_touches_
+        // the_index`'s reason: this test's own needles are string literals in
+        // the module below `#[cfg(test)]`, and a match against them is
+        // indistinguishable from a match against the handler.
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        // `concat!` for the same reason the neighbouring guard gives: no single
+        // literal in this file spells a whole needle out.
+        let handler_at = {
+            let opener = concat!(".on_menu_event", "(|app, event| match");
+            let found: Vec<usize> = production.match_indices(opener).map(|(i, _)| i).collect();
+            match found.as_slice() {
+                [one] => *one,
+                [] => panic!(
+                    "no `{opener}` found above #[cfg(test)] — the menu handler moved, was \
+                     renamed, or was removed, and this guard is now protecting nothing"
+                ),
+                many => panic!(
+                    "found {} occurrences of `{opener}` — this guard only knows how to check \
+                     ONE menu handler. Byte offsets: {many:?}",
+                    many.len()
+                ),
+            }
+        };
+        // Balanced on the BLANKED source, not the raw one, through
+        // `handler_region_len` below — a HELPER rather than the composition
+        // written out here, because Fix round 1 (Important 1) found that
+        // writing it out here left the fix unguarded: reverting this one line
+        // to `balanced_len(&production[handler_at..])` left both this guard
+        // AND its own fixture test green, since the fixture called
+        // `balanced_len`/`blank_comments` on its own rather than through
+        // whatever this line actually does. Routed through one function, the
+        // fixture drives the exact code this guard runs, and a revert here
+        // breaks both together.
+        let handler_len = handler_region_len(&production[handler_at..]);
+        let handler = &production[handler_at..handler_at + handler_len];
+        // 🔴 **Comments are blanked before the search, byte for byte.** The
+        // arm's own comment explains the fix in the words `scan_job::start`,
+        // and a guard that reads prose as code fails on the sentence that
+        // documents it — which is not a defect, it is a guard measuring the
+        // wrong thing. Blanking with SPACES (one byte each, as many as the
+        // comment held) keeps every offset in `code` equal to its offset in
+        // `handler`, so the failure message can quote the real source.
+        //
+        // It is `//` to end of line, the same rule `tests/locale_guard.rs`'s
+        // own sweep uses. A `//` inside a string literal would be blanked too;
+        // there is none in this handler, and the day there is, the guard's
+        // failure mode is a false GREEN — which is why the needles below are
+        // asserted to be present at all.
+        let code = blank_comments(handler);
+
+        // Every `std::thread::spawn(move || {` body inside the handler, as
+        // half-open byte ranges — the regions a start is allowed to happen in.
+        let spawn_opener = concat!("std::thread::spawn", "(move || {");
+        let spawned: Vec<std::ops::Range<usize>> = code
+            .match_indices(spawn_opener)
+            .map(|(at, _)| {
+                let body = at + spawn_opener.len();
+                body..body + balanced_len_from_inside(&code[body..])
+            })
+            .collect();
+
+        for needle in [concat!("resume_scan", "("), concat!("scan_job::", "start")] {
+            let hits: Vec<usize> = code.match_indices(needle).map(|(i, _)| i).collect();
+            assert!(
+                !hits.is_empty(),
+                "no `{needle}` in the menu handler — the resume arm moved or was renamed, and \
+                 this guard is now unfalsifiable"
+            );
+            for at in hits {
+                assert!(
+                    spawned.iter().any(|body| body.contains(&at)),
+                    "`{needle}` at byte {at} of the menu handler is NOT inside a \
+                     `{spawn_opener}` closure — it would run on the main thread, and the start \
+                     it leads to opens the index (`scan_job::start_inner` → `read_roots` → \
+                     `with_index`), freezing every window redraw and every other menu click \
+                     for as long as a job holds the connection. Handler:\n{handler}"
+                );
+            }
+        }
+    }
+
+    /// `src` with every `//`-to-end-of-line comment replaced by exactly as many
+    /// SPACES as it held bytes, so that offsets into the answer are offsets
+    /// into `src`.
+    fn blank_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        for line in src.split_inclusive('\n') {
+            match line.find("//") {
+                Some(at) => {
+                    out.push_str(&line[..at]);
+                    let commented = &line[at..];
+                    let newline = commented.ends_with('\n');
+                    let blanked = commented.len() - usize::from(newline);
+                    out.push_str(&" ".repeat(blanked));
+                    if newline {
+                        out.push('\n');
+                    }
+                }
+                None => out.push_str(line),
+            }
+        }
+        debug_assert_eq!(out.len(), src.len(), "blanking moved the offsets");
+        out
+    }
+
+    /// The byte length of `src` from its FIRST `{` through the `}` that closes
+    /// it — the shape both source-reading guards need and neither should write
+    /// twice.
+    fn balanced_len(src: &str) -> usize {
+        let open = src.find('{').expect("no `{` to balance from");
+        open + 1 + balanced_len_from_inside(&src[open + 1..])
+    }
+
+    /// `balanced_len`, but on a COMMENT-BLANKED copy of `source` — the region
+    /// `the_menu_handler_starts_a_scan_only_off_the_main_thread` slices its
+    /// `handler` with, and the one function its own fixture test below drives
+    /// directly, so the two cannot drift apart. A brace inside a comment
+    /// inside the region (a doc comment's own example, say) would otherwise
+    /// count toward the depth a RAW walk balances against, closing the region
+    /// early or late without either failure mode saying so — `blank_comments`
+    /// preserves every byte offset (its own `debug_assert_eq!` says so), so
+    /// the length this returns slices the ORIGINAL `source` exactly the same
+    /// as balancing the raw text would, for a region that has no such
+    /// comment, and correctly for one that does.
+    fn handler_region_len(source: &str) -> usize {
+        balanced_len(&blank_comments(source))
+    }
+
+    /// The byte length of the region from `src`'s start (already INSIDE one
+    /// open brace) up to, but not including, the `}` that closes it.
+    fn balanced_len_from_inside(src: &str) -> usize {
+        let mut depth: i32 = 1;
+        for (offset, ch) in src.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!(
+            "braces never balanced — this guard's own brace-matching broke, not the invariant it protects"
+        );
+    }
+
+    /// The case `the_menu_handler_starts_a_scan_only_off_the_main_thread`'s
+    /// fix exists for, exercised on a fixture string rather than on the real
+    /// handler — a comment carrying its own unbalanced `}` belongs in a test,
+    /// not in production source that guard is supposed to leave alone.
+    ///
+    /// 🔴 **Drives `handler_region_len` itself, not `balanced_len`/
+    /// `blank_comments` composed here a second time.** Fix round 1 (Important
+    /// 1): the first version of this test called `balanced_len(&blank_comments(
+    /// src))` directly, so reverting the GUARD's own line — `handler_len =
+    /// balanced_len(&production[handler_at..])`, skipping the blank — left
+    /// both the real guard AND this test green, since neither exercised the
+    /// other's code. `handler_region_len` is the one function both this test
+    /// and the guard call now, so a revert of it (in either place) breaks
+    /// them together.
+    #[test]
+    fn balancing_a_brace_inside_a_comment_needs_the_blanked_source() {
+        let src = "before { // a stray } inside a comment\n    real body\n} after";
+        let comment_brace = src.find("stray }").unwrap() + "stray ".len();
+        let real_brace = src.rfind('}').unwrap();
+        assert!(
+            comment_brace < real_brace,
+            "the fixture must carry two `}}`s, the comment's own before the real one"
+        );
+
+        assert_eq!(
+            balanced_len(src),
+            comment_brace,
+            "balancing the RAW source is expected to close on the comment's own `}}` — this pins \
+             down the failure mode the fix avoids, not a property to keep"
+        );
+        assert_eq!(
+            handler_region_len(src),
+            real_brace,
+            "handler_region_len must close on the REAL brace, not the one a comment \
+             happens to hold"
+        );
+    }
 }

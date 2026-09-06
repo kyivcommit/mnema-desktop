@@ -15,7 +15,12 @@ use serde::Serialize;
 /// not render as `0`. `skipped` is separate from `done` because a run that
 /// skipped half the folder and one that indexed it are not the same run, and a
 /// single counter cannot tell the user which one they got.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `PartialEq` and `Default` are here for `crate::scan_state::Phase`, which
+/// carries one of these inside the snapshot every surface compares against what
+/// it last drew — and whose callers claim the slot with a pass that has counted
+/// nothing yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
     pub done: u64,
@@ -167,6 +172,50 @@ pub struct Ended {
     /// case, since an ending overwrites whatever the progress line last said —
     /// had no way to say how many files were skipped, only how many were not.
     pub skipped: u64,
+    /// How many files this run found the index locked by another writer on,
+    /// after every busy retry was refused — the ending's half of
+    /// [`Progress::contended`], and `0` for the probe and for an embedding pass
+    /// exactly as that field is.
+    ///
+    /// 🔴 **It cannot be read off a `WalkReport`, and that is why it is carried
+    /// rather than derived.** `mnema_ingest::WalkReport` has no such counter at
+    /// all: contention is reported once, through the progress callback, at the
+    /// moment the last retry is refused. A caller that throttles those callbacks
+    /// — every caller does, `REPORT_INTERVAL`'s own doc comment says why — drops
+    /// most of them, so the number has to be kept aside on **every** callback
+    /// and handed to `walk_job::ended_from_report` at the end. A field derived
+    /// from the report instead would be `0` for every walk that met a lock and
+    /// finished anyway, which is the walk this exists to describe.
+    ///
+    /// **`contended <= skipped` holds for an ending built FROM A REPORT**, which
+    /// is every ending `walk_job::ended_from_report` makes: the contended file
+    /// is journalled as a skip immediately after it is counted here, and such an
+    /// ending is only ever built after the journalling.
+    /// [`Progress::contended`] states the same rule for the live events, where
+    /// the one exception is the contended file's own event. A surface must
+    /// therefore explain part of `skipped` with this number and must never add
+    /// the two.
+    ///
+    /// ⚠️ **One builder makes an ending with NO report, and the pair means
+    /// something else there.** `scan_job::failed_root` builds an [`Ended`] for a
+    /// folder whose walk answered `Err` or panicked instead of reporting:
+    /// [`Ended::failed`] sets `skipped: 0`, and the struct-update syntax keeps
+    /// the `contended` the progress callbacks counted. So a folder that met a
+    /// held index lock and then broke reports `contended > 0` beside
+    /// `skipped: 0`, and `ReadingOutcome::absorb` carries both into the sums.
+    ///
+    /// That is not a lost count and not a wrong one: `contended` says the walk
+    /// was refused a write it retried for, and `skipped: 0` says it never got as
+    /// far as journalling one — the walk stopped between those two facts. What a
+    /// surface must not do is read the pair as arithmetic, which is the rule
+    /// above stated the other way round. The alternative considered and refused
+    /// was `skipped: contended` in `failed_root`: it would make the subtraction
+    /// hold at the price of a count no walk ever reported.
+    ///
+    /// This sentence used to claim «always», and was true when
+    /// `ended_from_report` was the only builder. It outlived that guard by one
+    /// branch.
+    pub contended: u64,
     /// Always `true` for the probe, which has no subtree to fail to read.
     /// For a walk, mirrors `WalkReport::complete` — **the field a walk that
     /// stops `Completed` does not imply `true` for**, per that field's own
@@ -251,6 +300,7 @@ impl Ended {
                 done: total,
                 total,
                 skipped: 0,
+                contended: 0,
                 refused: 0,
                 complete: true,
                 frozen: Vec::new(),
@@ -264,6 +314,7 @@ impl Ended {
                 done,
                 total,
                 skipped: 0,
+                contended: 0,
                 refused: 0,
                 complete: true,
                 frozen: Vec::new(),
@@ -299,6 +350,7 @@ impl Ended {
             done,
             total,
             skipped: 0,
+            contended: 0,
             refused: 0,
             complete: false,
             frozen: Vec::new(),
@@ -396,15 +448,18 @@ pub fn seconds_left(done: u64, total: u64, elapsed: Duration) -> Option<u64> {
 /// **resolves the last unit** — always sent regardless of timing, because a bar
 /// that stops one short of the end looks like a hang.
 ///
-/// Shared by [`run_probe`]'s own loop, `walk_job::start_walk_job`'s progress
-/// closure and `embed_job::start_embed_job`'s. `walk_root` (`mnema-ingest`)
-/// calls its progress callback once per file (twice for a file whose busy
-/// retries were all refused, and once before the loop) with no throttle of
-/// its own —
+/// Shared by [`run_probe`]'s own loop and, since Task 3b folded the walk and
+/// the embed into one job, `scan_job`'s two progress closures —
+/// `RootProgress::observe`'s for the reading pass and `embed_after`'s for the
+/// embedding phase — where `walk_job::start_walk_job` and
+/// `embed_job::start_embed_job` used to call it before either command was
+/// deleted. `walk_root` (`mnema-ingest`) calls its progress callback once per
+/// file (twice for a file whose busy retries were all refused, and once
+/// before the loop) with no throttle of its own —
 /// [`REPORT_INTERVAL`]'s own doc comment names the shape that produces: "a
 /// folder of a hundred thousand files would put a hundred thousand messages
-/// through the IPC" — so whoever owns the channel on the other end of that
-/// callback has to apply this rule, or flood it.
+/// through the IPC" — so whoever owns the callback has to apply this rule, or
+/// flood the observer that reads `AppState::scan_state`.
 ///
 /// ⚠️ **`refused` is in the condition, and that is a repair rather than a
 /// generalisation.** The arm used to read `done == total`, which silently never
@@ -505,6 +560,7 @@ mod tests {
                 done: 40,
                 total: 40,
                 skipped: 0,
+                contended: 0,
                 refused: 0,
                 complete: true,
                 frozen: Vec::new(),
@@ -525,6 +581,7 @@ mod tests {
                 done: 7,
                 total: 40,
                 skipped: 0,
+                contended: 0,
                 refused: 0,
                 complete: true,
                 frozen: Vec::new(),

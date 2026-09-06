@@ -164,9 +164,14 @@ case_ "the wait must be announced, not answered with an empty screen" \
 # The <h2> in `Settings.svelte` proves only that `Settings.svelte` rendered. A
 # mask is global (D-c), so the editor is drawn beside the folder list rather
 # than inside a folder row, and this is the case that keeps it drawn at all.
+#
+# ⚠️ Re-anchored: the tag takes `{jobs}` since the independent review's second
+# finding — the editor has to hear a reading pass end to withdraw a question
+# whose estimate that pass invalidated. The mutant is the same one, the whole
+# element commented out.
 case_ "the folders panel must really hold the mask editor, not just its heading" \
   ui/src/settings/Settings.svelte \
-  "s{        <Masks />}{        <!-- Masks -->}" \
+  "s{        <Masks \{jobs\} />}{        <!-- Masks -->}" \
   "        <!-- Masks -->" \
   src/settings/Settings.test.ts 'clicking Folders shows the Folders heading and removes the Models heading' runner=vitest
 

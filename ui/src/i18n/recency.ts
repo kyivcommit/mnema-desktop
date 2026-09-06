@@ -73,7 +73,7 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
  * runtime must supply is the DATA behind those tags: on a Node built with
  * small-ICU only `en-US` is present, `uk` silently falls back to it, and the
  * two locales format identically. The tests that assert `uk` differs from `en`
- * (`recency.test.ts` and `Indexing.test.ts`) are exactly the ones that go red
+ * (`recency.test.ts` and `Scanning.test.ts`) are exactly the ones that go red
  * there, and they will read as a bug in this function rather than as a build of
  * Node without its locale data. Official Node builds have shipped full-ICU
  * since v13 and CI uses `actions/setup-node` with `lts/*`, so this is a note

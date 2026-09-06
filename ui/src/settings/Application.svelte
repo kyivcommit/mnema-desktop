@@ -7,7 +7,7 @@
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
-  // No prop, unlike `Indexing.svelte`: this section starts no job and shares no
+  // No prop, unlike `Scanning.svelte`: this section starts no job and shares no
   // controller. It reads `app_prefs` once on mount and re-reads it again only
   // where D-b and D-c say a REJECTION carries no state of its own — a refused
   // `set_hotkey` or `set_autostart` crosses as a sentence alone, so what the
@@ -16,12 +16,14 @@
 
   let prefs = $state<AppPrefs | null>(null);
   // A rejected `app_prefs` read. §10: a rejection is a SENTENCE, never a kind —
-  // shown verbatim beside a catalogue lead-in, exactly as `Indexing.svelte`
-  // does for `model_settings`.
+  // shown verbatim beside a catalogue lead-in, exactly as `Scanning.svelte`
+  // does for its own load-failure banner.
   let loadError = $state<string | null>(null);
 
-  // The newer of two reads in flight always wins — `Indexing.svelte:43`'s
-  // guard and its reason: a rejected `set_hotkey` or `set_autostart` triggers a
+  // The newer of two reads in flight always wins — `Settings.svelte`'s own
+  // `settingsSeq` guard and its reason (Task 7/8: that guard used to live in
+  // `Scanning.svelte`, back when that section read `model_settings` for
+  // itself): a rejected `set_hotkey` or `set_autostart` triggers a
   // second `appPrefs()` while the mount's own first read may still be in
   // flight, and the two can settle in either order.
   //
@@ -116,7 +118,8 @@
   );
 
   // The union discriminated HERE, before `reason` is read from either arm —
-  // `Indexing.svelte:104-106`'s pattern, for the same reason.
+  // `Scanning.svelte`'s own `index`/`read`/`unreadable` discrimination, for the
+  // same reason.
   const unavailable = $derived(hotkey !== null && hotkey.status.kind === 'unavailable' ? hotkey.status : null);
 
   const shortcutStatusText = $derived.by(() => {
@@ -134,7 +137,7 @@
     void $locale;
     if (unavailable === null) return null;
     // VERBATIM, beside the catalogue lead-in: a refusal the BACKEND makes is
-    // shown as it came, exactly as `Indexing.svelte`'s unreadable reason is.
+    // shown as it came, exactly as `Scanning.svelte`'s unreadable reason is.
     return t('application_shortcut_reason', { reason: unavailable.reason });
   });
   // A degraded state that offers no way forward is the state a person files a
@@ -296,9 +299,9 @@
   const autostartIsEnabled = $derived(autostart !== null && autostart.kind === 'enabled');
 
   // A `Record` over the discriminant rather than a chain of ternaries, for
-  // `Indexing.svelte`'s reason: a fourth arm added to `AutostartState` becomes
-  // a compile error here instead of silently falling through to a sentence
-  // that belongs to a different state.
+  // `Scanning.svelte`'s own `UNREADABLE` table's reason: a fourth arm added to
+  // `AutostartState` becomes a compile error here instead of silently falling
+  // through to a sentence that belongs to a different state.
   const AUTOSTART_SENTENCE: Record<AutostartState['kind'], Key> = {
     enabled: 'application_autostart_enabled',
     disabled: 'application_autostart_disabled',
@@ -394,7 +397,8 @@
 <!-- The failed read leads and does not gate what follows: on the FIRST read's
      rejection there is nothing below anyway, because `prefs` is still null. A
      refused RE-read (triggered by a rejected change) leaves the previous
-     answer on screen, which is `Indexing.svelte`'s ruling and not a new one. -->
+     answer on screen, which is `Settings.svelte`'s ruling for `model_settings`
+     and not a new one here. -->
 {#if loadError}
   <p data-testid="application-load-failed">{loadFailedLabel}</p>
   <p data-testid="application-load-error">{loadError}</p>

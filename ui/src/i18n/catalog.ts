@@ -1,5 +1,5 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
-  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_indexing' | 'settings_nav_application'
+  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
   | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -39,7 +39,6 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
-  | 'settings_folders_scan' | 'settings_folders_scan_named'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -61,6 +60,10 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
   | 'settings_folders_confirm_exclude_named' | 'settings_folders_confirm_include_named'
   | 'settings_folders_confirm_cancel_named'
+  | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
+  | 'settings_folders_removing' | 'settings_folders_remove_blocked'
+  | 'settings_folders_remove_question_withdrawn'
+  | 'settings_folders_added_note'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
@@ -72,9 +75,9 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_confirm_cancel_named'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
-  | 'settings_masks_already_stored'
-  | 'indexing_walk_starting' | 'indexing_walk_running'
-  | 'indexing_embed_starting' | 'indexing_embed_running'
+  | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
+  | 'indexing_reading_root'
+  | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
@@ -83,18 +86,23 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_walk_ended_root_unavailable' | 'indexing_walk_ended_volume_missing'
   | 'indexing_embed_ended_completed' | 'indexing_embed_ended_cancelled'
   | 'indexing_embed_ended_failed' | 'indexing_embed_ended_unexpected'
+  | 'indexing_embed_not_started_store'
   | 'indexing_failure_message' | 'indexing_walk_result' | 'indexing_embed_result'
   | 'indexing_frozen_heading' | 'indexing_frozen_row'
   | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
   | 'indexing_frozen_unreadable_directory'
-  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_rejected'
-  | 'indexing_unobserved' | 'indexing_cancel'
+  | 'indexing_roots_read' | 'indexing_root_partly_read' | 'indexing_root_unavailable'
+  | 'indexing_root_volume_missing' | 'indexing_root_message' | 'indexing_root_cancelled'
+  | 'indexing_resume' | 'indexing_retry'
+  | 'scanning_scan' | 'scanning_incomplete' | 'scanning_continue_embedding'
+  | 'indexing_note_no_key' | 'indexing_note_no_model'
+  | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
   | 'indexing_index_never'
   | 'indexing_index_unreadable_not_open' | 'indexing_index_unreadable_read_failed'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
-  | 'indexing_index_pending_chunks' | 'indexing_index_resume_embedding'
+  | 'indexing_index_pending_chunks'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
@@ -113,7 +121,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_title: 'Налаштування',
     settings_nav_models: 'Моделі',
     settings_nav_folders: 'Теки',
-    settings_nav_indexing: 'Індексація',
+    // Task 8: renamed from «Індексація» — the section renders one «Сканувати»
+    // control now, not only what the index holds, and the nav label says what
+    // pressing it does.
+    settings_nav_scanning: 'Сканування',
     settings_nav_application: 'Застосунок',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
@@ -334,13 +345,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# хвилину} few {# хвилини} many {# хвилин} other {# хвилини}} тому',
     recent_hours: '{count, plural, one {# годину} few {# години} many {# годин} other {# години}} тому',
     recent_days: '{count, plural, one {# день} few {# дні} many {# днів} other {# дня}} тому',
-    // §9.2 / Task 8 — running the index, showing it, stopping it. The scan
-    // starts on this control and never on adding a folder, because excluding
-    // subfolders (PR 8) is a move a person still has to make in between.
-    settings_folders_scan: 'Сканувати',
-    // Carries the path so two "Сканувати" buttons in a list stay apart for a
-    // screen reader; the VISIBLE label stays the plain word above.
-    settings_folders_scan_named: 'Сканувати {path}',
     // PR 8a, Task 5 — the folder row expands into what is on disk.
     //
     // The control keeps ONE name in both states: `aria-expanded` carries open
@@ -425,7 +429,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // сканування — це саме та подія, після якої вони брешуть. Мовчки прибрати
     // питання не можна: натиск людини зник би без сліду. Тому питання знімають
     // і кажуть, про яку теку воно було.
-    settings_folders_question_withdrawn: 'Питання про «{path}» знято: сканування закінчилося, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
+    settings_folders_question_withdrawn: 'Питання про «{path}» знято: індексацію закінчено, і цю панель перечитано. Натисніть ще раз, якщо це досі потрібно.',
     // ── PR 8a, Task 6: що коштує виключення, сказане ДО збереження ──────────
     //
     // Натиснута кнопка перечитує `list_tree` — число зі старого знімка описує
@@ -500,6 +504,48 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Підтвердити виключення {path}',
     settings_folders_confirm_include_named: 'Підтвердити скасування правила на {path}',
     settings_folders_confirm_cancel_named: 'Залишити {path} як є',
+    // Task 9. Видалення теки — єдина дія на цьому екрані, яка щось ЗАБИРАЄ з
+    // індексу без жодного сканування, тож питання ставиться перед нею так само,
+    // як перед виключенням підтеки. Число заморожене на момент натискання
+    // (`removeQuestion.files`), а слова — ні: речення будується всередині
+    // перебудови під `void $locale`, тож перемикання мови його переписує з тим
+    // самим числом.
+    //
+    // 🔴 Число — це `root.files.length` того рядка, який людина бачила: скільки
+    // файлів цієї теки зараз в індексі. Воно не обіцяє нижньої межі й не
+    // рахує того, що сканування ще не встигло проіндексувати, — саме тому
+    // речення говорить «файли цієї теки», а не «все, що зникне».
+    //
+    // 🔴 Рев'ю раунду 1 (m1): в арці `other` іменник у родовому однини, тож і
+    // дієслово однини — «зникне», як у власній арці `other` ключа
+    // `settings_folders_indexed`. Для цілих чисел українське CLDR цієї арки не
+    // добирає взагалі, тож на екрані вона не з'являється; вона все одно має
+    // бути узгодженою — неузгоджений рядок читається як помилка перекладу
+    // всюди, де його побачать.
+    settings_folders_confirm_remove: '{files, plural, one {Видалити теку {path} з індексу? # файл цієї теки зникне з пошуку.} few {Видалити теку {path} з індексу? # файли цієї теки зникнуть з пошуку.} many {Видалити теку {path} з індексу? # файлів цієї теки зникнуть з пошуку.} other {Видалити теку {path} з індексу? # файла цієї теки зникне з пошуку.}}',
+    // Дві теки на екрані — дві кнопки «Підтвердити» з тим самим написом; шлях у
+    // доступній назві лишає їх розрізненними, як у трьох ключах вище.
+    settings_folders_confirm_remove_named: 'Підтвердити видалення {path}',
+    // Стан рядка, поки `remove_watched_folder` не відповів. Стоїть на місці
+    // кнопок цього рядка, а не поруч із ними: натиснути тут більше нема на що,
+    // і кнопка, яка нічого не робить, читається як кнопка, яку не почули.
+    settings_folders_removing: 'Видаляємо…',
+    // Одне речення на весь список, поки триває робота: бекенд відмовляє
+    // видалення, доки завдання тримає слот (`bridge.rs:97-180`), тож кнопки
+    // вимкнені й тут сказано чому. Не текст відмови — до неї не доходить.
+    settings_folders_remove_blocked: 'Кнопка «Видалити» запрацює після зупинки сканування.',
+    // 🔴 Рев'ю раунду 1 (m3). Власний ключ, а не `settings_folders_question_withdrawn`.
+    // Речення те саме за змістом, але останнє підрядне називає, ЩО перечитано:
+    // питання про підтеку живе в панелі, і панель справді перечитують; питання
+    // про видалення живе під списком, і рядок, до якого воно належить, у
+    // звичайному випадку згорнутий — жодної панелі на екрані немає й жодної не
+    // читали. Спільний рядок казав людині про панель, якої вона не бачить.
+    settings_folders_remove_question_withdrawn: 'Питання про теку «{path}» знято: індексацію закінчено, і список перечитано. Натисніть ще раз, якщо це досі потрібно.',
+    // §9.2, Task 8. Owner's ruling: adding a folder starts no scan — excluding
+    // subfolders and setting masks are moves a person may still want to make
+    // first — so this sentence stands where the old per-row Scan button's
+    // implicit promise used to be, and names the one place a scan now starts.
+    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
     settings_masks_heading: 'Маски файлів',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
     // маска глобальна (D-c), тому не стосується тієї теки, поруч з якою вона
@@ -620,13 +666,31 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
     // знайшла б його.
     settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
-    indexing_walk_starting: 'Читання теки починається…',
-    indexing_walk_running: 'Триває читання теки.',
+    // 🔴 Власний ключ, а не `settings_folders_question_withdrawn`: там панель
+    // ПЕРЕЧИТАНО, а тут застарів РОЗРАХУНОК — питання про маску несе число,
+    // яке дав `mask_preview` до того, як індексація змінила набір документів.
+    settings_masks_question_withdrawn: 'Питання про маску «{mask}» знято: індексацію закінчено, і розрахунок застарів. Натисніть ще раз, якщо це досі потрібно.',
+    // Task 7 — the live reading phase names the folder it is on, one-based the
+    // way `scan_job.rs`'s own comment states it ("3 of 7" is what a person
+    // reads, and `rootIndex` is the folder being read now, not how many are
+    // behind it). No trailing full stop: the sentence ends in an interpolated
+    // path, and "…/x." reads as part of the path.
+    indexing_reading_root: 'Індексація теки {rootIndex} з {rootCount}: {rootPath}',
     // The embedding pass takes no root and covers the whole index
     // (embed_job.rs), so neither of these two may name the folder that was
     // pressed.
-    indexing_embed_starting: 'Вбудовування всього індексу починається…',
+    //
+    // Task 7: `indexing_embed_starting` (the old lead-in) is gone. The queue
+    // this phase works from is a marker on the index, not a job that "starts"
+    // the way a walk does — the ONLY moment a sentence is owed here is a
+    // fresh queue reporting zero of zero, which would otherwise read as
+    // "nothing to do" while a pass is genuinely under way.
+    indexing_embed_starting_zero: 'Вбудовування починається…',
     indexing_embed_running: 'Триває вбудовування всього індексу.',
+    // A removal has no counts at all (`scan_state::Phase::Removing`) and is not
+    // cancellable (`bridge.rs` fixes it at `false`), so this is the whole of
+    // what the strip has to say while it runs.
+    indexing_removing: 'Видаляємо теку {rootPath}…',
     indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
@@ -642,12 +706,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // recorded: the skip write meets the same lock and can fail too, leaving
     // the file in neither the index nor the journal
     // (`job::Progress::contended`).
+    //
+    // Task 7: the SAME key answers for `phase.counts.contended` while a scan
+    // runs and for `scan.lastReading.contended` once it has ended — the fact
+    // it explains ("Пропущено") is the same fact either way, and reading it
+    // off `lastReading` is what lets the sentence survive past the ending.
     indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
     indexing_eta: 'Залишилось приблизно {seconds} с.',
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
     indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
-    indexing_walk_ended_completed: 'Теку прочитано повністю.',
+    indexing_walk_ended_completed: 'Теки проіндексовано повністю.',
     // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
     // the whole tree, so what stopped being seen is still searchable. That is
     // why the word "done" cannot appear here.
@@ -679,14 +748,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `frozen: []`, and on the completed walk that does show it reconciliation
     // ran everywhere except the prefixes it goes on to name. Same class, two
     // different true scopes; each decided on its own evidence.
-    indexing_walk_ended_partly_read: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    indexing_walk_ended_partly_read: 'Теки проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цих теках не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
     indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
     indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
     // The four sentences below are not about a malfunction: they are decisions
     // the walk itself made (job.rs), and calling them a failure would tell a
     // person the program broke when instead a folder cannot be read.
     indexing_walk_ended_broken_worker: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
-    indexing_walk_ended_rules_not_applied: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
+    indexing_walk_ended_rules_not_applied: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не індексували зовсім.',
     indexing_walk_ended_root_unavailable: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
     indexing_walk_ended_volume_missing: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
     indexing_embed_ended_completed: 'Вбудовування всього індексу завершено.',
@@ -697,6 +766,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // carrying the state's own name: a default branch that draws "finished" is
     // exactly how a failed pass reads as a successful one.
     indexing_embed_ended_unexpected: 'Вбудовування спинилося з причини, якої тут не очікували ({reason}).',
+    // `EmbedOutcome::Skipped(StoreUnavailable)` (`scan_state.rs`): the embedding
+    // phase was never entered because the credential store itself refused to
+    // answer — not "no key", not "no model" — so it earns its own sentence
+    // rather than folding into either of those two.
+    indexing_embed_not_started_store: 'Вбудовування не запущено: сховище ключів не відповіло: {message}',
     indexing_failure_message: 'Програма повідомила: {message}',
     indexing_walk_result: 'Додано документів: {indexed}. Без змін: {unchanged}. Пропущено: {skipped}. Вилучено з індексу: {removed}.',
     indexing_embed_result: 'Вбудовано фрагментів: {done} з {total}. Відхилено: {refused}.',
@@ -719,17 +793,60 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'символьне посилання, сюди не заходили',
     indexing_frozen_empty_directory: 'прочиталася порожньою',
     indexing_frozen_unreadable_directory: 'не вдалося прочитати',
-    // The walk runs regardless, because word search needs neither a key
-    // nor a model — so each sentence names what is absent and what already
-    // works.
-    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
-    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
-    indexing_note_rejected: 'Запит відхилено.',
-    indexing_unobserved: 'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
+    // Task 7 — the reading block, drawn from `scan.lastReading` in `idle` and
+    // `ended` alike (D-e), and outliving the report that ends beside it.
+    // No trailing full stop on `indexing_roots_read`: it sits ahead of the
+    // result sentence on its own line, not as that sentence's own clause.
+    indexing_roots_read: 'Проіндексовано тек: {rootsRead} з {rootCount}',
+    // One row per root whose reading did not simply complete
+    // (`readingKind(root) !== 'completed'`) — each names its own path, because
+    // the aggregate cannot say WHICH folder the fact is about.
+    indexing_root_partly_read: '{rootPath}: проіндексовано частково',
+    indexing_root_unavailable: '{rootPath}: тека недоступна',
+    indexing_root_volume_missing: '{rootPath}: том відсутній',
+    // F6 (Task 10 live run): a cancelled root used to fall through to
+    // `indexing_root_message`'s own fallback, `WALK_ENDED['cancelled']` — the
+    // very sentence `readingBlock.sentence` already draws once for the whole
+    // reading. A root row and the reading's own outcome sentence saying the
+    // same thing twice read as an error in this component, not as agreement.
+    indexing_root_cancelled: '{rootPath}: індексацію перервано',
+    // `failed`/`brokenWorker` at the root — `job.rs`'s `message` is the one
+    // thing that tells a broken pool, a missing worker binary and a panic
+    // apart, per root the same way `indexing_failure_message` does for the
+    // whole scan.
+    indexing_root_message: '{rootPath}: {message}',
+    // D-m's labels: a person who pressed Stop is RESUMING, one whose scan
+    // failed is RETRYING — one word for both would read a failure as their
+    // own doing.
+    indexing_resume: 'Продовжити',
+    indexing_retry: 'Повторити',
+    // §9.3, Task 8 — the Scanning section's own ONE control, shown whenever no
+    // run already owns the slot.
+    scanning_scan: 'Сканувати',
+    // The marker `continueAction` (`jobs.ts`) reads FIRST, ahead of the queue:
+    // a half-read archive says so before it says anything about what is
+    // waiting to be embedded, because embedding what is there and leaving the
+    // unread half invisible would be the worse silence of the two.
+    scanning_incomplete: 'Попереднє сканування не завершило індексацію тек.',
+    // F2 (Task 10 live run): the QUEUE arm of `continueAction`
+    // (`entry: 'embedOnly'`, `where: 'section'`) used to share `indexing_resume`
+    // with the marker arm (`entry: 'full'`), so a person offered to resume the
+    // embedding queue alone read a button that said only «Продовжити» — the
+    // same word a half-read archive's own resume button says, promising the
+    // wrong half of the work. This key is that arm's own, and it alone: the
+    // marker arm still keeps `indexing_resume`.
+    scanning_continue_embedding: 'Продовжити вбудовування',
+    // F11 (Task 10 live run, owner's ruling): «у цій теці» claimed a scope this
+    // sentence never had — word search covers every watched folder, not the
+    // one this note happens to be drawn beside — so the clause is dropped
+    // rather than corrected to name all of them.
+    indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
+    indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
     indexing_cancel: 'Зупинити',
-    // §9.3, PR 9 Task 6 — the Indexing SECTION, which says what the index
-    // holds. Every key here is `indexing_index_*` so nothing confuses it with
-    // the `indexing_*` keys above, which belong to the window's job strip and
+    // §9.3, PR 9 Task 6 — the Scanning SECTION (called Indexing before Task
+    // 8), which says what the index holds. Every key here is
+    // `indexing_index_*` so nothing confuses it with the `indexing_*` keys
+    // above, which belong to the window's job strip and
     // say what a pass is doing right now.
     //
     // The count is of `path` rows, not of documents (D-e): a file in two
@@ -781,11 +898,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_refused_run: 'Останній прохід вбудовування відхилив {count, plural, one {# фрагмент} few {# фрагменти} many {# фрагментів} other {# фрагмента}}.',
     // F4 (spec §9.3, amended 2026-09-04): the embedding queue, `IndexRead.
     // pendingChunks` — a tray Stop mid-pass, then a restart, left thousands of
-    // chunks un-embedded with nothing on screen saying so. Shown only while no
-    // run is under way (`Indexing.svelte`'s own gate on `jobs.state`'s phase),
-    // beside a button that resumes it.
+    // chunks un-embedded with nothing on screen saying so. Task 8: the button
+    // beside it is `indexing_resume` now, through `continueAction`'s
+    // `where: 'section'`/`entry: 'embedOnly'` offer, not a button of its own —
+    // `indexing_index_resume_embedding` is gone, grepped for other consumers
+    // first (none found).
     indexing_index_pending_chunks: '{count, plural, one {Ще не вбудовано # фрагмент} few {Ще не вбудовано # фрагменти} many {Ще не вбудовано # фрагментів} other {Ще не вбудовано # фрагмента}}.',
-    indexing_index_resume_embedding: 'Продовжити вбудовування',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything
@@ -838,7 +956,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_title: 'Settings',
     settings_nav_models: 'Models',
     settings_nav_folders: 'Folders',
-    settings_nav_indexing: 'Indexing',
+    settings_nav_scanning: 'Scanning',
     settings_nav_application: 'Application',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
@@ -928,8 +1046,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
-    settings_folders_scan: 'Scan',
-    settings_folders_scan_named: 'Scan {path}',
     settings_folders_expand: 'Subfolders',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
@@ -954,7 +1070,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_rule_remove: 'Remove the rule',
     settings_folders_rule_remove_named: 'Remove the rule on {prefix}',
     settings_folders_rule_already_gone: 'There was no such rule left to remove. The list has been re-read.',
-    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: a scan ended and this panel was read again. Press again if you still want to.',
+    settings_folders_question_withdrawn: 'The question about “{path}” has been withdrawn: indexing has finished and this panel was read again. Press again if you still want to.',
     settings_folders_exclude_checking: 'Checking what this exclusion removes…',
     settings_folders_include_checking: 'Checking that this is still the same folder…',
     // 🔴 Fix round 6. Used to also claim "and the list has been re-read" —
@@ -975,6 +1091,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_confirm_exclude_named: 'Confirm excluding {path}',
     settings_folders_confirm_include_named: 'Confirm not excluding {path}',
     settings_folders_confirm_cancel_named: 'Leave {path} as it is',
+    settings_folders_confirm_remove: '{files, plural, one {Remove folder {path} from the index? # file from this folder will disappear from search.} other {Remove folder {path} from the index? # files from this folder will disappear from search.}}',
+    settings_folders_confirm_remove_named: 'Confirm removing {path}',
+    settings_folders_removing: 'Removing…',
+    settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
+    settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
+    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
@@ -1000,27 +1122,29 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
-    indexing_walk_starting: 'Reading the folder is starting…',
-    indexing_walk_running: 'The folder is being read.',
-    indexing_embed_starting: 'Embedding the whole index is starting…',
+    settings_masks_question_withdrawn: 'The question about mask “{mask}” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
+    indexing_reading_root: 'Indexing folder {rootIndex} of {rootCount}: {rootPath}',
+    indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
+    indexing_removing: 'Removing the folder {rootPath}…',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
-    indexing_walk_ended_completed: 'The folder was read in full.',
-    indexing_walk_ended_partly_read: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+    indexing_walk_ended_completed: 'The folders were indexed in full.',
+    indexing_walk_ended_partly_read: 'The folders were only partly indexed: some subfolders could not be entered. Nothing in these folders was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
     indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
     indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',
-    indexing_walk_ended_rules_not_applied: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
+    indexing_walk_ended_rules_not_applied: 'The scan stopped: the exclusion rules could not be applied, so the folder was not indexed at all.',
     indexing_walk_ended_root_unavailable: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
     indexing_walk_ended_volume_missing: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
     indexing_embed_ended_completed: 'Embedding the whole index has finished.',
     indexing_embed_ended_cancelled: 'The embedding pass was stopped at your request.',
     indexing_embed_ended_failed: 'The embedding pass broke off because something went wrong.',
     indexing_embed_ended_unexpected: 'The embedding pass stopped for a reason not expected here ({reason}).',
+    indexing_embed_not_started_store: 'Embedding was not started: the key store did not answer: {message}',
     indexing_failure_message: 'The program reported: {message}',
     indexing_walk_result: 'Documents added: {indexed}. Unchanged: {unchanged}. Skipped: {skipped}. Removed from the index: {removed}.',
     indexing_embed_result: 'Chunks embedded: {done} of {total}. Given up on: {refused}.',
@@ -1029,10 +1153,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_frozen_symlinked_subtree: 'a symbolic link, never entered',
     indexing_frozen_empty_directory: 'read as empty',
     indexing_frozen_unreadable_directory: 'could not be read',
-    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search over this folder already works.',
-    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search over this folder already works.',
-    indexing_note_rejected: 'The request was refused.',
-    indexing_unobserved: 'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
+    indexing_roots_read: 'Folders indexed: {rootsRead} of {rootCount}',
+    indexing_root_partly_read: '{rootPath}: indexed partly',
+    indexing_root_unavailable: '{rootPath}: the folder is unavailable',
+    indexing_root_volume_missing: '{rootPath}: the volume is missing',
+    indexing_root_cancelled: '{rootPath}: indexing was interrupted',
+    indexing_root_message: '{rootPath}: {message}',
+    indexing_resume: 'Resume',
+    indexing_retry: 'Retry',
+    scanning_scan: 'Scan',
+    scanning_incomplete: 'The previous scan did not finish indexing the folders.',
+    scanning_continue_embedding: 'Continue embedding',
+    indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search already works.',
+    indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',
@@ -1045,7 +1178,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_failed_chunks: 'In this index the provider has given up on {count, plural, one {# chunk} other {# chunks}} in all. They are not offered again until their text changes: search by meaning does not find them, word search still does.',
     indexing_index_refused_run: 'The last embedding pass gave up on {count, plural, one {# chunk} other {# chunks}}.',
     indexing_index_pending_chunks: '{count, plural, one {# chunk is not embedded yet} other {# chunks are not embedded yet}}.',
-    indexing_index_resume_embedding: 'Continue embedding',
     // §9.4 — the Application section: the shortcut, autostart, and the version.
     //
     // 🔴 Two sentence sources, and they are kept apart on purpose. Everything

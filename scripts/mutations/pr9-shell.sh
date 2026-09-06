@@ -471,28 +471,34 @@ case_ "a refused shortcut leaves the one already on disk alone" \
 
 # The claim goes unannounced: a job starts and the tray goes on offering a Stop
 # that is greyed out. The whole point of the observer, removed.
+#
+# ⚠️ Re-anchored for the review's first fix. The claim used to reach into the
+# slot's own field — `if let Some(f) = &slot.observer` — and now calls
+# `slot.announce()`, because the slot carries the observer CELL rather than a
+# copy of whatever was in it (`state.rs`, `JobSlot::observer`). The mutant is
+# the same one: the claim says nothing.
 case_ "claiming the job slot announces itself" \
   src-tauri/src/state.rs \
-  's~        if let Some\(f\) = &slot\.observer \{\n            f\(\);\n        \}~        // mutant: the claim is never announced~' \
+  's~        slot\.announce\(\);~        // mutant: the claim is never announced~' \
   '// mutant: the claim is never announced' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
-# 🔴 The store and the announcement swapped, which is the ordering the whole
-# observer contract rests on. `JobSlot::drop` frees the slot and only then says
-# so, and that order is what lets an incoming job claim the slot in between: the
-# handoff then announces `true` from the incoming claim and, last, the outgoing
-# drop — where a look finds a job running. Announce first and the slot is still
-# taken when anybody looks, so the incoming claim in the named fixture is
-# refused outright and the state a person's tray is drawn from is the outgoing
-# job's for as long as it takes the next event to arrive.
+# 🔴 The ending and the announcement swapped, which is the ordering the whole
+# observer contract rests on. `JobSlot::drop` writes the ending and only then
+# says so, and that order is what lets an incoming job claim the slot in
+# between: the handoff then announces `true` from the incoming claim and, last,
+# the outgoing drop — where a look finds a job running. Announce first and the
+# snapshot is still `Running` when anybody looks, so the incoming claim in the
+# named fixture is refused outright and the state a person's tray is drawn from
+# is the outgoing job's for as long as it takes the next event to arrive.
 #
 # The named test is the one whose fixture builds the handoff; its neighbour
 # `the_observer_hears_a_job_start_and_finish` also goes red here, which is what
 # a swapped pair of statements should do to both.
-case_ "the outgoing job frees the slot before it announces, never after" \
+case_ "the outgoing job writes its ending before it announces, never after" \
   src-tauri/src/state.rs \
-  's~        self\.running\.store\(false, Ordering::Release\);.*?if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        if let Some(f) = \&self.observer \{ f(); \} // mutant: the outgoing job announces before it frees the slot\n        self.running.store(false, Ordering::Release);~s' \
-  '// mutant: the outgoing job announces before it frees the slot' \
+  's{        \{\n            let mut scan = self\n                \.scan\n                \.lock\(\)\n                \.unwrap_or_else\(std::sync::PoisonError::into_inner\);\n            let owed_a_report(.*?)\n        \}\n        self\.announce\(\);}{        self.announce(); // mutant: the outgoing job announces before it writes the ending\n        {\n            let mut scan = self\n                .scan\n                .lock()\n                .unwrap_or_else(std::sync::PoisonError::into_inner);\n            let owed_a_report$1\n        }}s' \
+  '// mutant: the outgoing job announces before it writes the ending' \
   mnema-desktop 'state::tests::an_announcement_is_read_as_the_fact_not_replayed_as_the_edge' --lib
 
 # 🔴 The `false` edge moved from the job ENDING to the stop being REQUESTED —
@@ -501,9 +507,43 @@ case_ "the outgoing job frees the slot before it announces, never after" \
 # every job that finishes on its own, crashes, or is never cancelled at all. Two
 # substitutions in one expression on purpose: the marker proves the first
 # applied, the occurrence count proves the second did.
+#
+# ⚠️ **What the second substitution silences, corrected TWICE — read this before
+# re-anchoring it a third time.**
+#
+# Until Task 11b the comment said it emptied `JobSlot::drop`; it emptied
+# `JobSlot::announce`, which `update`, `mark_reading_done`, `finish` AND `drop`
+# all call. That was acceptable while the CLAIM announced through its own inline
+# `if let Some(f) = &slot.observer` in `claim_job`, because emptying `announce`
+# then left the claim speaking and the named test still died on its RELEASE
+# assertion.
+#
+# 🔴 The review's first fix routed the claim through `slot.announce()` as well,
+# and that quietly turned this case into a duplicate of «claiming the job slot
+# announces itself» two above: the same mutant now silences the claim, and the
+# named test dies on its FIRST assertion instead. Measured at `7e6bd3c` — «left:
+# [], right: [Running { … }]», the claim's message, where at `241db06` the same
+# case failed with «releasing must announce itself too». Red either way, and
+# staleness cannot see it: staleness proves a pattern still matches, never that
+# the named test still dies for the named reason. The round that re-anchored it
+# also wrote «what it silences is unchanged», which was false as measured.
+#
+# So the second substitution now empties the RELEASE's own call site — the
+# `self.announce()` at the foot of `JobSlot::finish`, anchored on the
+# `self.finished = true;` above it — and nothing else. `announce` itself is
+# untouched, so the claim, `update` and `mark_reading_done` all still speak, and
+# the ONLY announcement the named test can still hear is the new one at the stop
+# request, which it never makes. It dies on «releasing must announce itself
+# too», which is this case's own property and not its neighbour's.
+#
+# `finish` and not `drop`, because the named test releases through `finish`.
+# `drop`'s own announcement is a different write with its own guards — the
+# ordering case two above this one, and `pr9b-scan.sh`'s revision cases — and
+# folding it in here would need a third substitution the harness checks neither
+# the marker nor the occurrence count of.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
-  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        self\.finished = true;\n        self\.announce\(\);~        self.finished = true;\n        // mutant: the ending is not announced~' \
   '// mutant: the release is announced when a stop is requested' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
@@ -511,9 +551,17 @@ case_ "the release is announced when the job ends, not when a stop is asked for"
 # where it would rebuild a menu item no dispatcher arm answers and no catalog
 # key labels. This is the case that makes the spec assertion falsifiable, which
 # a list compared against itself would not be.
+#
+# Rewritten twice at Task 11b, for one change and then another: PR 9 replaced
+# the `"stop_indexing"` literal with the `STOP_ID` constant, and Task 10c added
+# `RESUME_ID` beneath it (F4, «Продовжити сканування»). The anchor is the tail
+# of the array either way — the last two entries and the closing bracket —
+# because that is the part the mutation has to insert INTO, and naming the
+# constants rather than their values is what keeps this case honest about which
+# list it is amending.
 case_ "the tray item list is the amended spec 8, not the one before it" \
   src-tauri/src/tray.rs \
-  's~    "stop_indexing",\n    "quit",\n\];~    "stop_indexing",\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
+  's~    STOP_ID,\n    RESUME_ID,\n    "quit",\n\];~    STOP_ID,\n    RESUME_ID,\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
   '// mutant: the deleted update check is back' \
   mnema-desktop 'tray::tests::tray_item_ids_match_spec_order' --lib
 
@@ -568,16 +616,20 @@ case_ "the shared fixture kills a wrong per-platform spelling of the command key
   '// mutant: the parsers spelling on a platform that prints Win' \
   mnema-desktop 'shortcut::tests::the_shared_fixture_is_what_this_formatter_produces' --lib
 
-# External review P1. The post-walk read of the cancellation flag dropped:
-# `walk_root` observes the flag only between files, so a Stop raised after the
-# last observation is never seen by it and the walk returns `Completed`. Under
-# this mutant the walk ends `completed` while the person is looking at a Stop
-# they pressed, `jobs.ts` chains the embedding pass off `completed`, and
-# `claim_job` clears the flag as it takes the slot — so the Stop is erased and
-# the text goes to a provider. Every existing walk test survives it: none of
-# them raises the flag inside the last progress report.
-case_ "a Stop that lands after the walks last cancellation check is honoured" \
-  src-tauri/src/walk_job.rs \
-  's~        let stopped_late = slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\);~        let stopped_late = false; // mutant: the walk stops reading the flag it was given~' \
-  '// mutant: the walk stops reading the flag it was given' \
-  mnema-desktop 'a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed' --test commands
+# 🔴 RETIRED at Task 11b — «a Stop that lands after the walks last cancellation
+# check is honoured». The late-Stop read it quoted belonged to
+# `walk_job::start_walk_job`, the one-folder-per-job command Task 3b deleted:
+# one folder was one job, the slot changed hands the moment it answered, and
+# that read was the only place left to catch a Stop the walk had not seen.
+#
+# The property did not go with it — it moved UP a level and got sharper. The
+# scan reads every folder under ONE claim, so the same fact is now D-h in
+# `scan_job::read_every_root`: after the last folder's report and before the
+# embedding phase, a pass that would end `Completed` is rewritten to `Cancelled`
+# if the flag is set. `walk_job.rs`'s own doc comment argues why a per-folder
+# rewrite would be the wrong layer twice over.
+#
+# Its carrier is `scan_job::tests::a_stop_after_the_last_root_report_still_ends_
+# cancelled_with_resume_full`, and the mutant is
+# `scripts/mutations/pr9b-scan.sh`'s «a Stop landing after the last folder's
+# report must still end the scan».

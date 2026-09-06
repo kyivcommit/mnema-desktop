@@ -147,9 +147,20 @@ case_ "commands: the job says how it ended" \
 # Removes the unwind protection while still compiling: the loop is called
 # directly and its result wrapped in the `Ok` the match below expects, so a panic
 # escapes the thread exactly as it did before this was fixed.
+#
+# The closing half is anchored on the line ABOVE the `}));` it rewrites, not
+# on that line alone: bridge.rs gained two more `Arc::new({ ... })` /
+# `Box::new(move || { ... })` test closures (Task 4, PR 9b) that close the
+# same way at the same 8-space indent, so a bare `}));` selector now matches
+# three places and `scripts/mutation-staleness.sh` refuses it (`MATCHES MORE
+# THAN ONCE`). Only `run_probe`'s own call is preceded by a lone `)` at
+# 12-space indent — the closing paren of `job::run_probe(...)` itself, one
+# line up — which neither test closure's own predecessor line matches.
+# Folding that line into the match, unchanged in the replacement, is what
+# makes this half select its own site again.
 case_ "commands: the ending survives a panic in the job" \
   src-tauri/src/bridge.rs \
-  's{let caught = catch_unwind\(AssertUnwindSafe\(\|\| \{}{let caught = Ok::<_, Box<dyn std::any::Any + Send>>(\{};s{\n        \}\)\);\n}{\n        \});\n}' \
+  's{let caught = catch_unwind\(AssertUnwindSafe\(\|\| \{}{let caught = Ok::<_, Box<dyn std::any::Any + Send>>(\{};s{\n            \)\n        \}\)\);\n}{\n            \)\n        \});\n}' \
   'let caught = Ok::<_, Box<dyn std::any::Any + Send>>({' \
   mnema-desktop 'a_job_that_panics_still_tells_the_window_it_ended' --test commands
 
@@ -191,16 +202,35 @@ case_ "build: a comment saying unwind does not count as declaring it" \
   '# this used to be panic = "unwind"' \
   mnema-desktop 'the_release_profile_unwinds_because_the_shell_catches_unwinds' --test unwind_profile
 
+# ⚠️ **`inherits = "release"` is part of the mutation, and it is there so that
+# the mutation still COMPILES.** Fixed at Task 11b, having been broken by cargo
+# rather than by this repository: measured on cargo 1.97.1, renaming the section
+# alone makes every cargo invocation exit with
+#
+#   error: profile `release-was-here` is missing an `inherits` directive
+#   (`inherits` is required for all profiles except `dev` or `release`)
+#
+# — so the named test never ran and the harness scored a BROKEN CASE, which is
+# the honest verdict and not a result about the test. With the directive the
+# manifest is valid, the profile is gone, and the test panics on its own
+# `expect`: "the workspace manifest has no [profile.release] section". Verified
+# by hand at Task 11b with the mutation applied to the real manifest.
+#
+# The fix is to the CASE and not to the profile, deliberately: `[profile.release]`
+# is one of the two names cargo exempts, and giving the real section an
+# `inherits` it does not need to make a mutation convenient would be changing the
+# product to suit the instrument.
 case_ "build: the profile section must exist at all" \
   Cargo.toml \
-  's{\[profile\.release\]}{[profile.release-was-here]}' \
-  '[profile.release-was-here]' \
+  's{\[profile\.release\]}{[profile.release-was-here]\ninherits = "release"}' \
+  '[profile.release-was-here]
+inherits = "release"' \
   mnema-desktop 'the_release_profile_unwinds_because_the_shell_catches_unwinds' --test unwind_profile
 
 case_ "commands: job_status reports the running job" \
   src-tauri/src/bridge.rs \
-  's{        running: state\.job_is_running\(\),}{        running: false,}' \
-  'running: false,' \
+  's~    state\.scan_state\(\)\n\}~    crate::scan_state::ScanState \{ snapshot: crate::scan_state::ScanSnapshot::Idle, ..state.scan_state() \} // mutant: job_status never reports a running job\n\}~' \
+  '// mutant: job_status never reports a running job' \
   mnema-desktop 'the_window_can_ask_whether_a_job_is_running' --test commands
 
 case_ "commands: job_status is registered" \
@@ -218,8 +248,8 @@ case_ "commands: a new job does not inherit the last cancellation" \
 
 case_ "commands: only one job at a time" \
   src-tauri/src/state.rs \
-  's{        self\.running\n            \.compare_exchange\(false, true, Ordering::AcqRel, Ordering::Acquire\)\n            \.map_err\(\|_\| Error::JobAlreadyRunning\)\?;}{        self.running.store(true, Ordering::Release);}' \
-  'self.running.store(true, Ordering::Release);' \
+  's{            if matches!\(\n                scan\.snapshot,\n                crate::scan_state::ScanSnapshot::Running \{ \.\. \}\n            \) \{\n                return Err\(Error::JobAlreadyRunning\);\n            \}}{            // mutant: a second job takes the slot from the first}' \
+  '// mutant: a second job takes the slot from the first' \
   mnema-desktop 'only_one_job_runs_at_a_time' --test commands
 
 case_ "commands: start_probe_job is registered" \

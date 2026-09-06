@@ -3,18 +3,27 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
-import { camelOf, rustEnumVariants } from './rust-enum';
+import {
+  camelOf, camelOfSnake, rustEnumVariants, rustStrConst, rustStructFields, rustVariantFields,
+} from './rust-enum';
 import type {
   AppPrefs,
   AutostartState,
+  Counts,
   HotkeyState,
   HotkeyStatus,
   IndexSettings,
+  OtherJob,
+  ReadingOutcome,
+  RootOutcome,
+  ScanReport,
+  ScanState,
   SourceAround,
   StoredExclusion,
   SubfolderListing,
   SubfolderState,
 } from './ipc';
+import { OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -36,6 +45,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }));
 
+// Tauri's event module, which `listenScanProgress` imports dynamically. Faked
+// here so the event NAME and the unwrapping of `e.payload` are exercised
+// through the real wrapper rather than described by it.
+const listen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...a: unknown[]) => listen(...a),
+}));
+
 test('listTree invokes list_tree', async () => {
   invoke.mockResolvedValue({ roots: [], recents: [] });
 
@@ -53,50 +70,81 @@ test('setKey invokes set_key with the typed key', async () => {
   expect(invoke).toHaveBeenCalledWith('set_key', { key: 'a-key-value' });
 });
 
-// PR 7 Task 8: the whole event crosses, not one field of it. The mutation this
-// kills is the shape the module used to have — an `onmessage` that read `event`
-// and threw the ending's contents away, which left every reason, count and
-// frozen prefix unavailable to whatever drew the screen.
-const ENDED_PAYLOAD = {
-  reason: 'volumeMissing', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
-  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
-} as const;
-const PROGRESS_PAYLOAD = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null } as const;
+// PR 9b Task 6: the scan is one job, started from one of two entry points, and
+// it reports through a STATE rather than a channel. The three wrappers below
+// are the whole of that boundary on this side.
+//
+// The state fixture is the shape `scan_state.rs` pins as JSON
+// (`every_snapshot_has_its_wire_shape_pinned`); nothing here is written from a
+// document, and `settings/jobs.test.ts` compares the union's spellings against
+// that file's own enums.
+const SCAN_STATE: ipc.ScanState = {
+  revision: 4, files: 11, readSeq: 1, jobsDone: 0, lastReading: null,
+  snapshot: {
+    kind: 'running', cancellable: true,
+    phase: {
+      kind: 'reading', rootIndex: 1, rootCount: 2, rootPath: '/home/a/notes',
+      counts: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null },
+    },
+  },
+};
 
-test('startEmbedJob forwards every job event, whole, and takes no root', async () => {
+// 🔴 Both entry points, because `embedOnly` is the one this window would break
+// silently: serde REFUSES a variant nobody defined rather than defaulting it
+// (`the_two_entry_points_survive_the_round_trip_under_the_names_the_window_sends`),
+// so a misspelling turns a resumption into an error message. And no channel —
+// the scan has none to report on.
+test('startScanJob sends the entry point it was given, and nothing else', async () => {
   invoke.mockResolvedValue(undefined);
-  const seen: unknown[] = [];
 
-  await ipc.startEmbedJob((e) => seen.push(e));
+  await ipc.startScanJob('full');
+  await ipc.startScanJob('embedOnly');
 
-  const call = invoke.mock.calls.at(-1) as [string, { onProgress: { onmessage: (m: unknown) => void } }];
-  expect(call[0]).toBe('start_embed_job');
-  // The pass covers the whole index: a root id here would be a promise it
-  // cannot keep (embed_job.rs).
-  expect(Object.keys(call[1])).toEqual(['onProgress']);
-  const channel = call[1].onProgress;
-  expect(typeof channel.onmessage).toBe('function');
-
-  channel.onmessage({ event: 'progress', data: PROGRESS_PAYLOAD });
-  channel.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
-
-  expect(seen).toEqual([
-    { event: 'progress', data: PROGRESS_PAYLOAD },
-    { event: 'ended', data: ENDED_PAYLOAD },
-  ]);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'start_scan_job').map((c) => c[1]))
+    .toEqual([{ entry: 'full' }, { entry: 'embedOnly' }]);
+  expect(invoke.mock.calls.at(-1)).toHaveLength(2);
 });
 
-test('startWalkJob sends the root id it was given and forwards the whole event', async () => {
-  invoke.mockResolvedValue(undefined);
-  const seen: unknown[] = [];
+// The whole state crosses, not a boolean. The shape this replaces was
+// `{ running: boolean }`, and a bar fed from a boolean is one that never
+// finishes.
+test('jobStatus asks for the whole scan state with the command name alone', async () => {
+  invoke.mockResolvedValue(SCAN_STATE);
 
-  await ipc.startWalkJob(42, (e) => seen.push(e));
+  const state = await ipc.jobStatus();
 
-  const call = invoke.mock.calls.at(-1) as [string, { rootId: number; onProgress: { onmessage: (m: unknown) => void } }];
-  expect(call[0]).toBe('start_walk_job');
-  expect(call[1].rootId).toBe(42);
-  call[1].onProgress.onmessage({ event: 'ended', data: ENDED_PAYLOAD });
-  expect(seen).toEqual([{ event: 'ended', data: ENDED_PAYLOAD }]);
+  expect(invoke).toHaveBeenCalledWith('job_status');
+  expect(invoke.mock.calls.at(-1)).toHaveLength(1);
+  expect(state).toEqual(SCAN_STATE);
+});
+
+// Both halves of the wrapper: the event NAME it registers on, and the payload
+// it hands the caller. A listener on another name hears nothing, and one that
+// passed the envelope on would give every consumer a state with no revision.
+// The unlisten function comes back untouched, because a caller that cannot
+// unsubscribe leaves a listener on the window for the life of the process.
+test('listenScanProgress subscribes to scan-progress and unwraps the payload', async () => {
+  const stop = vi.fn();
+  listen.mockResolvedValue(stop);
+  const seen: ipc.ScanState[] = [];
+
+  const unlisten = await ipc.listenScanProgress((s) => seen.push(s));
+
+  expect(listen.mock.calls.at(-1)?.[0]).toBe('scan-progress');
+  (listen.mock.calls.at(-1)?.[1] as (e: { payload: ipc.ScanState }) => void)({ payload: SCAN_STATE });
+  expect(seen).toEqual([SCAN_STATE]);
+  expect(unlisten).toBe(stop);
+});
+
+// 🔴 The path travels WITH the id, and both are asserted: `bridge.rs` deletes
+// the row only while that id still names that path, so a call that sent the id
+// alone would be the stale-then-act shape the compare exists to close.
+test('removeWatchedFolder sends the path beside the id', async () => {
+  invoke.mockResolvedValue(3);
+
+  await ipc.removeWatchedFolder(9, '/home/a/notes');
+
+  expect(invoke).toHaveBeenCalledWith('remove_watched_folder', { rootId: 9, path: '/home/a/notes' });
 });
 
 // Both directions on the one thing this command must not need: a channel.
@@ -431,7 +479,7 @@ test('the subfolder wire types reject Rust snake_case spellings', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The Indexing section's own fields on `model_settings`' index read arm
+// The Scanning section's own fields on `model_settings`' index read arm
 // (`src-tauri/src/models.rs`, §9.3). The Rust side pins that the wire carries
 // them, against a really walked index, in
 // `the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment`
@@ -446,7 +494,7 @@ test('the index read arm carries the file count, the moment, and the refusal cou
   const read: IndexRead = {
     kind: 'read', embeddingModel: 'emb-1', chatModel: null,
     embeddedChunks: 3, embeddedChunksEverywhere: 3, totalChunks: 4,
-    failedChunks: 1, pendingChunks: 2, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 1, pendingChunks: 2, scanIncomplete: false, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
   };
 
@@ -463,7 +511,7 @@ test('an index that has never finished indexing states that as null, not as an a
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
     searchTextArm: true, searchContentArm: true,
   };
 
@@ -473,17 +521,22 @@ test('an index that has never finished indexing states that as null, not as an a
   expect('lastIndexedAt' in read).toBe(true);
 });
 
-// 🔴 Each of the four omitted on its own, because "the object is missing
+// 🔴 Each of the five omitted on its own, because "the object is missing
 // something" is satisfied by any one of them and would not notice the other
-// three turning optional. Required and not optional for the reason `ipc.ts`
+// four turning optional. Required and not optional for the reason `ipc.ts`
 // gives over the type: the only substitute for a missing count is `0`, and `0`
 // in front of a person reads as a measured claim this build has not made —
 // a fail-quiet field is a number that is silently always wrong.
-test('the four counts are required, so no fixture can leave one to a default', () => {
+//
+// `scanIncomplete` (PR 9b Task 6) is the fifth, and its default is worse than a
+// wrong number: `false` is the statement that the last scan saw the whole
+// archive, which is exactly the claim a person acts on when they decide their
+// index is complete.
+test('the five index facts are required, so no fixture can leave one to a default', () => {
   const rest = {
     kind: 'read' as const, embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    searchTextArm: true, searchContentArm: true,
+    scanIncomplete: false, searchTextArm: true, searchContentArm: true,
   };
 
   // @ts-expect-error `indexedFiles` is required.
@@ -494,16 +547,21 @@ test('the four counts are required, so no fixture can leave one to a default', (
   const noRefusals: IndexRead = { ...rest, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null };
   // @ts-expect-error `pendingChunks` is required.
   const noQueue: IndexRead = { ...rest, failedChunks: 0, indexedFiles: 0, lastIndexedAt: null };
+  const { scanIncomplete: _dropped, ...withoutMarker } = rest;
+  // @ts-expect-error `scanIncomplete` is required.
+  const noMarker: IndexRead = {
+    ...withoutMarker, failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+  };
 
-  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind])
-    .toEqual(['read', 'read', 'read', 'read']);
+  expect([noFiles.kind, noMoment.kind, noRefusals.kind, noQueue.kind, noMarker.kind])
+    .toEqual(['read', 'read', 'read', 'read', 'read']);
 });
 
 test('the index read arm rejects Rust snake_case spellings', () => {
   const read: IndexRead = {
     kind: 'read', embeddingModel: null, chatModel: null,
     embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
+    failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 2, lastIndexedAt: 1_700_000_000,
     searchTextArm: true, searchContentArm: true,
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
     indexed_files: 2,
@@ -600,4 +658,156 @@ test('app prefs reject Rust snake_case spellings', () => {
   };
 
   expect(prefs.hotkey.shortcut).toBe('Alt+Space');
+});
+
+// ---------------------------------------------------------------------------
+// Task 11a (Task 6, deferred). `ScanState`/`ScanReport`/`ReadingOutcome`/
+// `RootOutcome` mirror roughly forty `scan_state.rs` fields between them with
+// no field-level guard until now — `rustStructFields` (`rust-enum.ts`) is the
+// struct-field sibling of `rustEnumVariants` above, extended for exactly this.
+//
+// Each fixture is typed directly as the struct it pins, not built through a
+// helper this file also controls: a field `scan_state.rs` drops, renames or
+// adds compiles cleanly on the TypeScript side regardless (there is no shared
+// compiler), so nothing but a fixture TypeScript itself refuses to compile
+// incomplete or excessive stands between a Rust rename and every caller
+// reading `undefined`. `Object.keys` of that fixture is therefore exactly
+// `keyof` the struct — not a list copied out by hand a second time — compared
+// against the Rust field names read out of `scan_state.rs` and converted
+// through the same `camelCase` rule serde applies.
+//
+// Task 11a fix round 1 (Minor 1). **Two DIFFERENT failures, in two DIFFERENT
+// places, and this file's own `test()`s below only ever produce one of them.**
+// A field renamed on the ipc.ts side alone (the TS type changes, nothing in
+// Rust does) breaks the FIXTURE'S OWN compilation — `SCAN_STATE_FIXTURE:
+// ScanState = {...}` gains a missing-property or excess-property error — and
+// that surfaces as a `tsc`/`svelte-check` diagnostic under `npm run check`,
+// never as a failing `test()` here (`vitest`'s transform does not
+// type-check, so the fixture would still run with whatever shape it has).
+// A field renamed on the RUST side alone is the opposite: it compiles cleanly
+// on both sides (there is no shared compiler), so nothing but the `test()`s
+// below catch it, as a `vitest` assertion failure under `npm test`. The gate
+// in `task-11-dispatch.md` runs both, in that order, for exactly this reason
+// — either alone leaves one of the two directions unguarded.
+//
+// `rustStructFields` also throws, rather than answering silently wrong, on a
+// field-level `#[serde(rename = "…")]` it has no way to express — the same
+// refusal `rustEnumVariants` makes for a variant-level rename, and pinned the
+// same way in `rust-enum.test.ts`.
+// ---------------------------------------------------------------------------
+
+const SCAN_STATE_RS = readFileSync(join(HERE, '../../../src-tauri/src/scan_state.rs'), 'utf8');
+
+const ROOT_OUTCOME_FIXTURE: RootOutcome = {
+  rootPath: '/a', reason: 'completed', complete: true, message: null,
+  done: 0, total: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0,
+  contended: 0, frozen: [],
+};
+
+test('RootOutcome is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(ROOT_OUTCOME_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'RootOutcome').map(camelOfSnake).sort(),
+  );
+});
+
+const READING_OUTCOME_FIXTURE: ReadingOutcome = {
+  reason: 'completed', complete: true, rootsRead: 0, rootCount: 0,
+  done: 0, total: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0,
+  contended: 0, roots: [],
+};
+
+test('ReadingOutcome is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(READING_OUTCOME_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ReadingOutcome').map(camelOfSnake).sort(),
+  );
+});
+
+const SCAN_REPORT_FIXTURE: ScanReport = {
+  embedding: { kind: 'notReached' }, endedIn: 'reading', reason: 'completed',
+  message: null, resume: null,
+};
+
+test('ScanReport is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(SCAN_REPORT_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ScanReport').map(camelOfSnake).sort(),
+  );
+});
+
+const SCAN_STATE_FIXTURE: ScanState = {
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+test('ScanState is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(SCAN_STATE_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ScanState').map(camelOfSnake).sort(),
+  );
+});
+
+// 🔴 Final review, Area C, Minor 2. The four pins above stop exactly where the
+// `rename_all_fields` hazard lives: they cover the plain structs and none of
+// the STRUCT VARIANTS, which is where `rename_all` alone would leave a field in
+// snake_case beside a correctly spelled `kind`. A Rust-side rename there failed
+// `every_snapshot_has_its_wire_shape_pinned` on that side and nothing at all on
+// this one, so the two mirrors were kept in step by whoever happened to edit
+// the Rust pin.
+//
+// `rustVariantFields` also refuses an enum that has stopped declaring
+// `rename_all_fields = "camelCase"` — the check the names alone cannot make,
+// since this side derives camelCase from the Rust spelling either way and would
+// go on agreeing with itself while the wire changed shape.
+//
+// `kind` is dropped from each fixture before comparing: it is serde's own tag,
+// not a field of the variant.
+const withoutKind = (o: object) => Object.keys(o).filter((k) => k !== 'kind').sort();
+
+// The counts every running phase carries. Its own field-for-field pin against
+// `job.rs` lives with the `JobProgress` mirror; here it is only a value of the
+// right shape to put in a variant fixture.
+const PROGRESS_FIXTURE: Counts = {
+  done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null,
+};
+
+test('every struct variant on the wire is exactly what scan_state.rs defines, field for field', () => {
+  const cases: ReadonlyArray<[string, string, object]> = [
+    ['Phase', 'Reading', {
+      kind: 'reading', rootIndex: 0, rootCount: 0, rootPath: '', counts: PROGRESS_FIXTURE,
+    }],
+    ['Phase', 'Embedding', { kind: 'embedding', counts: PROGRESS_FIXTURE }],
+    ['Phase', 'Removing', { kind: 'removing', rootPath: '' }],
+    ['Phase', 'Other', { kind: 'other', job: 'probe' }],
+    ['ScanSnapshot', 'Running', {
+      kind: 'running', phase: { kind: 'embedding', counts: PROGRESS_FIXTURE }, cancellable: true,
+    }],
+    ['ScanSnapshot', 'Ended', { kind: 'ended', report: SCAN_REPORT_FIXTURE }],
+    ['EmbedOutcome', 'Ran', { kind: 'ran', done: 0, total: 0, refused: 0 }],
+    ['SkipWhy', 'StoreUnavailable', { kind: 'storeUnavailable', message: '' }],
+  ];
+  for (const [enumName, variant, fixture] of cases) {
+    expect(withoutKind(fixture)).toEqual(
+      rustVariantFields(SCAN_STATE_RS, enumName, variant).map(camelOfSnake).sort(),
+    );
+  }
+});
+
+// 🔴 Final review, Area D, Important 1. The `scan-progress` name used to be two
+// independent literals — `lib.rs`'s emit and `ipc.ts`'s listen — with nothing
+// comparing them. That is the failure in this file's whole subject that looks
+// least like a defect: rename one side and the application builds, starts,
+// answers `job_status`, and never delivers another live update. The window
+// draws whatever it read at mount and stops, with no error on either side.
+//
+// `lib.rs` and not `scan_state.rs`, because the name has to be pinned where it
+// is EMITTED. A constant declared beside the type and a literal typed at the
+// emit site would leave exactly the gap this closes.
+const LIB_RS = readFileSync(join(HERE, '../../../src-tauri/src/lib.rs'), 'utf8');
+
+test('the scan-progress event name is the one lib.rs actually emits', () => {
+  expect(SCAN_PROGRESS_EVENT).toBe(rustStrConst(LIB_RS, 'SCAN_PROGRESS_EVENT'));
+});
+
+test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {
+  const jobs: readonly OtherJob[] = OTHER_JOBS;
+  expect(jobs.slice().sort()).toEqual(
+    rustEnumVariants(SCAN_STATE_RS, 'OtherJob').map(camelOf).sort(),
+  );
 });

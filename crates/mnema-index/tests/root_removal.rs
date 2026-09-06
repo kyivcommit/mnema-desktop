@@ -228,3 +228,68 @@ fn removing_a_root_takes_its_documents_vectors_too() {
 
     assert!(db.knn(space, &[0.1; 4], 5, None).unwrap().is_empty());
 }
+
+/// What this pins: the two outcomes `Db::delete_watched_root_if_path`
+/// produces on the paths a real caller hits, in that order. A stale path
+/// deletes nothing — `None`, and both the document and the root row still
+/// there to prove it — then the true path deletes exactly like
+/// `delete_watched_root` and answers `Some(n)`.
+///
+/// **What this does NOT pin: that the compare and the delete are one
+/// transaction.** That is a structural property of the function's own body
+/// (`write.rs:923-946`) — one `Transaction`, opened at
+/// `Transaction::new_unchecked(.., Immediate)`, carries the read, the
+/// compare, the delete and the commit, and SQLite's own write lock is what
+/// closes the window a second connection could otherwise write through. No
+/// assertion here can tell that apart from a version that read
+/// `absolute_path` OUTSIDE a transaction, compared, and only opened one
+/// afterwards to delete: that version passes both halves of this test and
+/// the absent-id test below just as well, and the property that says it is
+/// wrong lives one function up, not in this file. Falsified by reading
+/// `write.rs`, not by a test here — `mnema-index`'s own suite has no hook
+/// that can land a second connection's write between two statements, and
+/// none is added for this.
+#[test]
+fn delete_watched_root_if_path_only_deletes_a_matching_path() {
+    let db = fixture_db();
+    let root = db.insert_watched_root("/tmp/one").unwrap();
+    let doc = insert_document_with_chunk(&db, root, "a.txt", "unique marker text");
+
+    let mismatch = db
+        .delete_watched_root_if_path(root, "/tmp/somewhere-else")
+        .unwrap();
+    assert_eq!(mismatch, None, "a stale path must not delete anything");
+    assert!(
+        db.document_exists(&doc).unwrap(),
+        "the document was deleted under a path that did not match"
+    );
+    assert_eq!(
+        db.watched_root_path(root).unwrap().as_deref(),
+        Some("/tmp/one"),
+        "the root row itself was deleted under a path that did not match"
+    );
+
+    let removed = db.delete_watched_root_if_path(root, "/tmp/one").unwrap();
+    assert_eq!(
+        removed,
+        Some(1),
+        "a matching path should delete exactly like delete_watched_root"
+    );
+    assert!(!db.document_exists(&doc).unwrap());
+    assert_eq!(db.watched_root_path(root).unwrap(), None);
+}
+
+/// The third outcome `Ok(None)` folds into the same value as a path mismatch:
+/// an id with no row at all. Both are "nothing was deleted", and the caller
+/// that needs to tell them apart reads `watched_root_path` afterwards — this
+/// crate's own contribution to that split is only that neither case writes
+/// anything, which is what this pins.
+#[test]
+fn delete_watched_root_if_path_answers_none_for_an_id_nobody_holds() {
+    let db = fixture_db();
+    assert_eq!(
+        db.delete_watched_root_if_path(999, "/tmp/anything")
+            .unwrap(),
+        None
+    );
+}

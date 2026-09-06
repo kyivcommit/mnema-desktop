@@ -1,129 +1,59 @@
-// The job the settings window is watching, as a value: what a walk or an
-// embedding pass is doing, what it ended as, and what the window may say about
-// it. DOM-free, the way `launcher/state.ts` is — the sentences are the
-// component's, the states are here.
+// The scan the settings window is watching, as ONE value: what the application
+// is doing, what the last scan came to, and what a person may press next.
+// DOM-free, the way `launcher/state.ts` is — the sentences are the component's,
+// the states are here.
 //
-// **Where this lives is a decision, not an accident.** The channel a job
-// reports on belongs to the page that started it (`bridge.rs`), so a controller
-// created inside a section is destroyed the moment somebody clicks another one
-// — taking the counters AND the Cancel button with it. `cancel_job` needs no
-// channel at all, so that Cancel would be lost for nothing. `Settings.svelte`
-// creates exactly one of these, above every section, and hands it down.
+// 🔴 **A snapshot, not a stream of edges.** Until this commit the controller
+// rebuilt the state from channel events it may never have heard, and everything
+// that wanted to draw the scan had a different answer: a window reopened
+// mid-job, a section mounted half-way through, and a job that had never run
+// were indistinguishable. `scan_state.rs` moved that state into the core; this
+// file now does two things only — it keeps the newest `ScanState` it has been
+// shown, and it asks the backend to start or stop a scan.
+//
+// **Where this lives is still a decision, not an accident.** `Settings.svelte`
+// creates exactly one of these, above every section, and hands it down: a
+// controller created inside a section is destroyed when that section is,
+// taking the subscription and the Stop button with it. Three of the four
+// sections are destroyed by the next nav click; the fourth, the folders panel,
+// is kept mounted and hidden by F10 (Task 10e), and that is the window's
+// decision about one section rather than a property this controller may lean
+// on — which is why it is created above all four and not inside the one that
+// happens to survive today.
 import { get, writable, type Readable } from 'svelte/store';
 import {
-  cancelJob, jobStatus, modelSettings, startEmbedJob, startWalkJob,
-  type Frozen, type JobEnded, type JobEvent,
+  cancelJob, jobStatus, listenScanProgress, startScanJob,
+  type Counts, type Entry, type IndexRead, type ScanState,
 } from '../lib/ipc';
 
-/// Which pass reported. The two are not interchangeable on screen: a walk reads
-/// ONE folder, an embedding pass covers the whole index and takes no root
-/// (`embed_job.rs`), so a sentence written for one lies about the other.
-export type JobPass = 'walk' | 'embed';
-
-/// What a job ended as — eight, not seven, and the extra one is the whole point
-/// of reading `Ended.complete`.
+/// The state a window holds before anything has told it otherwise, and the
+/// exact shape `ScanState::default()` serialises to: idle, nothing counted,
+/// nothing read.
 ///
-/// The four after `failed` are carried across by name because they are not
-/// malfunctions: `job.rs` says reporting them as `failed` tells a person
-/// something broke when instead a folder is unreadable, an exclusion rule did
-/// not take, or a volume may have gone missing.
-export type JobOutcome =
-  | { kind: 'completed' }
-  /// `reason: completed` with `complete: false`: phase 2 finished everything
-  /// phase 1 could hand it, but phase 1 never saw the whole tree — so whatever
-  /// the person deleted under the unreadable part is STILL searchable
-  /// (`job.rs`). "Done" is the one word this must not be.
-  | { kind: 'partlyRead' }
-  | { kind: 'cancelled' }
-  /// A panic, a broken pool, a worker binary that would not start. `message` is
-  /// the text that tells those apart; `null` is a shape the wire permits
-  /// (`Option<String>`) and the screen has to survive.
-  | { kind: 'failed'; message: string | null }
-  | { kind: 'brokenWorker' }
-  | { kind: 'rulesNotApplied' }
-  | { kind: 'rootUnavailable' }
-  | { kind: 'volumeMissing' };
-
-export type OutcomeKind = JobOutcome['kind'];
-
-/// Every outcome, for the tables that must cover all of them. A closed set,
-/// unlike an API surface: it is exactly the seven wire reasons plus the split
-/// `complete` makes in one of them.
-export const OUTCOME_KINDS = [
-  'completed', 'partlyRead', 'cancelled', 'failed',
-  'brokenWorker', 'rulesNotApplied', 'rootUnavailable', 'volumeMissing',
-] as const satisfies readonly OutcomeKind[];
-
-/// No wildcard arm: a variant added to `EndReason` fails to type-check here,
-/// which is what `job.rs`'s own pinning test asks the window side to do.
+/// `revision: 0` is the DEFAULT state's own revision, and not a floor that
+/// anything can equal: `apply` needs strictly greater, so a state arriving at
+/// revision 0 is dropped as stale. That is safe because of a fact about the
+/// core rather than about this line — every write to `ScanState` bumps the
+/// revision before announcing (`state.rs`) — so no state but the default one
+/// can ever carry 0. A core that announced at 0 would be invisible here.
 ///
-/// `complete` splits `completed` and NOTHING else. `Ended::failed` sets
-/// `complete: false` on every failure — it has no `WalkReport` to read it from
-/// — so a reducer keying the partly-read state off that field alone would
-/// report a broken pass as a half-read folder.
-export function outcomeOf(ended: JobEnded): JobOutcome {
-  switch (ended.reason) {
-    case 'completed': return ended.complete ? { kind: 'completed' } : { kind: 'partlyRead' };
-    case 'cancelled': return { kind: 'cancelled' };
-    case 'failed': return { kind: 'failed', message: ended.message };
-    case 'brokenWorker': return { kind: 'brokenWorker' };
-    case 'rulesNotApplied': return { kind: 'rulesNotApplied' };
-    case 'rootUnavailable': return { kind: 'rootUnavailable' };
-    case 'volumeMissing': return { kind: 'volumeMissing' };
-  }
-}
-
-/// An ending with the counts kept apart the way the wire keeps them: `indexed`
-/// and `unchanged` are not one number (a run that wrote a hundred documents and
-/// a run that found a hundred already there are not the same run), and `frozen`
-/// is here because `removed == 0` alone cannot say whether anything was
-/// silently left untouched (`job.rs`).
-export type Ending = {
-  outcome: JobOutcome;
-  done: number; total: number; skipped: number; refused: number;
-  indexed: number; unchanged: number; removed: number;
-  frozen: Frozen[];
-};
-
-export function endingOf(ended: JobEnded): Ending {
-  return {
-    outcome: outcomeOf(ended),
-    done: ended.done, total: ended.total, skipped: ended.skipped, refused: ended.refused,
-    indexed: ended.indexed, unchanged: ended.unchanged, removed: ended.removed,
-    frozen: ended.frozen,
-  };
-}
-
-/// Whether a walk that ended this way is worth embedding.
-///
-/// `partlyRead` chains: the part that WAS read is real work, and refusing to
-/// embed it because a subfolder could not be opened would leave the person with
-/// documents in the index that content search cannot answer for. The partly-read
-/// sentence stays on screen alongside — the chaining decision does not soften
-/// what the walk reported.
-export function chainsEmbedPass(kind: OutcomeKind): boolean {
-  return kind === 'completed' || kind === 'partlyRead';
-}
-
-export type Counts = {
-  done: number; total: number; skipped: number; refused: number;
-  /// Files whose every retry found the index locked by another writer
-  /// (`job::Progress::contended`). It is NOT a second count of different
-  /// files: the same file is journalled as a skip immediately afterwards, so
-  /// `contended <= skipped` and a surface drawing both explains one with the
-  /// other rather than adding them.
-  contended: number;
-  /// `Option<u64>` on the Rust side, so `null` for the whole of an ordinary
-  /// run's beginning: "not known yet" is a real state and must not render as 0.
-  secondsLeft: number | null;
+/// Not exported: a test asserting against this very constant would agree with
+/// the code by construction. `jobs.test.ts` writes the same shape itself.
+const NO_SCAN: ScanState = {
+  revision: 0,
+  files: 0,
+  readSeq: 0,
+  jobsDone: 0,
+  lastReading: null,
+  snapshot: { kind: 'idle' },
 };
 
 /// What can honestly be said about how far along a run is.
 ///
-/// `total: 0` is not an edge case: a walk reports it before phase 1 has counted
-/// anything, and a root that could not be entered reports zero of zero for good
-/// (`walk_job.rs`). "0 of 0" reads as "nothing to do" while a run is under way,
-/// and any expression dividing by it is worse. Nothing here divides.
+/// `total: 0` is not an edge case: a reading pass reports it before phase 1 has
+/// counted anything, and a root that could not be entered reports zero of zero
+/// for good (`walk_job.rs`). "0 of 0" reads as "nothing to do" while a run is
+/// under way, and any expression dividing by it is worse. Nothing here divides.
 export type ProgressShape =
   | { kind: 'countingUp'; done: number }
   | { kind: 'ratio'; done: number; total: number };
@@ -133,229 +63,254 @@ export function progressShape(counts: Counts): ProgressShape {
   return { kind: 'ratio', done: counts.done, total: counts.total };
 }
 
-export type JobPhase =
-  | { kind: 'idle' }
-  /// `job_status` said a job is running and this window has no channel for it —
-  /// the settings window was reopened mid-run, or another section took the slot
-  /// (`set_embedding_model` holds it without ever sending an ending). There are
-  /// no counts to draw and none will arrive, so this is deliberately NOT a
-  /// progress line: a bar fed from a boolean is one that never finishes.
-  /// Cancel is still offered, because `cancel_job` needs no channel.
-  | { kind: 'runningUnobserved' }
-  | { kind: 'starting'; pass: JobPass }
-  | { kind: 'running'; pass: JobPass; counts: Counts }
-  | { kind: 'ended'; pass: JobPass; ending: Ending };
-
-/// Something the window has to say beside the phase. `noKey`/`noModel` are the
-/// window's own pre-check, read from `model_settings`: the walk still ran
-/// — text search needs neither — and the section says in words which one is
-/// absent. `rejected` carries a backend sentence VERBATIM: a rejection crosses
-/// the IPC as text (`error.rs`), so nothing here branches on a kind or matches
-/// on the words.
-export type JobNote =
-  | { kind: 'noKey' }
-  | { kind: 'noModel' }
-  | { kind: 'rejected'; sentence: string };
-
-/// `walk` is held apart from `phase` on purpose: when a read folder chains the
-/// embedding pass, the phase moves on to that pass while the walk's own ending
-/// — including a partly-read one — must stay on screen.
-export type JobState = { phase: JobPhase; walk: Ending | null; note: JobNote | null };
+/// The scan as this window holds it, plus whatever the last command said back.
+///
+/// `note` is a backend sentence VERBATIM: a rejection crosses the IPC as text
+/// (`error.rs`), so nothing here branches on a kind or matches on the words. It
+/// is deliberately not part of `ScanState` — the core has no opinion about a
+/// command this window sent and had refused.
+export type JobState = { scan: ScanState; note: string | null };
 
 export type JobController = {
   state: Readable<JobState>;
-  /// Runs the walk for ONE watched root, then chains the embedding pass if the
-  /// folder was read and both preconditions hold.
-  scan(rootId: number): Promise<void>;
-  /// Runs the embedding pass on its own, with the same two preconditions the
-  /// chained one checks. This is the recovery act the Models section offers
-  /// when the active space is empty — it goes through the controller so the
-  /// pass reports to the window's own strip rather than to a listener inside a
-  /// section, which the next click destroys.
-  embed(): Promise<void>;
+  /// Starts one scan from one of its two entry points. `full` reads every
+  /// watched folder and then embeds; `embedOnly` is the resumption for a scan
+  /// whose reading pass already finished (`scan_state::Entry`).
+  scan(entry: Entry): Promise<void>;
   cancel(): Promise<void>;
-  /// Asks the backend whether a job is running. Only ever writes over `idle` or
-  /// `runningUnobserved` — see the guard's own comment.
-  syncFromStatus(): Promise<void>;
+  /// Opens the subscription and takes the first snapshot. Synchronous, and the
+  /// `destroy` it returns is synchronous too, because Svelte's `onMount` will
+  /// take either but only calls a returned function — an `async` mount returns
+  /// a promise, which Svelte would keep and never call.
+  mount(): () => void;
 };
+
+/// Which of two states is the newer one, and NOTHING else. Pure, so the rule
+/// can be tested without a controller at all.
+///
+/// 🔴 An equal revision returns `current` **by identity**, which is what lets a
+/// caller recognise "nothing newer arrived" with `===` — the observer can
+/// announce the same revision twice, because two announcements race and either
+/// may arrive first (`state::JobObserver`). Identity is the SIGNAL and not the
+/// remedy: what actually spares the subscribers is `absorb` below, which does
+/// not write the store at all when this returns what it was given.
+///
+/// Compared by revision and never field by field: two reads equal in every
+/// field are not evidence that nothing happened in between, which is the whole
+/// reason `ScanState::revision` exists.
+export function apply(current: ScanState, incoming: ScanState): ScanState {
+  return incoming.revision > current.revision ? incoming : current;
+}
+
+/// What a person may press to carry on, and WHERE the offer belongs.
+///
+/// `where` is not decoration. The strip is the window's status line and speaks
+/// about the job that just ended; the section speaks about the state the index
+/// is in. A state that is both — a cancelled scan whose report names its
+/// resumption, over an index still carrying the marker — owes ONE offer, and
+/// this function is the single place that decides which.
+export type ContinueAction = { entry: Entry; where: 'strip' | 'section'; label: 'resume' | 'retry' };
+
+/// D-m's table, pure, in one place so that the strip and the section cannot
+/// each answer it and disagree.
+///
+/// The order of the arms is the decision:
+///
+/// - A running scan offers nothing. The index's markers are still set while a
+///   scan is under way — they are cleared by the pass that finishes, not by the
+///   one that starts — so a table reading them first would offer a second scan
+///   over the one already going.
+/// - A report that NAMES its resumption wins over the markers. It is the
+///   narrower fact: `scan_job::resume_for` decided it from the phase the scan
+///   actually ended in, and the marker only says something is owed.
+/// - `scanIncomplete` outranks the queue. `embedOnly` over a half-read archive
+///   would embed what is there and leave the unread half invisible while the
+///   window said the work was done.
+///
+/// `label` follows the reason and not the entry point: a person who pressed
+/// Stop is resuming, a person whose scan failed is retrying, and one word for
+/// both makes a failure read as their own doing.
+export function continueAction(state: ScanState, read: IndexRead | null): ContinueAction | null {
+  const snapshot = state.snapshot;
+  if (snapshot.kind === 'running') return null;
+  if (snapshot.kind === 'ended' && snapshot.report.resume !== null) {
+    return {
+      entry: snapshot.report.resume,
+      where: 'strip',
+      label: snapshot.report.reason === 'cancelled' ? 'resume' : 'retry',
+    };
+  }
+  if (read === null) return null;
+  if (read.scanIncomplete) return { entry: 'full', where: 'section', label: 'resume' };
+  if (read.pendingChunks > 0) return { entry: 'embedOnly', where: 'section', label: 'resume' };
+  return null;
+}
 
 const sentenceOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/// A phase this window wrote in anticipation of a pass that then never
-/// started, taken back off. `scan`'s catch makes the same move for the same
-/// reason: a strip left saying something is starting, when nothing is, offers a
-/// Cancel for a job that does not exist.
-///
-/// Only `starting` is touched. In the CHAINED case the phase at this point is
-/// the walk's own ending, and that report must stay on screen — the walk really
-/// did run, whatever the pass after it did.
-const notStarted = (phase: JobPhase): JobPhase => (phase.kind === 'starting' ? { kind: 'idle' } : phase);
-
 export function createJobController(): JobController {
-  const store = writable<JobState>({ phase: { kind: 'idle' }, walk: null, note: null });
+  const store = writable<JobState>({ scan: NO_SCAN, note: null });
 
-  // Which operation the window is on. **A continuation that resumes after an
-  // `await` is not entitled to assume it is still the current one.** `chain()`
-  // waits on `model_settings`, and a second scan can start and take the job
-  // slot inside that wait: the stale continuation then writes
-  // `starting`/`embed` over the live walk, is refused with "a job is already
-  // running", and its own catch resets the store to `idle` — so the running
-  // walk disappears from the strip along with its Stop, and stays gone until
-  // some other event happens to arrive.
+  // 🔴 The store is not written AT ALL when nothing is newer, and returning the
+  // same object from `update` is not the same thing: Svelte's `safe_not_equal`
+  // treats every object as changed, so a store handed back its own value still
+  // wakes every subscriber. The read and the write are one step — there is no
+  // `await` between them and nothing else on this thread to interleave.
   //
-  // Nothing in the store can tell the two apart: both continuations write the
-  // same shapes for the same reasons. The number is the only thing that says
-  // WHICH operation is speaking.
+  // 🔴 **`fromEvent` decides whether the standing sentence dies with this
+  // state, and the two callers are not interchangeable.** `note` is written by
+  // every rejection and used to be cleared in exactly one place — the top of
+  // `scan()` — so a refused Stop sat on the strip beneath a live
+  // `indexing_reading_root` line until the person pressed Scan, and a refused first `jobStatus`
+  // sat there for the life of the window while every state after it arrived
+  // correctly. `Settings.svelte` states the opposite rule for its own banner in
+  // this same window, and paid a fix round for it: a successful read takes the
+  // failure sentence away, because a sentence that outlives the state it
+  // describes is this project's own dominant late-PR class.
   //
-  // It guards the continuation and NOT `onEvent`. That asymmetry is the
-  // measured half: a second scan attempted while the first is still running is
-  // REFUSED, so the first job keeps running and keeps reporting — and a guard
-  // on its events would take the live pass off the screen, which is the very
-  // failure this is here to prevent, arriving through the ordinary path
-  // instead of the racing one.
-  let operation = 0;
+  // It cannot simply be cleared on every applied state. `scan()`'s error path
+  // says its sentence and then re-reads `job_status` for itself, and that
+  // re-read applies a newer state immediately — so a blanket clear would delete
+  // the sentence about the press before anybody could read it, which is what
+  // `a re-read refused after a refused scan keeps the sentence about the press`
+  // exists to protect. The distinction is whose statement the state is: an
+  // EVENT is the core speaking about the world, and it postdates whatever was
+  // refused; a re-read is this window answering its own question.
+  //
+  // Cleared only when the state is actually taken, so «nothing newer arrived»
+  // stays one fact rather than two: an event carrying a revision this window
+  // has already seen says nothing new and takes nothing away.
+  const absorb = (incoming: ScanState, fromEvent = false) => {
+    const current = get(store);
+    const scan = apply(current.scan, incoming);
+    if (scan === current.scan) return;
+    store.set({ ...current, scan, note: fromEvent ? null : current.note });
+  };
 
-  function onEvent(pass: JobPass, event: JobEvent, gen: number) {
-    if (event.event === 'progress') {
-      store.update((s) => ({ ...s, phase: { kind: 'running', pass, counts: event.data } }));
-      return;
-    }
-    const ending = endingOf(event.data);
-    store.update((s) => ({
-      ...s,
-      phase: { kind: 'ended', pass, ending },
-      walk: pass === 'walk' ? ending : s.walk,
-    }));
-    if (pass === 'walk' && chainsEmbedPass(ending.outcome.kind)) void chain(gen);
+  const say = (e: unknown) => store.update((s) => ({ ...s, note: sentenceOf(e) }));
+
+  function mount(): () => void {
+    // Everything below is guarded by this rather than by unsubscribing: the
+    // subscription and the snapshot are both in flight when `destroy` can first
+    // be called, and neither can be recalled once asked for.
+    let destroyed = false;
+    let unlisten: (() => void) | null = null;
+
+    const destroy = () => {
+      destroyed = true;
+      const fn = unlisten;
+      unlisten = null;
+      if (fn !== null) fn();
+    };
+
+    // `async` so that a wrapper which throws SYNCHRONOUSLY — one that is
+    // `undefined`, or that answers with something that is not a promise — comes
+    // back as a rejection this `catch` can turn into a sentence. Called bare,
+    // that throw would escape `mount`, and `mount` is what `onMount` calls: the
+    // whole window would fail to render over a boundary that only failed to
+    // answer.
+    const readSnapshot = () => {
+      void (async () => {
+        const state = await jobStatus();
+        if (!destroyed) absorb(state);
+      })().catch((e) => { if (!destroyed) say(e); });
+    };
+
+    // 🔴 **Three things reach this controller, and each covers what the one
+    // before it cannot.**
+    //
+    // The FIRST read, started here and waiting on nothing, is the fast paint: a
+    // window opened mid-scan draws the run without waiting for a dynamic import
+    // to resolve. It is started independently of the subscription because
+    // `listenScanProgress` awaits that import, and a promise that never settles
+    // is neither a rejection nor a resolution — chained behind it, this read
+    // would never happen at all, and the window would say nothing whatever
+    // about a scan that is running, with no timeout and nothing else that asks.
+    //
+    // The SECOND read, inside the `.then` below, closes the gap that
+    // independence opens — and the gap is real. `apply` sorts two states that
+    // both ARRIVE; `scan-progress` is a fire-and-forget `handle.emit`
+    // (`lib.rs`) with no replay and no retained last value, so an emission
+    // landing between the first read and the moment the listener finishes
+    // registering is delivered to nobody and is in no reply either. During a run
+    // the next progress tick corrects that. The LAST emission of a job does not:
+    // a window opened just as a scan ends would keep a running strip with a Stop
+    // that `cancel_job` will refuse, and the sections would never take their
+    // ending re-read. The duplicate costs nothing — the second answer is either
+    // newer, or the same revision and dropped by `apply` on identity.
+    //
+    // The EVENTS cover everything after that.
+    //
+    // This is where the controller parts company with `bootLocale`
+    // (`i18n/index.ts`), which registers before it asks and asks once: a locale
+    // reply carries no version, so order is the only thing that can say which of
+    // two answers is newer, and deferring that read is free because a window
+    // with no locale yet has not painted. Neither holds here.
+    readSnapshot();
+
+    void listenScanProgress((incoming) => {
+      if (destroyed) return;
+      // `true`: this is the core speaking, and it postdates any rejection still
+      // on screen. See `absorb`.
+      absorb(incoming, true);
+    })
+      .then((fn) => {
+        // `destroy` may already have run, with nothing to call. The unlisten is
+        // used the moment it arrives instead, so a section switch during boot
+        // does not leave a listener on the window for the life of the process —
+        // and a window that has gone has nothing to re-read for.
+        if (destroyed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        readSnapshot();
+      })
+      // Trailing, so it covers the handler above as well as the subscription
+      // itself. A subscription that could not be registered is a sentence like
+      // any other rejection.
+      .catch((e) => { if (!destroyed) say(e); });
+
+    return destroy;
   }
 
-  // The window checks BOTH preconditions itself and names the one that is
-  // absent, so on the ordinary path neither of the backend's own refusals is
-  // reached. `start_embed_job` rejects on a missing key before it claims the
-  // slot; a missing MODEL it does not check at all, and that refusal arrives as
-  // an ending carrying a sentence. Those two are the second line, for the state
-  // that changed between this read and the call — both still happen, and both
-  // still reach the screen.
-  async function chain(gen: number) {
-    let settings;
+  async function scan(entry: Entry) {
+    // The sentence a previous press earned is about that press. Cleared before
+    // this one is sent, so a refusal left on screen cannot be read as this
+    // scan's own answer.
+    store.update((s) => ({ ...s, note: null }));
     try {
-      settings = await modelSettings();
+      await startScanJob(entry);
     } catch (e) {
-      if (gen !== operation) return;
-      store.update((s) => ({
-        ...s, phase: notStarted(s.phase), note: { kind: 'rejected', sentence: sentenceOf(e) },
-      }));
-      return;
+      say(e);
+      // 🔴 The decision comes from the re-read, never from the sentence. A
+      // rejection is text (`error.rs`), and the commonest reason this command
+      // is refused is that another job holds the slot — that job's state is
+      // exactly what this window must go on drawing, and the event for it may
+      // already have gone by.
+      //
+      // A re-read that is itself refused is swallowed on purpose: the sentence
+      // a person needs is the one about the press they made, and replacing it
+      // with a sentence about a question nobody asked would take the reason the
+      // scan would not start off the screen.
+      try {
+        absorb(await jobStatus());
+      } catch {
+        /* the sentence above stands */
+      }
     }
-    // Checked HERE rather than on the way in: what makes this continuation
-    // stale is time passing inside the await above, so the answer before it is
-    // about the wrong moment. Everything below writes to the store, and a
-    // superseded walk may write none of it — not the note, not the phase.
-    if (gen !== operation) return;
-    if (settings.key.kind !== 'present') {
-      store.update((s) => ({ ...s, phase: notStarted(s.phase), note: { kind: 'noKey' } }));
-      return;
-    }
-    // `typeof === 'string'` rather than a truthiness or null check: a field
-    // renamed away on the wire reads as `undefined`, and the safe side of that
-    // mistake is "no model chosen", never "chosen".
-    if (settings.index.kind !== 'read' || typeof settings.index.embeddingModel !== 'string') {
-      store.update((s) => ({ ...s, phase: notStarted(s.phase), note: { kind: 'noModel' } }));
-      return;
-    }
-    store.update((s) => ({ ...s, phase: { kind: 'starting', pass: 'embed' } }));
-    try {
-      await startEmbedJob((event) => onEvent('embed', event, gen));
-    } catch (e) {
-      // The same guard again, for the second await. The refusal a superseded
-      // continuation collects is "a job is already running" — and the job that
-      // is running is the newer one, whose `starting` state this catch would
-      // otherwise reset to `idle`.
-      if (gen !== operation) return;
-      store.update((s) => ({
-        ...s,
-        phase: s.phase.kind === 'starting' ? { kind: 'idle' } : s.phase,
-        note: { kind: 'rejected', sentence: sentenceOf(e) },
-      }));
-    }
-  }
-
-  async function scan(rootId: number) {
-    const gen = ++operation;
-    store.set({ phase: { kind: 'starting', pass: 'walk' }, walk: null, note: null });
-    try {
-      await startWalkJob(rootId, (event) => onEvent('walk', event, gen));
-    } catch (e) {
-      // Only if nothing has reported yet: a refused command claimed no slot, but
-      // a job that has already sent an event owns the phase.
-      store.update((s) => ({
-        ...s,
-        phase: s.phase.kind === 'starting' ? { kind: 'idle' } : s.phase,
-        note: { kind: 'rejected', sentence: sentenceOf(e) },
-      }));
-      // 🔴 The line above has just destroyed `runningUnobserved`, and the
-      // commonest reason this command is refused is that the very job that
-      // state described still holds the slot. Nothing else ever restores it —
-      // `syncFromStatus` is called once, at mount — so a single press would
-      // otherwise cost a person the Cancel button for the life of the window,
-      // which is the one failure they cannot work around. The re-read writes
-      // only over `idle`/`runningUnobserved`, so it cannot clobber a pass this
-      // window is actually watching.
-      await syncFromStatus();
-    }
-  }
-
-  // The recovery pass, asked for by a person rather than chained off a walk.
-  // Two things differ from the chained call and both follow from that.
-  //
-  // It clears what came before. A walk's report and its note are about the act
-  // that produced them; left standing beside a pass somebody has just asked for
-  // by hand, they read as this pass's own report. The chained call must NOT do
-  // this — there the walk's ending is exactly what has to stay.
-  //
-  // And it writes `starting` before the awaits, so the press has a visible
-  // answer while the two preconditions are being read — the same opening
-  // `scan` makes, and `notStarted` above is what takes it back off if the
-  // pass turns out not to start.
-  async function embed() {
-    const gen = ++operation;
-    store.set({ phase: { kind: 'starting', pass: 'embed' }, walk: null, note: null });
-    await chain(gen);
   }
 
   async function cancel() {
     try {
       await cancelJob();
     } catch (e) {
-      store.update((s) => ({ ...s, note: { kind: 'rejected', sentence: sentenceOf(e) } }));
-      return;
+      say(e);
     }
-    // A job this window is watching reports its own stop on the channel, and
-    // that ending carries counts nothing here could invent. A job it cannot
-    // hear will report to nobody, so its state has to be asked for.
-    if (get(store).phase.kind === 'runningUnobserved') await syncFromStatus();
+    // Nothing is written on success: the job reports its own stop through the
+    // observer, and a state invented here would be a claim about a slot this
+    // window has not read.
   }
 
-  async function syncFromStatus() {
-    // Reads only where it cannot destroy something better. A window watching a
-    // pass of its own has live counts and a working Cancel; overwriting those
-    // with a boolean — on every remount, which is every section switch — is the
-    // mutation that costs a person the button they cannot work around.
-    const observing = (s: JobState) => s.phase.kind === 'idle' || s.phase.kind === 'runningUnobserved';
-    if (!observing(get(store))) return;
-    let running: boolean;
-    try {
-      running = (await jobStatus()).running;
-    } catch (e) {
-      store.update((s) => ({ ...s, note: { kind: 'rejected', sentence: sentenceOf(e) } }));
-      return;
-    }
-    // Asked again after the await: a scan may have started while it was in
-    // flight, and this answer is then already about the wrong moment.
-    store.update((s) => (observing(s)
-      ? { ...s, phase: running ? { kind: 'runningUnobserved' } : { kind: 'idle' } }
-      : s));
-  }
-
-  return { state: { subscribe: store.subscribe }, scan, embed, cancel, syncFromStatus };
+  return { state: { subscribe: store.subscribe }, scan, cancel, mount };
 }

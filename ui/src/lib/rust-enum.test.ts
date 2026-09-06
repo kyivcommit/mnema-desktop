@@ -1,5 +1,7 @@
 import { expect, test } from 'vitest';
-import { camelOf, rustEnumVariants } from './rust-enum';
+import {
+  camelOf, camelOfSnake, rustEnumVariants, rustStructFields,
+} from './rust-enum';
 
 // The case the reader exists for, and the one it was once wrong about: a
 // variant hidden behind a doc comment that carries a lone `}`. Before comments
@@ -74,4 +76,80 @@ pub enum Sample {
 test('camelOf lowercases the first character and leaves the rest as written', () => {
   expect(camelOf('Open')).toBe('open');
   expect(camelOf('ExcludedByAncestor')).toBe('excludedByAncestor');
+});
+
+// Task 11a. `rustStructFields`'s own version of the same case
+// `rustEnumVariants` is pinned against above: a doc comment carrying a lone
+// `}` must not truncate the field list, and a doc comment carrying NEITHER
+// brace (the ordinary case, and the one every real struct in this codebase
+// takes) must not confuse it either.
+test('the field reader sees a field hidden behind a doc comment carrying a lone brace', () => {
+  const fixture = `
+/// A doc comment with a lone } in it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sample {
+    pub first: String,
+    /// A brace } here truncated the body before comments were stripped first.
+    pub second: u64,
+}
+`;
+  expect(rustStructFields(fixture, 'Sample')).toEqual(['first', 'second']);
+});
+
+// A field typed with a generic carries its own `<>`, and neither its own
+// comma (a two-parameter generic) nor its own bracket may be mistaken for the
+// struct's own — both directions, since either mistake drops or splits a
+// field wrongly.
+test('a generic field type does not confuse the struct\'s own closing brace or its own field separators', () => {
+  const fixture = `
+pub struct Sample {
+    pub plain: String,
+    pub nested: Option<Vec<crate::job::Frozen>>,
+    pub last: bool,
+}
+`;
+  expect(rustStructFields(fixture, 'Sample')).toEqual(['plain', 'nested', 'last']);
+});
+
+// The final field is read with or without a trailing comma, the same pair
+// `rustEnumVariants` is pinned against for a variant.
+test('the final field is read with or without a trailing comma', () => {
+  const withComma = 'pub struct Sample {\n    pub first: u64,\n    pub second: bool,\n}\n';
+  const without = 'pub struct Sample {\n    pub first: u64,\n    pub second: bool\n}\n';
+  expect(rustStructFields(withComma, 'Sample')).toEqual(['first', 'second']);
+  expect(rustStructFields(without, 'Sample')).toEqual(['first', 'second']);
+});
+
+// The reader must not answer about a neighbour, the same guarantee
+// `rustEnumVariants` gives for an enum it cannot find.
+test('a struct it cannot find is a throw, not an answer drawn from a neighbour', () => {
+  const fixture = 'pub struct SampleTwo {\n    pub only: bool,\n}\n';
+  expect(() => rustStructFields(fixture, 'Sample')).toThrow(/struct Sample not found/);
+  expect(rustStructFields(fixture, 'SampleTwo')).toEqual(['only']);
+});
+
+// serde's `RenameRule::CamelCase` applied to a snake_case struct field: every
+// `_x` becomes `X`, the underscore dropped, and a field with no underscore at
+// all is left exactly as written.
+test('camelOfSnake turns snake_case into camelCase and leaves a single word alone', () => {
+  expect(camelOfSnake('root_path')).toBe('rootPath');
+  expect(camelOfSnake('roots_read')).toBe('rootsRead');
+  expect(camelOfSnake('reason')).toBe('reason');
+});
+
+// Task 11a fix round 1 (Minor 1). The field-level twin of the enum reader's
+// own refusal: without this, a `#[serde(rename = "…")]` on a field reaches
+// `camelOfSnake` unnoticed, and the pin compares two lists that both look
+// complete while quietly holding the wrong name for one of them — a false
+// GREEN this throw turns into a loud failure instead.
+test('a field-level serde rename is refused, the way a variant-level one is', () => {
+  const renamed = `
+pub struct Sample {
+    pub first: String,
+    #[serde(rename = "second_thing")]
+    pub second: bool,
+}
+`;
+  expect(() => rustStructFields(renamed, 'Sample')).toThrow(/explicit #\[serde\(rename/);
 });

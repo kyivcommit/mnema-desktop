@@ -1,4 +1,5 @@
-# The §9.3 Indexing SECTION's own guards — `ui/src/settings/Indexing.svelte`,
+# The §9.3 Scanning SECTION's own guards (called Indexing before Task 8) —
+# `ui/src/settings/Scanning.svelte`,
 # the file that says what the index holds — and, from Task 7, the §9.4
 # Application section's own: `ui/src/settings/Application.svelte` and
 # `ui/src/i18n/shortcut.ts`. From Task 11b, `ui/src/i18n/recency.ts` too — the
@@ -68,7 +69,7 @@
 # instead, which renders and is judged.
 #
 # ⚠️ **Read the discriminant case's title narrowly: it covers ONE of the two
-# arms** (review, Minor 6). `Indexing.svelte:105` — `const read` — has no case
+# arms** (review, Minor 6). `Scanning.svelte`'s own `const read` line has no case
 # here, and cannot have one for the same measured reason: pointing it at the
 # `unreadable` arm is the crashing mutant described above. That line is defended
 # by the `notOpen` test all the same (its `queryByTestId(...).toBeNull()`
@@ -82,10 +83,10 @@
 # exists to replace ("секція показує «не вдалося прочитати індекс», а не
 # порожні числа").
 case_ "the Unreadable arm must be told from the Read arm by kind, before anything is read" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Scanning.svelte \
   "s~  const unreadable = \\\$derived\(index !== null && index\.kind === 'unreadable' \? index : null\);~  const unreadable = \\\$derived(index !== null \&\& index.kind === 'read' ? index : null); // mutant: the arms are not told apart~" \
   "const unreadable = \$derived(index !== null && index.kind === 'read' ? index : null); // mutant: the arms are not told apart" \
-  src/settings/Indexing.test.ts 'an index that is not open says so, and shows the backend reason verbatim' runner=vitest
+  src/settings/Scanning.test.ts 'an index that is not open says so, and shows the backend reason verbatim' runner=vitest
 
 # 🔴 `lastIndexedAt: null` is the backend's own statement that nothing has ever
 # finished indexing (`MAX(ingest_stage.updated_at)` over an empty set), and the
@@ -95,10 +96,10 @@ case_ "the Unreadable arm must be told from the Read arm by kind, before anythin
 # what the index actually holds. Only a fixture in the empty state can tell the
 # two apart; every filled-index assertion passes under this mutant.
 case_ "an index nothing has ever finished indexing must not be given the epoch as its date" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Scanning.svelte \
   "s~  const lastIndexedAt = \\\$derived\(read === null \? null : read\.lastIndexedAt\);~  const lastIndexedAt = \\\$derived(read === null ? null : (read.lastIndexedAt ?? 0)); // mutant: null becomes the epoch~" \
   "const lastIndexedAt = \$derived(read === null ? null : (read.lastIndexedAt ?? 0)); // mutant: null becomes the epoch" \
-  src/settings/Indexing.test.ts 'an index nothing has ever finished indexing says so, and draws no time at all' runner=vitest
+  src/settings/Scanning.test.ts 'an index nothing has ever finished indexing says so, and draws no time at all' runner=vitest
 
 # D-e: the date is not a duplicate of the phrase. «годину тому» is what a person
 # feels; the date is what they compare against the file they edited this
@@ -107,11 +108,11 @@ case_ "an index nothing has ever finished indexing must not be given the epoch a
 # stopped answering the question the spec asked. The relative phrase survives
 # this mutant, which is why an assertion on it cannot see the loss.
 case_ "the date must be drawn beside the relative phrase, not replaced by it" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Scanning.svelte \
   's~\{#if dateLine\}<p data-testid="indexing-index-date">\{dateLine\}</p>\{/if\}\n~~' \
   '{#if filesLine}<p data-testid="indexing-index-files">{filesLine}</p>{/if}
 {#if agoLine}<p data-testid="indexing-index-ago">{agoLine}</p>{/if}' \
-  src/settings/Indexing.test.ts 'a filled index says how many files it holds, the date it last grew, and how long ago that was' runner=vitest
+  src/settings/Scanning.test.ts 'a filled index says how many files it holds, the date it last grew, and how long ago that was' runner=vitest
 
 # 🔴 The PR 7 debt, and the mutant that makes it invisible again.
 # `IndexRead::failed_chunks` is cumulative for the SPACE; `job::Progress::refused`
@@ -120,22 +121,45 @@ case_ "the date must be drawn beside the relative phrase, not replaced by it" \
 # for both draws two numbers under one subject — and every state with only ONE
 # of the two on screen passes under this mutant, which is exactly why the suite
 # needs the state that has both.
+# Rewritten at Task 11b: the section no longer holds its own `phase`, it reads
+# the snapshot from the controller and takes the refusals off the ENDING's
+# embedding outcome. Same key, same two subjects, same test.
 case_ "the run's refusals and the index's must not be drawn from one key" \
-  ui/src/settings/Indexing.svelte \
-  "s~    return t\('indexing_index_refused_run', \{ count: phase\.ending\.refused \}\);~    return t('indexing_index_failed_chunks', { count: phase.ending.refused }); // mutant: one subject for two scopes~" \
-  "return t('indexing_index_failed_chunks', { count: phase.ending.refused }); // mutant: one subject for two scopes" \
-  src/settings/Indexing.test.ts 'a run that gave up on chunks and an index that already had some show two sentences, each about its own subject' runner=vitest
+  ui/src/settings/Scanning.svelte \
+  "s~    return t\('indexing_index_refused_run', \{ count: embedding\.refused \}\);~    return t('indexing_index_failed_chunks', { count: embedding.refused }); // mutant: one subject for two scopes~" \
+  "return t('indexing_index_failed_chunks', { count: embedding.refused }); // mutant: one subject for two scopes" \
+  src/settings/Scanning.test.ts 'a run that gave up on chunks and an index that already had some show two sentences, each about its own subject' runner=vitest
 
 # An ENDING is the one moment the numbers on this screen can have changed. A
 # subscriber that re-fetches on every store emission answers every "does an
 # ending re-read the index" test correctly and issues an IPC call per progress
 # report for the whole of a long pass. The mirror — a progress event and a call
 # count that does not move — is the only thing that tells the two apart.
+# Rewritten at Task 11b. Task 8 made `Settings.svelte` the window's SINGLE
+# reader of `model_settings` and this section a prop of it, so the subscription
+# that decides when to re-read is up there now — and it has grown two triggers
+# beside the ending (`readSeq` growth, and `scan.files` moving, F1/F9). The
+# property is the one it always was: something has to have CHANGED, and a
+# subscriber that re-fetches on every emission issues an IPC call per progress
+# report for the whole of a long pass while answering every "does an ending
+# re-read" assertion correctly. The mirror is still the only thing that can see
+# it, and it is the running tick that moves nothing.
+# ⚠️ Re-quoted a second time in final fix round 2, and the reason is worth
+# recording: the round that MOVED this condition (area C's fourth trigger, any
+# transition out of `running`) gated on `npm test` alone, because nothing it
+# touched was Rust. `mutation-staleness.sh` was not in that gate and did not run
+# until the next commit, so two cases sat stale for one commit. Staleness is
+# cheap and reads every case file regardless of language; it belongs in a UI
+# gate too.
+# ⚠️ And a third time, for the independent review's third finding: the fourth
+# trigger is now `jobsDoneChanged`, a count of endings rather than an edge out
+# of `running`, and the `ended` arm went with it. The mutant is unchanged — the
+# condition removed entirely — and so is the test that kills it.
 case_ "the re-read must follow an ending, not every emission of the job store" \
-  ui/src/settings/Indexing.svelte \
-  "s~      if \(phase\.kind === 'ended'\) void refresh\(\);~      void refresh(); // mutant: every emission re-reads~" \
+  ui/src/settings/Settings.svelte \
+  "s~      if \(readSeqChanged \|\| filesChanged \|\| jobsDoneChanged\) \{\n        void refresh\(\);\n      \}~      void refresh(); // mutant: every emission re-reads~" \
   "      void refresh(); // mutant: every emission re-reads" \
-  src/settings/Indexing.test.ts 'a progress report is not an ending and re-reads nothing' runner=vitest
+  src/settings/Settings.test.ts 'a running tick with an unchanged files count does not re-read' runner=vitest
 
 # 🔴 The decision that the two scope sentences do NOT share a fate. A pass ends,
 # the ending triggers the re-read, and the re-read comes back `Unreadable` — an
@@ -143,58 +167,71 @@ case_ "the re-read must follow an ending, not every emission of the job store" \
 # answer "the index could not be read" and delete, in the same breath, the only
 # surviving report of what the pass just did. The mutant is the tidier-looking
 # guard and the lossy one.
+# Rewritten at Task 11b: same decision, same mutant, on the line the ending
+# check now sits on. The test was renamed with the section.
 case_ "the run's own report must outlive a read of the index that fails" \
-  ui/src/settings/Indexing.svelte \
-  "s~    if \(phase\.kind !== 'ended' \|\| phase\.ending\.refused === 0\) return null;~    if (read === null || phase.kind !== 'ended' || phase.ending.refused === 0) return null; // mutant: the run's report dies with the index~" \
-  "if (read === null || phase.kind !== 'ended' || phase.ending.refused === 0) return null; // mutant: the run's report dies with the index" \
-  src/settings/Indexing.test.ts 'an index that stops being readable still says what the pass that just ended gave up on' runner=vitest
+  ui/src/settings/Scanning.svelte \
+  "s~    if \(snapshot\.kind !== 'ended'\) return null;~    if (read === null || snapshot.kind !== 'ended') return null; // mutant: the run's report dies with the index~" \
+  "if (read === null || snapshot.kind !== 'ended') return null; // mutant: the run's report dies with the index" \
+  src/settings/Scanning.test.ts 'a pass that gave up on chunks says so even when the index cannot be read at all' runner=vitest
 
 # 🔴 Two reads can be in flight here whenever endings arrive faster than the IPC
 # answers, and they may settle in either order. Without the stamp the older
 # reply repaints the screen with numbers taken before the pass that triggered
 # the newer one — and nothing on the screen says so, because both answers are
 # well-formed. Only a fixture that resolves them in reverse can see it.
+# Rewritten at Task 11b: `refresh` and its generation stamp moved up to
+# `Settings.svelte` with the single `model_settings` read (Task 8). The
+# expression, the marker and the fixture shape are unchanged.
 case_ "an older read that settles last must not write over the newer one" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Settings.svelte \
   "s~      if \(seq !== settingsSeq\) return; // a newer read has already spoken\n~~" \
   "      const s = await modelSettings();
       settings = s;" \
-  src/settings/Indexing.test.ts 'an older read that settles last does not repaint over the newer one' runner=vitest
+  src/settings/Settings.test.ts 'an older read that settles last does not repaint over the newer one' runner=vitest
 
 # The same stamp's other half, on the exit nothing else reaches. An older read
 # can REJECT after a newer one has already repainted the screen, and an
 # unstamped catch then puts «не вдалося прочитати стан індексу» over numbers
 # that were read successfully. Only a fixture that rejects the older of two
 # deferred reads can see it — the reversed-order case above resolves both.
+# Rewritten at Task 11b, same move as the case above.
 case_ "an older read that is refused last must not put a failure over the newer numbers" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Settings.svelte \
   "s~      if \(seq !== settingsSeq\) return; // superseded before this rejection arrived\n~~" \
   "    } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);" \
-  src/settings/Indexing.test.ts 'an older read that is refused last does not put a failure over the newer numbers' runner=vitest
+  src/settings/Settings.test.ts 'an older read that is refused last does not overwrite the newer numbers' runner=vitest
 
 # 🔴 A sentence that outlives the state it describes — this project's own
 # dominant late-PR class, in the smallest possible form. One refused re-read
 # would otherwise leave "the state of the index could not be read" standing over
 # numbers a later read confirmed, for the rest of the session. Every test that
 # only ever fails, or only ever succeeds, passes under this mutant.
+# Rewritten at Task 11b, same move as the two cases above. The one test that
+# drove both directions is now two, and this case takes the half that can only
+# be seen by a success FOLLOWING a failure.
 case_ "a read that succeeds must take the failure sentence away with it" \
-  ui/src/settings/Indexing.svelte \
+  ui/src/settings/Settings.svelte \
   "s~      settings = s;\n      loadError = null;~      settings = s; // mutant: the failure sentence outlives the failure~" \
   "      settings = s; // mutant: the failure sentence outlives the failure" \
-  src/settings/Indexing.test.ts 'a re-read that is refused says so beside the numbers it could not confirm, and stops saying it once one succeeds' runner=vitest
+  src/settings/Settings.test.ts 'a live success after a rejection takes the failure banner away and shows the new numbers' runner=vitest
 
-# 🔴 This section sits inside `Settings.svelte`'s `{#if section === …}` chain, so
-# every nav change destroys and rebuilds it. An `onMount` that does not RETURN
-# the unsubscriber leaves a live listener behind on each visit, and one ending
-# then fans out to all of them. It is invisible to every assertion phrased as
-# "at least once": only a counted fixture — three mounts, one ending, one
-# re-read — can see it.
-case_ "the job subscription must die with the component, not outlive it" \
-  ui/src/settings/Indexing.svelte \
-  "s~    return stop;~    void stop; // mutant: the subscription outlives the component~" \
-  "    void stop; // mutant: the subscription outlives the component" \
-  src/settings/Indexing.test.ts 'a section left behind by a nav change stops listening — three mounts, one ending, one re-read' runner=vitest
+# 🔴 Rewritten at Task 11b, and the ARGUMENT changed with the code rather than
+# only the file name. The old sentence was "a nav change destroys this section,
+# so its listener must die with it" — and since F10 (Task 10e) a nav change
+# destroys nothing that holds this subscription: it is the WINDOW's, opened once
+# in `Settings.svelte`'s own `onMount`. What it must not outlive is the window.
+# An `onMount` that does not RETURN the unsubscriber leaves a live listener
+# behind on every settings window a person opens and closes, each one re-reading
+# `model_settings` on every ending for the rest of the process. Only a counted
+# fixture that destroys the window and then delivers one more snapshot can see
+# it, which is what the named test is.
+case_ "the job subscription must die with the window, not outlive it" \
+  ui/src/settings/Settings.svelte \
+  "s~    return stop;~    void stop; // mutant: the subscription outlives the window~" \
+  "    void stop; // mutant: the subscription outlives the window" \
+  src/settings/Settings.jobs-teardown.test.ts "the window's own subscription to jobs.state is torn down on unmount, not just the channel jobs.mount guards separately" runner=vitest
 
 # ---------------------------------------------------------------------------
 # F4 (spec §9.3, amended 2026-09-04): the embedding queue.
@@ -212,21 +249,30 @@ case_ "the job subscription must die with the component, not outlive it" \
 # still end up embedding, sometimes not, and always run a walk nobody asked
 # for. Killed by asserting BOTH sides: `startEmbedJob` called and
 # `startWalkJob` never.
+# Rewritten at Task 11b. There is one `scan(entry)` on the controller now rather
+# than a `scan()` and an `embed()`, so the mutant is the entry point hardcoded to
+# `'full'` — the button that reads «Продовжити вбудовування» and walks every
+# watched folder instead, over an archive whose reading pass already finished.
 case_ "the resume button must start the embedding pass, not a folder scan" \
-  ui/src/settings/Indexing.svelte \
-  "s~    void jobs\.embed\(\);~    void jobs.scan(1); // mutant: resumes by scanning instead of embedding~" \
-  "    void jobs.scan(1); // mutant: resumes by scanning instead of embedding" \
-  src/settings/Indexing.test.ts 'the resume button starts the embedding pass through the controller, never a scan' runner=vitest
+  ui/src/settings/Scanning.svelte \
+  "s~    onclick={\(\) => jobs\.scan\(sectionAction\.entry\)}~    onclick={() => jobs.scan(/* mutant: resumes by scanning instead of embedding */ 'full')}~" \
+  "onclick={() => jobs.scan(/* mutant: resumes by scanning instead of embedding */ 'full')}" \
+  src/settings/Scanning.test.ts 'a waiting queue with no incomplete marker offers to resume embedding, not a full scan' runner=vitest
 
 # `>= 0` is true of an empty queue too, so this is the mutant that draws
 # "0 chunks not embedded yet" beside a button that would resume nothing. Every
 # fixture with a real queue passes under it; only the empty-queue state can
 # tell the two conditions apart.
+# Rewritten at Task 11b: D-m moved the decision into `continueAction`
+# (`jobs.ts`), so the section no longer answers it and this case follows it
+# there. `>= 0` is true of an empty queue too, which is the mutant that draws
+# «Продовжити вбудовування» beside a queue holding nothing; every fixture with a
+# real queue passes under it.
 case_ "the pending line must not draw when the queue is empty" \
-  ui/src/settings/Indexing.svelte \
-  's~    read !== null && read\.pendingChunks > 0~    read !== null \&\& read.pendingChunks >= 0 // mutant: an empty queue still shows~' \
-  'read !== null && read.pendingChunks >= 0 // mutant: an empty queue still shows' \
-  src/settings/Indexing.test.ts 'an empty queue says nothing and offers nothing' runner=vitest
+  ui/src/settings/jobs.ts \
+  "s~  if \(read\.pendingChunks > 0\) return \{ entry: 'embedOnly', where: 'section', label: 'resume' \};~  if (read.pendingChunks >= 0) return { entry: 'embedOnly', where: 'section', label: 'resume' }; // mutant: an empty queue still shows~" \
+  "if (read.pendingChunks >= 0) return { entry: 'embedOnly', where: 'section', label: 'resume' }; // mutant: an empty queue still shows" \
+  src/settings/Scanning.test.ts 'idle with neither marker nor queue shows the scan button alone' runner=vitest
 
 # The phase half of the gate, dropped: the count on screen is a moment-old
 # read that does not shrink as a resumed run works through the queue, so
@@ -234,28 +280,36 @@ case_ "the pending line must not draw when the queue is empty" \
 # progress, both claiming the same chunks. Every idle/ended fixture passes
 # under this mutant; only a fixture that drives the controller into `running`
 # can see the gate is gone.
+# Rewritten at Task 11b, same move into `continueAction` as the case above. The
+# count on screen is a moment-old read that does not shrink as a resumed run
+# works through the queue, so without this the section's offer sits beside the
+# strip's own progress, both claiming the same chunks — and the index's markers
+# are still SET while a scan is under way, because the pass that finishes is
+# what clears them, so a table reading them first would offer a second scan over
+# the one already going.
 case_ "the pending line and its button must step aside while a run is under way" \
-  ui/src/settings/Indexing.svelte \
-  "s~      && \(\\\$jobState\.phase\.kind === 'idle' \|\| \\\$jobState\.phase\.kind === 'ended'\),~      \&\& true, // mutant: shows regardless of the running pass~" \
-  "&& true, // mutant: shows regardless of the running pass" \
-  src/settings/Indexing.test.ts 'a queue is not offered again while a run is already under way' runner=vitest
+  ui/src/settings/jobs.ts \
+  "s~  if \(snapshot\.kind === 'running'\) return null;~  // mutant: shows regardless of the running pass~" \
+  "  // mutant: shows regardless of the running pass" \
+  src/settings/Scanning.test.ts 'a run under way hides the scan button and the continue row both' runner=vitest
 
-# The narrower half of the same gate, dropped on its own (review, Important 1):
-# the whole `|| 'ended'` disjunct, not the phase check as a whole. The mutant
-# above is killed by the RUNNING fixture regardless of whether `ended` was
-# ever reachable, so it says nothing about this arm — a body that never shows
-# the line again once a pass has ended even once would still pass every case
-# before this one. Only a fixture that drives the controller all the way to
-# `ended` and then asserts PRESENCE can tell the two apart.
-case_ "the pending line and its button must survive the phase reaching ended, not only idle" \
-  ui/src/settings/Indexing.svelte \
-  "s~      && \(\\\$jobState\.phase\.kind === 'idle' \|\| \\\$jobState\.phase\.kind === 'ended'\),~      \&\& (\\\$jobState\.phase\.kind === 'idle'), // mutant: the ended arm never shows again~" \
-  "(\$jobState.phase.kind === 'idle'), // mutant: the ended arm never shows again" \
-  src/settings/Indexing.test.ts 'an ended pass with chunks still owed still shows the line and the button' runner=vitest
+# 🔴 RETIRED at Task 11b — «the pending line and its button must survive the
+# phase reaching ended, not only idle». The `idle || ended` gate it quoted is
+# gone: R2-2 found that an `Ended` snapshot naming no resumption, over an index
+# still carrying a marker, was offered NOTHING by either surface, and D-m
+# replaced the gate with one pure `continueAction` whose only phase condition is
+# that a scan is not RUNNING. So «ended» is no longer an arm to be dropped — it
+# is every state that is not running.
+#
+# The property survives in the wider form and is carried by
+# `scripts/mutations/pr9b-scan.sh`'s «the index's own markers must be offered
+# after an ending too, not only when idle», which puts the `idle` gate back and
+# is killed by 'an ended report naming no resumption still offers to continue
+# when the index marks a walk incomplete' (`Scanning.test.ts`).
 
 # ---------------------------------------------------------------------------
 # F1 (measured live, 2026-09-04): `formatIndexedDate`'s own trailing-stop
-# strip. `ui/src/i18n/recency.ts`, not `Indexing.svelte` — the two other files
+# strip. `ui/src/i18n/recency.ts`, not `Scanning.svelte` — the two other files
 # this case file already reaches beyond its own header's list
 # (`ui/src/i18n/shortcut.ts` below) — because the fix is one function used by
 # every locale, and the fixture that tells "uk ends in «р.»" apart from "the

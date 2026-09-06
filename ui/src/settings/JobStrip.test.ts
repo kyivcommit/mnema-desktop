@@ -3,20 +3,37 @@ import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale, type Loc } from '../i18n';
-import { OUTCOME_KINDS, type OutcomeKind } from './jobs';
-import type { JobEnded, JobEvent, JobProgress, ModelSettings } from '../lib/ipc';
+import { END_REASONS } from '../lib/ipc';
+import type {
+  Counts, EndReason, Entry, ModelSettings, ReadingOutcome, RootOutcome, ScanReport, ScanState,
+} from '../lib/ipc';
 
+// Task 7 — the reading outcome from `scan.lastReading` (the per-root rows,
+// the frozen prefixes, the folders-read count, the partly-read sentence that
+// outlives the report beside it), the embedding block from `report.embedding`,
+// the removal sentence, and the continue button from `continueAction`. Task 6
+// left this file holding only the smallest thing drawable from the new
+// `ScanState` snapshot; this is the rest of it.
+//
 // Only Tauri's own modules are faked. The whole settings window renders — the
-// nav, the sections and the indexing strip — because the claim this file makes
-// is about what a person READS on that window, and every previous round of this
-// project that pinned a testid or a count instead shipped a defect a screenshot
-// found in a minute.
+// nav, the sections and the strip — because the claim this file makes is about
+// what a person READS on that window, and every previous round of this project
+// that pinned a testid or a count instead shipped a defect a screenshot found
+// in a minute.
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...a: unknown[]) => invoke(...a),
   Channel: class {
     onmessage: ((message: unknown) => void) | null = null;
   },
+}));
+
+// The window's one subscription to the scan. Faked at the module boundary so
+// `listenScanProgress`'s own event name and its unwrapping of `e.payload` are
+// exercised rather than described.
+const listen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...a: unknown[]) => listen(...a),
 }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
@@ -32,24 +49,139 @@ const ROOTS = {
 
 // 🔴 Annotated `ModelSettings`, and the annotation is the guard rather than
 // documentation. This fixture crosses an UNTYPED mock (`invoke` answers
-// `unknown`), so until PR 9 the compiler never looked at it — and Task 3 made
-// `indexedFiles`, `lastIndexedAt` and `failedChunks` REQUIRED fields of the
-// `read` arm. Without the annotation the §9.3 section, which this window now
-// mounts, read `undefined` where a unix timestamp belongs and every test that
-// stood on the Indexing nav item died with `Invalid time value`. With it, a
-// forgotten field is a `npm run check` error instead.
+// `unknown`), so without it a required field added to the `read` arm reaches
+// the §9.3 section as `undefined` and every test that stands on the Scanning
+// nav item dies somewhere unrelated. Task 7: `Settings.svelte` now reads
+// `model_settings` on ITS OWN mount too (for the strip's `read` prop), so
+// every test in this file crosses this fixture whether or not it ever visits
+// the Scanning section.
 const READY_SETTINGS: ModelSettings = {
   key: { kind: 'present' },
   index: {
     kind: 'read', embeddingModel: 'openai/text-embedding-3-small', chatModel: null,
     embeddedChunks: 12, embeddedChunksEverywhere: 12, totalChunks: 12,
     failedChunks: 0, pendingChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
-    searchTextArm: true, searchContentArm: true,
+    scanIncomplete: false, searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
 };
 
+type IndexReadT = Extract<ModelSettings['index'], { kind: 'read' }>;
+const readSettings = (over: Partial<IndexReadT> = {}): ModelSettings => ({
+  ...READY_SETTINGS,
+  index: { ...(READY_SETTINGS.index as IndexReadT), ...over },
+});
+
 const EMPTY_CATALOGUE = { entries: [], unreadable: 0, unreadableRecords: [] };
+
+// ---------------------------------------------------------------------------
+// The states. Every shape is the one `scan_state.rs` pins as JSON
+// (`every_snapshot_has_its_wire_shape_pinned`), and every one is newer than the
+// last, because the revision is the only thing the controller compares.
+// ---------------------------------------------------------------------------
+let revision = 0;
+// Bumped by `ended` below and by nothing else, the way the core bumps
+// `ScanState::jobs_done`: `JobSlot::finish` and its `Drop` move it and a
+// progress tick does not, so a running fixture leaves it where it was. A
+// module-level counter for the same reason `revision` is one — every state
+// this file emits must carry a number no earlier one carried.
+let jobsDone = 0;
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+const COUNTS: Counts = { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null };
+
+// `rootIndex` is ONE-BASED on the wire (`scan_job.rs`: "3 of 7" is what a
+// person reads), so the default here is 1, never 0 — a fixture that used 0
+// would be asserting against a folder position the backend never sends.
+const reading = (
+  counts: Partial<Counts> = {},
+  cancellable = true,
+  root: Partial<{ rootIndex: number; rootCount: number; rootPath: string }> = {},
+): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'running',
+    cancellable,
+    phase: {
+      kind: 'reading',
+      rootIndex: root.rootIndex ?? 1,
+      rootCount: root.rootCount ?? 2,
+      rootPath: root.rootPath ?? '/home/a/notes',
+      counts: { ...COUNTS, ...counts },
+    },
+  },
+});
+
+const embedding = (counts: Partial<Counts> = {}): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'running',
+    cancellable: true,
+    phase: { kind: 'embedding', counts: { ...COUNTS, ...counts } },
+  },
+});
+
+const removing = (rootPath = '/home/a/papers'): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  snapshot: {
+    kind: 'running',
+    cancellable: false,
+    phase: { kind: 'removing', rootPath },
+  },
+});
+
+const rootOutcome = (over: Partial<RootOutcome> = {}): RootOutcome => ({
+  rootPath: '/home/a/notes', reason: 'completed', complete: true, message: null,
+  done: 5, total: 5, indexed: 5, unchanged: 0, skipped: 0, removed: 0, contended: 0, frozen: [],
+  ...over,
+});
+
+const readingOutcome = (over: Partial<ReadingOutcome> = {}): ReadingOutcome => ({
+  reason: 'completed', complete: true, rootsRead: 1, rootCount: 1,
+  done: 5, total: 5, indexed: 5, unchanged: 0, skipped: 0, removed: 0, contended: 0,
+  roots: [rootOutcome()],
+  ...over,
+});
+
+// A finished job, optionally carrying the reading it left behind. `reading`
+// is a SEPARATE argument rather than folded into `over` — `ScanReport` and
+// `ReadingOutcome` are different fields of `ScanState` with different
+// lifetimes (`ipc.ts`), and a fixture that could only set one through the
+// other would misstate that.
+const ended = (over: Partial<ScanReport> = {}, reading: ReadingOutcome | null = null): ScanState => ({
+  ...IDLE_SCAN,
+  revision: (revision += 1),
+  jobsDone: (jobsDone += 1),
+  lastReading: reading,
+  snapshot: {
+    kind: 'ended',
+    report: {
+      embedding: { kind: 'notReached' }, endedIn: 'reading', reason: 'completed', message: null, resume: null,
+      ...over,
+    },
+  },
+});
+
+// A job whose ENDING IS a reading's own ending: `report.reason` and
+// `scan.lastReading.reason` are the SAME event, kept in step here the way the
+// real core keeps them in step (`ipc.ts`: `lastReading` is written whenever a
+// reading phase ends) — a fixture that set one without the other would be
+// asserting against a shape the backend cannot produce.
+const endedReading = (
+  reason: EndReason,
+  opts: { message?: string | null; resume?: Entry | null; complete?: boolean; roots?: RootOutcome[] } = {},
+): ScanState => {
+  const complete = opts.complete ?? reason === 'completed';
+  return ended(
+    { reason, endedIn: 'reading', message: opts.message ?? null, resume: opts.resume ?? null },
+    readingOutcome({ reason, complete, roots: opts.roots ?? [rootOutcome({ reason, complete })] }),
+  );
+};
 
 type Replies = Record<string, unknown>;
 let replies: Replies = {};
@@ -57,18 +189,18 @@ let replies: Replies = {};
 function reply(extra: Replies = {}) {
   replies = {
     list_tree: ROOTS,
+    // F10 (Task 10e, fix round 1) mounts the folders panel — the list and the
+    // mask editor beside it — for the window's life, so `list_masks` is now
+    // asked in every test in this file. Answered honestly for the reason the
+    // rest of this map is: an unanswered command resolves `undefined` here,
+    // and the editor would draw "no mask has been added yet" from a fixture
+    // that never said so.
+    list_masks: [],
     model_settings: READY_SETTINGS,
     provider_models: EMPTY_CATALOGUE,
-    job_status: { running: false },
-    start_walk_job: undefined,
-    start_embed_job: undefined,
+    job_status: IDLE_SCAN,
+    start_scan_job: undefined,
     cancel_job: undefined,
-    // PR 9 Task 7: `Settings` now mounts `Application` too, which reads
-    // `app_prefs` on mount. Left out of the default replies the wrapper
-    // resolves `undefined`, and every test in this file that ever visits that
-    // panel runs beside a component reading fields off it — `jobStatus`'s own
-    // reason above, once more. Nothing here exercises Application's own
-    // behaviour, that lives in Application.test.ts.
     app_prefs: {
       hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
       autostart: { kind: 'disabled' },
@@ -81,13 +213,24 @@ function reply(extra: Replies = {}) {
   };
 }
 
+let deliver: ((state: ScanState) => void) | null = null;
+const unlisten = vi.fn();
+
 beforeEach(() => {
   invoke.mockReset();
+  listen.mockReset();
+  unlisten.mockReset();
+  deliver = null;
+  revision = 0;
   reply();
   invoke.mockImplementation((cmd: string) => {
     const r = replies[cmd];
     if (r instanceof Error) return Promise.reject(r);
     return Promise.resolve(r);
+  });
+  listen.mockImplementation((_name: string, cb: (e: { payload: ScanState }) => void) => {
+    deliver = (state: ScanState) => cb({ payload: state });
+    return Promise.resolve(unlisten);
   });
   setLocale('uk');
 });
@@ -103,1485 +246,948 @@ const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
 // browser collapses it. Nobody sees the newline between two <span>s.
 const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
-function channelOf(cmd: string): (event: JobEvent) => void {
-  const call = [...invoke.mock.calls].reverse().find((c) => c[0] === cmd);
-  if (!call) throw new Error(`${cmd} was never invoked`);
-  const channel = (call[1] as { onProgress: { onmessage: (e: JobEvent) => void } }).onProgress;
-  return (event) => channel.onmessage(event);
-}
-
-async function openFolders(loc: Loc = 'uk') {
+// The whole window, with its one subscription open.
+async function openWindow(loc: Loc = 'uk') {
   setLocale(loc);
   const rendered = render(Settings);
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
+  await waitFor(() => expect(deliver).not.toBeNull());
   return rendered;
 }
 
-const scanButton = (rootId: number) =>
-  screen.getByTestId(`folder-scan-${rootId}`);
-
-// ---------------------------------------------------------------------------
-// Real endings, printed by a temporary Rust test from `walk_job.rs`'s own
-// `ended_from_report` and `job::Ended::failed` — not written from a document.
-// ---------------------------------------------------------------------------
-const WALK: JobEnded = {
-  reason: 'completed', done: 11, total: 11, skipped: 5, complete: true, frozen: [],
-  indexed: 5, unchanged: 1, refused: 0, removed: 4, message: null,
-};
-const FROZEN = [
-  { prefix: 'notes/archive', reason: 'unreadableDirectory' },
-  { prefix: 'notes/link', reason: 'symlinkedSubtree' },
-  { prefix: 'notes/void', reason: 'emptyDirectory' },
-] as const;
-
-const endedEvent = (over: Partial<JobEnded> = {}): JobEvent =>
-  ({ event: 'ended', data: { ...WALK, ...over } });
-const progressEvent = (over: Partial<JobProgress> = {}): JobEvent =>
-  ({ event: 'progress', data: { done: 3, total: 8, skipped: 1, refused: 0, contended: 0, secondsLeft: null, ...over } });
-
-// ---------------------------------------------------------------------------
-// The exhaustive visible-state matrix. Nine rows, no wildcard, both locales.
-//
-// The four rows after `failed` are the ones a table of three would lose. They
-// are NOT malfunctions — a broken helper, rules that did not take, an
-// unreadable folder, a volume that may be gone — and `job.rs` says reporting
-// them as `failed` tells a person something broke when instead a folder cannot
-// be read. A test covering only completed/cancelled/failed passes on a
-// component that collapses all four into one sentence.
-// ---------------------------------------------------------------------------
-type Row = {
-  name: string;
-  ending: Partial<JobEnded>;
-  uk: string; en: string;
-  /// The result line the SAME row puts on screen. Asserted beside the
-  /// sentence because the two are read together and can contradict each
-  /// other: nothing branches on the counts, so a row inheriting
-  /// `completed`'s numbers prints "the folder was not read at all" above
-  /// "Documents added: 5. Removed from the index: 4."
-  result: { uk: string; en: string };
-};
-
-const FAILURE_TEXT = 'the worker binary could not be started';
-
-// The counts each stop actually leaves behind, read off `walk.rs` rather than
-// inherited from `completed`'s own numbers.
-//
-// `removed` is written by phase 3 alone, and phase 3 runs only when phase 1 saw
-// the whole tree AND phase 2 ran to the end of what it handed over
-// (`walk.rs:511`) — so `removed: 4` on any row but the first states a deletion
-// this code cannot make. `rulesNotApplied` (`:384`) and `rootUnavailable`
-// (`:298`) return before phase 2 as well: nothing was read at all, which is
-// what their sentences say in words. `Ended::failed` (`job.rs:266`) zeroes
-// every count of its own accord and keeps `done`/`total`.
-const NOTHING_READ = { done: 0, total: 11, skipped: 0, refused: 0, indexed: 0, unchanged: 0, removed: 0 };
-// A root that is not a directory never reaches `enumerate`, so not even the
-// total is known (`walk.rs:289`).
-const NO_ROOT = { ...NOTHING_READ, total: 0 };
-// Stopped inside phase 2, part way through what phase 1 found.
-const STOPPED_MIDWAY = { done: 3, total: 11, skipped: 1, refused: 0, indexed: 2, unchanged: 0, removed: 0 };
-// The worker gives up only after several environmental skips in a row.
-const WORKER_GAVE_UP = { done: 5, total: 11, skipped: 3, refused: 0, indexed: 2, unchanged: 0, removed: 0 };
-// Phase 2 ran to the end; phase 3 was refused. Real work, no deletions.
-const READ_NOT_RECONCILED = { done: 11, total: 11, skipped: 5, refused: 0, indexed: 5, unchanged: 1, removed: 0 };
-const FAILED_COUNTS = { done: 7, total: 11, skipped: 0, refused: 0, indexed: 0, unchanged: 0, removed: 0 };
-
-const NOTHING_DONE_RESULT = {
-  uk: 'Додано документів: 0. Без змін: 0. Пропущено: 0. Вилучено з індексу: 0.',
-  en: 'Documents added: 0. Unchanged: 0. Skipped: 0. Removed from the index: 0.',
-};
-const MIDWAY_RESULT = {
-  uk: 'Додано документів: 2. Без змін: 0. Пропущено: 1. Вилучено з індексу: 0.',
-  en: 'Documents added: 2. Unchanged: 0. Skipped: 1. Removed from the index: 0.',
-};
-const WORKER_RESULT = {
-  uk: 'Додано документів: 2. Без змін: 0. Пропущено: 3. Вилучено з індексу: 0.',
-  en: 'Documents added: 2. Unchanged: 0. Skipped: 3. Removed from the index: 0.',
-};
-const NOT_RECONCILED_RESULT = {
-  uk: 'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 0.',
-  en: 'Documents added: 5. Unchanged: 1. Skipped: 5. Removed from the index: 0.',
-};
-
-const MATRIX: Row[] = [
-  {
-    name: 'completed',
-    ending: { reason: 'completed', complete: true },
-    uk: 'Теку прочитано повністю.',
-    en: 'The folder was read in full.',
-    result: {
-      uk: 'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.',
-      en: 'Documents added: 5. Unchanged: 1. Skipped: 5. Removed from the index: 4.',
-    },
-  },
-  {
-    // Phase 1 never saw the whole tree, so phase 3 was skipped: nothing was
-    // deleted, and that is precisely what the sentence warns about.
-    //
-    // 🔴 "nothing" is the whole root, not the unreadable subfolders (review
-    // round 1, B1). `walk.rs:511` returns before `known` is read and before any
-    // `delete_path`, so a rule newly covering a top-level folder nowhere near
-    // the unreadable one survives too — measured `removed=0`, row kept, still
-    // findable. The sentence below says so; it used to say "inside them".
-    name: 'partlyRead',
-    ending: { reason: 'completed', complete: false, ...READ_NOT_RECONCILED },
-    uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
-    en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
-    result: NOT_RECONCILED_RESULT,
-  },
-  {
-    // `complete` stays TRUE: the cancel lands in phase 2 (`walk.rs:432`), and
-    // phase 1 having finished says nothing about phase 2 being allowed to.
-    name: 'cancelled',
-    ending: { reason: 'cancelled', complete: true, ...STOPPED_MIDWAY },
-    uk: 'Сканування зупинено на ваше прохання.',
-    en: 'The scan was stopped at your request.',
-    result: MIDWAY_RESULT,
-  },
-  {
-    name: 'failed without a message',
-    ending: { reason: 'failed', complete: false, message: null, ...FAILED_COUNTS },
-    uk: 'Сканування обірвалося через збій.',
-    en: 'The scan broke off because something went wrong.',
-    result: NOTHING_DONE_RESULT,
-  },
-  {
-    name: 'failed carrying a message',
-    ending: { reason: 'failed', complete: false, message: FAILURE_TEXT, ...FAILED_COUNTS },
-    uk: `Сканування обірвалося через збій. Програма повідомила: ${FAILURE_TEXT}`,
-    en: `The scan broke off because something went wrong. The program reported: ${FAILURE_TEXT}`,
-    result: NOTHING_DONE_RESULT,
-  },
-  {
-    name: 'brokenWorker',
-    ending: { reason: 'brokenWorker', complete: true, ...WORKER_GAVE_UP },
-    uk: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
-    en: 'The scan stopped: the helper program that reads files stopped answering.',
-    result: WORKER_RESULT,
-  },
-  {
-    // The rules gate sits before phase 2, so `complete` is phase 1's own
-    // verdict and the counts are all zero — "not read at all" literally.
-    name: 'rulesNotApplied',
-    ending: { reason: 'rulesNotApplied', complete: true, ...NOTHING_READ },
-    uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не читали зовсім.',
-    en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not read at all.',
-    result: NOTHING_DONE_RESULT,
-  },
-  {
-    name: 'rootUnavailable',
-    ending: { reason: 'rootUnavailable', complete: false, ...NO_ROOT },
-    uk: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
-    en: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
-    result: NOTHING_DONE_RESULT,
-  },
-  {
-    // `complete` cannot be false here: the volume check is reached only past
-    // the `!walked.complete` return at `walk.rs:511`.
-    name: 'volumeMissing',
-    ending: { reason: 'volumeMissing', complete: true, ...READ_NOT_RECONCILED },
-    uk: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї. Нічого не вилучено — можливо, диск під’єднано не повністю.',
-    en: 'The scan stopped: the folder read as empty although the index still holds files from it. Nothing was deleted — the drive may not be fully attached.',
-    result: NOT_RECONCILED_RESULT,
-  },
-];
-
-// Both directions on the table itself: a wire reason the matrix says nothing
-// about, and a matrix row for a state that cannot happen, are both defects.
-test('the matrix names one row for every state a walk can end in, and no others', () => {
-  const covered = new Set(MATRIX.map((r) => (
-    r.ending.reason === 'completed' && r.ending.complete === false ? 'partlyRead' : r.ending.reason
-  )));
-  expect([...covered].sort()).toEqual([...OUTCOME_KINDS].sort());
-  expect(MATRIX).toHaveLength(OUTCOME_KINDS.length + 1); // + the `failed` row that carries a message
-});
-
-for (const loc of ['uk', 'en'] as const) {
-  test(`every way a walk can end shows its own sentence, and no two share one (${loc})`, async () => {
-    const seen: string[] = [];
-    for (const row of MATRIX) {
-      await openFolders(loc);
-      await fireEvent.click(scanButton(4));
-      await waitFor(() => expect(calls('start_walk_job')).not.toHaveLength(0));
-
-      channelOf('start_walk_job')(endedEvent(row.ending));
-      const region = await screen.findByTestId('indexing-walk-outcome');
-      await tick();
-
-      expect(visible(region), row.name).toBe(row[loc]);
-      // The line directly under it, in the same breath a person reads them:
-      // an oracle that looks only at the outcome sentence lets the screen
-      // contradict itself under its own eye.
-      expect(visible(screen.getByTestId('indexing-walk-result')), row.name).toBe(row.result[loc]);
-      seen.push(visible(region));
-      cleanup();
-      invoke.mockClear();
-    }
-    // A component that drew one sentence for the four variants after `failed`
-    // produces nine distinct rows in the reducer and this many collisions here.
-    expect(new Set(seen).size).toBe(MATRIX.length);
-  });
+// One state, the way the core's own observer sends it.
+async function emit(state: ScanState) {
+  if (deliver === null) throw new Error('nothing is listening to scan-progress');
+  deliver(state);
+  await tick();
 }
 
+const strip = () => screen.queryByTestId('indexing');
+
 // ---------------------------------------------------------------------------
-// Pressing the control, and what the counts read as.
+// When the strip is there at all.
 // ---------------------------------------------------------------------------
 
-test('pressing a folder`s scan control starts the walk for THAT folder', async () => {
-  await openFolders();
+// Both directions. A strip that is always there, saying nothing, is noise on a
+// window somebody opened to change a model; one that never appears is a running
+// scan a person cannot stop.
+test('nothing on screen until something has happened, and the strip the moment it has', async () => {
+  await openWindow();
+  expect(strip()).toBeNull();
 
-  await fireEvent.click(scanButton(4));
+  await emit(reading());
 
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  expect((calls('start_walk_job')[0][1] as { rootId: number }).rootId).toBe(4);
-  // The visible label is the plain word, not the per-row aria-label: an
-  // `aria-label` overrides the accessible name, so `getByRole(..., { name })`
-  // would go on passing after the visible text went stale.
-  expect(scanButton(4).textContent).toBe('Сканувати');
-  expect(scanButton(4).getAttribute('aria-label')).toBe('Сканувати /home/a/papers');
+  expect(strip()).not.toBeNull();
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+});
+
+// The pair this separates: a phase this build genuinely has no words for
+// (`other` — a probe or a model adoption nobody asked to start) against one
+// that does. `other` still offers Stop when `cancellable` says so — the
+// button does not depend on having a sentence.
+test('a probe or model-adoption phase this build has no words for offers only Stop, if any', async () => {
+  await openWindow();
+
+  await emit({
+    ...IDLE_SCAN,
+    revision: (revision += 1),
+    snapshot: { kind: 'running', cancellable: true, phase: { kind: 'other', job: 'probe' } },
+  });
+  expect(screen.queryByTestId('indexing-pass')).toBeNull();
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+
+  await emit(reading());
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+});
+
+// ---------------------------------------------------------------------------
+// A running reading phase, and a running removal.
+// ---------------------------------------------------------------------------
+
+// Both directions on Stop: a reading phase names the folder it is on and, when
+// cancellable, offers Stop; a removal names the folder it is emptying and, not
+// being cancellable (`bridge.rs` fixes it at `false`), offers nothing at all.
+// Neither offers the continue button — that only ever comes from an ENDED
+// report (`continueAction`), never from a running snapshot.
+test('a running reading phase names the folder and its position, a running removal names the folder alone', async () => {
+  await openWindow();
+
+  await emit(reading({}, true, { rootIndex: 2, rootCount: 5, rootPath: '/x' }));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 2 з 5: /x');
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  await emit(removing('/x'));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Видаляємо теку /x…');
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
 test('the running line reads as words, with the counts in them', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  await openWindow();
 
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
+  await emit(reading({ done: 3, total: 8, skipped: 1, refused: 0 }));
 
-  const text = container.textContent ?? '';
-  expect(text).toContain('Триває читання теки.');
-  expect(text).toContain('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
-  // `secondsLeft` is `Option<u64>` and arrives as `null` for the whole of an
-  // ordinary run's beginning. A line that formats it unconditionally prints
-  // "залишилось null" here.
-  expect(text).toContain('Скільки ще лишилось часу, поки не відомо.');
-  expect(text).not.toContain('null');
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-counts')))
+    .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 });
 
-// ---------------------------------------------------------------------------
-// The busy index. `contended` counts files whose every retry found the index
-// locked by another writer (`job::Progress::contended`), and the sentence it
-// draws makes exactly one promise — the next scan — because the skip write can
-// meet the same lock and leave the file recorded nowhere at all.
-// ---------------------------------------------------------------------------
+// `total: 0` is not an edge case: a reading pass reports it before phase 1 has
+// counted anything, and a folder that could not be entered reports zero of zero
+// for good. "0 of 0" reads as "nothing to do" while a run is under way.
+test('a run with nothing counted yet says so instead of reading as nothing to do', async () => {
+  await openWindow();
 
-const CONTENDED_UK =
-  'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.';
-const CONTENDED_EN =
-  'The index is busy with another write, so this scan did not write some files. The next scan will try them again.';
+  await emit(reading({ done: 4, total: 0 }));
 
-test('a scan that met a busy index says so, in both languages, without touching the counts', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  expect(visible(screen.getByTestId('indexing-counts')))
+    .toBe('Опрацьовано 4. Скільки їх усього, поки не відомо. Пропущено: 1. Відхилено: 0.');
+});
 
-  channelOf('start_walk_job')(progressEvent({ contended: 2 }));
-  await tick();
+// Both directions, and only for EMBEDDING: a reading pass already has
+// `progressShape`'s own "countingUp" sentence for a total it has not measured
+// yet, so this is the one shape that is embedding's alone.
+test('a fresh embedding pass says it is starting rather than showing 0 of 0, and shows counts once it has some', async () => {
+  await openWindow();
 
-  expect(visible(container)).toContain(CONTENDED_UK);
-  // 🔴 The number the sentence explains, unchanged. `contended <= skipped`
-  // once the file is journalled, so a strip adding the two would count one
-  // file twice — and the sentence would then be describing a number that
-  // already contains it.
-  expect(screen.getByTestId('indexing-counts').textContent)
+  await emit(embedding({ done: 0, total: 0 }));
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Вбудовування починається…');
+
+  await emit(embedding({ done: 3, total: 10 }));
+  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Опрацьовано 3 з 10. Пропущено: 1. Відхилено: 0.');
+});
+
+// Both directions. The busy line EXPLAINS part of the skipped number beside it
+// and adds nothing to it, so the counts line is asserted unchanged in the same
+// breath — a build that added the two would count one file twice.
+test('a scan that met a busy index says so without touching the counts, and one that did not says nothing', async () => {
+  await openWindow();
+
+  await emit(reading({ contended: 2 }));
+  expect(visible(screen.getByTestId('indexing-contended'))).toBe(
+    'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав.'
+    + ' Наступне сканування спробує їх знову.',
+  );
+  expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
 
-  // The derived rebuilds on a live switch, like every other line here.
-  setLocale('en');
-  await tick();
-
-  expect(visible(container)).toContain(CONTENDED_EN);
-  expect(visible(container)).not.toContain(CONTENDED_UK);
-});
-
-// 🔴 The one event the wording was chosen for, and the state the two tests
-// around it cannot reach. `contended` is reported BEFORE the skip is journalled
-// (`job::Progress::contended`), so exactly one event per contended file carries
-// `contended: 1` while `skipped` is still 0 — the only moment `contended <=
-// skipped` does not hold. A numbered wording would put «з них 1» beside
-// «Пропущено: 0» here and contradict itself under a person's own eye; a
-// number-free sentence is what survives it. This renders that event.
-test('the event that arrives before the skip is journalled does not contradict its own counts', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(progressEvent({ contended: 1, skipped: 0 }));
-  await tick();
-
-  // Both lines as a person reads them, together. The sentence is on screen and
-  // the number beside it is still the walk's own zero — nothing on the strip
-  // claims a file has been skipped that the walk has not journalled yet.
-  expect(screen.getByTestId('indexing-counts').textContent)
-    .toBe('Опрацьовано 3 з 8. Пропущено: 0. Відхилено: 0.');
-  expect(visible(container)).toContain(CONTENDED_UK);
-});
-
-// The other direction, and the one an unconditional line satisfies: an
-// ordinary scan met no lock and must say nothing about one.
-test('a scan that met no busy index says nothing about one', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(progressEvent({ contended: 0 }));
-  await tick();
-
-  // The rendered text first, and it is what an unconditionally drawn line
-  // fails on: a testid asserted ahead of it would be the thing that caught the
-  // mutant, and a testid is not what a person reads.
-  expect(visible(container)).not.toContain(CONTENDED_UK);
-  expect(visible(container)).not.toContain('зайнятий');
-
-  setLocale('en');
-  await tick();
-
-  expect(visible(container)).not.toContain(CONTENDED_EN);
-  expect(visible(container)).not.toContain('busy');
+  await emit(reading({ contended: 0 }));
   expect(screen.queryByTestId('indexing-contended')).toBeNull();
 });
 
-test('a run with nothing counted yet says so instead of reading as nothing to do', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// Both directions on a field whose `Option<u64>` has a real `None`: nought
+// seconds left is an estimate, and a truthiness check would print "not known
+// yet" for it.
+test('nought seconds left is an estimate, and an absent one says it is not known', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(progressEvent({ done: 0, total: 0, secondsLeft: 12 }));
-  await tick();
+  await emit(reading({ secondsLeft: 0 }));
+  expect(visible(screen.getByTestId('indexing-eta'))).toBe('Залишилось приблизно 0 с.');
 
-  const text = container.textContent ?? '';
-  expect(text).toContain('Опрацьовано 0. Скільки їх усього, поки не відомо.');
-  expect(text).not.toContain('0 з 0');
-  // The other direction of the same field: an estimate that IS known is shown.
-  expect(text).toContain('Залишилось приблизно 12 с.');
+  await emit(reading({ secondsLeft: null }));
+  expect(visible(screen.getByTestId('indexing-eta'))).toBe('Скільки ще лишилось часу, поки не відомо.');
 });
 
-// The third state of the same `Option<u64>`, and the one a truthiness check
-// eats: zero seconds left is a NUMBER — the run is about to finish — while
-// "not known yet" is what the window says when it has been told nothing. A
-// line written `seconds ? … : …` shows the second for the first.
-test('nought seconds left is an estimate, not an absence of one', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// 🔴 Stop follows `cancellable` and nothing else. It is fixed for the life of
+// the job (`scan_state.rs`) — a phase change does not make an uninterruptible
+// job interruptible — so a strip inferring it from the phase would offer a
+// button that does nothing. Both directions, on two states that differ in that
+// field alone.
+test('Stop is offered exactly when the core says the job may be stopped', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(progressEvent({ secondsLeft: 0 }));
-  await tick();
+  await emit(reading({}, true));
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
 
-  const text = container.textContent ?? '';
-  expect(text).toContain('Залишилось приблизно 0 с.');
-  expect(text).not.toContain('Скільки ще лишилось часу, поки не відомо.');
+  await emit(reading({}, false));
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
-test('an ended walk reports what it did to the index, not only that it ended', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+test('an idle window offers no Stop at all', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-walk-result')).toBeTruthy());
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+  expect(calls('cancel_job')).toHaveLength(0);
+});
 
-  expect(container.textContent).toContain(
-    'Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.',
-  );
+// The press asks the backend and invents nothing: the job reports its own stop
+// through the observer, and a line written here would be a claim about a slot
+// this window has not read.
+test('Stop asks the backend, and the ending that follows is what says it stopped', async () => {
+  await openWindow();
+  await emit(reading());
+
+  await fireEvent.click(screen.getByTestId('indexing-cancel'));
+
+  expect(calls('cancel_job')).toHaveLength(1);
+  expect(calls('cancel_job')[0]).toHaveLength(1); // the command name alone
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+
+  await emit(endedReading('cancelled'));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe('Сканування зупинено на ваше прохання.');
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
-// `frozen`: the decision is to SHOW it.
+// The reading block: `scan.lastReading`, in `idle` and `ended` alike (D-e).
 // ---------------------------------------------------------------------------
 
-// `removed == 0` alone cannot say whether anything was silently left untouched
-// (job.rs). Dropping this field would leave a person reading "removed: 4" with
-// no way to learn that three subtrees were never reconciled at all.
-test('subtrees reconciliation refused to touch are named, each with its own reason', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// The four rows after `failed`, plus `partlyRead`, are the ones a table of
+// three would lose. `job.rs` says reporting them as `failed` tells a person
+// something broke when instead a folder cannot be read, an exclusion rule did
+// not take, or a volume may have gone missing — and `partlyRead` is D-e's own
+// split of `completed`, never reachable through `reason` alone.
+const WALK_SENTENCES: Record<EndReason | 'partlyRead', { uk: string; en: string }> = {
+  completed: {
+    uk: 'Теки проіндексовано повністю.',
+    en: 'The folders were indexed in full.',
+  },
+  partlyRead: {
+    uk: 'Теки проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цих теках не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folders were only partly indexed: some subfolders could not be entered. Nothing in these folders was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+  },
+  cancelled: {
+    uk: 'Сканування зупинено на ваше прохання.',
+    en: 'The scan was stopped at your request.',
+  },
+  failed: {
+    uk: 'Сканування обірвалося через збій.',
+    en: 'The scan broke off because something went wrong.',
+  },
+  brokenWorker: {
+    uk: 'Сканування спинилося: допоміжна програма, яка читає файли, перестала відповідати.',
+    en: 'The scan stopped: the helper program that reads files stopped answering.',
+  },
+  rulesNotApplied: {
+    uk: 'Сканування спинилося: правила виключення не вдалося застосувати, тож теку не індексували зовсім.',
+    en: 'The scan stopped: the exclusion rules could not be applied, so the folder was not indexed at all.',
+  },
+  rootUnavailable: {
+    uk: 'Сканування спинилося: у теку не вдалося зайти. Можливо, її прибрали або диск від’єднано.',
+    en: 'The scan stopped: the folder could not be entered. It may have been removed, or its drive disconnected.',
+  },
+  volumeMissing: {
+    uk: 'Сканування спинилося: тека прочиталася порожньою, хоча в індексі є файли з неї.'
+      + ' Нічого не вилучено — можливо, диск під’єднано не повністю.',
+    en: 'The scan stopped: the folder read as empty although the index still holds files from it.'
+      + ' Nothing was deleted — the drive may not be fully attached.',
+  },
+};
 
-  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
-  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
-
-  const text = container.textContent ?? '';
-  expect(text).toContain('Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:');
-  expect(text).toContain('notes/archive — не вдалося прочитати');
-  expect(text).toContain('notes/link — символьне посилання, сюди не заходили');
-  expect(text).toContain('notes/void — прочиталася порожньою');
+// Both directions on the table itself: a wire reason (plus `partlyRead`) this
+// file says nothing about, and a row here for a kind `readingKind` cannot
+// produce, are both defects.
+test('the table names one sentence for every reading-outcome kind, and no others', () => {
+  expect(Object.keys(WALK_SENTENCES).sort()).toEqual([...END_REASONS, 'partlyRead'].sort());
 });
 
-// Two entries in one report can carry the SAME prefix: `walk.rs` decides
-// whether to climb by testing `parent`, then pushes `resolve_ancestor`'s
-// answer, which is a different string whenever `parent` is not itself on disk.
-// A list keyed by that prefix throws and takes the whole section with it.
-test('two frozen entries sharing a prefix are both shown, not a crash', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+test.each(['uk', 'en'] as const)('every reason a reading can end for shows its own sentence, and no two share one (%s)', async (loc) => {
+  await openWindow(loc);
+  const seen: string[] = [];
 
-  channelOf('start_walk_job')(endedEvent({
-    complete: false,
-    frozen: [
-      { prefix: 'notes/archive', reason: 'unreadableDirectory' },
-      { prefix: 'notes/archive', reason: 'emptyDirectory' },
-    ],
-  }));
-  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+  for (const reason of END_REASONS) {
+    await emit(endedReading(reason));
+    const shown = visible(screen.getByTestId('indexing-walk-outcome'));
+    expect(shown, reason).toBe(WALK_SENTENCES[reason][loc]);
+    seen.push(shown);
+  }
 
-  expect(screen.getByTestId('indexing-frozen').querySelectorAll('li')).toHaveLength(2);
-  expect(container.textContent).toContain('notes/archive — прочиталася порожньою');
+  // The cardinality claim, which the per-row assertions above cannot make: a
+  // component that drew one sentence for the four after `failed` would satisfy
+  // every one of them if the table repeated itself.
+  expect(new Set(seen).size).toBe(END_REASONS.length);
 });
 
-test('a walk that froze nothing shows no such list', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// D-e's own split: the SAME `reason: 'completed'` reads as two different
+// sentences depending on a fact `reason` alone cannot carry.
+test('a completed reading that did not see the whole tree reads as partly read, not as completed', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(endedEvent());
+  await emit(endedReading('completed', { complete: true }));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.completed.uk);
+
+  await emit(endedReading('completed', { complete: false }));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+});
+
+// Both directions. `message` is `Option<String>` on the wire, so its absence is
+// a shape the screen has to survive rather than a case that cannot happen — and
+// when it is there it is the ONLY thing telling a panic, a broken pool and a
+// missing worker binary apart.
+test('a failure carries its own text, and survives its absence', async () => {
+  await openWindow();
+
+  await emit(endedReading('failed', { message: 'the worker binary could not be started' }));
+  expect(visible(screen.getByTestId('indexing-ended-failure')))
+    .toBe('Програма повідомила: the worker binary could not be started');
+
+  await emit(endedReading('failed', { message: null }));
+  expect(screen.queryByTestId('indexing-ended-failure')).toBeNull();
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.failed.uk);
+});
+
+// 🔴 An ending is a STATE: a scan that finished stays finished until the next
+// job claims the slot, and so does the reading it left behind. The pair this
+// separates is «the window heard the ending» from «the window was opened after
+// it» — and the second is the one a channel could never answer.
+test('a window opened after the scan ended still reads how it went', async () => {
+  reply({ job_status: endedReading('volumeMissing') });
+
+  await openWindow();
+
   await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.volumeMissing.uk);
+});
 
+// D-e, read literally: `lastReading` renders in an IDLE snapshot too, not only
+// an ended one — nothing about the sentence depends on `snapshot.kind` beyond
+// "not running".
+test('a lastReading renders in an idle snapshot too, not only an ended one', async () => {
+  await openWindow();
+
+  await emit({
+    ...IDLE_SCAN,
+    revision: (revision += 1),
+    lastReading: readingOutcome({ reason: 'completed', complete: false }),
+  });
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+});
+
+// Important 2 (review): the doc comment above `readingBlock` claims it is
+// `null` "exactly when `snapshot.kind === 'running'`", and nothing built that
+// state before now — every running fixture in this file spreads `IDLE_SCAN`,
+// whose `lastReading` is `null`, so "running WITH a `lastReading`" was never
+// exercised. It is not a rare shape: `scan_job.rs` leaves `last_reading`
+// untouched across an `embedOnly` run, so every resumed embedding (the R2-1
+// sequence below included) passes through exactly this pair of states.
+test('a running phase hides the reading block, its root row and its frozen row too, even with a lastReading on hand — and a following ended snapshot brings them all back', async () => {
+  await openWindow();
+  const partlyRead = readingOutcome({
+    reason: 'completed', complete: false,
+    roots: [rootOutcome({
+      rootPath: '/a', complete: false,
+      frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+    })],
+  });
+
+  await emit({ ...embedding({ done: 1, total: 4 }), lastReading: partlyRead });
+
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(screen.queryByTestId('indexing-walk-outcome')).toBeNull();
+  expect(screen.queryByTestId('indexing-root-row')).toBeNull();
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
+
+  await emit(ended({}, partlyRead));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+});
+
+// The reading block's own copy of the busy sentence — sourced from
+// `lastReading.contended`, not from a running phase's live counts — and it is
+// what lets the fact survive past the ending. Both directions.
+test('the reading block\'s own busy sentence survives past the ending, and is silent when nothing was contended', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({ contended: 3 })));
+  expect(visible(screen.getByTestId('indexing-contended'))).toBe(
+    'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав.'
+    + ' Наступне сканування спробує їх знову.',
+  );
+
+  await emit(ended({}, readingOutcome({ contended: 0 })));
+  expect(screen.queryByTestId('indexing-contended')).toBeNull();
+});
+
+test('the folders-read count shows only when the reading actually names a root count', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({ rootsRead: 2, rootCount: 3 })));
+  expect(visible(screen.getByTestId('indexing-roots-read'))).toBe('Проіндексовано тек: 2 з 3');
+
+  await emit(ended({}, readingOutcome({ rootsRead: 0, rootCount: 0 })));
+  expect(screen.queryByTestId('indexing-roots-read')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Per-root rows and frozen prefixes.
+// ---------------------------------------------------------------------------
+
+// An unavailable root and a volume-missing root are each their own row, named
+// by path; a root that simply completed gets no row at all. Three rows in
+// total once the frozen prefix under the third root is counted too.
+test('an unavailable root and a volume-missing root are each their own row, and a completed root gets none', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    reason: 'completed', complete: false, rootCount: 3, rootsRead: 3,
+    roots: [
+      rootOutcome({ rootPath: '/gone', reason: 'rootUnavailable', complete: false }),
+      rootOutcome({ rootPath: '/vol', reason: 'volumeMissing', complete: false }),
+      rootOutcome({
+        rootPath: '/a', reason: 'completed', complete: true,
+        frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+      }),
+    ],
+  })));
+
+  const rows = screen.getAllByTestId('indexing-root-row').map((el) => visible(el));
+  expect(rows).toEqual(['/gone: тека недоступна', '/vol: том відсутній']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub — прочиталася порожньою');
+});
+
+// The one `walk_job.rs`-only kind a root row still has no sentence of its
+// own for: `rootRowText` falls back to the reading-outcome table's own
+// wording rather than leaving the row blank or throwing on a wire value the
+// type permits but no fixture above ever names.
+// Important 1 (Task 10a review, round 1): the fallback text this row draws IS
+// `indexing_walk_ended_rules_not_applied`, the same key the whole-reading
+// outcome line draws — so a locale that renders the outcome line correctly
+// but breaks this fallback (a literal, a stale copy) would still pass every
+// test that only ever checks the outcome line. Both directions, both locales.
+test.each(['uk', 'en'] as const)('a root whose rules were not applied still gets a row rather than a blank one, and both name the outcome the same way (%s)', async (loc) => {
+  await openWindow(loc);
+
+  await emit(ended({}, readingOutcome({
+    reason: 'rulesNotApplied', complete: false,
+    roots: [
+      rootOutcome({ rootPath: '/r', reason: 'rulesNotApplied', complete: false, message: null }),
+    ],
+  })));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.rulesNotApplied[loc]);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual([
+    `/r: ${WALK_SENTENCES.rulesNotApplied[loc]}`,
+  ]);
+});
+
+// F6 (Task 10 live run): a cancelled root used to fall to the SAME fallback
+// as `rulesNotApplied` above, whose own wording is `WALK_SENTENCES.cancelled`
+// — the exact sentence `readingBlock.sentence` already draws once for the
+// whole reading, so a cancelled root's own row silently repeated the top
+// sentence rather than saying anything about that root. `indexing_root_cancelled`
+// is its own key now; both directions: the row shows it, and does NOT equal
+// the top sentence a second time.
+// Minor 5 (Task 10a review, round 1): `indexing_root_cancelled` pinned in
+// English too, not only Ukrainian — a literal left in the English arm alone
+// would still pass a Ukrainian-only assertion.
+const ROOT_CANCELLED: Record<Loc, string> = {
+  uk: 'індексацію перервано',
+  en: 'indexing was interrupted',
+};
+
+test.each(['uk', 'en'] as const)('a cancelled root gets its own row, not a second copy of the top sentence (%s)', async (loc) => {
+  await openWindow(loc);
+
+  await emit(ended({}, readingOutcome({
+    reason: 'cancelled', complete: false,
+    roots: [rootOutcome({ rootPath: '/c', reason: 'cancelled', complete: false, message: null })],
+  })));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.cancelled[loc]);
+  const rows = screen.getAllByTestId('indexing-root-row').map(visible);
+  expect(rows).toEqual([`/c: ${ROOT_CANCELLED[loc]}`]);
+  expect(rows[0]).not.toBe(`/c: ${WALK_SENTENCES.cancelled[loc]}`);
+});
+
+// Both directions, and the crash this guards against: two prefixes under the
+// SAME root can be equal (`walk.rs`'s own ancestor-climb argument, restated in
+// the component's doc comment), and a list keyed by prefix alone would throw.
+test('two frozen entries sharing a prefix under one root are both shown, not a crash — and a walk that froze nothing shows no list', async () => {
+  await openWindow();
+
+  await emit(ended({}, readingOutcome({
+    roots: [rootOutcome({
+      rootPath: '/a',
+      frozen: [
+        { prefix: 'x', reason: 'unreadableDirectory' },
+        { prefix: 'x', reason: 'emptyDirectory' },
+      ],
+    })],
+  })));
+  expect(screen.getByTestId('indexing-frozen').querySelectorAll('li')).toHaveLength(2);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/x — не вдалося прочитати');
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/x — прочиталася порожньою');
+
+  await emit(ended({}, readingOutcome({ roots: [rootOutcome({ frozen: [] })] })));
   expect(screen.queryByTestId('indexing-frozen')).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
-// The chained embedding pass.
+// The embedding block, from `report.embedding`.
 // ---------------------------------------------------------------------------
 
-test('a partly read folder is embedded anyway AND stays reported as partly read', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// The partly-read sentence is the READING's own fact and does not go away
+// just because the embedding half that followed it succeeded — the two blocks
+// are drawn from two different fields with two different lifetimes.
+test('the partly-read sentence survives a successful embedding', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0 }));
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+  await emit(ended(
+    { embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, endedIn: 'embedding', reason: 'completed', resume: null },
+    readingOutcome({
+      reason: 'completed', complete: false,
+      roots: [rootOutcome({ rootPath: '/a', complete: false })],
+    }),
+  ));
 
-  expect(visible(screen.getByTestId('indexing-walk-outcome')))
-    .toBe(MATRIX.find((r) => r.name === 'partlyRead')!.uk);
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.uk);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування всього індексу завершено.');
+  expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
 });
 
-test('the embedding pass says it covers the whole index, never the folder that was pressed', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+test('an embedding skipped for no key, no model, or a store that did not answer gets its own sentence', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  channelOf('start_embed_job')(progressEvent({ done: 2, total: 40 }));
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noKey' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
+  );
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
+  );
+
+  await emit(ended(
+    { embedding: { kind: 'skipped', why: { kind: 'storeUnavailable', message: 'locked' } }, endedIn: 'embedding' },
+  ));
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('Вбудовування не запущено: сховище ключів не відповіло: locked');
+
+  // Minor 5 (Task 10a review, round 1): F11's English wording pinned too —
+  // dropping «у цій теці»/"over this folder" was a change to BOTH arms, and
+  // a Ukrainian-only assertion above would not catch a stale English one.
+  setLocale('en');
   await tick();
 
-  const text = container.textContent ?? '';
-  expect(text).toContain('Триває вбудовування всього індексу.');
-  expect(text).not.toContain('Триває читання теки.');
-});
-
-// The window checks both preconditions ITSELF and names the one that is
-// absent. The walk still ran — text search needs neither.
-test('with no provider key the pass is not started and the section says which is missing', async () => {
-  reply({ model_settings: { ...READY_SETTINGS, key: { kind: 'absent' } } });
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
-
-  expect(screen.getByTestId('indexing-note').textContent).toBe(
-    'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах у цій теці вже працює.',
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noKey' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Search by meaning was not started: no provider key is stored. Word search already works.',
   );
-  expect(calls('start_embed_job')).toHaveLength(0);
-  expect(container.textContent).toContain('Теку прочитано повністю.');
-});
 
-test('with no embedding model chosen the missing one is named apart from the key', async () => {
-  reply({
-    model_settings: { ...READY_SETTINGS, index: { ...READY_SETTINGS.index, embeddingModel: null } },
-  });
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
-
-  expect(screen.getByTestId('indexing-note').textContent).toBe(
-    'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах у цій теці вже працює.',
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
   );
-  expect(calls('start_embed_job')).toHaveLength(0);
 });
 
-// The second line, route one: the key went missing between the window's read
-// and the call, so the command rejects before claiming the slot. A rejection
-// crosses as a sentence — shown verbatim, never matched on.
-test('a pass refused by the backend shows the backend`s own sentence', async () => {
-  reply({ start_embed_job: new Error('no provider key is stored') });
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+// The pair Important 1 separates: `notReached` beside `endedIn: 'reading'`
+// (here) says nothing, because that ending is the reading block's own
+// (`lastReading.reason` names the very same event); `notReached` beside
+// `endedIn: 'embedding'` (the Stop-during-key-read fixture in "the label
+// follows the reason…" above) is the one shape that DOES earn a sentence,
+// because it is the only statement that ending has.
+test('an embedding that never reached the phase, and never left the reading phase either, says nothing at all', async () => {
+  await openWindow();
 
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+  await emit(endedReading('completed'));
 
-  expect(screen.getByTestId('indexing-rejection').textContent).toBe('no provider key is stored');
-  expect(screen.getByTestId('indexing-note').textContent).toBe('Запит відхилено.');
+  expect(screen.queryByTestId('indexing-embed-outcome')).toBeNull();
 });
 
-// The second line, route two, and it is a different shape entirely: a missing
-// model is not checked by `start_embed_job` at all (embed_job.rs), so the
-// command is ACCEPTED and the refusal arrives as an ending carrying a sentence.
-test('a model that vanished after the check arrives as an ending, and its text is shown', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+// ---------------------------------------------------------------------------
+// The continue button — D-m's table, rendered only when it names the strip.
+// ---------------------------------------------------------------------------
 
-  channelOf('start_embed_job')(endedEvent({
-    reason: 'failed', complete: false, message: 'the index has no active vector space',
+test('the label follows the reason, and the entry follows what the report named to resume from', async () => {
+  await openWindow();
+
+  await emit(endedReading('cancelled', { resume: 'full' }));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'full' });
+
+  await emit(ended(
+    { reason: 'cancelled', endedIn: 'embedding', embedding: { kind: 'notReached' }, resume: 'embedOnly' },
+    readingOutcome(),
+  ));
+  // Stop pressed while the credential store was still being read: the
+  // embedding phase was claimed and never offered a chunk to a provider, but
+  // it DID end, and the reading block above (a completed reading from an
+  // earlier pass) says nothing about it — this sentence is the only place
+  // that stop is stated at all (review, Important 1).
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування зупинено на ваше прохання.');
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'embedOnly' });
+
+  await emit(ended({
+    reason: 'failed', endedIn: 'embedding', message: 'boom', resume: 'embedOnly',
+    embedding: { kind: 'ran', done: 1, total: 3, refused: 0 },
   }));
-  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Повторити');
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('Програма повідомила: boom');
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'embedOnly' });
 
-  const text = container.textContent ?? '';
-  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
-    'Вбудовування обірвалося через збій. Програма повідомила: the index has no active vector space',
-  );
-  // The walk's own ending is still beside it: two passes, two results.
-  expect(text).toContain('Теку прочитано повністю.');
+  await emit(endedReading('brokenWorker', { resume: 'full' }));
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Повторити');
+
+  // A report naming no resumption offers nothing here, whatever it names —
+  // `rulesNotApplied`'s own reading never has one (`scan_job::resume_for`).
+  await emit(endedReading('rulesNotApplied', { resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
 });
 
-test('an embedding pass stopping for a walk-only reason is not drawn as a finished one', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
+// Both directions on the one thing the strip must NOT decide: whether the
+// index's own markers owe a button. `continueAction`'s `where: 'section'` arm
+// is the Scanning section's offer (Task 8), and the strip must stay silent for
+// it whether or not the index was ever read at all. Task 8 widens this to the
+// WHOLE window: the offer this pair used to leave unclaimed is now the
+// Scanning section's own, read through `Settings.svelte`'s single
+// `model_settings` — not a second one this section polls for itself.
+test('a report naming no resumption defers to the section, with the index read and with no index read at all', async () => {
+  reply({ model_settings: readSettings({ scanIncomplete: true }) });
+  await openWindow();
+  await emit(ended({ resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
 
-  channelOf('start_embed_job')(endedEvent({ reason: 'volumeMissing' }));
-  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
-
-  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
-    'Вбудовування спинилося з причини, якої тут не очікували (volumeMissing).',
-  );
-  // The pass reports its own counts too, and they are the embedding pass's —
-  // chunks over the whole index, not documents in the folder that was pressed.
-  expect(visible(screen.getByTestId('indexing-embed-result')))
-    .toBe('Вбудовано фрагментів: 11 з 11. Відхилено: 0.');
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Продовжити');
+  await fireEvent.click(screen.getByTestId('scanning-continue'));
+  expect(calls('start_scan_job').at(-1)?.[1]).toEqual({ entry: 'full' });
 });
 
-// ---------------------------------------------------------------------------
-// PR 25 review, P1-1 and P1-2 — state that must outlive a section used to live
-// inside it.
-//
-// `Models` was the one section rendered without the controller, and inside the
-// section conditional, so every click on another nav item destroyed it. Two
-// things died with it: the flag the degraded warning was conditioned on, and
-// the listener the recovery pass reported to.
-//
-// These are read on the WINDOW, along the path a person actually walks —
-// discard, leave, come back — because both defects are invisible to anything
-// that renders the section on its own and never unmounts it.
-// ---------------------------------------------------------------------------
+test('a report naming no resumption defers to the section even when the index could not be read at all', async () => {
+  reply({ model_settings: { key: READY_SETTINGS.key, index: { kind: 'unreadable', cause: 'notOpen', reason: 'x' }, platform: 'linux' } });
+  await openWindow();
+  await emit(ended({ resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
 
-const DEGRADED_UK =
-  'Пошук за змістом недоступний, доки індекс не буде вбудовано наново. Пошук за словами працює далі.';
-const READY_UK = 'Підключено — OpenRouter, ключ і обрана модель embedding готові.';
-
-/// The window's settings as `model_settings` answers them: an index on `emb-1`
-/// holding `total` chunks of document text, with `active` of them embedded in
-/// the space it points at.
-const onModel = (active: number, everywhere = active, total = 12): ModelSettings => ({
-  key: { kind: 'present' },
-  index: {
-    kind: 'read', embeddingModel: 'emb-1', chatModel: null,
-    embeddedChunks: active, embeddedChunksEverywhere: everywhere, totalChunks: total,
-    failedChunks: 0, pendingChunks: 0, indexedFiles: 9, lastIndexedAt: 1_700_000_000,
-    searchTextArm: true, searchContentArm: true,
-  },
-  platform: 'linux',
+  // Neither surface may guess: `read === null` (an `Unreadable` index) makes
+  // `continueAction` answer `null` outright, so the section offers nothing
+  // either — the correct degradation, not a second place a marker leaks
+  // through.
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
 });
 
-const model = (id: string, name: string) => ({
-  id, name, inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, refusal: null,
-});
-
-/// Opens the window on Models with two models to choose between, and drives the
-/// change that takes semantic search away: press the other model, confirm, and
-/// let `model_settings` answer with the index the change leaves behind.
-async function discardOnModels() {
-  replies.model_settings = onModel(7);
-  replies.provider_models = {
-    entries: [model('emb-1', 'Embedder One'), model('emb-2', 'Embedder Two')],
-    unreadable: 0, unreadableRecords: [],
-  };
-  replies.set_embedding_model = {
-    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
-    retired: [{ spaceId: 1, embeddedChunks: 4 }], index: onModel(0).index,
-  };
-  setLocale('uk');
-  const rendered = render(Settings);
-  await screen.findByTestId('model-entry-emb-2');
-
-  // What the index says once the change has landed: a new space, and nothing
-  // in it. Twelve chunks of text are still there, waiting to be embedded.
-  replies.model_settings = onModel(0);
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
-  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
-  await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
-  return rendered;
-}
-
-const toModels = async () => {
-  await fireEvent.click(screen.getByTestId('settings-nav-models'));
-  await screen.findByTestId('model-status-dot');
-};
-const toFolders = async () => {
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
-};
-
-// 🔴 The whole finding, read as a person reads it. Before the fix this window
-// came back showing a green dot and nothing else: the warning and the button
-// that repairs the loss were both gone, while the backend went on reporting an
-// empty active space.
-test('the warning about a search gone dark survives leaving the section and coming back', async () => {
-  const { container } = await discardOnModels();
-  expect(container.textContent).toContain(DEGRADED_UK);
-
-  await toFolders();
-  await toModels();
-
-  // Every line of it, in the order the section draws them.
-  expect(screen.getByTestId('model-embedding-degraded-note').textContent).toBe(DEGRADED_UK);
-  expect(screen.getByRole('button', { name: 'Вбудувати індекс наново' })).toBeTruthy();
-  const text = container.textContent ?? '';
-  // The dot still says what it has always said — provider, key and a chosen
-  // model — and it no longer has the last word: the loss is stated after it,
-  // which is the ruling Task 6's review settled and the vanishing warning had
-  // silently undone.
-  expect(text).toContain(READY_UK);
-  expect(text.indexOf(READY_UK)).toBeLessThan(text.indexOf(DEGRADED_UK));
-});
-
-// The other direction of the same re-read, and the one a warning that never
-// goes away would satisfy: the index refilled, so there is nothing left to say.
-test('a section coming back to a refilled index says nothing about a search gone dark', async () => {
-  const { container } = await discardOnModels();
-
-  replies.model_settings = onModel(12);
-  await toFolders();
-  await toModels();
-
-  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
-  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
-  expect(container.textContent).toContain(READY_UK);
-});
-
-// 🔴 P1-2. The pass reported to a listener inside the section, so switching
-// away unmounted the only observer while the backend job ran on: the strip
-// stayed idle, and the progress and the Cancel were gone.
-test('the recovery pass keeps reporting, and stays stoppable, after a section switch', async () => {
-  await discardOnModels();
-
-  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  channelOf('start_embed_job')(progressEvent({ done: 3, total: 12 }));
-  await tick();
-
-  // On the section it was started from, first.
-  expect(screen.getByTestId('indexing-pass').textContent).toBe('Триває вбудовування всього індексу.');
-  expect(screen.getByTestId('indexing-counts').textContent).toBe('Опрацьовано 3 з 12. Пропущено: 1. Відхилено: 0.');
-
-  await toFolders();
-
-  // And from a section that knows nothing about models: the strip is the
-  // window's status line, and the pass is the window's.
-  expect(screen.getByTestId('indexing-pass').textContent).toBe('Триває вбудовування всього індексу.');
-  expect(screen.getByTestId('indexing-counts').textContent).toBe('Опрацьовано 3 з 12. Пропущено: 1. Відхилено: 0.');
-  await fireEvent.click(screen.getByTestId('indexing-cancel'));
-  expect(calls('cancel_job')).toHaveLength(1);
-
-  // And the ending reaches the window wherever the person is standing.
-  channelOf('start_embed_job')(endedEvent({ reason: 'cancelled' }));
-  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-embed-outcome')))
-    .toBe('Вбудовування зупинено на ваше прохання.');
-});
-
-// The pass ending is what asks the index again, and the section is watching the
-// controller for it: the warning clears itself, with the person standing on the
-// section and pressing nothing. Written against the WINDOW because the listener
-// this replaced was handed to `startEmbedJob` by the section — it heard a pass
-// this section started, and only that one.
-test('a pass that repairs the index clears the warning while the section is on screen', async () => {
-  const { container } = await discardOnModels();
-  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  expect(screen.getByTestId('model-embedding-reembed-started').textContent).toBe('Вбудовування почалося.');
-
-  // What the index says once the pass has filled the space.
-  replies.model_settings = onModel(12);
-  channelOf('start_embed_job')(endedEvent());
-
-  await waitFor(() => expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull());
-  expect(screen.queryByTestId('model-embedding-reembed')).toBeNull();
-  expect(container.textContent).toContain(READY_UK);
-});
-
-// The same ending with the person standing somewhere else. Models is unmounted
-// then, so its own listener is not what answers here — the mount's read is, on
-// the way back. Both paths lead to the same screen, and this is the one the
-// section's subscription CANNOT cover, so it is asserted rather than assumed.
-test('a pass that ends while another section is on screen leaves nothing stale to come back to', async () => {
-  await discardOnModels();
-  await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-
-  await toFolders();
-  replies.model_settings = onModel(12);
-  channelOf('start_embed_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
-
-  await toModels();
-  expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
-});
-
-// ---------------------------------------------------------------------------
-// PR 25 review, P2-3 — an old walk's continuation writing over a newer scan.
-//
-// `chain()` resumes after `await modelSettings()`, and during that await
-// another scan can start and take the job slot. The stale continuation then
-// writes `starting`/`embed` over the live walk, is refused with "a job is
-// already running", and its own catch resets the store to `idle` — so the
-// running walk and its Stop are HIDDEN, and stay hidden until some other event
-// happens to arrive.
-//
-// Driven with a deferred promise rather than a timer: the race is about which
-// continuation resumes when, and a timer would assert a schedule instead of an
-// ordering. Nothing here waits on a clock.
-// ---------------------------------------------------------------------------
-test('a superseded walk`s continuation does not hide the scan that replaced it', async () => {
-  // `start_embed_job` is refused the way the backend really refuses it here:
-  // the newer walk holds the slot. That refusal is what the stale catch used to
-  // turn into `idle`.
-  replies.start_embed_job = new Error('a job is already running');
-  const { container } = await openFolders();
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  // The first walk ends, so its continuation starts — and is held inside
-  // `model_settings`, which is where the window's read of the two
-  // preconditions lives.
-  let release!: (value: unknown) => void;
-  replies.model_settings = new Promise((resolve) => { release = resolve; });
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('model_settings').length).toBeGreaterThan(1));
-
-  // A second scan, on the OTHER folder, while that read is still in flight. It
-  // takes the slot and starts reporting.
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
-  channelOf('start_walk_job')(progressEvent({ done: 2, total: 9 }));
-  await tick();
-
-  // Now let the superseded continuation resume, with everything it needs to
-  // succeed: a key, a model, and nothing in the answer to tell it that the
-  // world moved on.
-  release(READY_SETTINGS);
-  await tick();
-  await tick();
-  await tick();
-
-  // Read as a person reads it: the live walk is still on screen, with its own
-  // counts, and the control that stops it is still there.
-  const text = container.textContent ?? '';
-  expect(text).toContain('Триває читання теки.');
-  expect(text).toContain('Опрацьовано 2 з 9. Пропущено: 1. Відхилено: 0.');
-  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
-  // And the sentence the stale continuation would have put there instead is
-  // absent — both the embedding line and the refusal note it collects.
-  expect(text).not.toContain('Вбудовування всього індексу починається…');
-  expect(screen.queryByTestId('indexing-note')).toBeNull();
-  // The pass the superseded walk was going to chain was never even asked for:
-  // the guard returns before the command, so the backend is not made to refuse
-  // something this window already knows is not its turn.
-  expect(calls('start_embed_job')).toHaveLength(0);
-});
-
-// The same await, its other exit. `model_settings` can be refused, and the
-// refusal is reported as a note — so a superseded continuation whose read fails
-// would put a sentence on screen about a pass the person has already replaced.
-// One guard per exit, and each named by the test that has to fail without it.
-test('a superseded walk whose precondition read is refused says nothing about it', async () => {
-  const { container } = await openFolders();
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  let refuse!: (reason: unknown) => void;
-  replies.model_settings = new Promise((_resolve, reject) => { refuse = reject; });
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('model_settings').length).toBeGreaterThan(1));
-
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
-  channelOf('start_walk_job')(progressEvent({ done: 4, total: 5 }));
-  await tick();
-
-  refuse(new Error('LEAK-TOKEN-STALE-READ'));
-  await tick();
-  await tick();
-  await tick();
-
-  const text = container.textContent ?? '';
-  expect(text).toContain('Опрацьовано 4 з 5. Пропущено: 1. Відхилено: 0.');
-  expect(screen.queryByTestId('indexing-note')).toBeNull();
-  expect(text).not.toContain('LEAK-TOKEN-STALE-READ');
-});
-
-// The SECOND await in the same continuation, and it needs a case of its own:
-// with the first guard in place a superseded walk never reaches the command, so
-// nothing above can make this one die. The window a new scan fits into here is
-// `start_embed_job` itself being in flight — the refusal it collects is about
-// the newer job holding the slot, and the catch would reset that job\'s
-// `starting` to `idle`.
-test('a continuation superseded while its embed command is in flight leaves the newer scan alone', async () => {
-  let refuse!: (reason: unknown) => void;
-  replies.start_embed_job = new Promise((_resolve, reject) => { refuse = reject; });
-  const { container } = await openFolders();
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  // Ends, chains, passes both preconditions, and stops inside the command.
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(2));
-  channelOf('start_walk_job')(progressEvent({ done: 6, total: 7 }));
-  await tick();
-
-  refuse(new Error('a job is already running'));
-  await tick();
-  await tick();
-  await tick();
-
-  const text = container.textContent ?? '';
-  expect(text).toContain('Триває читання теки.');
-  expect(text).toContain('Опрацьовано 6 з 7. Пропущено: 1. Відхилено: 0.');
-  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
-  // The refusal belongs to a pass nobody is watching any more, so it is not
-  // reported as though it were about the scan on screen.
-  expect(screen.queryByTestId('indexing-note')).toBeNull();
-  expect(text).not.toContain('a job is already running');
-});
-
-// The other direction, and the one a guard that simply never chains would
-// satisfy: an ordinary walk, with nothing racing it, still chains its pass.
-test('a walk that nothing supersedes still chains its embedding pass', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(endedEvent());
-
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  expect(screen.getByTestId('indexing-pass').textContent).toBe('Вбудовування всього індексу починається…');
-});
-
-// ---------------------------------------------------------------------------
-// Cancel, and where the job state lives.
-// ---------------------------------------------------------------------------
-
-test('cancelling asks the backend to stop, and the line then says it stopped', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
-  expect(container.textContent).toContain('Триває читання теки.');
-
-  await fireEvent.click(screen.getByTestId('indexing-cancel'));
-  expect(calls('cancel_job')).toHaveLength(1);
-
-  channelOf('start_walk_job')(endedEvent({ reason: 'cancelled' }));
-  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
-  const text = container.textContent ?? '';
-  expect(text).toContain('Сканування зупинено на ваше прохання.');
-  expect(text).not.toContain('Триває читання теки.');
-});
-
-// 🔴 The main path, not an edge case: four nav items mean «Теки → Моделі →
-// Теки» is two clicks. The channel belongs to whoever started the job, so a
-// component that keeps the job inside the section takes the counters AND the
-// Cancel button with it when it unmounts — and `cancel_job` needs no channel,
-// so that Cancel is lost for nothing.
-test('a job survives switching sections, and Cancel still stops it afterwards', async () => {
-  const { container } = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
-
-  await fireEvent.click(screen.getByTestId('settings-nav-models'));
-  await tick();
-  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
-  await screen.findByTestId('folder-row-4');
-
-  expect(container.textContent).toContain('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
-  await fireEvent.click(screen.getByTestId('indexing-cancel'));
-  expect(calls('cancel_job')).toHaveLength(1);
-});
-
-// The other direction, and the half a Cancel rendered unconditionally would
-// satisfy on its own.
-test('with no job running there is no Cancel to press', async () => {
-  await openFolders();
-
-  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
-  expect(calls('cancel_job')).toHaveLength(0);
-  // And the strip itself is not there at all. An empty div left standing looks
-  // near-identical in a browser, which is exactly why nothing would notice it —
-  // a window somebody opened to change a model should carry no indexing strip
-  // saying nothing.
-  expect(screen.queryByTestId('indexing')).toBeNull();
-});
-
-// The other half of the same decision: once there IS something to say, the
-// strip is there to say it.
-test('the strip appears as soon as there is something to report', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-
-  await waitFor(() => expect(screen.getByTestId('indexing')).toBeTruthy());
-});
-
-// ---------------------------------------------------------------------------
-// A job this window has no channel for.
-// ---------------------------------------------------------------------------
-
-// `job_status` carries a boolean and nothing else, and `set_embedding_model`
-// holds the same slot without ever sending an ending — so a component drawing
-// "indexing" from that boolean can sit on a progress line nothing will finish.
-test('a job with no channel of ours is said in words, with no counts invented for it', async () => {
-  reply({ job_status: { running: true } });
-  const { container } = await openFolders();
-
-  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
-  const text = container.textContent ?? '';
-  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
-    'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
-  );
-  expect(text).not.toContain('Опрацьовано');
-  expect(text).not.toContain('Триває читання теки.');
-  // Cancel is still offered: `cancel_job` needs no channel, and losing the
-  // ability to stop a job is the one failure a person cannot work around.
-  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
-});
-
-test('cancelling a job we cannot hear re-reads the status instead of waiting for an ending', async () => {
-  reply({ job_status: { running: true } });
-  await openFolders();
-  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
-
-  reply({ job_status: { running: false } });
-  await fireEvent.click(screen.getByTestId('indexing-cancel'));
-
-  await waitFor(() => expect(screen.queryByTestId('indexing-unobserved')).toBeNull());
-  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
-});
-
-// 🔴 One press, and the Cancel is gone for the life of the window. `scan` opens
-// by writing `starting` over whatever was there — destroying `runningUnobserved`
-// — and the commonest reason `start_walk_job` is then refused is that the very
-// job that state described still holds the slot. `syncFromStatus` runs once, at
-// mount, so nothing would ever put it back: the person is left watching a job
-// they can no longer stop, and reopening the window is the only way out.
-test('a scan refused because a job we cannot hear holds the slot leaves its Stop in place', async () => {
-  reply({ job_status: { running: true }, start_walk_job: new Error('a job is already running') });
-  await openFolders();
-  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-
-  expect(screen.queryByTestId('indexing-cancel')).not.toBeNull();
-  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
-    'Зараз виконується інше завдання. Це вікно не бачить, як далеко воно просунулося, але зупинити його можна.',
-  );
-  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
-});
-
-// The same re-read must not invent a job either: a refusal with nothing running
-// leaves the window idle, not sitting on a Cancel that stops nothing.
-test('a scan refused with nothing running leaves no Stop behind', async () => {
-  reply({ start_walk_job: new Error('the index could not be opened') });
-  await openFolders();
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-
-  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
-  expect(screen.queryByTestId('indexing-unobserved')).toBeNull();
-});
-
-// ---------------------------------------------------------------------------
-// Rejections and language.
-// ---------------------------------------------------------------------------
-
-test('a refused scan shows the backend sentence and starts nothing', async () => {
-  reply({ start_walk_job: new Error('a job is already running') });
-  await openFolders();
-
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-
-  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
-  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
-});
-
-// D130 asks every visible string to follow a live language switch, and each
-// one is a `$derived.by` reading `$locale` for itself — so each has to be
-// switched under, one at a time. A single test over one state satisfies the
-// rule for the lines that state happens to draw and no others: the six tests
-// below exist because a running strip, a job with no channel, a note, an
-// embedding result and a folder row draw disjoint sets of lines.
-
-test('a language switch after a WALK ending reaches its sentence, its counts and its frozen list', async () => {
-  const { container } = await openFolders('uk');
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent({ complete: false, removed: 0, frozen: [...FROZEN] }));
-  await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
-  // Task 7. `frozenHeading` (JobStrip.svelte:148) is its own key inside this
-  // same `walkLines` block (line 139-140's `void $locale`) — the two
-  // parameterized tests further down mount fresh under one locale each and so
-  // cannot see whether this key itself re-renders on a LIVE switch, only that
-  // it resolves correctly at mount. Read under 'uk' BEFORE the switch below,
-  // the same way the labels-switch test in Folders.test.ts does — a hardcoded
-  // English literal here would otherwise still satisfy the 'en' assertions
-  // after the switch and pass unnoticed.
-  expect(container.textContent ?? '').toContain('Ці підтеки не звіряли, тож і видалені файли');
-
-  setLocale('en');
-  await tick();
-
-  const text = container.textContent ?? '';
-  expect(text).toContain(MATRIX.find((r) => r.name === 'partlyRead')!.en);
-  expect(text).toContain('Documents added: 5.');
-  expect(text).toContain('notes/link — a symbolic link, never entered');
-  expect(text).not.toContain('Теку прочитано');
-  expect(text).toContain('These subfolders were not reconciled, so both deleted files');
-  expect(text).not.toContain('Ці підтеки не звіряли');
-});
-
-// The lines a WALK ending never draws: the pass line, the counts, the estimate
-// and the button that stops it. These are the ones a person is looking at for
-// the longest, and every one of them is a derived of its own.
-test('a language switch DURING a pass reaches its line, its counts, its estimate and its Stop', async () => {
-  const { container } = await openFolders('uk');
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(progressEvent({ secondsLeft: 12 }));
-  await tick();
-  expect(container.textContent).toContain('Триває читання теки.');
-
-  setLocale('en');
-  await tick();
-
-  const text = container.textContent ?? '';
-  expect(screen.getByTestId('indexing-pass').textContent).toBe('The folder is being read.');
-  expect(screen.getByTestId('indexing-counts').textContent)
-    .toBe('Processed 3 of 8. Skipped: 1. Given up on: 0.');
-  expect(screen.getByTestId('indexing-eta').textContent).toBe('About 12 s left.');
-  expect(screen.getByTestId('indexing-cancel').textContent).toBe('Stop');
-  expect(text).not.toContain('Триває читання теки.');
-});
-
-// A job with no channel of ours draws neither of the two above: one sentence
-// and the button.
-test('a language switch reaches the sentence for a job we cannot hear, and its Stop', async () => {
-  reply({ job_status: { running: true } });
-  await openFolders('uk');
-  await waitFor(() => expect(screen.getByTestId('indexing-unobserved')).toBeTruthy());
-
-  setLocale('en');
-  await tick();
-
-  expect(screen.getByTestId('indexing-unobserved').textContent).toBe(
-    'Another job is running. This window cannot see how far it has got, but it can still be stopped.',
-  );
-  expect(screen.getByTestId('indexing-cancel').textContent).toBe('Stop');
-});
-
-// The note, and the sentence beside it that must NOT move: the backend's own
-// text crosses the IPC as words (`error.rs`) and belongs to no catalogue.
-test('a language switch reaches the note and leaves the backend`s own sentence verbatim', async () => {
-  reply({ start_walk_job: new Error('a job is already running') });
-  await openFolders('uk');
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(screen.getByTestId('indexing-note')).toBeTruthy());
-  expect(screen.getByTestId('indexing-note').textContent).toBe('Запит відхилено.');
-
-  setLocale('en');
-  await tick();
-
-  expect(screen.getByTestId('indexing-note').textContent).toBe('The request was refused.');
-  expect(screen.getByTestId('indexing-rejection').textContent).toBe('a job is already running');
-});
-
-// The embedding pass has its own table and its own result line — neither is
-// reached by switching under a walk.
-test('a language switch after an EMBEDDING ending reaches its sentence and its counts', async () => {
-  await openFolders('uk');
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  channelOf('start_embed_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-embed-outcome')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-embed-outcome')))
-    .toBe('Вбудовування всього індексу завершено.');
-
-  setLocale('en');
-  await tick();
-
-  expect(visible(screen.getByTestId('indexing-embed-outcome')))
-    .toBe('Embedding the whole index has finished.');
-  expect(visible(screen.getByTestId('indexing-embed-result')))
-    .toBe('Chunks embedded: 11 of 11. Given up on: 0.');
-});
-
-// The control that starts all of the above. It lives on every folder row, and
-// its label is a derived of its own — the row array's `void $locale` rebuilds
-// the aria-labels, not this.
-test('a language switch reaches the scan control on every folder row', async () => {
-  await openFolders('uk');
-  expect(scanButton(1).textContent).toBe('Сканувати');
-
-  setLocale('en');
-  await tick();
-
-  expect(scanButton(1).textContent).toBe('Scan');
-  expect(scanButton(4).textContent).toBe('Scan');
-});
-
-// Every outcome kind must have a sentence in both locales, and the check is on
-// the table rather than on a count: a number is a definition too, and it has
-// been the wrong one here before.
-test('nothing in the outcome vocabulary is left without words', () => {
-  const named = new Set<OutcomeKind>(MATRIX.map((r) => (
-    r.ending.reason === 'completed' && r.ending.complete === false ? 'partlyRead' : r.ending.reason as OutcomeKind
-  )));
-  for (const kind of OUTCOME_KINDS) expect(named.has(kind), kind).toBe(true);
-});
-
-// ---------------------------------------------------------------------------
-// Live run, finding 2 — the folder row states a falsehood after its own scan.
-//
-// On a real screen the row read «Проіндексовано: 0 документів» while the report
-// directly beneath it said four documents had been added, and the index agreed
-// with the report: `SELECT COUNT(*) … WHERE watched_root_id = 4` → 4. Task 7
-// re-reads the list after an add and after a remove; the one event nobody
-// wired is the one that changes the number the row shows.
-// ---------------------------------------------------------------------------
-
-const FOUR_FILES = [
-  { relativePath: '01-vulpine-notes.md', documentId: 'd1' },
-  { relativePath: '02-survey.md', documentId: 'd2' },
-  { relativePath: '03-method.md', documentId: 'd3' },
-  { relativePath: '04-appendix.md', documentId: 'd4' },
-];
-
-const treeReads = () => calls('list_tree').length;
-
-test('the folder row re-reads when the job that changed it ends, and not before', async () => {
-  await openFolders();
-  // Both directions start here: the row states zero, which is TRUE until the
-  // walk lands. A test that only asserts the four would pass on a row that had
-  // said four all along.
-  expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 0 документів');
-
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  // The index now holds the four documents the walk wrote. Swapped mid-run, so
-  // the number on screen can only become four by the list being READ again —
-  // never by anything this component could have kept from the ending itself.
-  reply({
-    list_tree: { roots: [ROOTS.roots[0], { ...ROOTS.roots[1], files: FOUR_FILES }], recents: [] },
-  });
-
-  // A progress report is not an ending and changes no folder's count: the list
-  // must not be re-read once per tick for the length of a run.
-  const beforeProgress = treeReads();
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
-  expect(treeReads()).toBe(beforeProgress);
-  expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 0 документів');
-
-  channelOf('start_walk_job')(endedEvent());
-
-  // What a person reads on the row after their own scan finishes.
-  await waitFor(() =>
-    expect(visible(screen.getByTestId('folder-row-4'))).toContain('Проіндексовано: 4 документи'),
-  );
-  expect(visible(screen.getByTestId('folder-row-4'))).not.toContain('Проіндексовано: 0 документів');
-  // The other row was not touched by this walk and still reads its own count —
-  // a re-read, not a number written onto whichever row was pressed.
-  expect(visible(screen.getByTestId('folder-row-1'))).toContain('Проіндексовано: 0 документів');
-});
-
-// The second half of "every ending, not only a walk's". The walk chains the
-// embedding pass, so an ENDING arrives that carries no root at all; the list is
-// read again on that one too. This is the assertion that dies if the re-read is
-// narrowed to `pass === 'walk'`.
-test('an embedding pass ending re-reads the list as well', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(calls('start_embed_job')).toHaveLength(1));
-  const afterWalk = treeReads();
-
-  channelOf('start_embed_job')(endedEvent());
-  await waitFor(() => expect(treeReads()).toBe(afterWalk + 1));
-});
-
-// ---------------------------------------------------------------------------
-// PR 8a live run, finding 1 — the same class one level deeper, and this one
-// makes the screen state something false about where a person's text is going.
-//
-// Measured by hand on a case-only rename: `6-rename/archive` was excluded by a
-// rule and its panel was open, reading «archive — Виключено вашим правилом». In
-// a terminal, `mv archive Archive`. Pressing Сканувати reported «Додано
-// документів: 2» — the walk indexes the folder again, because the rule names
-// `archive` byte for byte and the folder is now `Archive`. The row went on
-// reading «Виключено вашим правилом» about a folder whose text was on its way
-// to the model provider (D29). Collapsing and re-expanding by hand was the only
-// thing that corrected it.
-//
-// Written here rather than in `Folders.test.ts` for the reason finding 2's own
-// tests are: the whole window renders, the controller is the real one, and the
-// ending arrives down the channel `start_walk_job` was handed.
-// ---------------------------------------------------------------------------
-
-const BEFORE_RENAME = {
-  list_subfolders: { entries: [{ name: 'archive', relativePath: 'archive', state: { kind: 'excluded' } }], unnameable: 0 },
-  list_exclusions: [{ prefix: 'archive', existsOnDisk: true }],
-};
-const AFTER_RENAME = {
-  list_subfolders: { entries: [{ name: 'Archive', relativePath: 'Archive', state: { kind: 'open' } }], unnameable: 0 },
-  // The rule still names the old spelling, and now nothing is at that path.
-  list_exclusions: [{ prefix: 'archive', existsOnDisk: false }],
-};
-
-const panelText = (rootId: number) => visible(screen.getByTestId(`folder-panel-${rootId}`));
-
-async function openPanel() {
-  reply(BEFORE_RENAME);
-  await openFolders();
-  await fireEvent.click(screen.getByTestId('folder-expand-4'));
-  await screen.findByTestId('folder-rules-4');
-}
-
-test('a finished scan re-reads the open panel, so a renamed folder stops reading as excluded', async () => {
-  await openPanel();
-  // Both directions start here: while the rule matched, this is what the panel
-  // truthfully said. A test asserting only the end state would pass on a panel
-  // that had read «Archive» all along.
-  expect(panelText(4)).toContain('archive Виключено вашим правилом.');
-  expect(panelText(4)).not.toContain('Наразі за цим шляхом теки немає.');
-
-  await fireEvent.click(scanButton(4));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  // The disk moved underneath, mid-run. Swapped here so the new spelling can
-  // only reach the screen by the panel being READ again.
-  reply(AFTER_RENAME);
-
-  // A progress report is not an ending, and the panel is not re-read on one.
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
-  expect(panelText(4)).toContain('archive Виключено вашим правилом.');
-
-  channelOf('start_walk_job')(endedEvent());
-
-  await waitFor(() => expect(panelText(4)).toContain('Archive Жодне правило не виключає цю теку.'));
-  // The sentence the owner read over a folder being indexed at that moment.
-  expect(panelText(4)).not.toContain('Виключено вашим правилом.');
-  // And the rule list, read from the same ending: the rule is still stored and
-  // now names nothing on disk, which is the fact that explains the re-indexing.
-  expect(panelText(4)).toContain('archive Наразі за цим шляхом теки немає.');
-});
-
-// ---------------------------------------------------------------------------
-// Live run, finding 3 — a section says it is not built, and shows the thing it
-// is for.
-//
-// Standing on Індексація with a finished scan on screen, a person read «Ця
-// секція ще не готова.» and, directly under it, the folder read in full, four
-// documents added, embedding finished. Both halves were true; together they
-// were a contradiction. Every test in this file was green, because none of them
-// had ever rendered the strip while standing on an unbuilt section, and none
-// read the window's text IN ORDER.
-// ---------------------------------------------------------------------------
-
-async function reportOnScreen() {
-  const rendered = await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(endedEvent());
-  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
-  return rendered;
-}
-
-// PR 9 Task 6 built the Indexing section and Task 7 built Application, so no
-// panel is left that ends with the not-ready sentence any more — the case
-// below used to stand on the last one left; it now stands on Application built,
-// the same way the case that follows already stood on Indexing built.
-test('standing on the built application section, the report is still read before the section owns content', async () => {
-  const { container } = await reportOnScreen();
-  await fireEvent.click(screen.getByTestId('settings-nav-application'));
-  await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
-
-  const text = visible(container);
-  // Not vacuous in either direction: both are on the window.
-  expect(text).toContain('Теку прочитано повністю.');
-  expect(text).toContain('Додано документів: 5. Без змін: 1. Пропущено: 5. Вилучено з індексу: 4.');
-  expect(text).toContain('Версія 0.0.0');
-  // The window's status line comes first; the section's own content last.
-  expect(text.indexOf('Теку прочитано повністю.'))
-    .toBeLessThan(text.indexOf('Версія 0.0.0'));
-  // `toContain('Версія 0.0.0')` above already proves the panel holds the
-  // section's own content, not the placeholder — a stronger, positive claim
-  // than a `not.toContain` against a sentence the catalogue no longer has
-  // could ever make (Task 8 removed `settings_section_not_ready`, so that
-  // string can no longer be produced by the app at all).
-});
-
-// 🔴 The same finding, on the section the live run actually stood on. It is
-// built now, so what used to follow the report is no longer a sentence saying
-// the panel is empty — it is the index's own numbers, and reading them straight
-// after «Додано документів: 5…» is exactly the confusion finding 3 named. The
-// strip is still drawn first, so the report is still ABOVE the panel, and this
-// case is what says so once the not-ready sentence has gone.
-test('standing on the built indexing section, the report is still read before the section owns numbers', async () => {
-  const { container } = await reportOnScreen();
+// Fixture pair, both directions of D-m's ordering (`jobs.ts`): a report that
+// NAMES its own resumption wins over the index's markers, wherever they point
+// — the strip shows the one button and the section shows none — and a report
+// that ends a cycle with nothing left offers nothing on either surface, not
+// merely nothing on the one that happened to be visible.
+test('a report naming its own resumption wins the strip over the section, whatever the markers say; and a completed cycle with nothing left offers neither', async () => {
+  reply({ model_settings: readSettings({ scanIncomplete: true }) });
+  await openWindow();
+
+  await emit(endedReading('cancelled', { resume: 'full' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-continue')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
 
-  const text = visible(container);
-  // Not vacuous in either direction: both are on the window.
-  expect(text).toContain('Теку прочитано повністю.');
-  expect(text).toContain('В індексі 9 файлів.');
-  // The window's status line comes first; the section's own content last.
-  expect(text.indexOf('Теку прочитано повністю.'))
-    .toBeLessThan(text.indexOf('В індексі 9 файлів.'));
-  // `toContain('В індексі 9 файлів.')` above already proves the panel holds
-  // the section's own numbers, not the placeholder — the same reasoning as
-  // the Application case above: `settings_section_not_ready` is gone from the
-  // catalogue, so a `not.toContain` against its old sentence could not fail.
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  reply({ model_settings: readSettings({ scanIncomplete: false }) });
+  await emit(endedReading('completed', { resume: null }));
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
 });
 
-// The ruling the fix above must not break, on the path that now runs THROUGH a
-// section that starts no job of its own: the strip is outside every section, so the job it is
-// reporting on survives being navigated away from — counters and all — and
-// `cancel_job` needs no channel, so Cancel works from a section that has none.
-test('Cancel survives a switch through a section that starts nothing, in both directions', async () => {
-  await openFolders();
-  await fireEvent.click(scanButton(1));
-  await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
-  channelOf('start_walk_job')(progressEvent());
-  await tick();
+// 🔴 The R2-1 sequence, through the REAL controller: `Full(partial)` stops in
+// embedding, a person presses Продовжити, the controller resumes with
+// `embedOnly`, and the reading's own warning — the row and the frozen prefix
+// under it — is still on screen once that resumed embedding finishes. Repeated
+// across an unmount and a remount of the whole window between the stop and the
+// resume, because nothing here may live in the COMPONENT: only the backend
+// this new window reads is allowed to remember it.
+test('the last reading\'s warning outlives a continued embedding, across an unmount and a remount', async () => {
+  const partlyRead = readingOutcome({
+    reason: 'completed', complete: false,
+    roots: [rootOutcome({
+      rootPath: '/a', complete: false,
+      frozen: [{ prefix: 'sub', reason: 'emptyDirectory' }],
+    })],
+  });
+  const cancelledInEmbedding = ended(
+    { reason: 'cancelled', endedIn: 'embedding', embedding: { kind: 'notReached' }, resume: 'embedOnly' },
+    partlyRead,
+  );
 
+  let rendered = await openWindow();
+  await emit(cancelledInEmbedding);
+
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Продовжити');
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+
+  // Unmount and remount between the stop and the resume.
+  rendered.unmount();
+  deliver = null;
+  reply({ job_status: cancelledInEmbedding });
+  rendered = await openWindow();
+  await waitFor(() => expect(screen.getByTestId('indexing-continue')).toBeTruthy());
+
+  await fireEvent.click(screen.getByTestId('indexing-continue'));
+  expect(calls('start_scan_job')).toHaveLength(1);
+  expect(calls('start_scan_job')[0][1]).toEqual({ entry: 'embedOnly' });
+
+  await emit(ended(
+    { reason: 'completed', endedIn: 'embedding', embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, resume: null },
+    partlyRead, // UNCHANGED — the reading this embedding resumed from is untouched by it.
+  ));
+
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: проіндексовано частково']);
+  expect(visible(screen.getByTestId('indexing-frozen'))).toContain('/a/sub');
+  expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
+  expect(screen.queryByTestId('indexing-continue')).toBeNull();
+
+  // A LATER reading SUPERSEDES the earlier one — the warning is sticky, not
+  // permanent. The top-line sentence goes back to plain `completed` (a new
+  // reading, read in full); the row goes because this reading's own root is
+  // `completed`; the frozen list goes because that root's `frozen` is empty.
+  await emit(ended(
+    { reason: 'completed', endedIn: 'embedding', embedding: { kind: 'ran', done: 4, total: 4, refused: 0 }, resume: null },
+    readingOutcome({ reason: 'completed', complete: true }),
+  ));
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.completed.uk);
+  expect(screen.queryByTestId('indexing-root-row')).toBeNull();
+  expect(screen.queryByTestId('indexing-frozen')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// A refused command.
+// ---------------------------------------------------------------------------
+
+// A rejection crosses the IPC as text (`error.rs`) and nothing branches on it.
+// Task 7 drops the window's own lead-in (`indexing_note_rejected`): the
+// backend's sentence stands alone.
+test('a refused scan shows the backend sentence verbatim, with no lead-in of this window\'s own', async () => {
+  reply({ start_scan_job: new Error('LEAK-TOKEN-ANOTHER-JOB') });
+  await openWindow();
+  // Task 8: the one «Сканувати» control lives in the Scanning section now —
+  // Folders no longer starts a scan of its own.
   await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
-  await tick();
-  // Still running, still counted, still stoppable — from a section that has no
-  // channel of its own and starts no pass.
-  expect(screen.getByTestId('indexing-counts').textContent)
-    .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
-  await fireEvent.click(screen.getByTestId('indexing-cancel'));
-  expect(calls('cancel_job')).toHaveLength(1);
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
 
-  // And back again: the job is not lost by the return trip either.
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-ANOTHER-JOB');
+  expect(screen.queryByTestId('indexing-note')).toBeNull();
+});
+
+// 🔴 The sentence alone cannot say what the slot now holds, so the controller
+// asks again — and the commonest reason this command is refused is that another
+// job is running, whose Stop a person must keep. A build that only reported the
+// sentence would leave the window with no way to stop the job it just collided
+// with.
+test('a scan refused because another job holds the slot leaves that job`s Stop in place', async () => {
+  reply({ start_scan_job: new Error('another job is already running') });
+  // The window has to open IDLE — a running snapshot from the first
+  // `job_status` would hide the Scanning section's own button entirely (Task
+  // 8: it steps aside once a run already owns the slot, correctly). The race
+  // this test is about is the other job claiming the slot BETWEEN this
+  // window's mount and its own press — so `job_status` answers idle for BOTH
+  // calls the mount itself makes (`jobs.ts`'s own fast-paint read and the one
+  // behind `listenScanProgress`'s resolution) and running only on the THIRD
+  // call, the one `jobs.scan`'s own catch handler makes after `start_scan_job`
+  // is refused.
+  let jobStatusCalls = 0;
+  // `null` until the mount itself has settled — measured below, not assumed
+  // here. While it is `null`, every `job_status` call is one of the mount's
+  // own (the fast-paint read and the one behind `listenScanProgress`'s
+  // resolution), so all of them answer idle.
+  let mountCalls: number | null = null;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'job_status') {
+      jobStatusCalls += 1;
+      const stillMounting = mountCalls === null || jobStatusCalls <= mountCalls;
+      return Promise.resolve(stillMounting ? IDLE_SCAN : reading());
+    }
+    const r = replies[cmd];
+    if (r instanceof Error) return Promise.reject(r);
+    return Promise.resolve(r);
+  });
+  await openWindow();
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+  // The mount's own reads, measured from the fixture rather than assumed as a
+  // fixed count: whatever `jobStatusCalls` reached by the time the window has
+  // settled is the mount's, and only a call after this point is the THIRD one
+  // the test is actually about — `jobs.scan`'s own catch handler, after
+  // `start_scan_job` is refused below.
+  mountCalls = jobStatusCalls;
+
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// The strip belongs to the WINDOW, not to a section.
+// ---------------------------------------------------------------------------
+
+// 🔴 The live run's finding 3, and the reason the controller is created in
+// `Settings.svelte` above every section. A controller built inside a section
+// dies when that section does, taking the counters AND the Stop with it — and
+// `cancel_job` needs no channel at all, so that Stop would be lost for nothing.
+// Three of the four sections are destroyed by every nav click; the fourth,
+// Folders, is kept mounted and hidden by F10 (Task 10e), and that changes
+// nothing about who may hold the controller: what the strip has to survive is
+// the WINDOW's decisions about its sections, not one section's own luck.
+test('a scan survives switching sections, and Stop still stops it afterwards', async () => {
+  await openWindow();
+  await emit(reading());
+
   await fireEvent.click(screen.getByTestId('settings-nav-folders'));
   await screen.findByTestId('folder-row-4');
-  expect(screen.getByTestId('indexing-counts').textContent)
+  await fireEvent.click(screen.getByTestId('settings-nav-models'));
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-counts')))
     .toBe('Опрацьовано 3 з 8. Пропущено: 1. Відхилено: 0.');
+
   await fireEvent.click(screen.getByTestId('indexing-cancel'));
-  expect(calls('cancel_job')).toHaveLength(2);
 
-  channelOf('start_walk_job')(endedEvent({ reason: 'cancelled' }));
-  await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-walk-outcome')))
-    .toBe('Сканування зупинено на ваше прохання.');
+  expect(calls('cancel_job')).toHaveLength(1);
 });
 
-// The other direction of the same control, on the same path: with nothing
-// running, the built Application section offers no Cancel and calls nothing
-// belonging to a job.
-test('on the built application section with no job running there is no Cancel and no strip', async () => {
-  render(Settings);
+// 🔴 The subscription belongs to the window and goes with it. `onMount` calls
+// what its callback RETURNS on destroy, so a mount that starts the listener and
+// returns nothing leaves it live for the life of the process — and every
+// reopened window would add another. Both halves: the unlisten is called
+// exactly once, and a state delivered afterwards changes nothing.
+test('closing the window unsubscribes once, and a later state reaches nothing', async () => {
+  const { unmount } = await openWindow();
+  await emit(reading());
+  expect(screen.getByTestId('indexing-pass')).toBeTruthy();
+
+  unmount();
+
+  expect(unlisten).toHaveBeenCalledTimes(1);
+  await emit(endedReading('volumeMissing'));
+  expect(unlisten).toHaveBeenCalledTimes(1);
+  expect(strip()).toBeNull();
+});
+
+// The other half of the same rule: a state that arrives while another section
+// is on screen is on the strip when the person gets back, because the strip
+// never went away.
+test('a scan that ends on another section leaves its report on the strip', async () => {
+  await openWindow();
+  await emit(reading());
   await fireEvent.click(screen.getByTestId('settings-nav-application'));
-  await waitFor(() => expect(screen.getByTestId('application-version')).toBeTruthy());
+  await tick();
 
+  await emit(endedReading('brokenWorker'));
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.brokenWorker.uk);
   expect(screen.queryByTestId('indexing-cancel')).toBeNull();
-  expect(screen.queryByTestId('indexing')).toBeNull();
-  expect(calls('cancel_job')).toHaveLength(0);
 });
 
 // ---------------------------------------------------------------------------
-// PR 8a, Task 6 — the two sentences that enumerate what an incomplete walk
-// leaves behind, and the case both of them used to omit.
-//
-// 🔴 A path under a frozen prefix is never deleted (`should_delete`,
-// `walk.rs:767`), and that rule does not ask WHY the path stopped being seen.
-// A file the person deleted and a file a rule now excludes are the same
-// absence to phase 3 — so both survive, both stay searchable, and both go to
-// the provider on a later pass. Naming only deletion is an enumeration that
-// leaves out the one case PR 8 is entirely about.
-//
-// Asserted through the rendered screen in BOTH locales, not by reading the
-// catalog: a key changed in one locale and left behind in the other is exactly
-// what a catalog-reading test cannot see.
+// The sections that read the ending.
 // ---------------------------------------------------------------------------
 
-const PARTLY_READ_NAMES_EXCLUSIONS = {
-  uk: 'Теку прочитано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
-  en: 'The folder was only partly read: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
-} as const;
+// The live run's finding 1: the folder row went on stating zero indexed
+// documents while the report under it said four had been added. Both
+// directions, because a list that re-read on every store emission would satisfy
+// the first half alone.
+test('the folder list re-reads when a scan ends, and not while one runs', async () => {
+  await openWindow();
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await screen.findByTestId('folder-row-4');
+  const before = calls('list_tree').length;
 
-const FROZEN_NAMES_EXCLUSIONS = {
-  uk: 'Ці підтеки не звіряли, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком:',
-  en: 'These subfolders were not reconciled, so both deleted files and files your exclusion rules now cover are still found by search inside them:',
-} as const;
+  await emit(reading());
+  await tick();
+  expect(calls('list_tree')).toHaveLength(before);
 
-for (const loc of ['uk', 'en'] as const) {
-  test(`a partly read folder names exclusions, not deletions alone (${loc})`, async () => {
-    await openFolders(loc);
-    await fireEvent.click(scanButton(1));
-    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  await emit(ended());
 
-    channelOf('start_walk_job')(endedEvent({ reason: 'completed', complete: false, ...READ_NOT_RECONCILED }));
-    await waitFor(() => expect(screen.getByTestId('indexing-walk-outcome')).toBeTruthy());
+  await waitFor(() => expect(calls('list_tree').length).toBe(before + 1));
+});
 
-    expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(PARTLY_READ_NAMES_EXCLUSIONS[loc]);
-  });
+test('the scanning section re-reads what the index holds when a scan ends', async () => {
+  await openWindow();
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const before = calls('model_settings').length;
 
-  test(`the frozen-subtree heading names exclusions, not deletions alone (${loc})`, async () => {
-    const { container } = await openFolders(loc);
-    await fireEvent.click(scanButton(1));
-    await waitFor(() => expect(calls('start_walk_job')).toHaveLength(1));
+  await emit(ended());
 
-    // 🔴 `complete: true`, and it is not cosmetic (review round 1, M3).
-    // `report.frozen` is assigned at `walk.rs:747`, past the
-    // `if !walked.complete || !stopped_cleanly { return }` gate at
-    // `walk.rs:511`, so `complete: false` ALWAYS carries `frozen: []` and the
-    // pair this fixture used to send is a screen the backend cannot draw. The
-    // heading renders off `frozen.length > 0` alone, so the assertion is the
-    // same one — now made about a state that happens. Measured shape:
-    // `complete=true removed=0 frozen=[Frozen{prefix:"linked",…}]`.
-    channelOf('start_walk_job')(endedEvent({ complete: true, removed: 0, frozen: [...FROZEN] }));
-    await waitFor(() => expect(screen.getByTestId('indexing-frozen')).toBeTruthy());
+  await waitFor(() => expect(calls('model_settings').length).toBe(before + 1));
+});
 
-    expect(container.textContent ?? '').toContain(FROZEN_NAMES_EXCLUSIONS[loc]);
-  });
-}
+// ---------------------------------------------------------------------------
+// The language, which every line has to follow after mount.
+// ---------------------------------------------------------------------------
+
+// D130: the switch is reactive, not a remount. A line built once at mount reads
+// correctly in the language the window opened in and never changes again, which
+// is exactly the defect a test that only ever seeds one locale cannot see.
+test('a language switch during a scan reaches the line, the counts, the estimate and Stop', async () => {
+  await openWindow('uk');
+  await emit(reading({ contended: 2, secondsLeft: 12 }));
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Indexing folder 1 of 2: /home/a/notes');
+  expect(visible(screen.getByTestId('indexing-counts')))
+    .toBe('Processed 3 of 8. Skipped: 1. Given up on: 0.');
+  expect(visible(screen.getByTestId('indexing-contended'))).toBe(
+    'The index is busy with another write, so this scan did not write some files.'
+    + ' The next scan will try them again.',
+  );
+  expect(visible(screen.getByTestId('indexing-eta'))).toBe('About 12 s left.');
+  expect(visible(screen.getByTestId('indexing-cancel'))).toBe('Stop');
+});
+
+// One test for the whole ended shape: the reading block, its per-root row, the
+// embedding block, the failure text and the continue button all follow the
+// switch together.
+test('a language switch while ended re-renders the reading block, the embedding block, the failure text and the continue button', async () => {
+  await openWindow('uk');
+  await emit(ended(
+    {
+      reason: 'failed', endedIn: 'embedding', message: 'boom', resume: 'embedOnly',
+      embedding: { kind: 'ran', done: 1, total: 2, refused: 0 },
+    },
+    readingOutcome({
+      reason: 'completed', complete: false,
+      roots: [rootOutcome({ rootPath: '/a', complete: false })],
+    }),
+  ));
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.partlyRead.en);
+  expect(screen.getAllByTestId('indexing-root-row').map(visible)).toEqual(['/a: indexed partly']);
+  expect(visible(screen.getByTestId('indexing-embed-outcome')))
+    .toBe('The embedding pass broke off because something went wrong.');
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('The program reported: boom');
+  expect(visible(screen.getByTestId('indexing-continue'))).toBe('Retry');
+});
+
+// The backend's sentence is NOT translated — it is what the backend said — and
+// the strip has no lead-in of its own to translate any more (Task 7).
+test('a language switch leaves the backend`s rejection sentence verbatim', async () => {
+  reply({ start_scan_job: new Error('LEAK-TOKEN-VERBATIM') });
+  await openWindow('uk');
+  await fireEvent.click(screen.getByTestId('settings-nav-indexing'));
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('scanning-scan'));
+  await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
+
+  setLocale('en');
+  await tick();
+
+  expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-VERBATIM');
+});

@@ -4,9 +4,9 @@ import { tick } from 'svelte';
 import Application from './Application.svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
-import type { AppPrefs } from '../lib/ipc';
+import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 
-// The typed wrappers, not the raw `invoke` — the shape `Indexing.test.ts` uses.
+// The typed wrappers, not the raw `invoke` — the shape `Scanning.test.ts` uses.
 // Every wrapper `Settings.svelte`'s other sections reach for is declared too,
 // because the whole-window case at the bottom mounts all four: a wrapper left
 // out is `undefined`, and every call on it becomes a TypeError a `catch`
@@ -37,12 +37,38 @@ vi.mock('../lib/ipc', () => ({
   removeMask: vi.fn(),
   addWatchedFolder: vi.fn(),
   removeWatchedFolder: vi.fn(),
-  startWalkJob: vi.fn(),
-  startEmbedJob: vi.fn(),
+  startScanJob: vi.fn(),
   cancelJob: vi.fn(),
+  // The window opens the scan subscription at mount now; left out, `mount`
+  // throws and the whole window fails to render.
+  listenScanProgress: () => Promise.resolve(() => {}),
 }));
 
-// 🔴 Annotated `AppPrefs`, for the reason `Indexing.test.ts` annotates
+// 🔴 Annotated `ModelSettings`, and the annotation is the guard rather than
+// documentation. This fixture crosses an UNTYPED mock, so until it was named
+// the compiler never looked at it — and it had already fallen two required
+// fields behind (`pendingChunks`, and `scanIncomplete` when PR 9b added it).
+// Nothing in this file reads either, which is exactly why the drift was
+// silent; Task 8 wires `continueAction` into the settings window and that
+// function reads both. A missing `scanIncomplete` reads as `false`, which is
+// the statement that the last scan saw the whole archive.
+const SETTINGS: ModelSettings = {
+  key: { kind: 'present' },
+  index: {
+    kind: 'read', embeddingModel: null, chatModel: null,
+    embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+    failedChunks: 0, pendingChunks: 0, indexedFiles: 0, lastIndexedAt: null,
+    scanIncomplete: false, searchTextArm: true, searchContentArm: true,
+  },
+  platform: 'linux',
+};
+
+// What a process in which nothing has happened yet reports (`ScanState::default`).
+const IDLE_SCAN: ScanState = {
+  revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+// 🔴 Annotated `AppPrefs`, for the reason `Scanning.test.ts` annotates
 // `ModelSettings`: every inline fixture in this project's UI suites sits behind
 // an untyped mock where the compiler never looks, so a fixture that forgets
 // `platform` or `version` would render `undefined` in front of a person and
@@ -67,20 +93,11 @@ beforeEach(() => {
   listMasks.mockReset();
   jobStatus.mockReset();
   appPrefs.mockResolvedValue(prefs());
-  modelSettings.mockResolvedValue({
-    key: { kind: 'present' },
-    index: {
-      kind: 'read', embeddingModel: null, chatModel: null,
-      embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
-      failedChunks: 0, indexedFiles: 0, lastIndexedAt: null,
-      searchTextArm: true, searchContentArm: true,
-    },
-    platform: 'linux',
-  });
+  modelSettings.mockResolvedValue(SETTINGS);
   providerModels.mockResolvedValue({ entries: [], unreadable: 0, unreadableRecords: [] });
   listTree.mockResolvedValue({ roots: [], recents: [] });
   listMasks.mockResolvedValue([]);
-  jobStatus.mockResolvedValue({ running: false });
+  jobStatus.mockResolvedValue(IDLE_SCAN);
   setLocale('uk');
 });
 
@@ -805,7 +822,18 @@ test('an older read that settles last does not repaint over the newer one', asyn
 test('a person who opens Application in the settings window reads the shortcut, the autostart state and the version', async () => {
   appPrefs.mockResolvedValue(prefs({ platform: 'mac', version: '0.0.0' }));
   const { container } = render(Settings);
-  const panel = () => container.querySelector('.spane');
+  // 🔴 F10 (Task 10e): what is SHOWN in the panel, not what is mounted in it.
+  // The Folders section stays mounted and `hidden` for the window's life now,
+  // and `textContent` reads a hidden subtree exactly as it reads a shown one —
+  // so this test's own claim, that a person reads these words and no others,
+  // is only about a person once the hidden sections are taken out. The clone
+  // keeps this a read: removing `[hidden]` from the live tree would be this
+  // test editing the window it is reading.
+  const panel = () => {
+    const pane = container.querySelector('.spane')!.cloneNode(true) as HTMLElement;
+    for (const el of pane.querySelectorAll('[hidden]')) el.remove();
+    return pane;
+  };
 
   await fireEvent.click(screen.getByTestId('settings-nav-application'));
 

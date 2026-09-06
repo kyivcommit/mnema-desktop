@@ -12,16 +12,18 @@ use std::time::Duration;
 
 use fixture::{Fixture, vectors_for};
 use mnema_desktop::bridge;
-use mnema_desktop::embed_job::start_embed_job;
 use mnema_desktop::error::Error;
-use mnema_desktop::job::JobEvent;
+use mnema_desktop::job::{EndReason, JobEvent};
 use mnema_desktop::models::{
     DEFAULT_MODELS, ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState,
     KeyStoreFailure, UnreadableCause, forget_key, key_present, model_settings, provider_models,
     set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
+use mnema_desktop::scan_job;
+use mnema_desktop::scan_state::{EmbedOutcome, Entry, Phase, ScanSnapshot, ScanState, SkipWhy};
 use mnema_mock_provider::Reply;
-use serde_json::{Value, json};
+use serde_json::Value;
+use support::scan::{report_of, run_scan_capturing_snapshots, scan_with};
 use tauri::ipc::Channel;
 
 /// The index half, or a failure naming what the index said instead.
@@ -1258,25 +1260,6 @@ fn job_channel() -> (Channel<JobEvent>, mpsc::Receiver<Value>) {
     (channel, rx)
 }
 
-/// Every progress report the window was shown, and the ending — which always
-/// arrives, however the job ended, and is what this returns rather than a
-/// timeout.
-fn events_until_ended(events: &mpsc::Receiver<Value>) -> (Vec<Value>, Value) {
-    let mut progress = Vec::new();
-    loop {
-        match events.recv_timeout(Duration::from_secs(20)) {
-            Ok(event) if event["event"] == json!("progress") => {
-                progress.push(event["data"].clone())
-            }
-            Ok(event) if event["event"] == json!("ended") => {
-                return (progress, event["data"].clone());
-            }
-            Ok(other) => panic!("the job sent something that is neither: {other}"),
-            Err(_) => panic!("the job never told the window it ended"),
-        }
-    }
-}
-
 /// Waits for the job slot to come free, so a test that starts a second job is
 /// not racing the first one's own thread.
 fn wait_for_the_slot(fx: &Fixture) {
@@ -1288,6 +1271,34 @@ fn wait_for_the_slot(fx: &Fixture) {
         !fx.state().job_is_running(),
         "the job never released the slot"
     );
+}
+
+/// Runs a scan and returns every `Embedding` phase's progress counts the
+/// window would have been shown, in order, followed by the state the scan
+/// settled in.
+///
+/// The scan-job replacement for the old per-test `events_until_ended`: a scan
+/// has no channel, so what a window would have seen is read off the
+/// `Running { phase: Embedding { counts }, .. }` snapshots an observer sees as
+/// they happen — `support::scan::run_scan_watching`'s own doc comment is
+/// where that mechanism lives.
+fn run_scan_capturing_embedding_progress(
+    fx: &Fixture,
+    entry: Entry,
+) -> (Vec<mnema_desktop::job::Progress>, ScanState) {
+    let (snapshots, settled) =
+        run_scan_capturing_snapshots(fx.handle(), entry, Duration::from_secs(20));
+    let progress = snapshots
+        .iter()
+        .filter_map(|state| match &state.snapshot {
+            ScanSnapshot::Running {
+                phase: Phase::Embedding { counts },
+                ..
+            } => Some(counts.clone()),
+            _ => None,
+        })
+        .collect();
+    (progress, settled)
 }
 
 /// One job at a time is the model, and `AppState::running` is one flag for the
@@ -1310,8 +1321,7 @@ fn embedding_refuses_to_start_while_another_job_runs() {
     let (probe, _probe_events) = job_channel();
     bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
 
-    let (channel, _events) = job_channel();
-    let refusal = start_embed_job(fx.state(), channel)
+    let refusal = scan_job::start_scan_job(fx.state(), Entry::EmbedOnly)
         .expect_err("embedding started while a job was already running");
     assert!(
         matches!(refusal, Error::JobAlreadyRunning),
@@ -1321,72 +1331,75 @@ fn embedding_refuses_to_start_while_another_job_runs() {
     bridge::cancel_job(fx.state());
     wait_for_the_slot(&fx);
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel)
+    scan_job::start_scan_job(fx.state(), Entry::EmbedOnly)
         .expect("embedding was still refused with nothing else running");
     // Nothing is adopted in this test, so the run ends at once — waited out
     // rather than left running, because the fixture's temporary directory is
     // about to go and the job holds a connection to a database inside it.
-    events_until_ended(&events);
+    wait_for_the_slot(&fx);
 }
 
-/// The store is asked **before** the slot is taken, and the refusal a person
-/// gets says so.
-///
-/// It is `walk_job::start_walk_job`'s own rule — every fallible step before
-/// `claim_job`, so that a call which was always going to fail never has
-/// `job_status` reporting a job that is running — and it has more force here
-/// than there. `mnema_secrets::load` can block on a modal authorisation dialog:
-/// on macOS the store authorises against the code identity that wrote the
-/// credential, and an ad-hoc signature changes with every build
-/// (`KeyStoreFailure::Locked`'s own doc comment, measured 2026-08-11). Claiming
-/// the slot first would disable Start, and refuse a walk, for as long as that
-/// dialog sits unanswered on somebody's screen.
-///
-/// So the order is observable, and this is what observes it: with a job already
-/// running **and** no key, the answer names the key.
+/// 🔴 Renamed and rewritten for the scan job (Task 3b) — the property this
+/// held for `start_embed_job` is not merely converted, it is INVERTED. D-g
+/// (`scan_job::embed_after`'s own long comment) claims the slot BEFORE the
+/// key is read for an `EmbedOnly` entry, on purpose: the credential store can
+/// block on a modal authorisation dialog, and reading it before the claim
+/// would disable Start — refusing a `walk_job.rs`-shaped race in front of a
+/// dialog somebody has not answered yet is the exact cost D-g pays to avoid.
+/// So a job already holding the slot now refuses `EmbedOnly` with
+/// `JobAlreadyRunning`, even with no key entered at all — the mirror of what
+/// this test used to pin, not a continuation of it.
 #[test]
-fn the_key_is_read_before_the_job_slot_is_taken() {
+fn the_job_slot_is_claimed_before_the_key_is_read_for_an_embed_only_entry() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
 
     let (probe, _probe_events) = job_channel();
     bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
 
-    let (channel, _events) = job_channel();
-    let refusal =
-        start_embed_job(fx.state(), channel).expect_err("a job is running and there is no key");
+    let refusal = scan_job::start_scan_job(fx.state(), Entry::EmbedOnly)
+        .expect_err("a job is running, and the slot refuses before the key is ever read");
     assert!(
-        matches!(refusal, Error::NoKey),
-        "the slot was claimed before the store was asked: {refusal:?}"
-    );
-    // The sentence, not only the variant: this type crosses the IPC as its
-    // `Display` string, and `Error::NoKey`'s own doc comment is about what it
-    // tells the person to do next.
-    let said = refusal.to_string();
-    assert!(
-        !said.contains("already running"),
-        "a person with no key was told to wait for a job instead: {said}"
+        matches!(refusal, Error::JobAlreadyRunning),
+        "the slot is claimed before the key is read for `EmbedOnly` (D-g): {refusal:?}"
     );
 
     bridge::cancel_job(fx.state());
     wait_for_the_slot(&fx);
 }
 
-/// A missing key is a refusal a person can read, not a panic — and the slot is
-/// left free, so nothing is blocked by a call that never started anything.
+/// A missing key ends the job cleanly rather than panicking, and the slot is
+/// freed by the time it does — nothing is blocked by a run that had nothing to
+/// do.
+///
+/// 🔴 Rewritten for the scan job (Task 3b): `start_embed_job` refused
+/// SYNCHRONOUSLY, with `Err(Error::NoKey)`, before the slot was ever claimed.
+/// `scan_job::start_scan_job(EmbedOnly)` claims the slot unconditionally
+/// (D-g) and discovers the missing key on the job's own thread, so the
+/// command itself answers `Ok(())` and the refusal is now an ENDING —
+/// `Completed` with `embedding: Skipped { why: NoKey }` — which is what a
+/// person actually sees: the run finished, it just had nothing it was allowed
+/// to do.
 #[test]
 fn embedding_without_a_key_is_refused_rather_than_panicking() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
 
-    let (channel, _events) = job_channel();
-    let refusal = start_embed_job(fx.state(), channel).expect_err("there is no key to embed with");
+    let settled = scan_with(fx.handle(), Entry::EmbedOnly);
+    let report = report_of(&settled);
 
-    assert!(matches!(refusal, Error::NoKey), "{refusal:?}");
+    assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+    assert_eq!(
+        report.embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoKey
+        },
+        "{report:?}"
+    );
     assert!(
         !fx.state().job_is_running(),
-        "a refused start left the job slot taken, and nothing can index until a restart"
+        "a completed run with no key left the job slot taken, and nothing can index until a \
+         restart"
     );
     assert!(
         fx.provider_request().is_none(),
@@ -1407,26 +1420,48 @@ fn a_run_started_from_the_window_embeds_the_queue_and_reports_what_it_did() {
     let space = fx.active_space().expect("a model was adopted");
     fx.write_indexed_chunks(CHUNKS);
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the embedding job starts");
-    let (progress, ending) = events_until_ended(&events);
+    let (progress, settled) = run_scan_capturing_embedding_progress(&fx, Entry::EmbedOnly);
+    let report = report_of(&settled);
 
-    assert_eq!(ending["reason"], json!("completed"), "{ending}");
-    assert_eq!(ending["done"], json!(CHUNKS), "{ending}");
-    assert_eq!(ending["total"], json!(CHUNKS), "{ending}");
-    assert_eq!(ending["refused"], json!(0), "{ending}");
+    assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+    let (done, total, refused) = match report.embedding {
+        EmbedOutcome::Ran {
+            done,
+            total,
+            refused,
+        } => (done, total, refused),
+        other => panic!("a completed run did not report what it embedded: {other:?}"),
+    };
+    assert_eq!(done, CHUNKS as u64, "{report:?}");
+    assert_eq!(total, CHUNKS as u64, "{report:?}");
+    assert_eq!(refused, 0, "{report:?}");
 
     // The bar moved, and the last thing it was shown is the truth rather than
     // whatever the throttle last let through. Both halves: an empty list also
     // satisfies "no report disagreed with the ending".
-    assert!(
-        !progress.is_empty(),
-        "the window was shown no progress at all, so the bar never moved"
-    );
-    let last = progress.last().expect("the assertion above found one");
+    //
+    // Filtered to `done > 0` before the emptiness check: the scan announces
+    // two free `Embedding` snapshots before any chunk is embedded (the claim
+    // at `scan_job.rs:192` and the phase update at `scan_job.rs:507`), so the
+    // unfiltered vector is never empty regardless of what the pass actually
+    // reports.
+    //
+    // The emptiness check and the exactness check used to be two separate
+    // assertions, and the first was rescued by the second: deleting it left
+    // `real_progress.last().expect(...)` to panic on the same empty vector
+    // anyway, so its own mutant died on a neighbour rather than on itself.
+    // One `match` names the field this test is actually about either way.
+    let real_progress: Vec<_> = progress.iter().filter(|p| p.done > 0).collect();
+    let last = match real_progress.last() {
+        Some(last) => last,
+        None => panic!(
+            "the window was shown no progress from actually embedding a chunk, so the bar \
+             never moved: {progress:?}"
+        ),
+    };
     assert_eq!(
-        last["done"], ending["done"],
-        "the last progress report the window saw is short of the ending: {last}"
+        last.done, done,
+        "the last progress report the window saw is short of the ending: {last:?}"
     );
 
     // What the index actually holds, which is the only thing that makes the
@@ -1477,17 +1512,23 @@ fn a_chunk_the_provider_refused_is_counted_where_a_person_can_read_it() {
     let space = fx.active_space().expect("a model was adopted");
     fx.write_indexed_chunks(CHUNKS);
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the embedding job starts");
-    let (_progress, ending) = events_until_ended(&events);
+    let settled = scan_with(fx.handle(), Entry::EmbedOnly);
+    let report = report_of(&settled);
 
+    let (done, total, refused) = match report.embedding {
+        EmbedOutcome::Ran {
+            done,
+            total,
+            refused,
+        } => (done, total, refused),
+        other => panic!("the run did not report what it embedded: {other:?}"),
+    };
     assert_eq!(
-        ending["refused"],
-        json!(1),
-        "the ending does not say a chunk was given up on: {ending}"
+        refused, 1,
+        "the ending does not say a chunk was given up on: {report:?}"
     );
-    assert_eq!(ending["done"], json!(1), "{ending}");
-    assert_eq!(ending["total"], json!(CHUNKS), "{ending}");
+    assert_eq!(done, 1, "{report:?}");
+    assert_eq!(total, CHUNKS as u64, "{report:?}");
 
     // The number on the settings screen, which is the one that outlives this
     // run's channel and the one the no-retry rule is justified by.
@@ -1572,9 +1613,18 @@ fn pending_chunks_is_zero_with_no_active_space() {
     assert_eq!(read.pending_chunks, 0);
 }
 
-/// A person who has entered a key but chosen no model gets a sentence, not a
-/// silence and not a panic. The pass reads `meta.active_space` itself and
-/// refuses; this is that refusal reaching the window as an ending it can render.
+/// A person who has entered a key but chosen no model gets a closed reason a
+/// window can act on, not a silence and not a panic.
+///
+/// 🔴 Rewritten for the scan job (Task 3b), and not merely converted:
+/// `start_embed_job` left this to `mnema_embed::run`'s own `NoActiveSpace`
+/// refusal, an ending carrying a free-text sentence (`reason: "failed"`,
+/// `message` containing "no embedding model"). `scan_job::embed_after` asks
+/// the question itself, BEFORE calling `mnema_embed::run` at all, and answers
+/// with [`SkipWhy::NoModel`] on a `Completed` ending — a closed reason a
+/// window can offer a "choose a model" button for, rather than a sentence it
+/// can only display. See that function's own doc comment for why the
+/// question moved.
 ///
 /// **The key goes into the store directly, and that is the only way this state
 /// can still be built.** `set_key` applies `DEFAULT_MODELS` to every role the
@@ -1597,17 +1647,16 @@ fn a_run_with_no_model_chosen_ends_with_a_message_saying_so() {
         "something called the provider before the job did, so the check at the end is about it"
     );
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the job starts, and then fails on its own");
-    let (_progress, ending) = events_until_ended(&events);
+    let settled = scan_with(fx.handle(), Entry::EmbedOnly);
+    let report = report_of(&settled);
 
-    assert_eq!(ending["reason"], json!("failed"), "{ending}");
-    let message = ending["message"]
-        .as_str()
-        .expect("a failed job must carry a message the window can render");
-    assert!(
-        message.contains("no embedding model"),
-        "the ending does not say what is missing: {message}"
+    assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+    assert_eq!(
+        report.embedding,
+        EmbedOutcome::Skipped {
+            why: SkipWhy::NoModel
+        },
+        "the ending does not say what is missing: {report:?}"
     );
     assert!(
         fx.provider_request().is_none(),
@@ -1767,8 +1816,7 @@ fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
         );
     }
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the embedding job starts");
+    scan_job::start_scan_job(fx.state(), Entry::EmbedOnly).expect("the embedding job starts");
 
     // Wait until the mock has **read the run's request**, not merely until the
     // slot is taken. The server answers one connection at a time in the order
@@ -1798,8 +1846,9 @@ fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
 
     let outcome = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep);
 
-    let (_progress, ending) = events_until_ended(&events);
-    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+    wait_for_the_slot(&fx);
+    let report = report_of(&fx.state().scan_state());
+    assert_eq!(report.reason, EndReason::Completed, "{report:?}");
 
     // The index first, for the reason the test above gives: a change that
     // succeeded has already done its damage, and an `expect_err` here would end
@@ -1824,9 +1873,12 @@ fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
         "the index holds vectors outside the space it points at — a run wrote into a space that \
          was repointed away from it, and search will never see them"
     );
+    let done = match report.embedding {
+        EmbedOutcome::Ran { done, .. } => done,
+        other => panic!("a completed run did not report what it embedded: {other:?}"),
+    };
     assert_eq!(
-        ending["done"],
-        json!(read.embedded_chunks),
+        done as i64, read.embedded_chunks,
         "what the window was told and what the active space holds are two different numbers"
     );
 
@@ -2013,7 +2065,7 @@ fn text_matched(answer: &bridge::SearchAnswer) -> usize {
 /// 1. a hit for a query only the content arm can answer;
 /// 2. that hit gone after the change — and the *lexical* arm still answering,
 ///    which is what separates "semantic went dark" from "the index broke";
-/// 3. `start_embed_job` refilling the new space;
+/// 3. the scan job's `EmbedOnly` entry refilling the new space;
 /// 4. the same document findable by meaning again.
 ///
 /// **What makes step 2 a measurement of the fix rather than of the seeding** is
@@ -2044,10 +2096,12 @@ fn discarding_the_vectors_takes_semantic_search_with_them_until_the_index_is_ref
     let doomed_space = fx.active_space().expect("`set_key` chose a model");
     let chunks = fx.write_indexed_chunks(SEEDED_CHUNKS);
 
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the first embedding pass starts");
-    let (_progress, ending) = events_until_ended(&events);
-    assert_eq!(ending["reason"], json!("completed"), "{ending}");
+    let settled = scan_with(fx.handle(), Entry::EmbedOnly);
+    assert_eq!(
+        report_of(&settled).reason,
+        EndReason::Completed,
+        "{settled:?}"
+    );
 
     // 1 — found by meaning, and by nothing else. The lexical arm is asserted to
     // have matched NOTHING for this query, which is what makes the hit below
@@ -2110,13 +2164,17 @@ fn discarding_the_vectors_takes_semantic_search_with_them_until_the_index_is_ref
         "the document itself is gone, not merely its vectors"
     );
 
-    // 3 — the recovery, through the ordinary command: `start_embed_job` takes no
-    // root and covers the whole index, so nothing new is needed to offer it.
-    let (channel, events) = job_channel();
-    start_embed_job(fx.state(), channel).expect("the refill starts");
-    let (_progress, ending) = events_until_ended(&events);
-    assert_eq!(ending["reason"], json!("completed"), "{ending}");
-    assert_eq!(ending["done"], json!(SEEDED_CHUNKS), "{ending}");
+    // 3 — the recovery, through the ordinary command: `Entry::EmbedOnly` reads
+    // no folder and covers the whole embedding queue, so nothing new is needed
+    // to offer it.
+    let settled = scan_with(fx.handle(), Entry::EmbedOnly);
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+    let done = match report.embedding {
+        EmbedOutcome::Ran { done, .. } => done,
+        other => panic!("the refill did not report what it embedded: {other:?}"),
+    };
+    assert_eq!(done, SEEDED_CHUNKS as u64, "{report:?}");
 
     // 4 — findable by meaning again, and in the new space rather than the old.
     let refilled = bridge::search(fx.state(), SEMANTIC_ONLY_QUERY.into()).expect("the search runs");

@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// The scanning job's own test driver — see that module's header for why it
+/// is declared here, alongside `worker`, rather than pulled in with `#[path]`
+/// the way `app.rs` and `fixture.rs` are.
+pub mod scan;
+
 /// The extraction worker binary, built fresh so a walk job under test has
 /// something real behind `Pool::extract` to call.
 ///

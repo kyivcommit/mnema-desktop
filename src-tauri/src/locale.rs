@@ -57,17 +57,34 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// read the old one off the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    TrayStatus,       // "Проіндексовано —" / "Indexed —"
+    // The five that replaced `TrayStatus` (Task 5): `tray::status_label` is
+    // the ONE place that picks between them and appends the number and, for
+    // the count-carrying two, the plural word `files_word` below computes —
+    // this catalog holds only the fixed words, never a number.
+    TrayIndexingPercent, // "Індексація" / "Indexing" (+ " NN %")
+    TrayIndexingCount,   // "Індексація:" / "Indexing:" (+ " N <word>")
+    TrayEmbedding,       // "Вбудовування" / "Embedding" (+ " NN %")
+    TrayRemoving,        // "Видаляємо теку…" / "Removing folder…" (whole sentence)
+    // D-M1 (final review): the two jobs a person did not ask for. They used to
+    // share the IDLE sentence, so while a probe ran the tray said
+    // "Проскановано: N файлів" with a live Stop directly beneath it — a menu
+    // saying nothing is running over a control that stops something.
+    TrayProbing,      // "Перевірка…" / "Checking…" (whole sentence)
+    TrayAdopting,     // "Змінюємо модель…" / "Changing the model…" (whole sentence)
+    TrayScanned,      // "Проскановано:" / "Scanned:" (+ " N <word>")
     TrayShowSearch,   // "Показати пошук" / "Show search"
     TrayOpenSettings, // "Відкрити налаштування" / "Open settings"
     TrayStopIndexing, // "Зупинити сканування" / "Stop scanning"
-    TrayQuit,         // "Вийти" / "Quit"
-    MenuLanguage,     // submenu title "Мова" / "Language"
-    LangAuto,         // "Авто (система)" / "Auto (system)"
-    SettingsTitle,    // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,    // "Закрити налаштування" / "Close Settings"
-    MenuEdit,         // "Редагувати" / "Edit"
-    MenuWindow,       // "Вікно" / "Window"
+    // F4 (Task 10 live run): the tray offered a way to stop a scan and no way
+    // to carry one on — the resume button lived only in the settings window.
+    TrayResumeScanning, // "Продовжити сканування" / "Continue scanning"
+    TrayQuit,           // "Вийти" / "Quit"
+    MenuLanguage,       // submenu title "Мова" / "Language"
+    LangAuto,           // "Авто (система)" / "Auto (system)"
+    SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,      // "Закрити налаштування" / "Close Settings"
+    MenuEdit,           // "Редагувати" / "Edit"
+    MenuWindow,         // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
     // here, and not in `error.rs` with every other rejection sentence, because
     // each answers a PRESS a person made and there is a better sentence for it
@@ -81,10 +98,17 @@ pub enum Key {
 }
 
 pub const ALL_KEYS: &[Key] = &[
-    Key::TrayStatus,
+    Key::TrayIndexingPercent,
+    Key::TrayIndexingCount,
+    Key::TrayEmbedding,
+    Key::TrayRemoving,
+    Key::TrayProbing,
+    Key::TrayAdopting,
+    Key::TrayScanned,
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
     Key::TrayStopIndexing,
+    Key::TrayResumeScanning,
     Key::TrayQuit,
     Key::MenuLanguage,
     Key::LangAuto,
@@ -99,14 +123,28 @@ pub const ALL_KEYS: &[Key] = &[
 pub fn t(lang: Lang, key: Key) -> &'static str {
     use Key::*;
     match (lang, key) {
-        (Lang::Uk, TrayStatus) => "Проіндексовано —",
-        (Lang::En, TrayStatus) => "Indexed —",
+        (Lang::Uk, TrayIndexingPercent) => "Індексація",
+        (Lang::En, TrayIndexingPercent) => "Indexing",
+        (Lang::Uk, TrayIndexingCount) => "Індексація:",
+        (Lang::En, TrayIndexingCount) => "Indexing:",
+        (Lang::Uk, TrayEmbedding) => "Вбудовування",
+        (Lang::En, TrayEmbedding) => "Embedding",
+        (Lang::Uk, TrayRemoving) => "Видаляємо теку…",
+        (Lang::En, TrayRemoving) => "Removing folder…",
+        (Lang::Uk, TrayProbing) => "Перевірка…",
+        (Lang::En, TrayProbing) => "Checking…",
+        (Lang::Uk, TrayAdopting) => "Змінюємо модель…",
+        (Lang::En, TrayAdopting) => "Changing the model…",
+        (Lang::Uk, TrayScanned) => "Проскановано:",
+        (Lang::En, TrayScanned) => "Scanned:",
         (Lang::Uk, TrayShowSearch) => "Показати пошук",
         (Lang::En, TrayShowSearch) => "Show search",
         (Lang::Uk, TrayOpenSettings) => "Відкрити налаштування",
         (Lang::En, TrayOpenSettings) => "Open settings",
         (Lang::Uk, TrayStopIndexing) => "Зупинити сканування",
         (Lang::En, TrayStopIndexing) => "Stop scanning",
+        (Lang::Uk, TrayResumeScanning) => "Продовжити сканування",
+        (Lang::En, TrayResumeScanning) => "Continue scanning",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, MenuLanguage) => "Мова",
@@ -130,6 +168,52 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         }
         (Lang::En, HotkeyNeedsAModifier) => {
             "a shortcut needs at least one modifier: Ctrl, Alt, Shift or Cmd"
+        }
+    }
+}
+
+/// The word for "file(s)" that agrees with `n`, in `lang`.
+///
+/// The Ukrainian arm is the reason this exists at all: «файл» is a count noun
+/// with three plural forms rather than English's two, and which form applies is
+/// not "does `n` end in 1" — it is the Slavic rule where the LAST TWO digits
+/// decide, so that 11–14 fall to the "many" form even though they end in
+/// 1/2/4. Getting this wrong is not cosmetic: `tray::status_label` builds a
+/// sentence with it, and a form that disagreed with the number beside it would
+/// be exactly the kind of tray text this task was written to stop showing.
+///
+/// `n` is signed because [`crate::scan_state::ScanState::files`] is signed; the
+/// magnitude is what decides the form, so `n.unsigned_abs()` is taken up front
+/// and a negative count (a state the type allows but no writer here produces)
+/// pluralizes the same as its positive twin rather than panicking or picking
+/// arbitrarily.
+pub fn files_word(lang: Lang, n: i64) -> &'static str {
+    // Review round 1, Minor 3: this used to sit inside the Ukrainian arm
+    // only, which made the doc comment above false for the English one —
+    // `files_word(En, -1)` answered "files" while `files_word(Uk, -1)`
+    // answered «файл». Taken here, before the `match`, so BOTH arms decide
+    // off the magnitude the doc comment promises.
+    let n = n.unsigned_abs();
+    match lang {
+        Lang::En => {
+            if n == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        }
+        Lang::Uk => {
+            let last_two = n % 100;
+            let last_one = n % 10;
+            if (11..=14).contains(&last_two) {
+                "файлів"
+            } else if last_one == 1 {
+                "файл"
+            } else if (2..=4).contains(&last_one) {
+                "файли"
+            } else {
+                "файлів"
+            }
         }
     }
 }
@@ -289,9 +373,9 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let choice = app.state::<crate::state::AppState>().locale().choice;
     // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
     // icon and its `on_tray_icon_event` (the positioner) are left in place.
-    // The rebuild also replaces the Stop item a job may be about to disable,
-    // which is why the swap is `tray::swap_tray_menu` and not a `set_menu`
-    // here — see `tray::StopItem`.
+    // The rebuild also replaces the status/Stop items a job may be about to
+    // redraw, which is why the swap is `tray::swap_tray_menu` and not a
+    // `set_menu` here — see `tray::TrayItems`.
     crate::tray::swap_tray_menu(app, lang, choice);
     // The settings window's native OS title, re-set whether or not it is
     // visible so an already-open or merely-hidden window is right next time.
@@ -310,6 +394,32 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     let _ = app.emit("locale-changed", lang_tag(lang));
 }
 
+/// 🔴 **`#[tauri::command]` with no `(async)`, and that is load-bearing rather
+/// than a default nobody changed.**
+///
+/// A blocking command runs inline on the MAIN THREAD. The language switch this
+/// performs reaches [`apply_choice`] → [`apply_locale`] →
+/// [`crate::tray::swap_tray_menu`] → `build_tray_menu` → `Menu::with_items`,
+/// and `muda::Menu::new` is `MainThreadMarker::new().expect("`muda::Menu` can
+/// only be created on the main thread")`
+/// (`muda-0.19.3/src/platform_impl/macos/mod.rs:130-132`). That is a PANIC on
+/// macOS, not a degradation, and unlike `new_submenu` beside it there is no
+/// `cfg!(test)` bypass. So this command is on the main thread because it is not
+/// `(async)`, and the menu rebuild below it is legal for that reason alone.
+///
+/// **Its sibling does the opposite and documents it**: [`crate::prefs::
+/// set_hotkey`] IS `(async)`, therefore on a worker thread, and therefore hops
+/// through `run_on_main_thread` with a paragraph of its own explaining why. One
+/// caller handling this hazard at length while the other silently depends on
+/// the inverse is how a later reader "harmonises" the two and panics the
+/// language switch. Making this one `(async)` means giving it the same hop.
+///
+/// ⚠️ **No headless test can tell this from the version that panics**, which is
+/// the same limit `set_hotkey`'s own note records: `swap_tray_menu` returns at
+/// its first line when there is no tray, and `mock_builder()` builds none. The
+/// defence is therefore a source-reading one —
+/// `tests::the_locale_command_is_not_async_because_it_rebuilds_the_menu_inline`
+/// below — plus the live run that switches language with the tray up.
 #[tauri::command]
 pub fn set_locale<R: Runtime>(
     app: AppHandle<R>,
@@ -324,6 +434,87 @@ mod tests {
     use super::*;
     // The tests reach the file directly; the module itself no longer does.
     use crate::paths;
+
+    /// 🔴 **The one defence [`set_locale`]'s own doc says it can have**, and it
+    /// reads source because nothing else can see the property.
+    ///
+    /// `set_locale` rebuilds the tray menu on the caller's thread, and
+    /// `muda::Menu::new` panics off the main thread on macOS. It is on the main
+    /// thread because the command is NOT `(async)` — an attribute, not a line
+    /// of code, so no runtime assertion can reach it. And no headless test can
+    /// distinguish the two: `swap_tray_menu` returns at its first line when
+    /// there is no tray, and `mock_builder()` builds none, so under the mock a
+    /// worker-thread rebuild and a main-thread one are observationally
+    /// identical. That is the same limit `prefs::set_hotkey`'s own note
+    /// records, and it is why this is a source guard in the family of the two
+    /// in `lib.rs` rather than a fixture.
+    ///
+    /// The PRODUCTION half only, for those guards' own reason: this test's
+    /// needles are string literals in the module below `#[cfg(test)]`, and a
+    /// match against them is indistinguishable from a match against the
+    /// command. `concat!` on top of that, so no single literal here spells a
+    /// whole needle out.
+    ///
+    /// ⚠️ **The two panics above the assertion are about THIS READER, not about
+    /// the product**, and the difference is worth stating because it would be
+    /// easy to write them up as extra defences. An absent `#[tauri::command]`
+    /// is caught by the compiler long before this test runs — measured:
+    /// deleting it fails the build at `invoke_handler!` with «could not find
+    /// `__cmd__set_locale` in `locale`». What the "no attribute at all" and
+    /// "belongs to another item" branches buy is that this guard REFUSES rather
+    /// than reporting a green about a shape it did not find. The one thing it
+    /// actually defends is the `async`, which compiles either way.
+    #[test]
+    fn the_locale_command_is_not_async_because_it_rebuilds_the_menu_inline() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/locale.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("locale.rs could not read its own source at {path:?}: {e}"));
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        let definition = concat!("pub fn ", "set_locale<R: Runtime>(");
+        let found: Vec<usize> = production
+            .match_indices(definition)
+            .map(|(i, _)| i)
+            .collect();
+        let at = match found.as_slice() {
+            [one] => *one,
+            [] => panic!(
+                "no `{definition}` above #[cfg(test)] — the command moved, was renamed, or                  changed signature, and this guard is now protecting nothing"
+            ),
+            many => panic!(
+                "found {} occurrences of `{definition}` — this guard only knows how to check                  ONE definition. Byte offsets: {many:?}",
+                many.len()
+            ),
+        };
+
+        // The attribute belongs to this definition only if nothing but
+        // whitespace, attributes and doc comments separates the two — a `}`
+        // between them would mean this is some earlier item's attribute.
+        let attribute = concat!("#[tauri::", "command");
+        let opener = production[..at]
+            .rfind(attribute)
+            .unwrap_or_else(|| panic!("`set_locale` carries no `{attribute}…` attribute at all"));
+        let between = &production[opener..at];
+        assert!(
+            !between.contains('}'),
+            "the nearest `{attribute}` above `set_locale` belongs to another item —              `set_locale` is not a command any more:\n{between}"
+        );
+
+        let end = between
+            .find('\n')
+            .unwrap_or_else(|| panic!("the attribute line never ends:\n{between}"));
+        let line = &between[..end];
+        assert!(
+            !line.contains("async"),
+            "`set_locale` is now `{line}`. A command declared `(async)` runs on a WORKER \
+             thread, and this one rebuilds the tray menu inline — `muda::Menu::new` panics off \
+             the main thread on macOS. If it has to become async, it also has to hop through \
+             `run_on_main_thread` the way `prefs::set_hotkey` does."
+        );
+    }
 
     #[test]
     fn primary_subtag_handles_real_os_grammar() {
@@ -435,6 +626,67 @@ mod tests {
             assert!(!t(Lang::Uk, key).is_empty(), "UK missing for {key:?}");
             assert!(!t(Lang::En, key).is_empty(), "EN missing for {key:?}");
         }
+    }
+
+    /// The Ukrainian three-arm plural, on the table the brief pins:
+    /// 1 → «файл» singular; 2, 22 → «файли» (ends in 2–4, not 12–14); 5, 25,
+    /// 111 → «файлів» (ends in 5+ or falls in the 11–14 "teen" band by its last
+    /// two digits); 11, 21 are the pair that separates "ends in 1" from
+    /// "the Slavic rule": 21 ends in 1 and is NOT in 11–14, so it takes the
+    /// singular form same as 1, while 11 ends in 1 and IS in 11–14, so it takes
+    /// the plural — a naive "n % 10 == 1 → singular" rule would answer «файл»
+    /// for both and go red only on this one row.
+    ///
+    /// Review round 1, Minor 5: `0`, `10`, `20`, `100` added — each ends in 0,
+    /// which none of the rows above do, and each is the rule's own boundary
+    /// rather than a value inside one of its bands. `0` in particular is the
+    /// state a fresh install's tray is in, pinned only indirectly before this
+    /// (through `Idle`'s «Проскановано: 0 файлів») — this puts it in the rule's
+    /// own table instead of relying on that one caller to keep exercising it.
+    #[test]
+    fn ukrainian_file_count_takes_the_slavic_plural() {
+        for (n, word) in [
+            (0, "файлів"),
+            (1, "файл"),
+            (2, "файли"),
+            (5, "файлів"),
+            (10, "файлів"),
+            (11, "файлів"),
+            (20, "файлів"),
+            (21, "файл"),
+            (22, "файли"),
+            (25, "файлів"),
+            (100, "файлів"),
+            (111, "файлів"),
+        ] {
+            assert_eq!(files_word(Lang::Uk, n), word, "n = {n}");
+        }
+    }
+
+    /// Review round 1, Minor 3: `files_word`'s doc claims the magnitude alone
+    /// decides, in both languages — the negative row is what makes that a
+    /// tested claim rather than a sentence about the Ukrainian arm only.
+    /// −1 takes the singular the SAME as 1 (not "files", which `n == 1`
+    /// alone, without `unsigned_abs`, would have answered); −3 takes the
+    /// plural the same as 3, in both languages at once so a fix that moved
+    /// `unsigned_abs` into only one arm again would still go red here.
+    #[test]
+    fn a_negative_count_pluralizes_the_same_as_its_positive_twin() {
+        for (n, uk, en) in [(-1, "файл", "file"), (-3, "файли", "files")] {
+            assert_eq!(files_word(Lang::Uk, n), uk, "n = {n}");
+            assert_eq!(files_word(Lang::En, n), en, "n = {n}");
+        }
+    }
+
+    /// English has only the ordinary two forms, and 1 is the only singular one
+    /// — asserted against a neighbour (0) so the rule pinned is "n == 1", not
+    /// "n is odd" or some other coincidence that would also pass on 1 alone.
+    #[test]
+    fn english_file_count_is_singular_only_at_one() {
+        assert_eq!(files_word(Lang::En, 1), "file");
+        assert_eq!(files_word(Lang::En, 0), "files");
+        assert_eq!(files_word(Lang::En, 2), "files");
+        assert_eq!(files_word(Lang::En, 21), "files");
     }
 
     #[test]

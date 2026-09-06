@@ -1,363 +1,29 @@
-//! The real walk, run as a job — `start_probe_job`'s shape, over
-//! `mnema_ingest::walk_root` instead of forty units of nothing.
+//! What a real walk produced, translated into the shell's own vocabulary —
+//! [`Ended`] and [`job::FrozenReason`] — for [`crate::scan_job`]'s reading
+//! pass to build its per-folder outcome from.
 //!
-//! Kept apart from `bridge.rs` rather than folded into it because this one
-//! command pulls in three crates (`mnema-core`, `mnema-pool`, `mnema-walk`)
-//! none of the other commands need, and because translating a `WalkReport`
-//! into what the window reads is enough logic on its own to want a file that
-//! is *only* that translation.
+//! ⚠️ **This file no longer runs a walk itself.** Until Task 3b it was also
+//! `start_walk_job`, the window-driven command one folder at a time —
+//! `#[tauri::command(async)] pub fn start_walk_job(state, root_id,
+//! on_progress: Channel<JobEvent>)`, claiming one job slot per folder and
+//! chaining the embedding pass over a channel the window listened on. It was
+//! unregistered from `invoke_handler!` when [`crate::scan_job`]'s reading
+//! pass took over every watched folder under one claim (that file's own
+//! header has the argument — a Stop lost in the gap between two claims), and
+//! deleted here once the ~48 test functions across `tests/commands.rs`,
+//! `tests/model_commands.rs` and `tests/mask_differential.rs` that had driven
+//! it as a fixture moved onto the scan job instead. `ui/` still names it
+//! until Task 6 rewrites the window side. What is left is the translation
+//! this file was always more than half of — [`ended_from_report`] and
+//! [`frozen_reason`] — which `scan_job.rs` still calls for every folder it
+//! reads.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use mnema_ingest::{FrozenReason, StopReason, WalkReport};
 
-use mnema_ingest::{FrozenReason, StopReason, WalkReport, walk_root};
-use mnema_pool::{Pool, PoolConfig};
-use mnema_walk::WalkRules;
-use tauri::State;
-use tauri::ipc::Channel;
+use crate::job::{self, EndReason, Ended, Frozen};
 
-use crate::error::Error;
-use crate::job::{self, EndReason, Ended, Frozen, JobEvent, Progress};
-use crate::state::AppState;
-
-/// `(async)` for the reason given on [`crate::bridge::open_index`]: unlike
-/// `start_probe_job`, this command reads the root's path — and, since the
-/// exclusion commands exist, its stored exclusion rules — through
-/// `with_index` before it ever spawns a thread, and every other caller of
-/// `with_index` in this crate is `(async)` for exactly that reason — a
-/// window-issued command that can wait on the same mutex must not be the one
-/// left free to run inline on the main thread. Claiming the slot and
-/// spawning the walk's own OS thread are cheap either way; what moved this
-/// off `start_probe_job`'s blocking shape is the lookup in front of them.
-///
-/// Every fallible step **that must not take the slot** runs before
-/// [`AppState::claim_job`]. The qualifier is the whole claim, and the two
-/// previous rewrites of this sentence got it wrong in opposite directions:
-/// a count ("all three of them") that was short by one, then a universal
-/// ("every fallible step below") that was simply false —
-/// `state.open_job_index()?` is a fallible step below and it runs AFTER the
-/// claim, deliberately, for the reason its own comment gives down there
-/// (review round 1 M2, review round 2 N1). What this paragraph is about is
-/// a property, not a tally.
-///
-/// The steps it holds for, named rather than counted: the index read
-/// itself, which fails as [`Error::IndexNotOpen`], [`Error::StatePoisoned`]
-/// or [`Error::Index`]; an unknown `root_id` (a folder removed by a second
-/// window, a stale id a reloaded page still has); a stored exclusion prefix
-/// that `WalkRules::new` refuses; and a `Pool` that refuses its own config.
-/// Claiming the slot first and releasing it on the first `?` would give the
-/// same end state one command later,
-/// but for as long as this call runs `job_status` would report a job
-/// running for a call that was always going to fail — a page polling it at
-/// the wrong moment sees a lie, however short-lived.
-#[tauri::command(async)]
-pub fn start_walk_job(
-    state: State<'_, AppState>,
-    root_id: i64,
-    on_progress: Channel<JobEvent>,
-) -> Result<(), Error> {
-    // The root's path, the exclusion rules for that root and the file masks,
-    // read under one
-    // `with_index` lock rather than two. They are one question — what is
-    // being walked, and with which rules — and every writer in this crate
-    // reaches the index through the same mutex, so two acquisitions leave a
-    // window between them in which another window's command commits.
-    // `Db::delete_watched_root` is the writer that makes that concrete: it
-    // runs as one transaction, and deleting the row cascades this root's
-    // `ignore_rule` rows away with it (`write.rs:757-784`), so a path read
-    // before it and an exclusion list read after it describe two different
-    // states of the index. One lock makes the pair one answer.
-    //
-    // The masks join the same read for the same reason and not because they
-    // are related to the prefixes — they are not: a mask belongs to no root
-    // (D-c) and `Db::list_masks` takes no `root_id`. What makes them one
-    // question is that they are all "the rules this walk runs under", and a
-    // mask committed by a second window between two acquisitions would produce
-    // a walk that applied the exclusions of one moment and the masks of
-    // another.
-    let (root, user_prefixes, masks) = state.with_index(|db| {
-        Ok((
-            db.watched_root_path(root_id)?,
-            db.list_path_exclusions(root_id)?,
-            db.list_masks()?,
-        ))
-    })?;
-    let root = PathBuf::from(root.ok_or(Error::UnknownWatchedRoot(root_id))?);
-
-    // Every watched folder walks with the built-in list and `.gitignore` on,
-    // plus whatever subfolders the person excluded for this root through
-    // `bridge::exclude_subfolder`. The two flags are still the fixed default
-    // this file has always passed; only the third argument is new, and it is
-    // the whole of what makes a saved rule mean anything.
-    //
-    // `?` rather than the `.expect` that stood here: that justification was
-    // exact and it died with `Vec::new()`. `validate_prefix` now runs over
-    // prefixes that came out of the database, and a stored prefix CAN fail
-    // it — one written by an older build whose validator was narrower (the
-    // whitelist in `rules.rs` grew across three review rounds), or one
-    // written straight through `Db::add_path_exclusion`, which deliberately
-    // does not validate because validation belongs at the command, the one
-    // place a person is standing there to fix it.
-    //
-    // So the refusal is the point, not a formality. This line runs on the
-    // command's own thread and before `claim_job`, so a refusal reaches the
-    // window as an ordinary rejection carrying `RulesError`'s own sentence —
-    // which `ui/src/settings/jobs.ts:283-290` already renders as `note: {
-    // kind: 'rejected', sentence }`, so nothing new is owed on the other
-    // side. An `.expect` on the same line would instead panic inside a
-    // command, which is not a shape any window can render at all.
-    // And refusing is the conservative direction rather than the strict
-    // one: the alternative is a walk that runs with the rule silently
-    // absent, and under D29 an indexed file is a file whose text is sent to
-    // a third-party provider. This is the same answer `Walked::rules_
-    // applied` gives one layer down, where the prefixes are each valid but
-    // refuse to combine — there the whole override layer stops applying and
-    // `walk_root` stops before phase 2 rather than indexing what the rules
-    // no longer cover.
-    //
-    // There is a third outcome besides "a rule" and "a refusal", and it is
-    // deliberate: `validate_prefix` answers `Ok(None)` for the empty string
-    // (`rules.rs:553-556`), so a blank stored row is dropped and the walk
-    // runs with the rules it does have. A blank names no folder, so nothing
-    // is believed excluded and then indexed anyway, and `exclude_subfolder`
-    // refuses blanks before they can be stored at all. Pinned by one test,
-    // and beneath it by the `scripts/mutations/pr8-exclusions.sh` case named
-    // "a blank stored prefix must stay a non-error" — named, not numbered,
-    // because a position in that file is one more count that drifts:
-    //
-    // `a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything`
-    //
-    // on its own line, unwrapped, because a wrapped identifier answers to no
-    // search: broken across two comment lines, as it was, `grep` for that
-    // name across the repository returned only the definition, so a rename
-    // would have left this comment claiming a pin that was gone (review
-    // round 2, N4). A later change to that `Ok(None)` cannot now quietly
-    // turn this line into a refusal.
-    // 🔴 `with_masks` REPLACES the mask set rather than adding to it, so the
-    // whole stored set goes in ONE call. Two successive calls would leave the
-    // walk applying only the second one's masks, silently — every file the
-    // first call named would stay indexed and, under D29, keep going to the
-    // provider, with the walk reporting `completed`.
-    //
-    // A refusal here stops the walk for the reason the paragraph above gives
-    // for prefixes, and a stored mask CAN fail: `Db::add_mask` deliberately
-    // does not validate, and `validate_mask` may grow. The one non-error is
-    // the same one — `Ok(None)` for the literal empty string — so a blank
-    // stored row drops out and the walk runs with the masks it does have.
-    let rules = WalkRules::new(true, true, user_prefixes)?.with_masks(masks)?;
-
-    // `Pool::new` never touches the worker path — it opens the diagnostics
-    // file, if any, and allocates empty slots. A worker that does not exist
-    // at `state.worker_path()` is discovered on the first `extract()` call,
-    // inside `walk_root`, and surfaces as an ordinary `IngestError` handled
-    // below, not here.
-    let pool = Pool::new(PoolConfig::new(state.worker_path()))
-        // Reuses `mnema_ingest::IngestError`'s own `Pool` variant rather than
-        // adding a second `Error` case that would say the same thing in
-        // different words: a pool that refuses its config and a pool that
-        // dies mid-walk are both "the extraction pool cannot continue," which
-        // is exactly that variant's own message.
-        .map_err(mnema_ingest::IngestError::Pool)?;
-
-    let slot = state.claim_job()?;
-
-    // The job's own connection, not the window's — see `AppState::
-    // open_job_index`'s own doc comment. A walk is a sequence of writes that
-    // can run for hours; the window must keep answering searches while it
-    // does. After `claim_job`, unlike everything above: releasing a slot
-    // this command already holds on the way out is `JobSlot::drop`'s job,
-    // not a second thing to get right here.
-    let job_db = state.open_job_index()?;
-
-    std::thread::spawn(move || {
-        // The last count, and the last total, the window was actually shown —
-        // read on every failure path below, not only the panic one. Updated
-        // together, and only after a successful send, for the same reason
-        // `start_probe_job` records `reported` only then: `Ended::failed`
-        // promises what the window *saw*, not the loop's internal position.
-        let reported = AtomicU64::new(0);
-        let last_total = AtomicU64::new(0);
-        let started = Instant::now();
-        // Throttling state for the progress closure below, mirroring
-        // `job::run_probe`'s own `last_report` exactly — see the `due` check
-        // inside the closure for why. A plain local rather than another
-        // atomic: `walk_root` calls this closure synchronously, on this one
-        // thread, so nothing else can race it.
-        let mut last_report: Option<Instant> = None;
-
-        // `AssertUnwindSafe`: unlike the probe, this closure's body reaches
-        // into `pool` and `job_db` as well as the channel and two atomics —
-        // but all four are used only inside this one thread, for only as
-        // long as this call runs, and every one of them is dropped the
-        // moment the thread ends, caught panic or not. Nothing downstream
-        // ever observes them again in whatever state an unwind left them in.
-        // `mnema-extract` is what this thread calls through FFI by way of
-        // the pool's worker process, which is the panic this exists for —
-        // the probe cannot panic at all.
-        let caught = catch_unwind(AssertUnwindSafe(|| {
-            walk_root(
-                &pool,
-                &job_db,
-                root_id,
-                &root,
-                &rules,
-                slot.cancel_flag(),
-                &mut |progress| {
-                    let done = progress.done;
-                    let total = progress.total;
-
-                    // `walk_root` calls this once per file (twice for a
-                    // file whose busy retries were all refused, and once
-                    // before the loop) — `job::
-                    // REPORT_INTERVAL`'s own doc comment names this exact
-                    // shape: "a folder of a hundred thousand files would put
-                    // a hundred thousand messages through the IPC to move a
-                    // bar the user reads four times a second anyway." The
-                    // probe already avoids this inside `run_probe`; nothing
-                    // inside `walk_root` throttles on its caller's behalf, so
-                    // this closure is where it has to happen for a real
-                    // walk — `job::progress_is_due` is the same rule
-                    // `run_probe`'s own loop uses, pulled out so both share
-                    // one tested definition of "due" rather than two.
-                    let now = Instant::now();
-                    // `0` refused: a walk gives nothing up for good. Its own
-                    // `WalkProgress::refused` is a file phase 1 declined to
-                    // open, merged into `skipped` below, and a different fact
-                    // from the one `job::Progress::refused` carries — that
-                    // field's own doc comment is where the two are told apart.
-                    if !job::progress_is_due(last_report, now, job::REPORT_INTERVAL, done, 0, total)
-                    {
-                        return;
-                    }
-                    last_report = Some(now);
-
-                    if on_progress
-                        .send(JobEvent::Progress(Progress {
-                            done,
-                            total,
-                            // `WalkProgress` counts a phase-1 refusal
-                            // (`refused`) apart from a phase-2 skip
-                            // (`skipped`) because the two are refused for
-                            // different reasons — but the live bar draws one
-                            // number, and the itemised difference is what
-                            // `skips` (`bridge.rs`) reads from the journal,
-                            // not what the bar is for. Nothing is lost: the
-                            // journal, not the bar, is the record.
-                            skipped: progress.skipped + progress.refused,
-                            // Not `progress.refused`, which is already inside
-                            // `skipped` one line up. See
-                            // `job::Progress::refused`.
-                            refused: 0,
-                            // Forwarded, not merged into `skipped` the way
-                            // `progress.refused` is: the same file is
-                            // journalled as a skip a moment later and counted
-                            // there, so adding it here would count it twice.
-                            // `job::Progress::contended` says so in full.
-                            contended: progress.contended,
-                            seconds_left: job::seconds_left(done, total, started.elapsed()),
-                        }))
-                        .is_ok()
-                    {
-                        reported.store(done, Ordering::Relaxed);
-                        last_total.store(total, Ordering::Relaxed);
-                    }
-                },
-            )
-        }));
-
-        // Read once, here, after `walk_root` has returned and while the slot is
-        // still held — the same shape `embed_job.rs` already uses for the same
-        // reason, and deliberately NOT pushed down into `walk_root`: the flag
-        // belongs to the job that owns the slot, and `mnema-ingest` is a
-        // library that is handed a flag rather than the owner of one.
-        //
-        // What it repairs: `walk_root` reads the flag between files, at the top
-        // of its phase-2 loop (`walk.rs:450`). A Stop raised after the last
-        // read — by the tray's `stop_indexing` or the strip's Stop, both of
-        // which only set this flag (`lib.rs`, `AppState::cancel_job`) — is
-        // never seen there, and the walk returns `StopReason::Completed`. The
-        // window chains the embedding pass on `completed` (`jobs.ts`,
-        // `chainsEmbedPass`) and `AppState::claim_job` clears the flag as it
-        // takes the slot, so the person's explicit Stop does not merely arrive
-        // late: it is erased, and their text goes to the provider.
-        //
-        // Only `Completed` is reinterpreted. Every other `StopReason` already
-        // names something the walk itself decided — a broken worker, an
-        // unavailable root — and a Stop arriving alongside one of those does
-        // not make that reason less true.
-        //
-        // ⚠️ **This narrows the window; it does not close it.** The read is
-        // before `drop(slot)` below, so no other job's `claim_job()` can clear
-        // the flag underneath it — but a Stop pressed AFTER this line still
-        // finds a walk whose ending is already decided, and the slot is
-        // released a few lines later. Between that release and the window's
-        // decision to chain, a `claim_job()` clears the flag, and a Stop landing
-        // in there is lost exactly as it was before. The gap is now
-        // microseconds rather than the whole of a walk's last file, which is
-        // worth having on its own, and it is as far as one job can get: the
-        // flag this job owns stops meaning anything the moment its slot does.
-        //
-        // What actually closes it is the follow-up PR's single scanning job —
-        // walk and embed under ONE claim, so there is no handoff to lose a Stop
-        // across and no second `claim_job()` to clear the flag. **Do not attempt
-        // to close it here**: any fix at this level means holding the slot
-        // across a boundary this job does not own, which is the shape that
-        // makes a stuck slot lock the application out of indexing.
-        let stopped_late = slot.cancel_flag().load(Ordering::SeqCst);
-        let ending = match caught {
-            Ok(Ok(report)) => ended_from_report(&report, stopped_late),
-            // Neither arm below has a `WalkReport` to read `frozen` or the
-            // counters from — `walk_root` returned `Err`, or never returned
-            // at all — so both fall back to the same "last count the window
-            // was shown" `Ended::failed` already gives a panic, which is what
-            // an unexplained stop **is** from the window's side regardless of
-            // which of the two produced it. Each still has its own text,
-            // though: `IngestError`'s `Display` for the one that returned an
-            // error, and the caught payload — via `job::panic_message` — for
-            // the one that unwound. Without either, `reason: "failed"` is all
-            // a window can say, which is the gap task 12's review named
-            // first: a missing worker binary, a broken pool and a panic all
-            // arriving as the same bare word.
-            Ok(Err(ingest_error)) => job::Ended::failed(
-                reported.load(Ordering::Relaxed),
-                last_total.load(Ordering::Relaxed),
-                ingest_error.to_string(),
-            ),
-            Err(panic) => job::Ended::failed(
-                reported.load(Ordering::Relaxed),
-                last_total.load(Ordering::Relaxed),
-                job::panic_message(&*panic),
-            ),
-        };
-        // Dropped **before** the send, not left to the end of this closure:
-        // `JobSlot::drop` is what clears `AppState::running`, and a window is
-        // free to re-enable Start inside the very handler that receives this
-        // `Ended` message. A click landing in the gap between
-        // the send and an implicit end-of-scope drop races a slot this
-        // thread still holds. Measured directly before this line existed: a
-        // second `start_walk_job` issued the instant the first `Ended`
-        // arrived was refused with `a job is already running`, even though
-        // the window had just been told the first one was over. The
-        // ordering is enough on its own — `on_progress.send` happens after
-        // `slot`'s drop in this same thread's program order, and the
-        // receiving thread's `recv` synchronises with that send, so
-        // whatever this thread observes about `running` by the time it
-        // drops `slot` is what the receiving thread sees too.
-        drop(slot);
-        let _ = on_progress.send(JobEvent::Ended(ending));
-        // `pool` and `job_db` are dropped here, at the end of the closure:
-        // the pool's workers are asked to exit and the job's own connection
-        // closes. Neither gates a second job's ability to start — only the
-        // slot does — so there is no reason to hurry them the way `slot`
-        // was hurried above.
-    });
-
-    Ok(())
-}
-
-/// Translates a finished walk into what the channel sends.
+/// Translates a finished walk into the shell's own [`Ended`], which
+/// [`crate::scan_job::root_outcome`] then folds into one folder's row.
 ///
 /// `total` and `done` are recomputed from the report's own counters rather
 /// than carried from the last progress event, because `WalkReport` makes them
@@ -395,23 +61,32 @@ pub fn start_walk_job(
 /// `Ok(Ok(report))`, the one outcome where the walk itself decided the
 /// ending rather than failing unexplained, so there is no failure text to
 /// carry — see `Ended::message`'s own doc comment for where one comes from.
-/// `stopped_late` is the cancellation flag as it stood when `walk_root`
-/// returned, and it changes exactly one thing: a walk that finished everything
-/// it was given, with a Stop raised too late for `walk_root` to have seen it,
-/// is reported as cancelled rather than completed. The caller's own comment
-/// says why that matters more than it looks; here it is enough that the `Ended`
-/// this produces is byte-for-byte the one an ordinary cancel produces from the
-/// same counters, so nothing downstream needs a third case to tell them apart.
 ///
-/// `complete` still crosses as the walk reported it, and for a late Stop that
-/// is `true`: phase 1 really did read every entry. The two fields answer
-/// different questions — `complete` is about what was SEEN, `reason` about why
-/// the run ENDED — and a late Stop is only ever an answer to the second.
-fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
+/// ⚠️ **No late-Stop rewrite here.** The command this function was written
+/// for, `start_walk_job`, used to read the cancellation flag itself after
+/// `walk_root` returned and report a completed walk as `Cancelled` when a Stop
+/// had landed too late for the walk to see it on its own — one folder was one
+/// job, and the slot changed hands the moment it answered, so that read was
+/// the only place left to catch it. The scan job reads every folder under ONE
+/// claim instead, and holds the SAME property one level up: `scan_job.rs`'s
+/// D-h rewrites the whole PASS's reason at the boundary after the last
+/// folder's report, not this function's per-folder one, because a Stop
+/// landing after one folder's report still leaves folders unread that the
+/// pass's own top-of-loop check will catch on the next iteration. A per-folder
+/// rewrite here would be the wrong layer twice over: too early for a Stop
+/// landing after this folder but before the next one starts, and redundant
+/// with D-h for a Stop landing after the very last folder.
+///
+/// `contended` is the one counter that is **not** in the report and cannot be:
+/// `WalkReport` has no such field, because contention is announced once,
+/// through the progress callback, at the moment the last busy retry is refused.
+/// Every caller of that callback throttles it, so the caller is the only place
+/// the number survives — see [`Ended::contended`] for the rule and
+/// `crate::scan_job::RootProgress` for the counter that keeps it.
+pub(crate) fn ended_from_report(report: &WalkReport, contended: u64) -> Ended {
     let total = report.found + report.refused;
     let done = report.indexed + report.unchanged + report.skipped + report.refused;
     let reason = match report.stopped {
-        StopReason::Completed if stopped_late => EndReason::Cancelled,
         StopReason::Completed => EndReason::Completed,
         StopReason::Cancelled => EndReason::Cancelled,
         StopReason::BrokenWorker => EndReason::BrokenWorker,
@@ -434,6 +109,7 @@ fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
         // Same merge `Progress` makes for the same reason — see the comment
         // where the live progress event is built, above.
         skipped: report.skipped + report.refused,
+        contended,
         // A walk gives no unit up for good; `report.refused` is a file it
         // declined to open, and it is already inside `skipped`.
         refused: 0,
@@ -451,7 +127,7 @@ fn ended_from_report(report: &WalkReport, stopped_late: bool) -> Ended {
 /// See [`job::FrozenReason`]'s own doc comment for why the words moved to
 /// the window rather than staying here as `Ended.frozen[_].why`, which is
 /// what this function replaced.
-fn frozen_reason(why: FrozenReason) -> job::FrozenReason {
+pub(crate) fn frozen_reason(why: FrozenReason) -> job::FrozenReason {
     match why {
         FrozenReason::SymlinkedSubtree => job::FrozenReason::SymlinkedSubtree,
         FrozenReason::EmptyDirectory => job::FrozenReason::EmptyDirectory,
@@ -480,6 +156,40 @@ mod tests {
         }
     }
 
+    /// The contention count reaches the ending from the caller, and only from
+    /// the caller.
+    ///
+    /// The pair of states this separates is "a walk that met a held write lock"
+    /// from "a walk that met none", on two reports that are otherwise the same
+    /// byte for byte — `WalkReport` carries nothing about contention, so the
+    /// only thing that can differ is the argument. An implementation that
+    /// dropped the argument and wrote `0` passes the second assertion and fails
+    /// the first; one that wrote `skipped` there passes the first and fails the
+    /// second.
+    #[test]
+    fn contention_reaches_the_ending_from_the_caller_and_not_from_the_report() {
+        assert_eq!(
+            ended_from_report(&report(StopReason::Completed), 2).contended,
+            2,
+            "the count the caller kept was not carried into the ending"
+        );
+        assert_eq!(
+            ended_from_report(&report(StopReason::Completed), 0).contended,
+            0,
+            "a walk that met no lock must report none"
+        );
+        // The rule `Ended::contended` states, on the fixture that can break it:
+        // `report(..)` skips 2 and refuses 3, so the ending's `skipped` is 5.
+        let ended = ended_from_report(&report(StopReason::Completed), 5);
+        assert!(
+            ended.contended <= ended.skipped,
+            "contended {} is above skipped {}, so a surface adding the two \
+             would count files twice",
+            ended.contended,
+            ended.skipped
+        );
+    }
+
     /// Pins the one thing a review round found missing entirely by mutation:
     /// with every `StopReason` arm below collapsed to `EndReason::Completed`
     /// and `frozen` replaced by `Vec::new()`, all seventeen tests in
@@ -499,7 +209,7 @@ mod tests {
         ];
         for (stopped, expected) in cases {
             assert_eq!(
-                ended_from_report(&report(stopped), false).reason,
+                ended_from_report(&report(stopped), 0).reason,
                 expected,
                 "StopReason::{stopped:?} did not become EndReason::{expected:?}"
             );
@@ -514,11 +224,11 @@ mod tests {
     fn completeness_crosses_the_seam_unchanged() {
         let mut walked = report(StopReason::Completed);
         walked.complete = true;
-        assert!(ended_from_report(&walked, false).complete);
+        assert!(ended_from_report(&walked, 0).complete);
 
         walked.complete = false;
         assert!(
-            !ended_from_report(&walked, false).complete,
+            !ended_from_report(&walked, 0).complete,
             "an incomplete walk must not report as one that saw everything, \
              even when it otherwise stopped `Completed`"
         );
@@ -532,7 +242,7 @@ mod tests {
             why: FrozenReason::EmptyDirectory,
         }];
 
-        let ended = ended_from_report(&walked, false);
+        let ended = ended_from_report(&walked, 0);
         assert_eq!(ended.frozen.len(), 1);
         assert_eq!(ended.frozen[0].prefix, "mnt/share");
         // The exact variant, not merely `Some`: `each_frozen_reason_maps_to_
@@ -574,7 +284,7 @@ mod tests {
     /// swapped field would show up here rather than in `done` alone.
     #[test]
     fn indexed_and_unchanged_cross_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         assert_eq!(ended.indexed, 5);
         assert_eq!(ended.unchanged, 1);
         assert_ne!(ended.indexed, ended.done);
@@ -589,26 +299,26 @@ mod tests {
     /// field on `report(..)` so a swap — not only a drop — would fail here.
     #[test]
     fn removed_crosses_the_seam_separately_from_done() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         assert_eq!(ended.removed, 4);
         assert_ne!(ended.removed, ended.done);
     }
 
     /// `message` is the field `ended_from_report` never sets — it belongs to
-    /// the two `Ended::failed` call sites in `start_walk_job`, which have
-    /// actual failure text to give it. A walk the core itself decided the
-    /// ending for has none to invent.
+    /// callers that have actual failure text to give it, like
+    /// `scan_job::failed_root`'s `..Ended::failed(0, 0, message)`. A walk the
+    /// core itself decided the ending for has none to invent.
     #[test]
     fn a_walk_reported_by_ended_from_report_carries_no_failure_message() {
         assert_eq!(
-            ended_from_report(&report(StopReason::Completed), false).message,
+            ended_from_report(&report(StopReason::Completed), 0).message,
             None
         );
     }
 
     #[test]
     fn done_and_total_include_phase_one_refusals_and_skipped_merges_both_kinds() {
-        let ended = ended_from_report(&report(StopReason::Completed), false);
+        let ended = ended_from_report(&report(StopReason::Completed), 0);
         // found: 8, refused: 3
         assert_eq!(ended.total, 11);
         // indexed: 5, unchanged: 1, skipped: 2, refused: 3
@@ -629,7 +339,7 @@ mod tests {
         walked.skipped = 0;
         walked.refused = 0;
 
-        let ended = ended_from_report(&walked, false);
+        let ended = ended_from_report(&walked, 0);
         assert_eq!(ended.done, 0);
         assert_eq!(ended.total, 0);
         assert_eq!(ended.reason, EndReason::RootUnavailable);

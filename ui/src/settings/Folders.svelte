@@ -7,18 +7,16 @@
     listTree, addWatchedFolder, removeWatchedFolder,
     listSubfolders, listExclusions, excludeSubfolder, includeSubfolder,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
-    type TreeListing, type TreeRoot,
+    type ScanSnapshot, type TreeListing, type TreeRoot,
   } from '../lib/ipc';
-  import type { JobController, JobPass, JobPhase } from './jobs';
+  import type { JobController } from './jobs';
 
-  // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove, and scan.
-  //
-  // The scan starts on a button of its own and NEVER on adding a folder,
-  // because excluding subfolders (PR 8) is a configuration move a person still
-  // has to make in between — a walk started by `add_watched_folder` would run
-  // before that chance exists. This component still never calls the walk
-  // itself: it asks the controller `Settings.svelte` owns, so the job outlives
-  // a click on another section.
+  // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove. Scanning is
+  // not this component's any more (Task 8): the single Scan control
+  // lives in the Scanning section (`Scanning.svelte`), and adding a folder here
+  // starts nothing at all — the note below the list says so and names the next
+  // step, because excluding subfolders (PR 8) is a configuration move a person
+  // may still want to make before the first scan reads this folder.
   //
   // Fixture question: `TreeRoot` (`ipc.ts`) carries `files: TreeFile[]` and no
   // flag for whether a walk has ever run. A folder just added and a folder
@@ -27,9 +25,21 @@
   // count `indexed_documents` gives, which is true of both states, and stops
   // there. Telling the two apart belongs to the task that runs the walk.
 
-  // Required, not optional: a folder list that quietly drops its scan control
-  // when nobody passes one is the shape a person opens to find nothing happens.
+  // Still required, even with the scan button gone: this component listens for
+  // a job's ending through the SAME controller `Settings.svelte` owns, to
+  // re-read a panel a scan elsewhere may have moved underneath it — see
+  // `reread`/`withdrawQuestions` below. A folder list that quietly dropped that
+  // listener when nobody passed one is the shape a stale panel goes unnoticed
+  // in.
   let { jobs }: { jobs: JobController } = $props();
+  // Read once, on purpose: the controller's identity never changes for the life
+  // of the window, so `$jobState` below is ordinary auto-subscription — the
+  // shape `Scanning.svelte:40` already uses. It is a SECOND reader of the same
+  // store beside the `onMount` subscription further down, and the two answer
+  // different questions: that one acts on a change (withdraw, re-read), this
+  // one draws the state a run is in right now.
+  // svelte-ignore state_referenced_locally
+  const jobState = jobs.state;
 
   let roots = $state<TreeRoot[]>([]);
   // Set on a rejected `list_tree`, at mount or on a later re-read. Held apart
@@ -49,11 +59,66 @@
   // A boolean and not the sentence, for `alreadyGone`'s reason: a `t()` frozen
   // here would keep its language through a switch. Cleared at the four
   // functions a press into this component can start — `askExclude`,
-  // `askInclude`, `addFolder`, `removeFolder` — for the same rule as
+  // `askInclude`, `addFolder`, `askRemove` — for the same rule as
   // `actionError`: what the last press led to stands until the next one. Not
-  // at `exclude`/`include` or `answer` themselves: those run only once one of
-  // the four above has already cleared it for this press.
+  // at `exclude`/`include`, `answer` or `confirmRemove` themselves: those run
+  // only once one of the four above has already cleared it for this press.
   let rootChanged = $state(false);
+
+  // 🔴 Task 8. NOT `rootChanged`: that flag answers a different question — "the
+  // id/path a press was about has moved underneath it" — and never becomes
+  // `true` on an ordinary successful add, so it cannot be reused here without
+  // making an unrelated banner appear or disappear by accident. This one
+  // answers "the last press was an add that succeeded", for the owner's own
+  // ruling: adding a folder starts no scan, and this is the sentence that says
+  // what to do instead. Cleared at the two presses that change the list —
+  // `addFolder` and `askRemove` — for the same reason `rootChanged` is
+  // cleared at ITS four: what the last press led to stands until the next one.
+  // 🔴 Task 9: `askRemove` and not the confirmation behind it. The press is
+  // what makes this note stale — a person who has pressed "Remove" has moved
+  // on from the add whatever they answer next — and a note cleared only on the
+  // answer would stand over an open removal question about the folder it names.
+  // 🔴 Fix round 1, Minor 2: TWO sites, not `rootChanged`'s four — that flag
+  // also clears at `askExclude`/`askInclude`, which do not touch this list at
+  // all, so citing "the same place" overstated where this one lives.
+  let folderAdded = $state(false);
+
+  // ── Task 9: "Remove" asks before it removes ─────────────────────────────
+  //
+  // 🔴 The question lives HERE and not in `Pending`, and the reason is where the
+  // press is: `Pending` is a PANEL's question and exists only while a row is
+  // expanded, while this press is on the row itself and is available whether the
+  // row is open or shut. A question stored on the panel would be dropped by the
+  // collapse that a person expanding another folder makes, and dropped in
+  // silence.
+  //
+  // At most one on screen — a second "Remove" replaces the first, for
+  // `Pending`'s own reason: two questions about two folders, each with a
+  // Confirm, is a screen on which the wrong one can be answered.
+  //
+  // `files` is `root.files.length` read ONCE, at the click, from the row the
+  // person saw, and `path` likewise — the same freezing `Pending` does with its
+  // two numbers, for the same reason: a re-read landing underneath must not
+  // renumber or rename a sentence somebody is part way through reading. It is
+  // also what is SENT: see `confirmRemove`.
+  let removeQuestion = $state<{ rootId: number; path: string; files: number } | null>(null);
+  // The root whose removal is in flight, or `null`. Its row says so in place of
+  // its buttons and every other row's "Remove" is disabled meanwhile: a
+  // second press during the wait sends `remove_watched_folder` twice for one
+  // folder, and the second one races the re-read behind the first.
+  let removing = $state<number | null>(null);
+  // The PATH the removal question was about when a reading pass withdrew it, or
+  // `null` — the path and not the sentence, for `Panel.withdrawn`'s reason: a
+  // `t()` frozen here would keep its language through a switch.
+  let removeWithdrawn = $state<string | null>(null);
+
+  // Whether a job holds the slot, read LIVE from the store rather than captured
+  // at the press. `remove_watched_folder` is refused while a job is running
+  // (`bridge.rs:97-180`), so the press is taken off the screen before it is
+  // made — and a run that starts after the question was opened has to reach the
+  // Confirm button already drawn, which a value captured at the press could not
+  // do.
+  const scanRunning = $derived($jobState.scan.snapshot.kind === 'running');
 
   // ── PR 8a, Task 5: what an expanded folder holds ──────────────────────────
   //
@@ -522,7 +587,7 @@
   function abandonChangedFolder(rootId: number) {
     patch(rootId, { pending: null });
     rootChanged = true;
-    reread(null); // no ending, so no pass — and no question left to withdraw
+    reread(false); // no ending, so nothing to withdraw
   }
 
   // 🔴 The re-read is not a nicety: a count taken from the listing this window
@@ -538,6 +603,7 @@
     if (panel === undefined) return;
     const generation = ask(rootId);
     rootChanged = false;
+    abandonRemoveQuestion(); // a press elsewhere in this list: see the function
     // `withdrawn` is cleared HERE and in `askInclude`, and deliberately not
     // also in `exclude`/`include`: every path into those two runs through one
     // of these two functions first (`exclude`'s zero-cost shortcut included),
@@ -619,6 +685,7 @@
     if (panel === undefined) return;
     const generation = ask(rootId);
     rootChanged = false;
+    abandonRemoveQuestion(); // a press elsewhere in this list: see the function
     patch(rootId, {
       actionError: null, alreadyGone: false, withdrawn: null,
       pending: { kind: 'checking', path, of: 'include' },
@@ -750,6 +817,32 @@
     // `loadError`. See `refreshes` for what overlaps and why.
     if (refreshes !== generation) return;
     roots = listing.roots;
+    // 🔴 Fix round 1, I1. The removal question is held to the SAME identity
+    // rule as the panels below, against the same listing and through the same
+    // `namesFolder`, because it is drawn under a row and can outlive it. It is
+    // withdrawn only by `readSeq` growth, so a plain re-read — a mount, an add,
+    // a removal's own answer, or any ending that moves no reading counter —
+    // leaves it standing by design; and the identity underneath it can move
+    // between two of them. `watched_root.id` is a rowid alias (see the panel
+    // prune below), so a remove-and-add elsewhere hands this id to another
+    // folder.
+    //
+    // Both cases the one comparison answers are real and neither is quiet: with
+    // the id still present and naming something else, a question saying
+    // "Remove folder /synthetic/root — 3 files" is drawn directly beneath a row
+    // that now reads another path, and its Confirm can only earn a refusal
+    // (`bridge.rs` compares the frozen path). With the root gone from the
+    // listing, NO row renders the question at all, so the press disappears with
+    // no word — the falsehood `withdrawQuestions` exists to prevent.
+    //
+    // The note and not `rootChanged`: this one names the folder the question
+    // was about, which is the fact a person needs to press again, and
+    // `rootChanged` is a boolean that cannot carry it.
+    if (removeQuestion !== null
+        && !namesFolder(listing, removeQuestion.rootId, removeQuestion.path)) {
+      removeWithdrawn = removeQuestion.path;
+      removeQuestion = null;
+    }
     // An expansion belongs to a row, and outlives it for no longer than the
     // row itself: `remove_watched_folder` deletes a database row whose id
     // SQLite may hand out again, and an expansion left behind under that id
@@ -839,27 +932,32 @@
   // window; the alternative is a second record of what is open, and
   // `panel.tree` already answers that question.
   //
-  // 🔴 PR 8a, Task 8 fix round 2. `reread`'s `pass` is the ending's own, `null`
-  // only at `onMount` where there is no ending to have a pass. The RE-READ
-  // below stays unconditional — an embedding pass moves `list_exclusions`'
-  // `existsOnDisk` and `list_subfolders` exactly as a walk can (D29 sends the
-  // same rename window through either). The WITHDRAWAL does not: it is spelled
-  // "a scan ended", and only a walk is one. A walk reads ONE folder and moves
-  // the two numbers `Pending` freezes (`jobs.ts`'s own words); an embedding
-  // pass covers the whole index, takes no root, and changes no rule and no file
-  // count for the folder the question is about — so a person's still-open press
-  // has nothing invalidated to withdraw it over. Reviewed and reproduced:
-  // raising an exclude question while a CHAINED embedding pass runs, then
-  // letting that pass end, used to discard the press and print "a scan ended"
-  // when none had. That is why the two live in separate functions, and fix
-  // round 1 then found the second reason they have to.
+  // 🔴 PR 8a, Task 8 fix round 2, and the finding still stands even though the
+  // shape it was written against is gone. The RE-READ below is unconditional —
+  // any phase of a scan moves `list_exclusions`' `existsOnDisk` and
+  // `list_subfolders` (D29 sends the same rename window through either). The
+  // WITHDRAWAL is narrower, because it is spelled "indexing has finished and
+  // this panel was read again": what makes a pending question wrong is a
+  // READING pass having run, which is what moved the two numbers `Pending`
+  // freezes. An embedding pass changes no rule and no file count for the
+  // folder the question is about, so a still-open press has nothing
+  // invalidated to withdraw it over. Reviewed and reproduced: raising an
+  // exclude question while the embedding ran, then letting it end, used to
+  // discard the press and print "indexing has finished" when none had.
+  //
+  // 🔴 That distinction IS drawn, and the fact it is drawn on is
+  // `ScanState.readSeq` — how many reading passes have ENDED in this process
+  // (`ipc.ts:734-745`). The chained pass the finding was first expressed in
+  // terms of no longer exists; the counter is the durable form of the same
+  // fact, and it is the only field that tells apart the two endings a person
+  // sees as one. See the subscription below for where it is compared.
 
-  // 🔴 The question goes, and not in silence, ONLY on a walk's own ending.
-  // Its two numbers were read from a `list_tree` taken BEFORE this scan,
+  // 🔴 The question goes, and not in silence, when a READING PASS ends.
+  // Its two numbers were read from a `list_tree` taken BEFORE that scan,
   // and `Pending` freezes them on purpose: they cannot be corrected in
   // place without renumbering a sentence somebody is part way through
-  // reading, and they cannot be left standing, because a walk ending is
-  // precisely the event that makes them wrong. The include question is no
+  // reading, and they cannot be left standing, because a reading pass ending
+  // is precisely the event that makes them wrong. The include question is no
   // safer — it carries `existsOnDisk`, the one fact the rename that
   // produced this defect invalidated. So the question is withdrawn and the
   // panel says which folder it was about; pressing again asks it afresh
@@ -872,10 +970,10 @@
   // 🔴 Fix round 1, I1. Its own function, called from `reread` BEFORE any I/O
   // starts, and that placement is the whole finding. It used to sit at the top
   // of `rereadPanels`, which runs inside `refresh().then(…)` — so a rejected
-  // `list_tree` at a walk's ending took the withdrawal down with it, and the
-  // ending is consumed exactly once (`seen = phase` advances first), so it
-  // never came back. The next successful `refresh` — a chained embedding
-  // ending, an add, a remove, none of which withdraw anything — then cleared
+  // `list_tree` at a scan's ending took the withdrawal down with it, and the
+  // ending is consumed exactly once (`seen` advances first), so it never came
+  // back. The next successful `refresh` — a later ending, an add, a remove,
+  // none of which withdraw anything — then cleared
   // `loadError` and redrew the panel WITH the question still standing, stating
   // pre-scan numbers as current and carrying no `withdrawnNote` to say a scan
   // had happened underneath it.
@@ -886,12 +984,23 @@
   // often costs a second press, a question left standing states frozen numbers
   // as current, and under D29 the include question left standing is a person
   // being asked to unprotect a folder on facts a scan has already moved.
+  //
+  // 🔴 Task 9. BOTH questions, in one function, because one event invalidates
+  // both: the removal question's `files` was read from a `list_tree` taken
+  // before that reading pass, exactly as the exclude question's two numbers
+  // were. Its note is the same sentence about a different subject — the watched
+  // folder's own path rather than a subfolder's relative one — and it is drawn
+  // under the list, where the question was.
   function withdrawQuestions() {
     for (const [key, panel] of Object.entries(panels)) {
       if (panel.pending === null) continue;
       const rootId = Number(key);
       ask(rootId);
       patch(rootId, { pending: null, withdrawn: panel.pending.path });
+    }
+    if (removeQuestion !== null) {
+      removeWithdrawn = removeQuestion.path;
+      removeQuestion = null;
     }
   }
 
@@ -901,11 +1010,16 @@
     }
   }
 
-  function reread(pass: JobPass | null) {
+  function reread(withdraw: boolean) {
     // Synchronous, and first: see `withdrawQuestions`. It reads no I/O and
-    // cannot fail, so there is no path on which a walk's ending leaves a
-    // pending question standing.
-    if (pass === 'walk') withdrawQuestions();
+    // cannot fail, so there is no path on which a reading pass's ending leaves
+    // a pending question standing.
+    //
+    // The argument stays a boolean, and the fact behind it is decided by the
+    // ONE caller that can answer it — the subscription below, which is the only
+    // place that holds the last `readSeq` this component acted on. Deciding it
+    // here would need that memory in two places.
+    if (withdraw) withdrawQuestions();
     // Panels after the roots, never beside them: `refresh` is what deletes the
     // expansion of a root that has gone, and a `list_subfolders` fired for that
     // root would answer with a rejection drawn into a panel about to vanish.
@@ -915,7 +1029,7 @@
   }
 
   onMount(() => {
-    reread(null); // no ending yet, so no pass — and no panel is open to withdraw
+    reread(false); // no ending yet, and no panel is open to withdraw
     // Live run, finding 2. Task 7 re-reads after an add and after a remove;
     // the event nobody wired is the one that changes the NUMBER this list shows
     // — a job ending. The row went on stating zero indexed documents while the
@@ -926,36 +1040,88 @@
     // it as well — see `rereadPanels`, which is where the second half of this
     // finding is written up.
     //
-    // The RE-READ fires on EVERY ending, not only a walk's, and the reason is
-    // asymmetry rather than caution: a re-read that finds the same numbers
-    // rewrites them invisibly, while a missed one leaves a falsehood a person
-    // can act on. This window does not always know what is running at all
-    // (`runningUnobserved` is the state where it has no channel), so keying the
-    // RE-READ off the pass would be keying it off something it cannot always
-    // see. Endings are rare: at most a handful per run, never one per progress
-    // report.
+    // The RE-READ fires on EVERY ending, and the reason is asymmetry rather
+    // than caution: a re-read that finds the same numbers rewrites them
+    // invisibly, while a missed one leaves a falsehood a person can act on. A
+    // scan is one job over every watched folder and its report names no root,
+    // so there is nothing to narrow the re-read BY in any case. Endings are
+    // rare: at most a handful per run, never one per progress tick.
     //
-    // The WITHDRAWAL inside `rereadPanels` is narrower — see its own comment.
-    // `phase.pass` is passed through here rather than dropped, because that is
-    // the one fact `rereadPanels` needs and this subscription is the only place
-    // that has it.
+    // The WITHDRAWAL is narrower — see `withdrawQuestions`' own comment.
     //
-    // Compared by phase IDENTITY, not by kind: the controller writes a fresh
-    // phase object per event, so a progress report changes the object without
-    // ever being an ending, and an ending is written exactly once. Seeded with
-    // what the store already holds so a section switch back to this list does
-    // not read it twice on the same mount.
-    let seen: JobPhase = get(jobs.state).phase;
-    return jobs.state.subscribe(({ phase }) => {
-      if (phase === seen) return;
-      seen = phase;
-      if (phase.kind === 'ended') reread(phase.pass);
+    // Compared by snapshot IDENTITY, not by kind: the controller replaces the
+    // whole state on every change, so a progress tick changes the object
+    // without ever being an ending, and an ending is written exactly once. The
+    // guard is load-bearing in one direction that no kind check would cover:
+    // `jobs.ts` writes a NOTE into the same store without touching `scan`, and
+    // an ended snapshot already consumed must not be consumed a second time
+    // because a sentence beside it changed. Seeded with what the store already
+    // holds, so an ending that happened before this component existed is not
+    // read as one that happened under it. The case that seeding still answers
+    // is the WINDOW opening on a run it never started (`Settings.svelte`'s own
+    // note on `jobs.mount`: the tray can start a scan, and the settings window
+    // can be opened in the middle of it) — F10 (Task 10e) retired the other
+    // one, a nav click back into this section, because this section is no
+    // longer unmounted by a nav click at all.
+    //
+    // 🔴 The WITHDRAWAL is keyed on `ScanState.readSeq` — how many reading
+    // passes have ENDED — and NOT on the snapshot becoming `ended`. Two states
+    // separate the two rules, and each one costs something real:
+    //
+    //   • an `embedOnly` run ends like any other and reads no folder, so
+    //     nothing it did made a frozen number wrong. Withdrawing there
+    //     discards a press and prints "indexing has finished" over a run
+    //     that read nothing.
+    //   • the embedding phase of a `full` run arrives as `running` with the
+    //     counter ALREADY moved. The reading pass has ended by then, so every
+    //     number a question froze is stale — and no `ended` snapshot has been
+    //     seen yet. This is why the comparison is on the SNAPSHOT'S `readSeq`,
+    //     whatever kind carried it.
+    //
+    // The counter is seeded from the store rather than from zero: a pass that
+    // ended before this component existed must not be read as one that ended
+    // under a question it never saw. Since F10 (Task 10e) this component is
+    // mounted once per WINDOW, so the state that reaches the seeding is the
+    // window being opened on a run already going — not a nav click, which no
+    // longer rebuilds this section at all.
+    //
+    // The RE-READ stays on the ending, where it is right: any phase can move
+    // what the panels draw, and a re-read that finds the same numbers rewrites
+    // them invisibly. Both are reached from one `reread(true)` when the counter
+    // moves, in that order — the withdrawal is synchronous and cannot fail, the
+    // re-read can (fix round 1, I1).
+    let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
+    let seenReadSeq = get(jobs.state).scan.readSeq;
+    return jobs.state.subscribe(({ scan }) => {
+      if (scan.snapshot === seen) return;
+      seen = scan.snapshot;
+      if (scan.readSeq > seenReadSeq) {
+        seenReadSeq = scan.readSeq;
+        reread(true);
+      } else if (scan.snapshot.kind === 'ended') {
+        reread(false);
+      }
     });
   });
+
+  // 🔴 Task 9. A press about something else in this list abandons the removal
+  // question, and takes its withdrawn note with it. The rule is the one
+  // `rootChanged` is written under — what the last press led to stands until
+  // the next one — and its three sites are the three presses that start
+  // something here besides the removal itself: `askExclude`, `askInclude` and
+  // `addFolder`. Not `toggleRoot`: opening a row asks nothing and answers
+  // nothing, and a question dismissed by a person looking at what is inside the
+  // folder they are about to remove would be dismissed for looking.
+  function abandonRemoveQuestion() {
+    removeQuestion = null;
+    removeWithdrawn = null;
+  }
 
   async function addFolder() {
     actionError = null;
     rootChanged = false; // what the last press led to stands until the next one
+    folderAdded = false; // same rule, same place, for the note below
+    abandonRemoveQuestion();
     const selected = await open({ directory: true });
     if (selected === null) return; // cancelled dialog — calls nothing further
     try {
@@ -964,6 +1130,11 @@
       actionError = e instanceof Error ? e.message : String(e);
       return;
     }
+    // Set on the add's own success, before the re-read below — which can fail
+    // on its own account (`loadError`) without un-adding the folder the note is
+    // about. §9.2, Task 8 (owner's ruling): adding a folder starts no scan, so
+    // this is what stands in its place.
+    folderAdded = true;
     // Outside the action's own try: a rejection here is list_tree's own
     // sentence, about the list being unreadable, not about the add having
     // failed — the add already succeeded by this point.
@@ -974,15 +1145,60 @@
     }
   }
 
-  async function removeFolder(rootId: number) {
+  // 🔴 Task 9. The press asks; it removes nothing. The whole row is captured
+  // here — the id, the path this row was DRAWN from, and the count it was
+  // showing — and everything after this point reads that capture and never
+  // `roots`: the backend deletes the row only while that id still names that
+  // path, and a path re-derived from the id at confirm time would agree with it
+  // by construction and check nothing.
+  //
+  // The three banners are cleared HERE, at the press, and deliberately not
+  // again in `confirmRemove`: every path into that function runs through this
+  // one first, which is the rule `askExclude` states for `withdrawn`. The rule
+  // itself is `rootChanged`'s own — what the last press led to stands until the
+  // next one — and `removeWithdrawn` joins them for it.
+  function askRemove(root: TreeRoot) {
     actionError = null;
-    rootChanged = false; // what the last press led to stands until the next one
+    rootChanged = false;
+    folderAdded = false; // the note is about the LAST press, and this one is a remove
+    removeWithdrawn = null;
+    removeQuestion = { rootId: root.rootId, path: root.absolutePath, files: root.files.length };
+  }
+
+  function cancelRemove() {
+    removeQuestion = null;
+  }
+
+  // What is sent is the QUESTION's own id and path, read from the capture and
+  // from nothing on screen: a re-read under an open question can rename the row
+  // it was asked about, and the sentence the person answered named one folder.
+  async function confirmRemove() {
+    const question = removeQuestion;
+    if (question === null) return;
+    // Off the screen before the wait, not after it: a confirmation still drawn
+    // while its own removal is in flight is a second press waiting to happen.
+    removeQuestion = null;
+    removing = question.rootId;
     try {
-      await removeWatchedFolder(rootId);
+      await removeWatchedFolder(question.rootId, question.path);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
-      return;
+    } finally {
+      removing = null;
     }
+    // 🔴 Unconditional, and outside the `try` — `exclude`'s own shape, for the
+    // same reason and for one more. The reason it shares: what the rows must say
+    // next is decided by re-reading the state, never by parsing a rejection,
+    // which crosses the IPC as a sentence and nothing else (§10). The reason of
+    // its own: the commonest refusal here is `WatchedRootChanged` — the id no
+    // longer names that path (`bridge.rs:97-180`) — and that is precisely the
+    // state in which the row the person confirmed is not the row on screen. The
+    // sentence says the removal did not happen; the re-read is what takes the
+    // stale row away.
+    //
+    // A re-read that is itself refused is `loadError`'s, never `actionError`'s:
+    // the removal's own answer already stands, and this failure is about the
+    // list being unreadable.
     try {
       await refresh();
     } catch (e) {
@@ -993,8 +1209,11 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_folders_empty'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_folders_add'); });
   const removeLabel = $derived.by(() => { void $locale; return t('settings_folders_remove'); });
-  const scanLabel = $derived.by(() => { void $locale; return t('settings_folders_scan'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_folders_load_failed'); });
+  // §9.2, Task 8. Built the same way every other sentence on this screen is —
+  // inside the `void $locale` rebuild — so a language switch while it is
+  // showing moves it too.
+  const addedNoteLabel = $derived.by(() => { void $locale; return t('settings_folders_added_note'); });
 
   // Rows carry their own count label, not a bare `t()` call in the markup —
   // a call inside `{#each}` reads `get(locale)` non-reactively (`i18n/index.ts:11`)
@@ -1241,9 +1460,28 @@
         root,
         countLabel: t('settings_folders_indexed', { count: root.files.length }),
         removeAriaLabel: t('settings_folders_remove_named', { path: root.absolutePath }),
-        scanAriaLabel: t('settings_folders_scan_named', { path: root.absolutePath }),
         expandAriaLabel: t('settings_folders_expand_named', { path: root.absolutePath }),
         expanded: panel !== undefined,
+        // 🔴 Task 9. Built HERE, inside the `void $locale` rebuild, exactly as
+        // `confirmView` is and for the same reason — the words follow a
+        // language switch. The PATH and the COUNT come from `removeQuestion`,
+        // which froze both at the click: the sentence states what was on the
+        // row the person pressed, and a re-read that renames or renumbers that
+        // row underneath it changes neither half.
+        removeConfirm:
+          removeQuestion === null || removeQuestion.rootId !== root.rootId
+            ? null
+            : {
+                question: t('settings_folders_confirm_remove', {
+                  path: removeQuestion.path, files: removeQuestion.files,
+                }),
+                confirmLabel: t('settings_folders_confirm'),
+                confirmAriaLabel:
+                  t('settings_folders_confirm_remove_named', { path: removeQuestion.path }),
+                cancelLabel: t('settings_folders_confirm_cancel'),
+                cancelAriaLabel:
+                  t('settings_folders_confirm_cancel_named', { path: removeQuestion.path }),
+              },
         panel:
           panel === undefined
             ? null
@@ -1293,6 +1531,24 @@
   const rootChangedLabel = $derived.by(() => {
     void $locale;
     return rootChanged ? t('settings_folders_folder_changed') : null;
+  });
+  // Task 9, all three under `void $locale` like every other sentence here.
+  const removingLabel = $derived.by(() => { void $locale; return t('settings_folders_removing'); });
+  const removeBlockedLabel = $derived.by(() => {
+    void $locale;
+    return scanRunning ? t('settings_folders_remove_blocked') : null;
+  });
+  // 🔴 Fix round 1, m3. Its OWN key, not the panel note's. The two say the same
+  // thing about two different places, and the difference is in the clause that
+  // says what was re-read: the panel note says "this panel was read again", and
+  // this question's row is collapsed in the common case — no panel is on screen and
+  // none was read. The list was. Reusing one string here told a person a panel
+  // they cannot see had been re-read.
+  const removeWithdrawnLabel = $derived.by(() => {
+    void $locale;
+    return removeWithdrawn === null
+      ? null
+      : t('settings_folders_remove_question_withdrawn', { path: removeWithdrawn });
   });
 </script>
 
@@ -1345,22 +1601,60 @@
     <p>{emptyLabel}</p>
   {:else}
     <ul>
-      {#each rows as { root, countLabel, removeAriaLabel, scanAriaLabel, expandAriaLabel, expanded, panel } (root.rootId)}
+      {#each rows as { root, countLabel, removeAriaLabel, expandAriaLabel, expanded, panel, removeConfirm } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
           <span>{root.absolutePath}</span>
           <span>{countLabel}</span>
-          <button
-            type="button"
-            data-testid={`folder-expand-${root.rootId}`}
-            aria-expanded={expanded}
-            aria-label={expandAriaLabel}
-            onclick={() => toggleRoot(root)}>{expandLabel}</button>
-          <button
-            type="button"
-            data-testid={`folder-scan-${root.rootId}`}
-            aria-label={scanAriaLabel}
-            onclick={() => jobs.scan(root.rootId)}>{scanLabel}</button>
-          <button type="button" aria-label={removeAriaLabel} onclick={() => removeFolder(root.rootId)}>{removeLabel}</button>
+          <!-- Task 9: while THIS row's removal is in flight the row says so in
+               place of its buttons. Not beside them: there is nothing left to
+               press here, and a button that does nothing reads as a button
+               nobody heard. -->
+          {#if removing === root.rootId}
+            <span data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>
+          {:else}
+            <button
+              type="button"
+              data-testid={`folder-expand-${root.rootId}`}
+              aria-expanded={expanded}
+              aria-label={expandAriaLabel}
+              onclick={() => toggleRoot(root)}>{expandLabel}</button>
+            <!-- The per-folder scan button's funeral, Task 8: a scan is ONE job
+                 over every watched folder now (`scan_state::Entry`), and the
+                 single Scan control lives in the Scanning section instead
+                 (`Scanning.svelte`) — this row starts nothing any more.
+
+                 Task 9: it asks before it removes, and it is disabled while
+                 ANOTHER row's removal is in flight or while a job holds the
+                 slot — the backend refuses in the second case, and would race
+                 the re-read in the first. -->
+            <button
+              type="button"
+              aria-label={removeAriaLabel}
+              disabled={removing !== null || scanRunning}
+              onclick={() => askRemove(root)}>{removeLabel}</button>
+          {/if}
+          <!-- Directly under the row it is about, and that is true by
+               construction rather than by hope: the question is drawn only
+               while `refresh` still finds its id naming its frozen path, and
+               it is taken away with a note the moment either half moves (see
+               the `namesFolder` check in `refresh`). Without that check this
+               sentence was false in exactly one state — a re-read handing this
+               id to another folder — and quietly false in another, where the
+               row is gone and nothing renders the question at all. -->
+          {#if removeConfirm}
+            <div data-testid={`folder-remove-confirm-${root.rootId}`}>
+              <p>{removeConfirm.question}</p>
+              <button
+                type="button"
+                aria-label={removeConfirm.confirmAriaLabel}
+                disabled={scanRunning}
+                onclick={confirmRemove}>{removeConfirm.confirmLabel}</button>
+              <button
+                type="button"
+                aria-label={removeConfirm.cancelAriaLabel}
+                onclick={cancelRemove}>{removeConfirm.cancelLabel}</button>
+            </div>
+          {/if}
           {#if panel}
             <div data-testid={`folder-panel-${root.rootId}`}>
               {#if panel.loadError}
@@ -1430,6 +1724,36 @@
         </li>
       {/each}
     </ul>
+  {/if}
+  <!-- Under the list, Task 8: adding a folder starts no scan (owner's ruling —
+       excluding subfolders is still a move a person may want to make first),
+       so this is what stands where the old per-row Scan button's implicit
+       promise used to be. Stands until the next add or remove, never a job
+       ending: nothing about a scan changes what this sentence is telling a
+       person to go and do next. -->
+  <!-- Task 9, both under the list and both OUTSIDE the load-failure branch
+       above, which is the placement fix round 1 (I1) paid for once already: a
+       re-read that fails takes the whole list off the screen, and a withdrawal
+       notice that went with it would leave a press looking like a press that
+       did nothing. One sentence for the whole list, not one per row: every
+       "Remove" is disabled by the same fact. -->
+  <!-- Fix round 1, m2: only where there is a disabled button to explain. The
+       sentence says why every «Remove» is refused, so with no «Remove» on
+       screen it names a control the person cannot see.
+
+       BOTH halves of "on screen", because the list above is drawn on both: a
+       `loadError` replaces the whole list with its own two lines while `roots`
+       still holds the previous listing, so `roots.length > 0` alone would
+       leave this sentence standing over a list that is not there. The two
+       conditions are the same ones the `<ul>` above is gated on. -->
+  {#if removeBlockedLabel && loadError === null && roots.length > 0}
+    <p data-testid="folders-remove-blocked">{removeBlockedLabel}</p>
+  {/if}
+  {#if removeWithdrawnLabel}
+    <p data-testid="folders-remove-withdrawn">{removeWithdrawnLabel}</p>
+  {/if}
+  {#if folderAdded}
+    <p data-testid="folders-added-note">{addedNoteLabel}</p>
   {/if}
   <button type="button" onclick={addFolder}>{addLabel}</button>
   {#if actionError}<p data-testid="folders-action-error">{actionError}</p>{/if}

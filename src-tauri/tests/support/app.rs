@@ -1,6 +1,8 @@
 //! The application fixture shared by `tests/commands.rs` and
 //! `tests/mask_differential.rs`: a mock-runtime app over a temporary index,
-//! the IPC `call`, and a walk driven to its `Ended` event.
+//! the IPC `call`, and a probe job driven through its own `Ended` event
+//! (`job_channel`). Populating the index is `support::scan::scan_to_completion`'s
+//! job now, not this file's — see that module's own header.
 //!
 //! Pulled in with `#[path = "support/app.rs"]` by the binaries that want it,
 //! not declared in `support/mod.rs` — that module is compiled into EVERY
@@ -13,8 +15,7 @@ use std::time::Duration;
 
 use mnema_desktop::job::JobEvent;
 use mnema_desktop::state::AppState;
-use mnema_desktop::walk_job;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
 use tauri::webview::InvokeRequest;
@@ -122,6 +123,10 @@ pub fn call(webview: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Res
 }
 
 /// Collects what the webview would receive on a job channel.
+///
+/// `#[allow(dead_code)]` for this module's own reason: `mask_differential.rs`
+/// pulls this file in but never starts the probe job, so it never wants this.
+#[allow(dead_code)]
 pub fn job_channel() -> (Channel<JobEvent>, mpsc::Receiver<Value>) {
     let (tx, rx) = mpsc::channel();
     let channel = Channel::new(move |body| {
@@ -132,41 +137,14 @@ pub fn job_channel() -> (Channel<JobEvent>, mpsc::Receiver<Value>) {
     (channel, rx)
 }
 
-/// Starts a real walk over `root_id` and blocks until the window would have
-/// heard `Ended`, returning its payload for the caller to inspect.
-///
-/// Calls `walk_job::start_walk_job` directly on `state` rather than through
-/// `call`, the same choice `a_started_job_reports_progress_and_a_cancelled_
-/// one_stops` already makes for the probe: the argument is a real
-/// `tauri::ipc::Channel`, built from a callback this test can read, and the
-/// raw-IPC path (`"__CHANNEL__:N"`) has nothing on the other end for that
-/// callback to be. IPC *reachability* is a separate question, asked by
-/// `the_walk_job_is_reachable_through_the_ipc` in `commands.rs`.
-pub fn run_walk_and_capture_ending(app: &tauri::App<MockRuntime>, root_id: i64) -> Value {
-    let state = app.state::<AppState>();
-    let (channel, events) = job_channel();
-    walk_job::start_walk_job(state.clone(), root_id, channel).expect("the walk would not start");
-
-    loop {
-        match events.recv_timeout(Duration::from_secs(20)) {
-            Ok(event) if event["event"] == json!("ended") => return event["data"].clone(),
-            Ok(_) => continue,
-            Err(_) => panic!("the walk never told the window it ended"),
-        }
-    }
-}
-
-/// The common case: a walk over a fixture with nothing ambiguous in it must
-/// simply finish.
-#[allow(dead_code)]
-pub fn run_walk_to_completion(app: &tauri::App<MockRuntime>, root_id: i64) {
-    let ending = run_walk_and_capture_ending(app, root_id);
-    assert_eq!(
-        ending["reason"],
-        json!("completed"),
-        "the walk over the fixture folder did not complete: {ending}"
-    );
-}
+// 🔴 `run_walk_and_capture_ending` and `run_walk_to_completion` lived here,
+// driving `walk_job::start_walk_job` directly on `state` the same way
+// `job_channel` still drives the probe below. Task 3b deleted both once the
+// fixtures that used them moved onto `support::scan::scan_to_completion` and
+// `support::scan::scan_with`, which drive `scan_job::start_scan_job` instead
+// — a scan has no channel to block on, so the replacement is a poll on
+// `AppState::job_is_running` rather than a `recv` loop; see that module's own
+// header for the shape.
 
 /// What the index actually holds under one root, sorted — the same list
 /// reconciliation itself compares a walk against (`Db::paths_under_root`).
@@ -180,4 +158,90 @@ pub fn indexed_paths(app: &tauri::App<MockRuntime>, root_id: i64) -> Vec<String>
     app.state::<AppState>()
         .with_index(|db| db.paths_under_root(root_id))
         .expect("reading the paths the index holds under the root")
+}
+
+/// An application whose extraction worker is a stand-in that reads nothing.
+///
+/// The stand-in answers the manifest handshake by delegating to the real
+/// worker, and answers every file with bytes that are not valid UTF-8, which
+/// the pool turns into `Failure::Crash` for every single file — the shape D44
+/// was written for and the one `mnema-ingest`'s own
+/// `a_worker_that_answers_nothing_useful_stops_the_walk` uses. Delegating the
+/// handshake is what makes the fixture mean anything: a stand-in that failed
+/// the handshake too would stop the walk there, and a test about what happens
+/// to files afterwards would be measuring the handshake instead.
+///
+/// `scratch` must not be a watched folder — the script is written into it, and
+/// `enumerate` would list the script itself as a found file.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub fn app_with_a_worker_that_reads_nothing(
+    dir: &std::path::Path,
+    scratch: &std::path::Path,
+) -> tauri::App<MockRuntime> {
+    mnema_secrets::test_store::register();
+    let manifest = format!(
+        "if [ \"$1\" = \"--manifest\" ]; then\n  exec \"{}\" --manifest\nfi\n",
+        super::support::worker().display()
+    );
+    let worker = write_script(
+        scratch,
+        "worker-that-reads-nothing",
+        &format!("{manifest}while read -r _line; do\n  printf '\\377\\376\\n'\ndone\n"),
+    );
+    mock_builder()
+        .manage(AppState::new(
+            dir.to_path_buf(),
+            worker,
+            NO_PROVIDER.to_string(),
+            format!("mnema-desktop-test-{}", dir.display()),
+        ))
+        .invoke_handler(mnema_desktop::invoke_handler())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application")
+}
+
+/// Writes an executable stand-in and waits until the kernel will run it.
+///
+/// Copied from `crates/mnema-ingest/tests/support/mod.rs` rather than shared,
+/// for the reason `support::worker` gives at length: another crate's `tests/`
+/// directory is not reachable from this one. The retry loop is the measured
+/// half — between a `fork` and the `exec` that follows it a child holds a
+/// duplicate of every descriptor its parent had open, including this file's, so
+/// Linux refuses the script with `ETXTBSY` for as long as that window lasts.
+#[cfg(unix)]
+#[allow(dead_code)]
+fn write_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    for _ in 0..400 {
+        match Command::new(&path)
+            .arg("--manifest")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+                return path;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!(
+                "the stand-in at {} will not run at all: {e}",
+                path.display()
+            ),
+        }
+    }
+    panic!(
+        "{} was still reported as busy after two seconds of retrying",
+        path.display()
+    );
 }
