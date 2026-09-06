@@ -20,12 +20,18 @@
   let section = $state<SectionId>('models');
 
   // 🔴 ONE controller, here, above every section — not inside the one that
-  // starts the job. Four nav items make Folders -> Models -> Folders two
-  // clicks, and a controller living in `Folders.svelte` would be destroyed by
-  // the first of them: `mount` opens a `scan-progress` subscription and
-  // `destroy` closes it, so the counters AND the Stop button would go with
-  // that click. `cancel_job` needs nothing but the command, so that Stop would
-  // be lost for nothing.
+  // starts the job. A controller living in a SECTION dies with that section:
+  // `mount` opens a `scan-progress` subscription and `destroy` closes it, so
+  // the counters AND the Stop button would go with a nav click. `cancel_job`
+  // needs nothing but the command, so that Stop would be lost for nothing.
+  //
+  // 🔴 F10 (Task 10 live run) did NOT weaken this. `<Folders>` is the one
+  // section that now survives a nav change — it stays mounted and `hidden`,
+  // see the markup — and it is tempting to read that as "so a controller
+  // could live in it after all". It could not: what a section owns is
+  // destroyed when the WINDOW decides, and three of the four sections are
+  // still torn down by every nav click. The controller is the window's,
+  // because the strip that draws it is the window's.
   //
   // The argument used to be the CHANNEL's — a job reported on a channel
   // belonging to whoever started it — and the conclusion outlived it: what
@@ -189,7 +195,16 @@
        drawn before the nav and the panel both. Nothing about the controller
        moved: it is still created above every section, and `cancel_job` still
        needs no channel.
-       ⚠️ The component outside every `{#if}` is this one, `<JobStrip>`.
+       ⚠️ Two components sit outside the conditional below, and for reasons
+       that are not the same one. This one, `<JobStrip>`, is outside because it
+       is the WINDOW's status line — it must be readable and stoppable from
+       every section, and it is drawn once, here, above the pair of columns.
+       `<Folders>` is outside because of F10: it keeps state a person built by
+       hand, so it stays mounted and is merely `hidden` while another section
+       is shown (see the panel below). Neither is a precedent for the other: a
+       section hidden in place still costs its subscriptions and its polling
+       for the window's whole life, which is exactly why the other three keep
+       their `{#if}`.
        `<Scanning>` is INSIDE the conditional below, and Task 8 changed what
        that placement costs: the re-read of `model_settings` no longer lives in
        that section's own mount at all (`refresh()` above is this window's, not
@@ -217,17 +232,53 @@
     </nav>
 
     <div class="spane">
-      {#if section === 'models'}
-        <h2>{modelsLabel}</h2>
-        <Models {jobs} />
-      {:else if section === 'folders'}
+      <!-- 🔴 F10 (Task 10 live run). This section is MOUNTED for the window's
+           life and hidden with the `hidden` attribute, where the other three
+           are mounted and destroyed by every nav click. What a person builds
+           by hand in here is the reason: an expanded folder panel is one
+           `list_subfolders` per level, and an exclude question is a press
+           waiting for an answer. Unmounting took all of it away without a
+           word — a person who opened the Folders section, expanded a tree to
+           find the folder they meant to protect, looked at Scanning and came
+           back found the tree shut and the question gone. Nothing about the
+           three other sections is worth that: they draw what a read already
+           answered, and re-drawing it costs nothing a person can notice.
+           `[hidden]` is the browser's own rule (`display: none`), and it
+           takes the section out of the accessibility tree with it, so nothing
+           here is read out or reachable by keyboard while another section is
+           shown. There is no CSS in this project to say it a second time.
+           Two consequences are handled rather than hoped away. `Folders.svelte`
+           re-reads `list_tree` on ITS mount, which now happens once per window
+           instead of once per visit — its own `jobs.state` subscription is
+           what keeps it current after that, and it re-reads and withdraws
+           while hidden exactly as it does while shown. And its subscription is
+           now open for the window's life, which is what a person expects of a
+           question that is still waiting for them. -->
+      <div data-testid="settings-panel-folders" hidden={section !== 'folders'}>
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />
         <!-- Beside the folder list, never inside a folder row (§9.2, D-c): a
              mask is global to the index, so drawing it under one root would
              say it belongs to that root. It takes no `jobs` — nothing here
-             starts a job. -->
-        <Masks />
+             starts a job.
+             Still behind an `{#if}`, INSIDE the section that is now permanent,
+             and this is a scope line rather than a claim about the editor. F10
+             ruled on the FOLDER list — its expanded panels and its questions —
+             and told this task not to widen the change; `Masks.svelte` keeps
+             its per-mount `list_masks` and its per-visit lifetime exactly as
+             it had them. What that leaves standing is real and is written down
+             here rather than implied away: a typed but unadded mask, and a
+             mask question waiting to be confirmed, are still lost by a nav
+             click. If that is worth fixing it is the same one-line change as
+             this one, on evidence from a live run — not a thing to do quietly
+             on the way past. -->
+        {#if section === 'folders'}
+          <Masks />
+        {/if}
+      </div>
+      {#if section === 'models'}
+        <h2>{modelsLabel}</h2>
+        <Models {jobs} />
       {:else if section === 'indexing'}
         <h2>{scanningLabel}</h2>
         <!-- §9.3 — what the index holds, and the one Scan control (Task

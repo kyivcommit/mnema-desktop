@@ -1056,8 +1056,13 @@
     // `jobs.ts` writes a NOTE into the same store without touching `scan`, and
     // an ended snapshot already consumed must not be consumed a second time
     // because a sentence beside it changed. Seeded with what the store already
-    // holds so a section switch back to this list does not read it twice on the
-    // same mount.
+    // holds, so an ending that happened before this component existed is not
+    // read as one that happened under it. The case that seeding still answers
+    // is the WINDOW opening on a run it never started (`Settings.svelte`'s own
+    // note on `jobs.mount`: the tray can start a scan, and the settings window
+    // can be opened in the middle of it) — F10 (Task 10e) retired the other
+    // one, a nav click back into this section, because this section is no
+    // longer unmounted by a nav click at all.
     //
     // 🔴 The WITHDRAWAL is keyed on `ScanState.readSeq` — how many reading
     // passes have ENDED — and NOT on the snapshot becoming `ended`. Two states
@@ -1073,9 +1078,12 @@
     //     seen yet. This is why the comparison is on the SNAPSHOT'S `readSeq`,
     //     whatever kind carried it.
     //
-    // The counter is seeded from the store rather than from zero: a section
-    // switch back into this list must not read a pass that ended before this
-    // component existed as one that ended under a question it never saw.
+    // The counter is seeded from the store rather than from zero: a pass that
+    // ended before this component existed must not be read as one that ended
+    // under a question it never saw. Since F10 (Task 10e) this component is
+    // mounted once per WINDOW, so the state that reaches the seeding is the
+    // window being opened on a run already going — not a nav click, which no
+    // longer rebuilds this section at all.
     //
     // The RE-READ stays on the ending, where it is right: any phase can move
     // what the panels draw, and a re-read that finds the same numbers rewrites

@@ -1008,8 +1008,12 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
 
 // 🔴 The live run's finding 3, and the reason the controller is created in
 // `Settings.svelte` above every section. A controller built inside a section
-// dies with the first nav click, taking the counters AND the Stop with it — and
+// dies when that section does, taking the counters AND the Stop with it — and
 // `cancel_job` needs no channel at all, so that Stop would be lost for nothing.
+// Three of the four sections are destroyed by every nav click; the fourth,
+// Folders, is kept mounted and hidden by F10 (Task 10e), and that changes
+// nothing about who may hold the controller: what the strip has to survive is
+// the WINDOW's decisions about its sections, not one section's own luck.
 test('a scan survives switching sections, and Stop still stops it afterwards', async () => {
   await openWindow();
   await emit(reading());

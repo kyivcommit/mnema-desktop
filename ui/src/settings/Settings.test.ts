@@ -55,7 +55,19 @@ const APP_PREFS: AppPrefs = {
 // listener callback the controller registers so a test can deliver the states
 // a real scan would (`deliver`, the shape `Scanning.test.ts`/`JobStrip.test.ts`
 // already use).
+//
+// Task 10e makes `listTree` a trackable `vi.fn()` for the third reason on that
+// list: `Folders` is mounted for the WINDOW's life now, so how many times it
+// reads `list_tree` is a fact about this window rather than about that
+// section, and one of this task's claims is a count of exactly that. The
+// subfolder commands join it because a panel expanded here is a real
+// expansion — `Folders.svelte` calls them, and a mock factory that leaves
+// them out hands the component `undefined` to call.
 const modelSettings = vi.fn();
+const listTree = vi.fn();
+const listSubfolders = vi.fn();
+const listExclusions = vi.fn();
+const excludeSubfolder = vi.fn();
 let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
@@ -63,7 +75,11 @@ vi.mock('../lib/ipc', () => ({
   forgetKey: vi.fn(),
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
   setChatModel: vi.fn(),
-  listTree: () => Promise.resolve({ roots: [], recents: [] }),
+  listTree: (...a: unknown[]) => listTree(...a),
+  listSubfolders: (...a: unknown[]) => listSubfolders(...a),
+  listExclusions: (...a: unknown[]) => listExclusions(...a),
+  excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
+  includeSubfolder: vi.fn(),
   // Task 11 mounts `Masks` into the same panel, and it reads the mask list on
   // mount. Left out of this mock the wrapper is `undefined`, the call throws,
   // and every test in this file would run beside an unhandled rejection —
@@ -108,6 +124,16 @@ vi.mock('../lib/ipc', () => ({
 beforeEach(() => {
   modelSettings.mockReset();
   modelSettings.mockResolvedValue(SETTINGS);
+  // The empty listing every test in this file assumed before Task 10e made
+  // this a `vi.fn`. A test that needs a folder to expand says so itself,
+  // BEFORE `render` — the window reads `list_tree` on its own mount now.
+  listTree.mockReset();
+  listTree.mockResolvedValue({ roots: [], recents: [] });
+  listSubfolders.mockReset();
+  listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
+  listExclusions.mockReset();
+  listExclusions.mockResolvedValue([]);
+  excludeSubfolder.mockReset();
   deliver = null;
 });
 
@@ -222,7 +248,19 @@ test('aria-pressed says which section is selected', async () => {
 test('a person reading the screen sees a real window, not a bare nav', async () => {
   setLocale('en'); // seed, do not inherit
   const { container } = render(Settings);
-  const panel = () => container.querySelector('.spane');
+  // 🔴 Task 10e: what is SHOWN in the panel, not what is mounted in it. The
+  // Folders section stays mounted and `hidden` for the window's life now
+  // (F10), and `textContent` reads a hidden subtree exactly as it reads a
+  // shown one — so the assertion this test has always made, "a person reads
+  // these words and no others", is only about a person once the hidden
+  // sections are taken out. The clone is what keeps this a read: removing
+  // `[hidden]` from the live tree would be this test editing the window it is
+  // reading.
+  const panel = () => {
+    const pane = container.querySelector('.spane')!.cloneNode(true) as HTMLElement;
+    for (const el of pane.querySelectorAll('[hidden]')) el.remove();
+    return pane;
+  };
   // Equality, not containment: 'Models' already sits inside <nav>, so a
   // toContain over the whole page is satisfied by the nav alone and never
   // notices an empty or replaced panel. Equality forces the panel itself to
@@ -265,8 +303,15 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // Live run finding 1 is what the two colons below are: this line is exactly
   // where a person reads «Provider OpenRouter» and «Key An OpenRouter key…» as
   // one phrase each, and it was green on both.
+  //
+  // 🔴 Task 10e: the leading space is the hidden Folders section's own
+  // indentation, left behind in the panel when the clone above drops the
+  // section itself. It is not a word and nobody sees it — the claim this
+  // string makes is about words — but it IS what the panel now contains, and
+  // this assertion is a measurement, so it is written down rather than
+  // trimmed away.
   expect(panel()?.textContent).toBe(
-    'Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
+    ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.   Save    '
     + ' Embedding Chat   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
@@ -617,7 +662,10 @@ const endedOnce = (revision: number, readSeq: number): ScanState => ({
 // settle on the default fixture before installing a deferred queue, so the
 // only calls the queue ever sees are `Settings.svelte`'s own — Models is
 // unmounted by then and its `jobs.state` subscription has been torn down with
-// it, the same as any other section a nav change destroys.
+// it, the way a nav change destroys Models, Scanning and Application. Folders
+// is the exception since F10 (Task 10e) — mounted for the window's life — and
+// it costs these two tests nothing: it reads `list_tree`, never
+// `model_settings`, so no queue installed here can see a call of its.
 test('an older read that settles last does not repaint over the newer one', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);
@@ -728,4 +776,174 @@ test('an older read that is refused last does not overwrite the newer numbers', 
   expect(visible(screen.getByTestId('indexing-index-files'))).toBe('The index holds 42 files.');
   expect(screen.queryByTestId('indexing-index-load-failed')).toBeNull();
   expect(pageText()).not.toContain('STALE-REJECTION');
+});
+
+// ---------------------------------------------------------------------------
+// F10 (Task 10 live run): the Folders section keeps what a person built by
+// hand while another section is shown. It is the one section mounted for the
+// window's life and hidden with the `hidden` attribute; the other three are
+// still mounted and destroyed by every nav click.
+// ---------------------------------------------------------------------------
+
+// One watched folder holding one indexed file under `drop/`, which is what
+// gives the exclude question its two numbers to freeze. The shape
+// `Folders.test.ts` builds its own fixtures in.
+const ONE_ROOT = {
+  roots: [{
+    rootId: 1,
+    absolutePath: '/synthetic/root',
+    name: 'root',
+    files: [{ relativePath: 'drop/x.md', documentId: 'doc-1' }],
+  }],
+  recents: [],
+};
+const ONE_SUBFOLDER = {
+  entries: [{ name: 'drop', relativePath: 'drop', state: { kind: 'open' } }],
+  unnameable: 0,
+};
+
+// The Folders section's own element, mounted whether or not it is shown.
+const foldersPanel = () => screen.getByTestId('settings-panel-folders');
+// What a person can see of it, asked of the DOM rather than of this file's
+// belief about `hidden`: `display` comes from jsdom's own default stylesheet,
+// which carries the same `[hidden] { display: none }` rule every browser has.
+const foldersShown = () =>
+  !foldersPanel().hidden && getComputedStyle(foldersPanel()).display !== 'none';
+
+// Opens «Теки», expands the one root, and raises an exclude question about
+// `drop`. Returns with the question on screen.
+async function raiseQuestionInFolders() {
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await screen.findByTestId('folder-confirm-1');
+}
+
+// 🔴 The finding itself. A person opens «Теки», expands a tree to find the
+// folder they mean to protect, presses Exclude, goes to look at «Сканування»
+// to check whether a scan is running — and comes back to a shut tree and no
+// question, with nothing on screen having said either went away. The two
+// states this separates are "another section is shown" and "this section was
+// destroyed": under the first the panel and the press are still there when a
+// person returns, under the second they are gone.
+//
+// RED, measured twice. Against the `{#if}` chain this task replaces, the
+// section is simply not there while «Сканування» is shown, and the claim that
+// it is hidden rather than gone fails first:
+//   TestingLibraryElementError: Unable to find an element by:
+//   [data-testid="settings-panel-folders"]
+// That failure is also what a wrapper carrying only the testid produces, so it
+// does not yet separate hidden from unmounted. The variant that does — the
+// `hidden` wrapper kept, `<Folders>` still behind an `{#if}` inside it — was
+// run too, and reddens on what a person comes back to:
+//   TestingLibraryElementError: Unable to find an element by:
+//   [data-testid="folder-panel-1"]
+test('an expanded panel and a pending question survive a switch to another section and back', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(ONE_ROOT);
+  listSubfolders.mockResolvedValue(ONE_SUBFOLDER);
+  render(Settings);
+
+  await raiseQuestionInFolders();
+  expect(foldersShown()).toBe(true);
+  const question = visible(screen.getByTestId('folder-confirm-1'));
+  expect(question).toContain('drop');
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  // Hidden, not unmounted — and hidden in the way that also takes it out of
+  // the accessibility tree, which is what `queryByRole` is asking here.
+  expect(foldersShown()).toBe(false);
+  expect(screen.queryByRole('heading', { name: 'Folders' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Exclude drop' })).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+
+  expect(foldersShown()).toBe(true);
+  // The panel is still expanded — `list_subfolders` is not asked again, and
+  // the row it drew is the same one.
+  expect(screen.getByTestId('folder-panel-1')).toBeTruthy();
+  expect(screen.getByTestId('subfolder-1-drop')).toBeTruthy();
+  // And the press is still waiting for an answer, with the same words on it.
+  expect(visible(screen.getByTestId('folder-confirm-1'))).toBe(question);
+  // Nothing was stored on the way: the question is pending, not answered.
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// The other half of staying mounted, and the one that could go wrong quietly:
+// a section kept on screen must not be a section that stopped listening. A
+// reading pass ending while «Сканування» is shown withdraws the question the
+// hidden «Теки» is holding — the numbers it froze were read before that pass —
+// and the person who comes back reads why their press is gone instead of
+// finding it silently missing.
+//
+// RED, measured on the variant that isolates this claim (the `hidden` wrapper
+// kept, `<Folders>` still behind an `{#if}` inside it): the section is not
+// mounted while it is away, so it hears the ending not at all, and the return
+// builds it fresh with neither a question nor a note —
+//   TestingLibraryElementError: Unable to find an element by:
+//   [data-testid="folder-question-withdrawn-1"]
+// which is the `waitFor` BEFORE the return, at the moment the ending is
+// delivered. Against the plain `{#if}` chain it fails earlier and for the
+// weaker reason the test above quotes.
+test('a reading pass ending while the section is hidden withdraws the question, and says so on return', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(ONE_ROOT);
+  listSubfolders.mockResolvedValue(ONE_SUBFOLDER);
+  render(Settings);
+
+  await raiseQuestionInFolders();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(foldersShown()).toBe(false);
+  // A reading pass has ended: `readSeq` 0 -> 1. This is the fact
+  // `Folders.svelte` withdraws on, not the ending itself.
+  await emit(endedOnce(1, 1));
+  await waitFor(() => expect(screen.getByTestId('folder-question-withdrawn-1')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+
+  expect(visible(screen.getByTestId('folder-question-withdrawn-1'))).toBe(
+    'The question about “drop” has been withdrawn: indexing has finished and this panel was'
+    + ' read again. Press again if you still want to.',
+  );
+  // Withdrawn, not answered — the pair the note stands on.
+  expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+// The count the ruling changed. `Folders.svelte` reads `list_tree` on its own
+// mount, and its mount is now the WINDOW's: one read when the window opens,
+// and none for any number of visits to the section afterwards. Both halves
+// are asserted, because "once at the end" alone is satisfied by a section
+// that is never read at all.
+//
+// RED against the `{#if}` chain: nothing reads `list_tree` until the section
+// is first opened, so the first claim fails on the window's own mount —
+//   AssertionError: expected +0 to be 1 // Object.is equality
+// — and on the variant that isolates the second claim (the `hidden` wrapper
+// kept, `<Folders>` still behind an `{#if}` inside it) the read comes back per
+// visit and the count after the return fails instead:
+//   AssertionError: expected 2 to be 1 // Object.is equality
+test('the folder list is read once when the window opens, and not again on a section switch', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(ONE_ROOT);
+  render(Settings);
+
+  await waitFor(() => expect(listTree.mock.calls.length).toBe(1));
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(foldersShown()).toBe(true));
+
+  expect(listTree.mock.calls.length).toBe(1);
+  // The pair: the section IS still listening, so the read it owes a reading
+  // pass's ending still happens. A component that had stopped reading
+  // altogether would pass the assertion above for the wrong reason.
+  await emit(endedOnce(2, 1));
+  await waitFor(() => expect(listTree.mock.calls.length).toBe(2));
 });

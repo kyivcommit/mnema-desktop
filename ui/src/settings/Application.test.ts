@@ -822,7 +822,18 @@ test('an older read that settles last does not repaint over the newer one', asyn
 test('a person who opens Application in the settings window reads the shortcut, the autostart state and the version', async () => {
   appPrefs.mockResolvedValue(prefs({ platform: 'mac', version: '0.0.0' }));
   const { container } = render(Settings);
-  const panel = () => container.querySelector('.spane');
+  // 🔴 F10 (Task 10e): what is SHOWN in the panel, not what is mounted in it.
+  // The Folders section stays mounted and `hidden` for the window's life now,
+  // and `textContent` reads a hidden subtree exactly as it reads a shown one —
+  // so this test's own claim, that a person reads these words and no others,
+  // is only about a person once the hidden sections are taken out. The clone
+  // keeps this a read: removing `[hidden]` from the live tree would be this
+  // test editing the window it is reading.
+  const panel = () => {
+    const pane = container.querySelector('.spane')!.cloneNode(true) as HTMLElement;
+    for (const el of pane.querySelectorAll('[hidden]')) el.remove();
+    return pane;
+  };
 
   await fireEvent.click(screen.getByTestId('settings-nav-application'));
 
