@@ -473,7 +473,8 @@ pub fn set_embedding_model(
     // `match` is the adoption's own, which may carry retirements with it even
     // while still failing: `adopt_retiring_whatever_blocks` drops a space and
     // loops back for another attempt on `SpaceNotEmpty` under `Discard`, so a
-    // later drop or a later `SpaceNotEmpty` for a DIFFERENT space can fail
+    // later drop, or a REPEAT `SpaceNotEmpty` for a space this run already
+    // retired (the loop's guard refuses to drop the same space twice), can fail
     // after this run has already destroyed vectors — `Error::RetiredThenFailed`
     // is that shape, `failure_after_retiring`'s own doc is where it is
     // decided. The closure's error type is fixed at `mnema_index::Error` by
