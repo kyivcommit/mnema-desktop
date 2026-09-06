@@ -87,7 +87,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_embed_ended_completed' | 'indexing_embed_ended_cancelled'
   | 'indexing_embed_ended_failed' | 'indexing_embed_ended_unexpected'
   | 'indexing_embed_not_started_store'
-  | 'indexing_failure_message' | 'indexing_walk_result' | 'indexing_embed_result'
+  | 'indexing_failure_message' | 'indexing_rules_not_applied_pointer'
+  | 'indexing_walk_result' | 'indexing_embed_result'
   | 'indexing_frozen_heading' | 'indexing_frozen_row'
   | 'indexing_frozen_symlinked_subtree' | 'indexing_frozen_empty_directory'
   | 'indexing_frozen_unreadable_directory'
@@ -772,6 +773,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // rather than folding into either of those two.
     indexing_embed_not_started_store: 'Вбудовування не запущено: сховище ключів не відповіло: {message}',
     indexing_failure_message: 'Програма повідомила: {message}',
+    // The one pointer this catalogue owns for `rulesNotApplied`, shared by
+    // both the arm that stops the walk before it starts (this ending never
+    // reaches a folder to read) and the arm that stops it mid-walk (the
+    // ended report's own `message` names the folder) — a second copy inline
+    // in either sentence would be free to drift from this one.
+    indexing_rules_not_applied_pointer: 'Виправте правило в розділі «Теки».',
     indexing_walk_result: 'Додано документів: {indexed}. Без змін: {unchanged}. Пропущено: {skipped}. Вилучено з індексу: {removed}.',
     indexing_embed_result: 'Вбудовано фрагментів: {done} з {total}. Відхилено: {refused}.',
     // `frozen` is shown, not dropped: `removed: 0` alone cannot say whether
@@ -1146,6 +1153,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_ended_unexpected: 'The embedding pass stopped for a reason not expected here ({reason}).',
     indexing_embed_not_started_store: 'Embedding was not started: the key store did not answer: {message}',
     indexing_failure_message: 'The program reported: {message}',
+    indexing_rules_not_applied_pointer: 'Fix the rule in the Folders section.',
     indexing_walk_result: 'Documents added: {indexed}. Unchanged: {unchanged}. Skipped: {skipped}. Removed from the index: {removed}.',
     indexing_embed_result: 'Chunks embedded: {done} of {total}. Given up on: {refused}.',
     indexing_frozen_heading: 'These subfolders were not reconciled, so both deleted files and files your exclusion rules now cover are still found by search inside them:',
