@@ -15,10 +15,14 @@
 # core count would suggest, which is what "nearly serial" predicted. This asks
 # a narrower question —
 # whether each case's expression still matches the code it was written against,
-# and whether what it produces is still what its marker describes — and answers
-# in about a second. A file that passes here can still be full of tests that
-# protect nothing; a file that fails here is proving less than it says, whatever
-# the last mutation run reported.
+# whether what it produces is still what its marker describes, and (guard 4,
+# added later) whether the test it names still exists. **Measured, not "about
+# a second" as this line used to claim**: `time scripts/mutation-staleness.sh
+# > out.txt 2>&1` on an Apple M2 Max, cold, sweeping all 851 cases across 41
+# case files, is 22.6-22.7s for guards 1-3 alone and 25.2-25.9s with guard 4
+# — repeatable across runs, not a one-off. A file that passes here can still
+# be full of tests that protect nothing; a file that fails here is proving
+# less than it says, whatever the last mutation run reported.
 #
 # Why it exists, from the run that paid for it. A four-column re-indentation —
 # one function's body moved out of a closure — broke three cases that quote it.
@@ -82,12 +86,20 @@
 # "exists" means for each runner, and the header note above the `case_`
 # function for what is still not checked even now.
 #
+# ⚠️ The RED this guard was built against, precisely: `55b2bc6` left
+# `pr8-ui-folders.sh` and `pr9-index.sh` naming seven tests that had been
+# renamed or lived in the wrong file (fixed by `be2db76`) — not the thirty-
+# four the "SHEBANG OVER CASES" note below once got confused with, which is a
+# different hole (a case file skipped outright) that this guard does not
+# touch.
+#
 # What it does **not** check: that the mutation compiles, or that anything
 # goes red — those need a compiler and a test run. Nor, for the test-name
-# guard just described, whether the test is green, whether a misspelled
-# `runner=` name was used, or whether a `runner=` field was written somewhere
-# other than straight after the test name — see the note above `case_` for
-# why those three stay `mutation-check.sh`'s job alone.
+# guard just described, whether the test is green, or whether a `runner=`
+# field was written somewhere other than straight after the test name — see
+# the note above `case_` for why those two stay `mutation-check.sh`'s job
+# alone. A misspelled runner name is no longer in this list: see the same
+# note for what catches it instead.
 #
 # ⚠️ **Read the exit code from this script, not from a pipeline.**
 # `scripts/mutation-staleness.sh cases | tail` reports `tail`'s status, not this
@@ -237,14 +249,47 @@ names_checked=0
 # Prints the directory — ABSOLUTE, because it comes from `find "$REPO/…"` —
 # and returns 0 on a match, or returns 1 having printed nothing. Callers must
 # not prepend `$REPO/` to it again.
+#
+# Cached per target in `$WORK`, not in a bash associative array: `env bash`
+# on this machine (and so, presumably, on any contributor's Mac without a
+# newer bash on `PATH`) resolves to Apple's bundled 3.2.57, which does not
+# have `declare -A` — verified with `env bash --version` rather than assumed,
+# after a `declare -A` draft of this cache would have died outright on this
+# very box. A `$WORK/pkgdir-<target>` file holds either the directory (a hit)
+# or nothing at all (a confirmed miss, recorded so a target that names no
+# package is not re-searched on every one of its cases); its mere existence
+# is what tells the two apart.
+#
+# Sets `$PKGDIR_RESULT` and returns 0 or 1, rather than printing the
+# directory for a caller to capture with `$(…)`: a command substitution
+# forks a subshell every time regardless of what runs inside it, measured
+# here to cost about 1.8s over 800 calls even when the body is nothing but a
+# cache hit — most of what a first cut of this cache (fast internally, still
+# wrapped in `pkgdir=$(find_pkg_dir "$target")` at the call site) left on the
+# table. A cache hit below is `read` (a builtin) against a file redirection,
+# which forks nothing at all; only a genuine miss forks `find`, `grep` and
+# `dirname` (about a dozen times total, once per distinct package, not once
+# per case).
 find_pkg_dir() {
   local target="$1" toml
+  local cache="$WORK/pkgdir-$target"
+  if [ -f "$cache" ]; then
+    if [ -s "$cache" ]; then
+      IFS= read -r PKGDIR_RESULT < "$cache"
+      return 0
+    fi
+    PKGDIR_RESULT=""
+    return 1
+  fi
   while IFS= read -r toml; do
     if grep -qm1 -E '^name[[:space:]]*=[[:space:]]*"'"$target"'"' "$toml"; then
-      dirname "$toml"
+      PKGDIR_RESULT=$(dirname "$toml")
+      printf '%s' "$PKGDIR_RESULT" > "$cache"
       return 0
     fi
   done < <(find "$REPO/crates" "$REPO/src-tauri" -maxdepth 2 -name Cargo.toml 2>/dev/null)
+  PKGDIR_RESULT=""
+  : > "$cache"
   return 1
 }
 
@@ -255,18 +300,12 @@ find_pkg_dir() {
 # `<test-name>`; everything after the test name — the runner's own trailing
 # arguments — still belongs to the harness and is still ignored here.
 #
-# ⚠️ **Three things guard 4 still cannot see, and why.** `mutation-check.sh`
-# grew an optional `runner=` field so a case can name a vitest test instead of
-# a cargo one:
+# ⚠️ **Two things guard 4 still cannot see, one loose thing it accepts on
+# purpose, and one divergence from the tool it is standing in for.**
+# `mutation-check.sh` grew an optional `runner=` field so a case can name a
+# vitest test instead of a cargo one:
 #
-#   1. A misspelled runner name (`runner=vitets`) falls through the `case`
-#      below to its default arm, which checks nothing and stays silent — this
-#      script does not know the set of valid runner names, `mutation-check.sh`
-#      does, and refuses one with exit 2. Verified by hand: a case whose
-#      seventh field reads `runner=vitets` is skipped by guard 4 exactly like
-#      one with no `runner=` field naming a cargo target that happens not to
-#      exist would be — both fall to the default arm, silently.
-#   2. A `runner=` field written anywhere but straight after the test name is
+#   1. A `runner=` field written anywhere but straight after the test name is
 #      never seen as a runner at all — guard 4 only inspects the seventh
 #      field. Verified by hand: `case_ … target test extra-arg runner=vitest`
 #      leaves guard 4 treating it as `cargo` (the default), which then asks
@@ -275,16 +314,48 @@ find_pkg_dir() {
 #      case but the wrong reason. `mutation-check.sh` refuses this shape
 #      outright (`puts runner=… after another argument`, exit 2), which is
 #      the only place the reason is stated correctly.
-#   3. Whether the test is GREEN. Guard 4 is a grep for the name, not a
+#   2. Whether the test is GREEN. Guard 4 is a grep for the name, not a
 #      compile or a run — `mutation-check.sh`'s baseline pass is the only
 #      place that requires it to pass.
 #
-# `mutation-check.sh` refuses all three outright — an unknown runner name and
-# a misplaced `runner=` both exit 2, a named test that does not exist or is
-# not green is a baseline failure and exits 1 — so a green `stale: 0` here
-# still says nothing about any of the three; it only closes the fourth gap,
-# where a named test had simply stopped existing and nothing outside
-# `mutation-check.sh`'s own CI matrix would ever have noticed.
+# A misspelled runner name (`runner=vitets`) used to be a third — it falls
+# through the `case` below to its default arm — but that arm now prints
+# UNRECOGNISED RUNNER at the case and the final assertion requires
+# `names_checked == checked`, so it is a checked failure, not a silent one.
+# Guard 4 still does not know the set of valid runner names — it only notices
+# that this one matched neither of the two it does know — which is why
+# `mutation-check.sh`'s own exit-2 refusal remains the only place a bad
+# runner name is named correctly.
+#
+# 🔴 **Guard 4's cargo check is deliberately loose, the same trade the fn-index
+# below makes for speed.** `grep -qxF "fn $want"` (or, before the index
+# existed, the equivalent single grep) is satisfied by ANY line reading
+# `fn <name>` anywhere under the package's `src/` or `tests/` — a helper of
+# the same name in an unrelated module, a doc comment quoting `fn foo(...)`,
+# or the identifier inside a string literal all count. It does not require
+# `#[test]`, does not resolve which module the case's `::`-qualified path
+# actually names, and ignores every trailing cargo argument (`--lib`,
+# `--test foo`) entirely. `mutation-check.sh`'s own `--exact` match against
+# the full path is the fine check this cheap one stands in front of; guard 4
+# only asks "does a function by this name exist somewhere in the package",
+# which is enough to catch a rename or deletion and not enough to catch a
+# case that now runs a different function of the same name than the one it
+# was written against.
+#
+# ⚠️ **Guard 4's vitest check and `mutation-check.sh`'s own selection do not
+# agree on what a title IS.** `run_named_test` passes `<test-name>` to
+# vitest's `-t`, which treats it as a REGULAR EXPRESSION (see the warning
+# above `run_named_test` in `mutation-check.sh`); guard 4 above instead
+# `grep -qF`s it — always literal. The two agree exactly as long as no title
+# contains a character that means something different to each: verified by
+# sweeping every vitest case in `scripts/mutations/` (91 cases, 81 distinct
+# titles) for `( ) [ ] { } ? + * ^ $ | \`, none of which appear; two titles
+# contain a bare `.`, which both tools currently treat the same way only
+# because nothing else happens to sit where it could match differently. A
+# future title carrying one of the harder metacharacters would still pass
+# guard 4 (a fixed string does not care what the bytes look like) and could
+# silently change what `-t` selects in `mutation-check.sh` — that half is the
+# one to re-check by hand if it ever happens, not this one.
 case_() {
   local label="$1" file="$2" expr="$3" marker="$4" target="$5" test="$6"
   checked=$((checked + 1))
@@ -304,11 +375,38 @@ case_() {
       # match is the fine check against the full path; this is the cheap one,
       # and deliberately does not try to resolve module nesting.
       local want="${test##*::}"
-      local pkgdir
-      if pkgdir=$(find_pkg_dir "$target"); then
-        if ! grep -qrE "\bfn[[:space:]]+${want}[[:space:]]*\(" "$pkgdir/src" "$pkgdir/tests" 2>/dev/null; then
+      if find_pkg_dir "$target"; then
+        local pkgdir="$PKGDIR_RESULT"
+        # One `fn`-index per package, built on its first case and reused by
+        # every later one — measured against the alternative (a fresh
+        # `grep -r` per case) at 851 cases over roughly a dozen packages: the
+        # index turns "grep the package's sources 851 times" into "grep them
+        # ~12 times and a file lookup 851 times". That change alone (before
+        # `find_pkg_dir` below was also cached) still cost 45s over the full
+        # sweep; caching `find_pkg_dir` too brought it to the 25.2-25.9s the
+        # header's timing note quotes now — close to, not equal to, `main`'s
+        # own 22.6-22.7s, and the remaining ~3s is the one `grep -qxF` per
+        # case just below, which a bash-only alternative measured slower than
+        # (see the note there). The index is a plain list, one `fn NAME` per
+        # line, and nothing here reads it as anything other than the input
+        # `grep -qxF` compares a whole line against — see the warning above
+        # `case_` for exactly how loose that makes this check.
+        local idx="$WORK/fns-$target"
+        if [ ! -f "$idx" ]; then
+          grep -rhoE '\bfn +[A-Za-z0-9_]+' "$pkgdir/src" "$pkgdir/tests" 2>/dev/null \
+            | sed 's/  */ /g' | sort -u > "$idx"
+        fi
+        # 🔴 Tried and measured worse: replacing this with a bash-only
+        # `read -d '' | case` slurp of `$idx`, to avoid the fork `grep` still
+        # costs on every case. It cost MORE — 30.9s over the full sweep
+        # against 25.7s for the `grep -qxF` below — because bash's own glob
+        # matching against a whole-file string scales worse than an external
+        # `grep` optimised for exactly this. Left as `grep -qxF`, and left
+        # here so nobody re-tries the same idea assuming a fork is always
+        # the expensive part.
+        if ! grep -qxF "fn $want" "$idx"; then
           echo "TEST NOT FOUND: $label"
-          echo "   cargo, package $target: no \"fn $want(\" under $pkgdir/src or $pkgdir/tests — the case names $test"
+          echo "   cargo, package $target: no \"fn $want\" under $pkgdir/src or $pkgdir/tests — the case names $test"
           stale=$((stale + 1))
         fi
       else
@@ -341,15 +439,24 @@ case_() {
         # measured wrong on this very file: `grep -q` closes its end of the
         # pipe the instant it finds a match, `perl` is still writing the rest
         # of a 190KB file when that happens, the kernel delivers it SIGPIPE,
-        # and `set -o pipefail` (line 133) turns perl's SIGPIPE death into
-        # the PIPELINE's exit status — 141, non-zero — regardless of what
-        # grep found. Eighteen real, unrenamed tests were reported `TEST NOT
-        # FOUND` by exactly this, every one of them a title that happens to
-        # appear early enough in a large file for `perl` to still be running
-        # when `grep` stops reading. Writing the unescaped copy to `$WORK`
-        # and grepping that file removes the pipe, and with it the race.
-        local unescaped="$WORK/vitest-unescaped"
-        perl -pe 's/\\([\x27"`])/$1/g' "$vfile" > "$unescaped"
+        # and this script's own `set -uo pipefail` turns perl's SIGPIPE
+        # death into the PIPELINE's exit status — 141, non-zero —
+        # regardless of what grep found. Eighteen real, unrenamed tests were
+        # reported `TEST NOT FOUND` by exactly this, every one of them a
+        # title that happens to appear early enough in a large file for
+        # `perl` to still be running when `grep` stops reading. Writing the
+        # unescaped copy to `$WORK` and grepping that file removes the pipe,
+        # and with it the race.
+        #
+        # One unescaped copy per FILE, not per case: `Folders.test.ts` alone
+        # backs eight cases in this repository, and re-running `perl` over
+        # the whole file for each one is exactly the repeated-work shape the
+        # cargo index above exists to avoid.
+        local key="${target//\//_}"
+        local unescaped="$WORK/vitest-unescaped-$key"
+        if [ ! -f "$unescaped" ]; then
+          perl -pe 's/\\([\x27"`])/$1/g' "$vfile" > "$unescaped"
+        fi
         if ! grep -qF -- "$test" "$unescaped"; then
           echo "TEST NOT FOUND: $label"
           echo "   vitest: ui/$target has no test titled exactly: $test"
@@ -359,9 +466,13 @@ case_() {
       ;;
     *)
       # Unknown runner name. Not this script's boundary to police — see the
-      # warning above `case_` — so guard 4 checks neither existence check and
-      # does not count this case towards `names_checked`, which is exactly
-      # what makes that count able to fall below `checked` and be noticed.
+      # warning above `case_` for why a name it does not recognise is not
+      # treated as either `cargo` or `vitest` — but a case landing here is
+      # still made visible two ways rather than left silent: named right
+      # here, and counted in the gap between `names_checked` and `checked`
+      # that the final assertion below refuses to pass over.
+      echo "UNRECOGNISED RUNNER: $label"
+      echo "   guard 4 does not know runner=$runner and did not check whether $test exists"
       ;;
   esac
 
@@ -486,7 +597,10 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked"
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked"
+if [ "$names_checked" -ne "$checked" ]; then
+  echo "$((checked - names_checked)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
+fi
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
 # `checked > 0` is not decoration on `stale == 0`, it is the condition that one
@@ -498,8 +612,15 @@ if [ "$files_read" -eq 0 ] || [ "$checked" -eq 0 ]; then
   echo "no cases anywhere in what was asked for — a result derived from nothing is not a result"
   exit 1
 fi
-# Four conditions, and three of them are the same one: **a green line must not be
-# reachable by checking less.** `stale` is the finding this script is for;
-# `empty`, `hidden` and `unreadable` are the three ways it could otherwise report
-# success over cases it never looked at.
-[ "$stale" -eq 0 ] && [ "$empty" -eq 0 ] && [ "$hidden" -eq 0 ] && [ "$unreadable" -eq 0 ]
+# Five conditions, and four of them are the same one: **a green line must not
+# be reachable by checking less.** `stale` is the finding this script is for;
+# `empty`, `hidden` and `unreadable` are three ways it could otherwise report
+# success over cases it never looked at, and `names_checked == checked` is a
+# fourth: an unrecognised `runner=` value leaves `case_`'s runner dispatch on
+# its silent default arm, and without this comparison that case would count
+# towards `checked` while guard 4 said nothing about it at all — a `stale: 0`
+# that is true only because one case's test name went unchecked, and this
+# script's whole reason to exist is that such gaps are found here, not read
+# past.
+[ "$stale" -eq 0 ] && [ "$empty" -eq 0 ] && [ "$hidden" -eq 0 ] && [ "$unreadable" -eq 0 ] \
+  && [ "$names_checked" -eq "$checked" ]
