@@ -210,9 +210,18 @@ case_ "claiming the slot must not un-read the pass before it" \
 # one production line and touches no test code at all. A hook installed at the
 # call site would have stayed behind while the call moved, and the mutant would
 # then have been killed by the fixture rather than by the defect.
+# ⚠️ Rewritten in the final fix round, because B-I1 changed the shape of the
+# line this quotes: `read_roots` is a `match` now, so that the refusal it can
+# answer with gets its own ending instead of falling to the drop policy. The
+# mutant is therefore the whole pre-fix line — `read_roots(state)?` ahead of the
+# claim — rather than a pure move of the match, which would not compile: the
+# `Err` arm calls `slot.finish`, and there is no slot yet above the claim. That
+# is the ordering this case has always been about, and the named test does not
+# reach the rules path at all, so the second half of the revert changes nothing
+# about why it dies.
 case_ "the job slot must be taken before the list of folders is read, not after" \
   src-tauri/src/scan_job.rs \
-  's~    let slot = state\.claim_job\(\n        Phase::Reading \{\n            root_index: 0,\n            root_count: 0,\n            root_path: String::new\(\),\n            counts: Progress::default\(\),\n        \},\n        true,\n    \)\?;\n\n    let job_db = state\.open_job_index\(\)\?;\n    let roots = read_roots\(state\)\?;~    let roots = read_roots(state)?; // mutant: the folder list is read before the slot is claimed\n    let slot = state.claim_job(\n        Phase::Reading \{\n            root_index: 0,\n            root_count: 0,\n            root_path: String::new(),\n            counts: Progress::default(),\n        \},\n        true,\n    )?;\n\n    let job_db = state.open_job_index()?;~' \
+  's{    let slot = state\.claim_job\(\n        Phase::Reading \{\n            root_index: 0,\n            root_count: 0,\n            root_path: String::new\(\),\n            counts: Progress::default\(\),\n        \},\n        true,\n    \)\?;\n\n(.*?)    let roots = match read_roots\(state\) \{\n        Ok\(roots\) => roots,\n.*?\n    \};\n}{    let roots = read_roots(state)?; // mutant: the folder list is read before the slot is claimed\n    let slot = state.claim_job(\n        Phase::Reading \{\n            root_index: 0,\n            root_count: 0,\n            root_path: String::new(),\n            counts: Progress::default(),\n        \},\n        true,\n    )?;\n\n$1}s' \
   'let roots = read_roots(state)?; // mutant: the folder list is read before the slot is claimed' \
   mnema-desktop 'scan_job::tests::a_root_swapped_between_the_read_and_the_walk_is_not_walked_under_its_successors_id' --lib
 
@@ -350,7 +359,7 @@ case_ "a pass that visited every folder must clear the incomplete marker" \
 # reads the meta key AT the announcement rather than after it.
 case_ "the scan's own clock must be set before the pass announces that it ended" \
   src-tauri/src/scan_job.rs \
-  's~    if let Ok\(duration\) = std::time::SystemTime::now\(\)\.duration_since\(std::time::UNIX_EPOCH\) \{\n        let _ = job_db\.meta_set\(LAST_READING_AT, &duration\.as_secs\(\)\.to_string\(\)\);\n    \}\n\n    slot\.mark_reading_done\(outcome\.clone\(\)\);~    slot.mark_reading_done(outcome.clone()); // mutant: the clock is set after the announcement\n\n    if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) \{\n        let _ = job_db.meta_set(LAST_READING_AT, \&duration.as_secs().to_string());\n    \}~' \
+  's~    if outcome\.roots_read > 0\n        && let Ok\(duration\) = std::time::SystemTime::now\(\)\.duration_since\(std::time::UNIX_EPOCH\)\n    \{\n        let _ = job_db\.meta_set\(LAST_READING_AT, &duration\.as_secs\(\)\.to_string\(\)\);\n    \}\n\n    slot\.mark_reading_done\(outcome\.clone\(\)\);~    slot.mark_reading_done(outcome.clone()); // mutant: the clock is set after the announcement\n\n    if outcome.roots_read > 0\n        && let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)\n    \{\n        let _ = job_db.meta_set(LAST_READING_AT, \&duration.as_secs().to_string());\n    \}~' \
   'slot.mark_reading_done(outcome.clone()); // mutant: the clock is set after the announcement' \
   mnema-desktop 'scan_job::tests::a_reading_phase_announces_last_reading_at_already_set_at_the_ending' --lib
 

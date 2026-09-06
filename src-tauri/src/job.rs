@@ -187,13 +187,34 @@ pub struct Ended {
     /// from the report instead would be `0` for every walk that met a lock and
     /// finished anyway, which is the walk this exists to describe.
     ///
-    /// **`contended <= skipped` in an ending, always.** The contended file is
-    /// journalled as a skip immediately after it is counted here, and an ending
-    /// is only ever built from a walk that returned a report — that is, after
-    /// the journalling. [`Progress::contended`] states the same rule for the
-    /// live events, where the one exception is the contended file's own event.
-    /// A surface must therefore explain part of `skipped` with this number and
-    /// must never add the two.
+    /// **`contended <= skipped` holds for an ending built FROM A REPORT**, which
+    /// is every ending `walk_job::ended_from_report` makes: the contended file
+    /// is journalled as a skip immediately after it is counted here, and such an
+    /// ending is only ever built after the journalling.
+    /// [`Progress::contended`] states the same rule for the live events, where
+    /// the one exception is the contended file's own event. A surface must
+    /// therefore explain part of `skipped` with this number and must never add
+    /// the two.
+    ///
+    /// ⚠️ **One builder makes an ending with NO report, and the pair means
+    /// something else there.** `scan_job::failed_root` builds an [`Ended`] for a
+    /// folder whose walk answered `Err` or panicked instead of reporting:
+    /// [`Ended::failed`] sets `skipped: 0`, and the struct-update syntax keeps
+    /// the `contended` the progress callbacks counted. So a folder that met a
+    /// held index lock and then broke reports `contended > 0` beside
+    /// `skipped: 0`, and `ReadingOutcome::absorb` carries both into the sums.
+    ///
+    /// That is not a lost count and not a wrong one: `contended` says the walk
+    /// was refused a write it retried for, and `skipped: 0` says it never got as
+    /// far as journalling one — the walk stopped between those two facts. What a
+    /// surface must not do is read the pair as arithmetic, which is the rule
+    /// above stated the other way round. The alternative considered and refused
+    /// was `skipped: contended` in `failed_root`: it would make the subtraction
+    /// hold at the price of a count no walk ever reported.
+    ///
+    /// This sentence used to claim «always», and was true when
+    /// `ended_from_report` was the only builder. It outlived that guard by one
+    /// branch.
     pub contended: u64,
     /// Always `true` for the probe, which has no subtree to fail to read.
     /// For a walk, mirrors `WalkReport::complete` — **the field a walk that

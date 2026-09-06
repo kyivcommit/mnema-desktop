@@ -11505,11 +11505,40 @@ fn a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_report
         !state.job_is_running(),
         "the refused scan kept the job slot"
     );
+    // 🔴 The three halves the final review found unasserted, and the reason
+    // they are three. This test used to pin only that an ending EXISTS and that
+    // it is not `Completed`, which `Failed` satisfied — and `Failed` was what
+    // the slot's own drop policy wrote, having discarded the refusal through
+    // `?`. What a person then read was the internal English diagnostic «the job
+    // ended without a report» beside a «Повторити» that re-reads the same
+    // stored rule and fails identically, which is the exact row the resumption
+    // table closes on purpose.
+    let report = report_of(&state.scan_state());
     assert_eq!(
-        report_of(&state.scan_state()).reason,
-        EndReason::Failed,
-        "the slot went back to idle, so a window is left with no account of a \
-         scan that was asked for and never ran"
+        report.reason,
+        EndReason::RulesNotApplied,
+        "a stored rule that will refuse every time is not a defect the scan can \
+         retry its way out of, and `Failed` is what the drop policy writes when \
+         the refusal was thrown away: {report:?}"
+    );
+    assert_eq!(
+        report.message.as_deref(),
+        Some(
+            "exclusion rule \"..\" has a `..` path component — name the folder directly, not `.` \
+             or `..`"
+        ),
+        "the window must be given the refusal's own sentence, which names the \
+         rule, and not a diagnostic about a report nobody wrote: {report:?}"
+    );
+    assert_eq!(
+        report.resume, None,
+        "a retry re-reads the same stored rule and fails the same way, so the \
+         button must not be offered at all: {report:?}"
+    );
+    assert_eq!(
+        report.ended_in,
+        EndedIn::Reading,
+        "the refusal happened before any folder was read: {report:?}"
     );
     assert_eq!(
         indexed_paths(&app, root),

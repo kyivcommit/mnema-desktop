@@ -310,8 +310,58 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
         true,
     )?;
 
+    // 🔴 **Left on `?`, deliberately, and the arm below is what makes that a
+    // decision rather than an oversight.** An index this build cannot open is a
+    // TRANSIENT failure — a file lock, a disk that went away, a migration that
+    // has not run — and running the same scan again is exactly what a person
+    // should do about it. So this one falls to `JobSlot::drop`'s backstop, which
+    // writes `Failed` with `resume: Some(Full)`: a «Повторити» that may well
+    // work. That is the shape the drop policy was written for.
     let job_db = state.open_job_index()?;
-    let roots = read_roots(state)?;
+
+    // 🔴 **A stored rule that no longer validates is NOT that, and until the
+    // final review it was answered as though it were.** `read_roots` builds
+    // every folder's `WalkRules` and refuses when a stored exclusion prefix or a
+    // stored mask will not validate — an ordinary refusal with a known reason
+    // and a sentence of its own. Discarded through `?`, it reached the drop
+    // policy instead: the phase was still `Reading`, so the slot wrote
+    // `Ended { Failed, "the job ended without a report" }` with
+    // `resume_for(Failed, Reading)` = `Some(Full)`. The window then drew that
+    // English internal diagnostic verbatim, beside a «Повторити» that re-reads
+    // the same stored rule and fails identically. A report WAS owed, and the
+    // reason WAS known.
+    //
+    // `RulesNotApplied` is the row the resumption table already closes for
+    // exactly this cause — «повтор без виправлення правила повторить відмову» —
+    // and it is reached here through [`resume_for`] rather than by writing
+    // `None` out, so this arm cannot come to disagree with the table the walk's
+    // own `RulesNotApplied` endings are drawn from.
+    //
+    // The refusal's own sentence, not the drop policy's: `Error`'s display is
+    // what `bridge.rs` hands every other command's rejection to the window as,
+    // and it names the rule. The person's next step is «Теки», not a retry.
+    let roots = match read_roots(state) {
+        Ok(roots) => roots,
+        Err(refusal) => {
+            slot.finish(
+                Terminal::Ended {
+                    report: ScanReport {
+                        // The phase was never entered — the same distinction
+                        // `read_every_root`'s own reading-phase ending makes.
+                        embedding: EmbedOutcome::NotReached,
+                        ended_in: EndedIn::Reading,
+                        reason: EndReason::RulesNotApplied,
+                        message: Some(refusal.to_string()),
+                        resume: resume_for(EndReason::RulesNotApplied, EndedIn::Reading),
+                    },
+                },
+                // Nothing was read and nothing was written, so the count the
+                // last job left is still the truth.
+                None,
+            );
+            return Err(refusal);
+        }
+    };
     let root_count = roots.len() as u64;
 
     slot.update(Phase::Reading {
@@ -433,6 +483,15 @@ fn read_every_root(
         // first would then be skipped under the second without evidence.
         // `mnema_ingest::walk_root`'s own doc comment states the obligation:
         // the pool handed to a walk must not outlive it.
+        //
+        // ⚠️ A refusal here absorbs a `failed_root` before it breaks, so
+        // `roots_read` counts a folder whose pool never opened and the strip can
+        // say «Проіндексовано тек: 1 з 2» where the answer is nought. Accepted:
+        // the folder WAS attempted and its failure is absorbed rather than
+        // dropped, its own row carries `Failed` and the pool's message, and the
+        // same accounting already applies to a folder that answered
+        // `BrokenWorker` having indexed nothing. `roots_read` counts folders the
+        // pass reached, not folders it read.
         let pool = match Pool::new(PoolConfig::new(&worker)) {
             Ok(pool) => pool,
             Err(refusal) => {
@@ -543,16 +602,36 @@ fn read_every_root(
     // makes matter: an observer woken by the pass ending reads the index for
     // itself, and would otherwise find the marker still claiming a scan is
     // half-done over a `last_reading` that says it finished.
+    //
+    // ⚠️ **The first conjunct cannot be false, and is written anyway.** The loop
+    // has no `continue`, and each of its three exits writes a reason that is not
+    // `Completed` — so `reason == Completed` already implies every folder was
+    // absorbed, and no test or mutant can tell the two conditions apart. It
+    // stays because the question it asks is the one D-j is ABOUT («was every
+    // folder visited»), and dropping it would leave the marker's rule readable
+    // only as «did the pass finish», which is a different question that happens
+    // to have the same answer today. If a `continue` is ever added to that loop,
+    // this is the line that keeps the marker honest — and it is stated here so
+    // that nobody reads it as a guard that is currently doing work.
     if outcome.roots_read == outcome.root_count && outcome.reason == EndReason::Completed {
         let _ = job_db.meta_set(SCAN_INCOMPLETE, "0");
     }
 
-    // F7 (Task 10 live run). Unconditional — complete, cancelled, or failed,
-    // the index was written by this pass, so its own clock moves regardless of
-    // how it ended. Before `mark_reading_done`, the same ordering `SCAN_INCOMPLETE`
+    // F7 (Task 10 live run). Whatever the pass ENDED as — complete, cancelled or
+    // failed — the index was written by it, so its own clock moves regardless.
+    // Before `mark_reading_done`, the same ordering `SCAN_INCOMPLETE`
     // above already keeps and for the same reason: an observer woken by the pass
     // ending reads the index for itself, and would otherwise find no fresher
     // moment than whatever an earlier scan (or none) left behind.
+    //
+    // 🔴 **`roots_read > 0` is the one condition on it, and it is about the
+    // sentence a person reads.** The key means «when indexing last ended» and
+    // `Scanning.svelte` draws it as «Останнє оновлення» — so a pass that read no
+    // folder at all must not move it. Two states reach that: a Stop pressed in
+    // the same second as Start, and a scan over zero watched folders. Both would
+    // otherwise leave the panel saying the index was updated just now over an
+    // index nothing touched. A pass that read ONE folder and was then stopped
+    // still writes: it wrote to the index, which is the fact this key is for.
     //
     // 🔴 Minor 6 (review, fix round 1). NOT `unwrap_or(0)`: a `SystemTime`
     // before `UNIX_EPOCH` — a clock a person or a container set wrong — would
@@ -576,7 +655,9 @@ fn read_every_root(
     // `SCAN_INCOMPLETE` writes above use `let _ =` for the same reason: a
     // failure to write a hint for the next run is not a reason to fail the
     // run in front of it).
-    if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    if outcome.roots_read > 0
+        && let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    {
         let _ = job_db.meta_set(LAST_READING_AT, &duration.as_secs().to_string());
     }
 
@@ -2861,6 +2942,15 @@ mod tests {
     /// exactly as much as a completed pass does — a person who stops a scan
     /// still sees the files read before the Stop, and the section's date must
     /// speak of them rather than of whatever ran before.
+    ///
+    /// 🔴 **The Stop lands at the boundary, AFTER the folder was read, and
+    /// `roots_read` is asserted to say so.** That is the fixture's premise
+    /// rather than an incidental detail: the write is guarded on
+    /// `roots_read > 0`, so a cancel arriving earlier would leave the key
+    /// untouched and this test would then be about the other arm.
+    /// `a_reading_stopped_before_its_first_folder_leaves_the_clock_alone` below
+    /// is that other arm, and the two together are what say the guard measures
+    /// something.
     #[test]
     fn a_cancelled_reading_still_writes_last_reading_at() {
         let data = tempfile::tempdir().expect("a data directory");
@@ -2887,6 +2977,16 @@ mod tests {
             EndReason::Cancelled,
             "this test is about a cancelled reading; it did not cancel: {settled:?}"
         );
+        assert_eq!(
+            settled
+                .last_reading
+                .as_ref()
+                .map(|reading| reading.roots_read),
+            Some(1),
+            "the premise: this Stop lands at the boundary, after the folder was \
+             read, which is what makes the write below the one this test is \
+             about: {settled:?}"
+        );
 
         // Minor 4 (review, fix round 1), the same pair as the completed test's
         // own.
@@ -2900,6 +3000,71 @@ mod tests {
             "scan.last_reading_at ({written}) is outside the window this test's \
              own scan ran in ({before}..={after})"
         );
+    }
+
+    /// 🔴 The arm the `roots_read > 0` guard exists for: a reading pass that
+    /// read NO folder leaves «Останнє оновлення» exactly where it was.
+    ///
+    /// The pair separated is "this scan indexed something, however little" from
+    /// "this scan touched nothing at all". The key means «when indexing last
+    /// ended» and `Scanning.svelte` draws it as a date the person compares
+    /// against the file they edited this morning — so a Start and a Stop pressed
+    /// in the same second, or a scan over folders it never reached, would
+    /// otherwise leave the panel saying the index was updated just now over an
+    /// index nothing wrote to. Unguarded, this test's scan moves the key.
+    ///
+    /// The Stop is raised from inside `read_roots` — after the list is read and
+    /// before the first walk — so the pass takes the loop's own top-of-iteration
+    /// check on its first turn and breaks with `roots_read: 0`. The key is
+    /// SEEDED with a value no scan in this test could produce, so "unchanged" is
+    /// a fact about the key rather than about an index that never had one.
+    #[test]
+    fn a_reading_stopped_before_its_first_folder_leaves_the_clock_alone() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt", "a2.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+
+        state
+            .with_index(|db| db.meta_set(LAST_READING_AT, "1000"))
+            .expect("seeding the clock with a moment no scan here can produce");
+
+        let stopping = Arc::downgrade(&state);
+        let turn = take_scan_turn_reading(Arc::new(move |_: &AppState| {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+        }));
+
+        let (deps, calls) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+
+        let reading = settled
+            .last_reading
+            .clone()
+            .expect("the scan recorded no reading pass");
+        assert_eq!(
+            reading.reason,
+            EndReason::Cancelled,
+            "the fixture was supposed to stop this pass before it read anything: {reading:?}"
+        );
+        assert_eq!(
+            reading.roots_read, 0,
+            "a folder was read after all, so this test is about the other arm: {reading:?}"
+        );
+        assert_eq!(
+            reading.root_count, 1,
+            "the premise: there WAS a folder to read, and the pass never got to \
+             it — an empty watch list would prove nothing about the guard: {reading:?}"
+        );
+        assert_eq!(
+            last_reading_at(&state),
+            1000,
+            "a pass that read no folder moved the index's «last updated» date, \
+             so the panel now says the index was updated by a scan that touched \
+             nothing"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// 🔴 `embedOnly` reads no folder at all.
