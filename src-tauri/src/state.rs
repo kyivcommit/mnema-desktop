@@ -121,13 +121,24 @@ pub struct AppState {
     autolaunch: Mutex<Box<dyn crate::os_services::Autolaunch>>,
     /// Who to tell when the job slot changes hands, if anybody asked.
     ///
-    /// An `Arc` rather than the `Box` [`AppState::set_job_observer`] takes,
-    /// because [`JobSlot`] carries its own clone for the life of the job:
-    /// `Box<dyn Fn(…)>` is not `Clone`, and looking the observer up again at
-    /// drop time would need a reference back to this struct that `JobSlot`
-    /// deliberately does not hold. `None` is the default and stays the default
-    /// under `cargo test` — nothing but `.setup` installs one.
-    job_observer: Mutex<Option<Arc<JobObserver>>>,
+    /// An `Arc` around the cell as well as around the observer inside it, and
+    /// the outer one is the whole of the independent review's first finding.
+    /// [`JobSlot`] used to carry a clone of the observer AS IT STOOD at the
+    /// moment of the claim, which is `None` for every job claimed before
+    /// `.setup` reaches [`AppState::set_job_observer`] — and `boot_index` runs
+    /// its model auto-setup, which claims `Other { ModelAdoption }`, on exactly
+    /// that side of the line (`lib.rs:611` against `lib.rs:688`). That slot's
+    /// `Drop` wrote `Idle` and told nobody, so a window that read
+    /// `Running { Other }` at mount stayed on it for the life of the process:
+    /// no «Сканувати», no removal, and no Stop for a job that was over.
+    ///
+    /// Carrying the CELL instead of its contents is what makes the slot read
+    /// the observer that is installed at the moment it speaks rather than the
+    /// one that was installed when it was claimed. `Box<dyn Fn(…)>` is still
+    /// not `Clone`, which is why the inner `Arc` stays. `None` is the default
+    /// and stays the default under `cargo test` — nothing but `.setup` installs
+    /// one.
+    job_observer: Arc<Mutex<Option<Arc<JobObserver>>>>,
     /// Serialises a whole hotkey change against another one.
     ///
     /// Separate from `hotkey` above, and that is the point: `hotkey` is held for
@@ -175,7 +186,7 @@ impl AppState {
             }),
             shortcuts: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
-            job_observer: Mutex::new(None),
+            job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
         }
     }
@@ -502,12 +513,12 @@ impl AppState {
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
-        // After the early return above, so a refused claim announces nothing:
-        // the caller that lost never held the slot, and an announcement from it
-        // would enable a control on behalf of a job that does not exist. Cloned
-        // out from under the lock before the call, so an observer is never run
-        // while this mutex is held.
-        let observer = self.observer();
+        // The CELL, not the observer inside it. A slot that copied the current
+        // observer here would be deaf to one installed afterwards, which is the
+        // review's first finding — see `job_observer`'s own note. Cloning an
+        // `Arc` takes no lock at all, so nothing here can run an observer while
+        // a mutex is held either.
+        let observer = self.job_observer.clone();
         // The slot exists BEFORE anything is told the slot is taken. An observer
         // is free to act on the state the moment it hears — including claiming
         // and releasing it again — and the struct that gives the slot back must
@@ -519,9 +530,12 @@ impl AppState {
             cancellable,
             finished: false,
         };
-        if let Some(f) = &slot.observer {
-            f();
-        }
+        // Through the slot's own `announce`, which is what makes the claim's
+        // announcement read the same cell every later one does. After the early
+        // return above, so a refused claim announces nothing: the caller that
+        // lost never held the slot, and an announcement from it would enable a
+        // control on behalf of a job that does not exist.
+        slot.announce();
         Ok(slot)
     }
 
@@ -620,12 +634,17 @@ pub struct JobSlot {
     /// reconciled later.
     scan: Arc<Mutex<crate::scan_state::ScanState>>,
     cancel: Arc<AtomicBool>,
-    /// The observer as it stood when this slot was claimed, carried rather than
-    /// looked up: this struct holds no reference to [`AppState`], and giving it
-    /// one to reach a field at drop time would be a larger change than a clone
-    /// of an `Arc`. `None` when nobody registered, which is what keeps every
-    /// existing caller silent.
-    observer: Option<Arc<JobObserver>>,
+    /// The state's observer CELL, shared rather than copied out of — the same
+    /// `Arc` [`AppState`] holds, so what this slot announces to is whoever is
+    /// registered at the moment it speaks and not whoever was registered when
+    /// it was claimed. This struct still holds no reference to [`AppState`];
+    /// one `Arc` of the field is all it needs. Empty when nobody has
+    /// registered, which is what keeps every existing caller silent.
+    ///
+    /// 🔴 The copy this replaces is the review's first finding: a slot claimed
+    /// during `boot_index`, before `.setup` installs the observer, ended
+    /// without a word and left a window that had read `Running` stuck on it.
+    observer: Arc<Mutex<Option<Arc<JobObserver>>>>,
     /// Carried rather than re-read out of the snapshot on every `update`. It
     /// cannot change for the life of the job, and re-reading it would need an
     /// arm for "the snapshot is not `Running`" — a state this slot's own
@@ -722,8 +741,19 @@ impl JobSlot {
 
     /// Tells whoever asked to go and look. Call sites must already have released
     /// `scan`, for the reason [`AppState::announce`] gives.
+    ///
+    /// Read from the shared cell on EVERY announcement, never once at the
+    /// claim: the observer is installed by `.setup`, and jobs exist before
+    /// `.setup` runs. Cloned out from under its own lock before the call, so
+    /// nothing runs an observer while a mutex here is held — an observer is
+    /// free to claim the slot, and claiming takes locks.
     fn announce(&self) {
-        if let Some(f) = &self.observer {
+        let observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(f) = observer {
             f();
         }
     }
@@ -1173,6 +1203,77 @@ mod tests {
         state
             .claim_job(probe(), true)
             .expect("the slot is free again");
+    }
+
+    /// 🔴 **A slot claimed before anybody was listening announces to the
+    /// listener installed after it** — the independent review's first finding,
+    /// in the order its probe reproduced it.
+    ///
+    /// `boot_index` starts on its own thread (`lib.rs:611`) and its model
+    /// auto-setup claims the slot as `Other { ModelAdoption }` before asking
+    /// the provider anything (`models.rs:164-173`); `.setup` installs the
+    /// observer afterwards (`lib.rs:688`). A slot that COPIED the observer at
+    /// claim time therefore held nothing for the whole of that job, so the
+    /// `Drop` that wrote `Idle` told nobody — and a window whose two mount-time
+    /// reads of `job_status` both landed inside that job stayed on
+    /// `Running { Other }` for the life of the process, with «Сканувати»
+    /// hidden, removal blocked, and no Stop offered for a job of that kind.
+    ///
+    /// The pair of states this separates is "the slot carries the observer it
+    /// was claimed with" against "the slot reads the observer installed at the
+    /// moment it speaks". Both directions are asserted: nothing is announced
+    /// while nobody is listening, exactly one announcement carries the ending,
+    /// and the next job — claimed with the observer already in place — still
+    /// announces its own two.
+    #[test]
+    fn a_slot_claimed_before_the_observer_still_announces_its_ending() {
+        let log = Log::default();
+        let state = state();
+
+        // Claimed with nothing listening at all, the way boot's model adoption
+        // is. `cancellable: false` is that job's own value.
+        let slot = state.claim_job(probe(), false).expect("the slot is free");
+        assert!(state.job_is_running());
+
+        state.set_job_observer(recorder(&log, &state));
+        assert_eq!(
+            snapshots(&log),
+            [],
+            "installing an observer is not itself an announcement: the claim \
+             happened before it and there is nothing to replay"
+        );
+
+        drop(slot);
+        assert_eq!(
+            snapshots(&log),
+            [ScanSnapshot::Idle],
+            "the ending must reach the observer installed after the claim, and \
+             exactly once"
+        );
+        assert!(
+            !state.job_is_running(),
+            "and what a look finds when it hears is the slot given back"
+        );
+
+        // The probe's own control, and the other direction: an observer that
+        // was in place for the whole of a job still hears both of its edges, so
+        // the assertion above is about WHEN the observer is read and not about
+        // a slot that announces less than it used to.
+        let next = state
+            .claim_job(probe(), false)
+            .expect("the slot is free again");
+        drop(next);
+        assert_eq!(
+            snapshots(&log),
+            [
+                ScanSnapshot::Idle,
+                ScanSnapshot::Running {
+                    phase: probe(),
+                    cancellable: false,
+                },
+                ScanSnapshot::Idle
+            ]
+        );
     }
 
     /// 🔴 **A reading job that vanished against a reading job that reported.**

@@ -471,9 +471,15 @@ case_ "a refused shortcut leaves the one already on disk alone" \
 
 # The claim goes unannounced: a job starts and the tray goes on offering a Stop
 # that is greyed out. The whole point of the observer, removed.
+#
+# ⚠️ Re-anchored for the review's first fix. The claim used to reach into the
+# slot's own field — `if let Some(f) = &slot.observer` — and now calls
+# `slot.announce()`, because the slot carries the observer CELL rather than a
+# copy of whatever was in it (`state.rs`, `JobSlot::observer`). The mutant is
+# the same one: the claim says nothing.
 case_ "claiming the job slot announces itself" \
   src-tauri/src/state.rs \
-  's~        if let Some\(f\) = &slot\.observer \{\n            f\(\);\n        \}~        // mutant: the claim is never announced~' \
+  's~        slot\.announce\(\);~        // mutant: the claim is never announced~' \
   '// mutant: the claim is never announced' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
@@ -513,9 +519,15 @@ case_ "the outgoing job writes its ending before it announces, never after" \
 # The slot-side ordering of the write and the announcement is a different case
 # and lives two above this one; the same rule on `finish`'s own path is
 # `scripts/mutations/pr9b-scan.sh`'s.
+#
+# ⚠️ The second substitution was re-anchored for the review's first fix.
+# `JobSlot::announce` now READS the shared observer cell instead of a field
+# holding a copy, so the block it empties is a lock-and-clone followed by the
+# call rather than a bare `if let` over `&self.observer`. What it silences is
+# unchanged, and so is the sentence above about how much of it that is.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
-  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        let observer = self\n            \.observer\n            \.lock\(\)\n            \.unwrap_or_else\(std::sync::PoisonError::into_inner\)\n            \.clone\(\);\n        if let Some\(f\) = observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
   '// mutant: the release is announced when a stop is requested' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
