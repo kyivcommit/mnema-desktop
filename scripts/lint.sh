@@ -42,12 +42,16 @@
 # profile's artifacts, and the next `cargo test` pays for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# The two checks that read comments rather than code, first because they cost
-# about a second and compile nothing: an obligation written into a comment
-# (`check-booked.sh`, its own self-test first — it writes failures to stderr,
-# so silencing its stdout hides only the success line) and a citation whose
-# line is past the end of its file (`check-citations.sh`). `ci.yml` runs the
-# same in its `mutations` job.
+# Three checks first, because none of them compiles anything and all three
+# together cost about a second: two that read comments rather than code — an
+# obligation written into one (`check-booked.sh`, its own self-test first —
+# it writes failures to stderr, so silencing its stdout hides only the
+# success line) and a citation whose line is past the end of its file
+# (`check-citations.sh`) — and one below that reads the mutation cases
+# themselves (`mutation-staleness.sh`), asking whether each still matches the
+# code and test it was written against. `ci.yml` runs `check-booked.sh` and
+# `check-citations.sh` in its `mutations` job and `mutation-staleness.sh` in
+# its `sweeps` job.
 scripts/check-booked.sh --self-test > /dev/null
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
@@ -61,6 +65,14 @@ cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
 scripts/check-citations.sh > "$cit" \
   || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
 rm -f "$cit"
+# A third comment-only check, same reason as the two above: `mutation-staleness.sh`
+# compiles nothing and takes about a second (`scripts/mutation-staleness.sh`'s own
+# header has the measurement). Unlike the citation sweep it prints nothing but
+# failures and a one-line summary even when it passes, so the whole output — not
+# just a tail — is worth showing when it does not.
+stale="$(mktemp)"; trap 'rm -f "$stale"' EXIT
+scripts/mutation-staleness.sh > "$stale" 2>&1 || { cat "$stale"; exit 1; }
+rm -f "$stale"
 # Formatting, before clippy: it compiles nothing and `ci.yml`'s `check` job
 # runs the same line first. PR #29 reached CI with eight rustfmt differences in
 # a file every local gate had passed, because nothing here asked.
