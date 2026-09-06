@@ -2727,7 +2727,6 @@ dependencies = [
  "mnema-search",
  "mnema-secrets",
  "mnema-walk",
- "rusqlite",
  "serde",
  "serde_json",
  "sys-locale",

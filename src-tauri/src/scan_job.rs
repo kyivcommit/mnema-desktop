@@ -479,11 +479,29 @@ fn read_every_root(
     // above already keeps and for the same reason: an observer woken by the pass
     // ending reads the index for itself, and would otherwise find no fresher
     // moment than whatever an earlier scan (or none) left behind.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let _ = job_db.meta_set(LAST_READING_AT, &now.to_string());
+    //
+    // 🔴 Minor 6 (review, fix round 1). NOT `unwrap_or(0)`: a `SystemTime`
+    // before `UNIX_EPOCH` — a clock a person or a container set wrong — would
+    // then store `"0"`, which PARSES and so, per `models.rs`'s own preference
+    // rule, WINS over the fallback query: the section would say 1 January
+    // 1970 rather than fall back to a real moment. On that arm nothing is
+    // written at all, which is what leaves the fallback query in charge, the
+    // same as an index scanned before this key ever existed. No test drives
+    // this arm — `SystemTime::now()` cannot be moved from a test in this
+    // crate — so nothing here claims more than "the code cannot produce
+    // `\"0\"` from this arm", which is a property of the `if let` below rather
+    // than something a test could observe.
+    //
+    // This codebase has no logging facility (`rg -n 'log::|tracing::'
+    // src-tauri crates` is empty), so unlike the review's own suggestion
+    // ("log at debug"), the clock failure is not logged — it is silent the
+    // same way every other swallowed error in this function is (the
+    // `SCAN_INCOMPLETE` writes above use `let _ =` for the same reason: a
+    // failure to write a hint for the next run is not a reason to fail the
+    // run in front of it).
+    if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        let _ = job_db.meta_set(LAST_READING_AT, &duration.as_secs().to_string());
+    }
 
     slot.mark_reading_done(outcome.clone());
 
@@ -2485,6 +2503,77 @@ mod tests {
         })
     }
 
+    /// Important 2 (review, fix round 1). The doc comment on the write in
+    /// `read_every_root` claims the same ordering `SCAN_INCOMPLETE` keeps «for
+    /// the same reason: an observer woken by the pass ending reads the index
+    /// for itself» — but nothing exercised that claim, unlike `SCAN_INCOMPLETE`
+    /// itself, which earns it with
+    /// [`a_reading_phase_that_visited_every_root_clears_the_marker_even_without_a_key`]
+    /// above: that test records the marker AT the announcement, through
+    /// [`run_scan_watching`]'s own hand on every emission, and fails if the
+    /// write moved below [`crate::state::JobSlot::mark_reading_done`]. This is
+    /// that test's mirror for [`LAST_READING_AT`].
+    ///
+    /// RED (fix round 1): with the write moved below
+    /// `slot.mark_reading_done(outcome.clone())`, this test failed with:
+    /// "the end of the reading pass announced scan.last_reading_at as None —
+    /// an observer reading the index at that moment would still find no
+    /// fresher moment than whatever ran before it"; restored afterwards.
+    #[test]
+    fn a_reading_phase_announces_last_reading_at_already_set_at_the_ending() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+
+        // The same shape as the `SCAN_INCOMPLETE` mirror above: what the index
+        // said the FIRST time the pass announced its own ending, read inside
+        // the observer rather than afterwards, since the write and the
+        // announcement's own consequences (F1/F9's `readSeq` bump, on the UI
+        // side) reach a consumer in the same instant only if this ordering
+        // holds.
+        let at_the_announcement: Arc<std::sync::Mutex<Option<Option<String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&at_the_announcement);
+        let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
+        let (_, settled) =
+            run_scan_watching(&turn, &state, Entry::Full, deps, move |state, now| {
+                if now.read_seq == 1 {
+                    let mut slot = recorder.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(
+                            state
+                                .with_index(|db| db.meta_get(LAST_READING_AT))
+                                .expect("reading scan.last_reading_at"),
+                        );
+                    }
+                }
+            });
+
+        assert_eq!(
+            report_of(&settled).reason,
+            EndReason::Completed,
+            "this test is about a completed reading; it did not complete: {settled:?}"
+        );
+
+        let at_the_announcement = at_the_announcement
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("the end of the reading pass was never announced");
+        let written = at_the_announcement.unwrap_or_else(|| {
+            panic!(
+                "the end of the reading pass announced scan.last_reading_at as \
+                 None — an observer reading the index at that moment would \
+                 still find no fresher moment than whatever ran before it"
+            )
+        });
+        written.parse::<u64>().unwrap_or_else(|e| {
+            panic!("scan.last_reading_at was not a unix timestamp at the announcement: {written:?} ({e})")
+        });
+    }
+
     /// F7 (Task 10 live run). `models::index_settings`'s "Останнє оновлення"
     /// must be able to read a moment THIS scan produced, not only a moment some
     /// earlier content-processing pass produced — the pair below
@@ -2511,11 +2600,20 @@ mod tests {
             "this test is about a completed reading; it did not complete: {settled:?}"
         );
 
+        // Minor 4 (review, fix round 1): `before` alone is satisfied by any
+        // constant far enough in the future — exactly the "a number that looks
+        // like an answer" shape the stale `models.rs` mutation case exists to
+        // catch. `after`, taken once the scan has settled, closes the other
+        // side.
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock")
+            .as_secs();
         let written = last_reading_at(&state);
         assert!(
-            written >= before,
-            "scan.last_reading_at ({written}) is earlier than the moment this \
-             test started the scan ({before})"
+            (before..=after).contains(&written),
+            "scan.last_reading_at ({written}) is outside the window this test's \
+             own scan ran in ({before}..={after})"
         );
     }
 
@@ -2551,11 +2649,17 @@ mod tests {
             "this test is about a cancelled reading; it did not cancel: {settled:?}"
         );
 
+        // Minor 4 (review, fix round 1), the same pair as the completed test's
+        // own.
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock")
+            .as_secs();
         let written = last_reading_at(&state);
         assert!(
-            written >= before,
-            "scan.last_reading_at ({written}) is earlier than the moment this \
-             test started the scan ({before})"
+            (before..=after).contains(&written),
+            "scan.last_reading_at ({written}) is outside the window this test's \
+             own scan ran in ({before}..={after})"
         );
     }
 
@@ -2577,6 +2681,15 @@ mod tests {
         watch(&state, folder.path());
 
         let before = state.scan_state().read_seq;
+        // Minor 5 (review, fix round 1). `LAST_READING_AT` holds by
+        // construction: `start_inner` (`:212-222`) sends `EmbedOnly` straight
+        // to `embed_after`, and `read_every_root` — the only writer — is never
+        // reached. Seeded to a known value here so this test's own "no folder
+        // was read" evidence (below) extends to this key too, rather than
+        // leaving it the one field nothing in this file names on this path.
+        state
+            .with_index(|db| db.meta_set(LAST_READING_AT, "1"))
+            .expect("seeding scan.last_reading_at by hand");
         let (deps, calls) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
         let (snapshots, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
 
@@ -2613,6 +2726,14 @@ mod tests {
             marker(&state),
             None,
             "the resumption touched a marker that is the reading pass's to write"
+        );
+        assert_eq!(
+            state
+                .with_index(|db| db.meta_get(LAST_READING_AT))
+                .expect("reading scan.last_reading_at"),
+            Some("1".to_string()),
+            "the resumption wrote scan.last_reading_at, a moment a reading pass \
+             is the only thing that owns"
         );
         assert!(
             state

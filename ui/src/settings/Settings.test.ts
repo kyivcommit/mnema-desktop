@@ -461,11 +461,15 @@ test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; a
 // seeded from what the store already holds — the same shape as
 // `seenReadSeq`/`seenSnapshot` above.
 //
-// RED (fix round 1): with the `filesChanged` clause deleted from
-// `Settings.svelte`, this test's first `waitFor` below timed out with
-// "Timed out in waitFor: Expected mock function to have been called 2 times,
-// but it was called 1 time(s)." — the ended report's own re-read happened
-// (`afterEnded` above baseline), the removal's idle snapshot did not.
+// RED (fix round 1, re-derived — Important 3, review round 1: the first
+// attempt at this note named the wrong `waitFor` and quoted a message
+// `toBe` cannot produce). With the `filesChanged` clause deleted from
+// `Settings.svelte`, the FIRST `waitFor` below (`baseline + 1`) still passes
+// — it is satisfied by the `ended` trigger alone, which nothing here
+// touches. It is the SECOND `waitFor` (`afterEnded + 1`, the removal's own
+// idle snapshot) that goes red, with:
+// "AssertionError: expected 3 to be 4 // Object.is equality" — `toBe`'s own
+// message, not `toHaveBeenCalledTimes`'s.
 test('a files count that changed on an idle snapshot re-reads, revealing the queue the vanished report offered', async () => {
   render(Settings);
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
@@ -526,6 +530,17 @@ test('a running tick with an unchanged files count does not re-read', async () =
   await emit(running);
   await tick();
   expect(modelSettings.mock.calls.length).toBe(baseline);
+
+  // Minor 3 (review, fix round 1): a "no call" assertion alone is satisfied
+  // by an emission that never reached the subscriber at all — a `jobStatus`
+  // fixture seeded at a higher revision, say, would make `apply` (`jobs.ts`)
+  // drop every state this test emits, and this assertion would keep passing
+  // while testing nothing. One positive assertion closes that: an `ended`
+  // snapshot right after DOES reach the subscriber and DOES trigger its own
+  // read, so a silently-dropped stream shows up here as a missing call
+  // rather than only as fixture 1 failing elsewhere in the file.
+  await emit(endedOnce(10, 0));
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
 });
 
 // A job nobody asked for and that owes no report (`OtherJob`, `ipc.ts`) ends
@@ -552,6 +567,14 @@ test('a probe job ending in idle with an unchanged files count does not re-read'
   await emit(idleAfterProbe);
   await tick();
   expect(modelSettings.mock.calls.length).toBe(baseline);
+
+  // Minor 3 (review, fix round 1), the same pair as the previous test's own:
+  // an `ended` snapshot right after DOES reach the subscriber and DOES
+  // trigger a read, so this file's "no call" assertions above are not
+  // vacuously satisfied by a stream that never reached `Settings.svelte` at
+  // all.
+  await emit(endedOnce(11, 0));
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
 });
 
 // ---------------------------------------------------------------------------

@@ -2117,6 +2117,18 @@ mod tests {
     /// `crates/mnema-index/tests/tree.rs`'s own `seed_indexed`, combined: the
     /// former has no ingest stage at all, and the latter is a different crate's
     /// private test helper this file cannot reach.
+    ///
+    /// Dev-dependency note (review, fix round 1): no writer on `Db` takes an
+    /// explicit timestamp, so this still reaches `Db::conn()` for the `UPDATE`
+    /// — but as a TUPLE of parameters rather than through the `rusqlite::
+    /// params!` macro this file's first draft reached for. `Connection::
+    /// execute`'s `params` argument is generic over `rusqlite::Params`, which
+    /// is implemented for tuples of `ToSql` values without either trait or
+    /// macro needing to be named — the same seam `tests/support/fixture.rs`'s
+    /// own `space_ids`/`tables_of_space` already use for a zero-param `[]`.
+    /// That is what let the added `rusqlite` entry in `src-tauri`'s
+    /// `[dev-dependencies]` come back out: it was needed only for the macro,
+    /// not for the connection or the query.
     fn seed_indexed(state: &AppState, root: i64, content_hash: &str, updated_at: i64) {
         state
             .with_index(|db| {
@@ -2136,7 +2148,7 @@ mod tests {
                 db.record_stage(content_hash, "chunk", "done")?;
                 db.conn().execute(
                     "UPDATE ingest_stage SET updated_at = ?2 WHERE content_hash = ?1 AND stage = 'chunk'",
-                    rusqlite::params![content_hash, updated_at],
+                    (content_hash, updated_at),
                 )?;
                 Ok(())
             })

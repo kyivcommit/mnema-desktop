@@ -111,15 +111,17 @@
   );
 
   onMount(() => {
-    // Fired when `scan.readSeq` grows OR the snapshot becomes `ended` —
-    // deliberately not "every ending" alone, the rule the old
-    // `Scanning.svelte` kept: a reading pass can end and hand the phase to
-    // embedding without the snapshot itself ever reaching `ended` (`readSeq`
-    // is `scan_state.rs`'s own count of reading passes that have ENDED), and
-    // that is exactly the moment `scanIncomplete`/`indexedFiles` can have
-    // moved. An `embedOnly` run's own ending moves `pendingChunks`/
-    // `failedChunks` without moving `readSeq` at all, which is why `ended`
-    // alone still has to trigger this on its own.
+    // Fired when `scan.readSeq` grows, the snapshot becomes `ended`, or
+    // `scan.files` changes (Minor 1, fix round 1 — this sentence used to name
+    // only the first two, which then read as the whole rule) — deliberately
+    // not "every ending" alone, the rule the old `Scanning.svelte` kept: a
+    // reading pass can end and hand the phase to embedding without the
+    // snapshot itself ever reaching `ended` (`readSeq` is `scan_state.rs`'s own
+    // count of reading passes that have ENDED), and that is exactly the moment
+    // `scanIncomplete`/`indexedFiles` can have moved. An `embedOnly` run's own
+    // ending moves `pendingChunks`/`failedChunks` without moving `readSeq` at
+    // all, which is why `ended` alone still has to trigger this on its own.
+    // The third condition, `files`, is documented where it is checked, below.
     //
     // Compared by snapshot IDENTITY, not by kind: the controller replaces the
     // whole state on every change, so a progress tick changes the object
@@ -132,9 +134,13 @@
     // `finish(Terminal::Idle, Some(files))` (`bridge.rs:182`) — straight to a
     // bare `idle` snapshot, never `ended`, and it is not a reading pass so it
     // never bumps `readSeq` either: the two conditions above are both blind to
-    // it. `files` (`ScanState.files`, the index's own count) is the one field
-    // a removal always moves, so it is watched the same way — seeded here for
-    // the same reason `seenSnapshot`/`seenReadSeq` are.
+    // it. `files` (`ScanState.files`, the index's own re-read count) is the
+    // field a removal moves WHENEVER it deletes anything (Minor 2, fix round
+    // 1 — "always" overclaimed: a removal of a watched folder holding no
+    // indexed file leaves `indexed_file_count` where it was, and this trigger
+    // rightly does not fire for it, since nothing in the section's numbers
+    // changed either). It is watched the same way as the two above — seeded
+    // here for the same reason `seenSnapshot`/`seenReadSeq` are.
     let seenFiles = get(jobs.state).scan.files;
     const stop = jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seenSnapshot) return;
