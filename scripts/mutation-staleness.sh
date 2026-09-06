@@ -71,9 +71,23 @@
 # this script re-derives it, and prints it beside the files it read. Do not
 # quote the figure above as a current total; run the sweep.
 #
-# What it does **not** check: that the case names a test that exists (the
-# harness's baseline pass does that), that the mutation compiles, or that
-# anything goes red. Those need a compiler and a test run.
+# A fourth guard, added after this script's own blind spot went unfixed for
+# weeks: it now also checks that the named test EXISTS — a grep, not a run.
+# `mutation-check.sh`'s baseline pass is the only place that requires the
+# test green, and it only runs on the files a CI matrix actually lists; a case
+# file outside that matrix could have its test renamed out from under it and
+# this script would keep saying `stale: 0` about it, because a case's fifth
+# and sixth fields (`<target>` and `<test-name>`) were, until now, read by
+# nothing but `mutation-check.sh` itself. See guard 4 in `case_` below for what
+# "exists" means for each runner, and the header note above the `case_`
+# function for what is still not checked even now.
+#
+# What it does **not** check: that the mutation compiles, or that anything
+# goes red — those need a compiler and a test run. Nor, for the test-name
+# guard just described, whether the test is green, whether a misspelled
+# `runner=` name was used, or whether a `runner=` field was written somewhere
+# other than straight after the test name — see the note above `case_` for
+# why those three stay `mutation-check.sh`'s job alone.
 #
 # ⚠️ **Read the exit code from this script, not from a pipeline.**
 # `scripts/mutation-staleness.sh cases | tail` reports `tail`'s status, not this
@@ -211,26 +225,145 @@ unreadable=0
 # is printed in the summary the same way the skipped-file list already makes
 # its own exclusions visible.
 every_match_count=0
+names_checked=0
+
+# Resolves a cargo package name to the directory holding its Cargo.toml, by
+# grepping for the FIRST `name = "…"` line in every workspace member's
+# manifest — deliberately not a precise TOML parse. `[package]` always comes
+# before `[lib]`/`[[bin]]` in every manifest this repository has today (a
+# `[[bin]]` can carry a second, different `name = "…"` further down, e.g.
+# `mnema-extract-worker` inside `mnema-extract`'s own Cargo.toml), so the
+# first match is the package name a case's `<target>` field actually names.
+# Prints the directory — ABSOLUTE, because it comes from `find "$REPO/…"` —
+# and returns 0 on a match, or returns 1 having printed nothing. Callers must
+# not prepend `$REPO/` to it again.
+find_pkg_dir() {
+  local target="$1" toml
+  while IFS= read -r toml; do
+    if grep -qm1 -E '^name[[:space:]]*=[[:space:]]*"'"$target"'"' "$toml"; then
+      dirname "$toml"
+      return 0
+    fi
+  done < <(find "$REPO/crates" "$REPO/src-tauri" -maxdepth 2 -name Cargo.toml 2>/dev/null)
+  return 1
+}
 
 # case_ <label> <file> <perl-expr> <marker> <target> <test-name> [runner=<name>] [args...]
 #
 # The same signature the case files are written against, so one file serves both
-# tools. Everything from the target onwards belongs to the harness and is
-# ignored here.
+# tools. Guard 4, below, is the only thing that reads `<target>` and
+# `<test-name>`; everything after the test name — the runner's own trailing
+# arguments — still belongs to the harness and is still ignored here.
 #
-# ⚠️ **Including the runner, which is why a green line here says nothing about
-# one.** `mutation-check.sh` grew an optional `runner=` field so a case can name
-# a vitest test instead of a cargo one; this script never reads it, so a
-# misspelled runner name, a `runner=` written after another argument, and a
-# vitest case naming a test file that does not exist all pass here unremarked.
-# `mutation-check.sh` refuses each of those — an unknown runner name and a
-# `runner=` written after another argument both exit 2, a named test file that
-# does not exist is a baseline failure and exits 1 — that is the only place
-# they are checked, and this note is here so nobody reads `stale: 0` as
-# covering them.
+# ⚠️ **Three things guard 4 still cannot see, and why.** `mutation-check.sh`
+# grew an optional `runner=` field so a case can name a vitest test instead of
+# a cargo one:
+#
+#   1. A misspelled runner name (`runner=vitets`) falls through the `case`
+#      below to its default arm, which checks nothing and stays silent — this
+#      script does not know the set of valid runner names, `mutation-check.sh`
+#      does, and refuses one with exit 2. Verified by hand: a case whose
+#      seventh field reads `runner=vitets` is skipped by guard 4 exactly like
+#      one with no `runner=` field naming a cargo target that happens not to
+#      exist would be — both fall to the default arm, silently.
+#   2. A `runner=` field written anywhere but straight after the test name is
+#      never seen as a runner at all — guard 4 only inspects the seventh
+#      field. Verified by hand: `case_ … target test extra-arg runner=vitest`
+#      leaves guard 4 treating it as `cargo` (the default), which then asks
+#      whether some workspace member is named `target` — the vitest test
+#      file's path — finds none, and reports `TEST NOT FOUND` for the right
+#      case but the wrong reason. `mutation-check.sh` refuses this shape
+#      outright (`puts runner=… after another argument`, exit 2), which is
+#      the only place the reason is stated correctly.
+#   3. Whether the test is GREEN. Guard 4 is a grep for the name, not a
+#      compile or a run — `mutation-check.sh`'s baseline pass is the only
+#      place that requires it to pass.
+#
+# `mutation-check.sh` refuses all three outright — an unknown runner name and
+# a misplaced `runner=` both exit 2, a named test that does not exist or is
+# not green is a baseline failure and exits 1 — so a green `stale: 0` here
+# still says nothing about any of the three; it only closes the fourth gap,
+# where a named test had simply stopped existing and nothing outside
+# `mutation-check.sh`'s own CI matrix would ever have noticed.
 case_() {
-  local label="$1" file="$2" expr="$3" marker="$4"
+  local label="$1" file="$2" expr="$3" marker="$4" target="$5" test="$6"
   checked=$((checked + 1))
+
+  # Guard 4: the named test exists. Independent of the file/marker guards
+  # below — a case can quote its target file correctly and still name a test
+  # that was renamed or deleted out from under it.
+  local runner=cargo
+  shift 6
+  case "${1-}" in
+    runner=*) runner="${1#runner=}" ;;
+  esac
+  case "$runner" in
+    cargo)
+      names_checked=$((names_checked + 1))
+      # The LAST `::` segment only — `mutation-check.sh`'s own `--exact`
+      # match is the fine check against the full path; this is the cheap one,
+      # and deliberately does not try to resolve module nesting.
+      local want="${test##*::}"
+      local pkgdir
+      if pkgdir=$(find_pkg_dir "$target"); then
+        if ! grep -qrE "\bfn[[:space:]]+${want}[[:space:]]*\(" "$pkgdir/src" "$pkgdir/tests" 2>/dev/null; then
+          echo "TEST NOT FOUND: $label"
+          echo "   cargo, package $target: no \"fn $want(\" under $pkgdir/src or $pkgdir/tests — the case names $test"
+          stale=$((stale + 1))
+        fi
+      else
+        echo "TEST NOT FOUND: $label"
+        echo "   cargo, package $target: no Cargo.toml under crates/*/ or src-tauri declares this package"
+        stale=$((stale + 1))
+      fi
+      ;;
+    vitest)
+      names_checked=$((names_checked + 1))
+      local vfile="$REPO/ui/$target"
+      if [ ! -f "$vfile" ]; then
+        echo "TEST NOT FOUND: $label"
+        echo "   vitest: ui/$target does not exist — the case names test $test"
+        stale=$((stale + 1))
+      else
+        # A title's apostrophe is written `\'` in the source when it sits
+        # inside a single-quoted string literal (JS escaping a quote
+        # character it is nested in) — bytes a case file's <test-name> never
+        # carries, because that field holds the string vitest actually
+        # reports, not its source spelling. Measured: `pr9-ui.sh`'s "the job
+        # subscription must die with the window" case named a real, unrenamed
+        # test and still failed a plain `grep -F` for exactly this reason —
+        # `Settings.jobs-teardown.test.ts` writes `the window\'s own
+        # subscription…`. Unescaping `\'`, `\"` and `` \` `` before the
+        # search (never touching the needle, only the haystack) is what makes
+        # the fixed-string match see the same text vitest does.
+        #
+        # ⚠️ **Through a file, never a pipe.** `perl … "$vfile" | grep -qF …`
+        # measured wrong on this very file: `grep -q` closes its end of the
+        # pipe the instant it finds a match, `perl` is still writing the rest
+        # of a 190KB file when that happens, the kernel delivers it SIGPIPE,
+        # and `set -o pipefail` (line 133) turns perl's SIGPIPE death into
+        # the PIPELINE's exit status — 141, non-zero — regardless of what
+        # grep found. Eighteen real, unrenamed tests were reported `TEST NOT
+        # FOUND` by exactly this, every one of them a title that happens to
+        # appear early enough in a large file for `perl` to still be running
+        # when `grep` stops reading. Writing the unescaped copy to `$WORK`
+        # and grepping that file removes the pipe, and with it the race.
+        local unescaped="$WORK/vitest-unescaped"
+        perl -pe 's/\\([\x27"`])/$1/g' "$vfile" > "$unescaped"
+        if ! grep -qF -- "$test" "$unescaped"; then
+          echo "TEST NOT FOUND: $label"
+          echo "   vitest: ui/$target has no test titled exactly: $test"
+          stale=$((stale + 1))
+        fi
+      fi
+      ;;
+    *)
+      # Unknown runner name. Not this script's boundary to police — see the
+      # warning above `case_` — so guard 4 checks neither existence check and
+      # does not count this case towards `names_checked`, which is exactly
+      # what makes that count able to fall below `checked` and be noticed.
+      ;;
+  esac
 
   if [ ! -f "$REPO/$file" ]; then
     echo "MISSING FILE: $file — $label"
@@ -353,7 +486,7 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count"
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked"
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
 # `checked > 0` is not decoration on `stale == 0`, it is the condition that one
