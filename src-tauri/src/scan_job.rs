@@ -579,6 +579,113 @@ fn read_every_root(
     embed_after(slot, job_db, deps, base);
 }
 
+/// What the embedding phase's counts are measured against: the chunks the
+/// active space has ALREADY embedded, and the queue this pass is about to work
+/// through.
+///
+/// 🔴 **F5 (Task 10 live run): the percentage is the share of the INDEX that is
+/// embedded, not the share of this pass.** `Phase::Embedding` and
+/// `EmbedOutcome::Ran` used to carry the pass alone — `total` the queue this
+/// run was handed, `done` counting up from zero — so every resumption sent the
+/// tray back to «Вбудовування 0 %» over an archive that was almost entirely
+/// embedded, and the ending said "embedded 40 of 40" about an index holding
+/// nine thousand. Owner's ruling, 2026-09-06.
+///
+/// **The queue is measured on this side, and that is a departure the deleted
+/// `start_embed_job` argued the other way.** Its rule was that the denominator
+/// must be the run's own measurement and never a second one taken from the
+/// shell — but that argument was about re-reading the queue AFTER a pass had
+/// emptied it, which is a different number standing where the first one
+/// belongs. This read happens BEFORE the pass, and the phase has no
+/// alternative: the announcement D-g puts in front of the key read is made
+/// before `mnema_embed::run` has been called at all, so there is nothing else
+/// for it to count against. The two are the same query —
+/// `Db::queued_chunk_count` of the active space (`mnema-embed/src/lib.rs:227`)
+/// — and the pass's own answer replaces this one on its first report
+/// ([`IndexCounts::published`]), so what this number is for is the interval
+/// before that report and a run that never made one.
+#[derive(Debug, Clone, Copy)]
+struct IndexCounts {
+    /// `Db::embedded_chunk_count` of the active space: every chunk that space
+    /// has a vector for, whatever pass wrote it and whenever.
+    embedded: u64,
+    /// `Db::queued_chunk_count` of the active space: what this pass has left
+    /// to do, and so the other half of the denominator.
+    queued: u64,
+}
+
+impl IndexCounts {
+    /// Both numbers, or zeroes for an index that cannot answer for them.
+    ///
+    /// Zero `embedded` is this phase reporting the pass alone, which is exactly
+    /// what it did before F5: a degradation rather than a wrong number. Zero
+    /// `queued` stands only until the pass's first report replaces it. The one
+    /// state that reaches this reliably is an index with no model — `Ok(None)`
+    /// below — and it never reaches a report at all, because [`embed_after`]
+    /// skips the phase a few lines after announcing it.
+    fn read(job_db: &Db) -> Self {
+        let Ok(Some(space_id)) = job_db.active_space() else {
+            return Self {
+                embedded: 0,
+                queued: 0,
+            };
+        };
+        Self {
+            embedded: non_negative(job_db.embedded_chunk_count(space_id)),
+            queued: non_negative(job_db.queued_chunk_count(space_id)),
+        }
+    }
+
+    /// The counts the phase is announced with, before the pass has said
+    /// anything: everything the index holds, and nothing of this pass.
+    fn opening(self) -> Progress {
+        Progress {
+            done: self.embedded,
+            total: self.embedded.saturating_add(self.queued),
+            ..Progress::default()
+        }
+    }
+
+    /// One of the pass's own reports, moved onto the index's scale.
+    ///
+    /// 🔴 **`counts` arrives already translated by
+    /// [`crate::embed_job::progress_from`], and that order is the whole of
+    /// `seconds_left`.** The estimate is the pass's rate over the pass's
+    /// remainder ([`job::seconds_left`]); `embedded` is work this run did not
+    /// do, in time it did not spend, so an offset applied before the estimate
+    /// would report a rate nothing measured — and, on a pass that has embedded
+    /// nothing yet, would replace the honest "unknown" (`None` at `done == 0`)
+    /// with a number.
+    ///
+    /// `total` is the pass's own, offset — not [`IndexCounts::queued`]. The two
+    /// are the same query, and taking the reporting run's answer keeps
+    /// `mnema_embed::EmbedProgress`'s invariant (`done + failed <= total`) true
+    /// of the published pair rather than true of one half of it. That the
+    /// reporting run's number is the one used is not a matter of taste here:
+    /// `a_stop_during_the_embedding_resumes_as_embed_only` drives a pass whose
+    /// report says `total: 5` over a fixture whose queue holds one, and fails
+    /// if this reaches for the queue instead.
+    fn published(self, counts: Progress) -> Progress {
+        Progress {
+            done: self.embedded.saturating_add(counts.done),
+            total: self.embedded.saturating_add(counts.total),
+            ..counts
+        }
+    }
+}
+
+/// A count as the phase carries it, and `0` for an index that refused to
+/// answer.
+///
+/// The refusal is swallowed for the reason every other swallowed error in this
+/// file is: a phase that cannot read a count still has a pass to run, and a
+/// scan abandoned over a number that is only shown to somebody would be a
+/// worse answer than the number being the pass's own. Nothing claims more than
+/// that here — no test drives a database that refuses these two queries.
+fn non_negative(answer: Result<i64, mnema_index::Error>) -> u64 {
+    answer.map(|n| u64::try_from(n).unwrap_or(0)).unwrap_or(0)
+}
+
 /// The embedding phase, and the ending of the whole job.
 ///
 /// One function for both entry points, called from the same place in both: the
@@ -593,7 +700,13 @@ fn read_every_root(
 ///    store can put an authorisation dialog on screen and wait for a person to
 ///    answer it, and a phase announced afterwards would leave every surface
 ///    drawing `Reading` — a folder name and a progress bar — for the whole of
-///    that wait, over a pass that had finished reading folders.
+///    that wait, over a pass that had finished reading folders. The two counts
+///    the announcement carries ([`IndexCounts`], F5) are read in front of it,
+///    which does not weaken this: they are two `SELECT count(*)`s on the job's
+///    own connection, not a store that can put a dialog on screen, and they
+///    are what the announcement is made OF — read after it, the phase would be
+///    announced at zero for the whole of that same wait, which is the thing
+///    this step exists to prevent.
 /// 2. The key is read on THIS thread. That is the whole reason it is not read
 ///    in the command: a dialog waited for in front of `claim_job` is a minute
 ///    with Start disabled and no job to show for it.
@@ -604,8 +717,13 @@ fn read_every_root(
 ///    said `Completed` because there happened to be no key would be reporting a
 ///    scan that finished to somebody who stopped it.
 fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
+    // F5. Read before the announcement below because the announcement is made
+    // of them — see step 1 of D-g above, and [`IndexCounts`] for why the queue
+    // is measured from this side at all.
+    let index = IndexCounts::read(&job_db);
+
     slot.update(Phase::Embedding {
-        counts: Progress::default(),
+        counts: index.opening(),
     });
 
     let answer = (deps.key)();
@@ -691,13 +809,17 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
     // The size of the queue this run started against, written on every report
     // whether or not the throttle published it — `mnema_embed` measures it once,
     // before it takes anything out of the queue, so it is a fact about the run
-    // and the honest denominator for an ending. `0` here (a run stopped in its
-    // first instant, before any report) is deliberately not repaired by
-    // reading the queue again from this side: that would be a second
-    // measurement, taken after the pass stopped, and it could disagree with
-    // the one the run actually used — the deleted `start_embed_job` made the
-    // same choice for the same reason.
-    let queue_total = AtomicU64::new(0);
+    // and the honest denominator for an ending.
+    //
+    // Seeded with the queue THIS side measured a moment ago (F5) rather than
+    // with `0`. A run stopped in its first instant, before any report, used to
+    // leave a zero here and end "0 of 0" — an ending that reads as finished to
+    // somebody who stopped it. The seed is not a second measurement of the
+    // kind the deleted `start_embed_job` refused: that was a re-read taken
+    // AFTER a pass had emptied the queue, standing where the starting number
+    // belongs, and this is the same query taken before the pass began, on the
+    // same connection, replaced by the run's own answer the moment it reports.
+    let queue_total = AtomicU64::new(index.queued);
     let started = Instant::now();
     // A plain local rather than an atomic: the pass calls this closure
     // synchronously, on this one thread.
@@ -733,7 +855,8 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
                 reported_refused.store(progress.failed, Ordering::Relaxed);
 
                 slot.update(Phase::Embedding {
-                    counts: crate::embed_job::progress_from(progress, started.elapsed()),
+                    counts: index
+                        .published(crate::embed_job::progress_from(progress, started.elapsed())),
                 });
             },
         )
@@ -762,12 +885,17 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
         ),
     };
 
+    // Offset the same way a live report is (F5), and by the same number, so
+    // that the ending a person reads and the last bar they watched are two
+    // statements about one scale. `refused` is left alone: it counts what this
+    // pass gave up on, and the space's own cumulative figure is a different
+    // number on a different screen (`crate::models::IndexRead::failed_chunks`).
     finish_embedding(
         slot,
         &job_db,
         EmbedOutcome::Ran {
-            done: ended.done,
-            total: ended.total,
+            done: index.embedded.saturating_add(ended.done),
+            total: index.embedded.saturating_add(ended.total),
             refused: ended.refused,
         },
         ended.reason,
@@ -1514,10 +1642,25 @@ mod tests {
             .collect()
     }
 
-    /// Whether a phase is the empty `Embedding` announcement D-g puts in front
-    /// of the key read.
-    fn is_embedding_with_nothing_counted(phase: &Phase) -> bool {
-        matches!(phase, Phase::Embedding { counts } if *counts == Progress::default())
+    /// Whether a phase is the `Embedding` announcement D-g puts in front of the
+    /// key read, over an index holding `base` embedded chunks already: what the
+    /// index holds, and nothing of this pass counted yet.
+    ///
+    /// `base` is a parameter rather than the zero every caller below passes
+    /// (F5): the announcement's `done` is now the index's own count, so a
+    /// predicate that asked for `Progress::default()` — as this did — would be
+    /// reading each fixture's empty space and calling it "nothing counted",
+    /// and would answer `false` for the very state the offset exists for.
+    fn is_embedding_with_nothing_counted(phase: &Phase, base: u64) -> bool {
+        matches!(
+            phase,
+            Phase::Embedding { counts }
+                if counts.done == base
+                    && counts.skipped == 0
+                    && counts.refused == 0
+                    && counts.contended == 0
+                    && counts.seconds_left.is_none()
+        )
     }
 
     /// 🔴 The contention count survives the throttle that drops the report
@@ -1974,7 +2117,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no folder was ever announced: {phases:?}"));
         let empty_embedding_at = phases
             .iter()
-            .position(is_embedding_with_nothing_counted)
+            .position(|phase| is_embedding_with_nothing_counted(phase, 0))
             .unwrap_or_else(|| {
                 panic!("the embedding phase was never announced before it counted: {phases:?}")
             });
@@ -2197,7 +2340,7 @@ mod tests {
                 )
             });
             assert!(
-                is_embedding_with_nothing_counted(&under),
+                is_embedding_with_nothing_counted(&under, 0),
                 "the credential store was asked under {under:?}, so a person \
                  answering an authorisation dialog watches a folder name and a \
                  reading bar for the whole of it ({which})"
@@ -2210,7 +2353,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no folder was announced ({which}): {phases:?}"));
             let empty_embedding_at = phases
                 .iter()
-                .position(is_embedding_with_nothing_counted)
+                .position(|phase| is_embedding_with_nothing_counted(phase, 0))
                 .unwrap_or_else(|| {
                     panic!(
                         "the store was asked under the reading phase, so a surface drew a \
@@ -3173,6 +3316,328 @@ mod tests {
             "a stopped pass must still report what it managed: {report:?}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ------------------------- F5: the counts measure the whole index
+
+    /// Writes a vector for the first `how_many` chunks of the queue, leaving
+    /// the space in the state a pass that had embedded them would have left.
+    ///
+    /// Through `insert_vector` — the call `mnema_embed::run` itself makes — for
+    /// [`adopt_a_model`]'s reason: a fixture that writes rows its own way can
+    /// build a database the product cannot, and the two counts this test is
+    /// about are read straight off these rows.
+    fn embed_by_hand(state: &AppState, how_many: usize) {
+        state
+            .with_index(|db| {
+                let space = db.active_space()?.expect("no model has been adopted");
+                for chunk in db.chunks_needing_embedding(space, how_many)? {
+                    db.insert_vector(space, chunk.id, &[0.5; A_WIDTH as usize])?;
+                }
+                Ok(())
+            })
+            .expect("writing the vectors this test's base is made of");
+    }
+
+    /// What the active space holds: chunks it has already embedded, and chunks
+    /// still queued — the two numbers the phase's counts are built from.
+    fn index_counts(state: &AppState) -> (u64, u64) {
+        state
+            .with_index(|db| {
+                let space = db.active_space()?.expect("no model has been adopted");
+                Ok((
+                    db.embedded_chunk_count(space)?,
+                    db.queued_chunk_count(space)?,
+                ))
+            })
+            .map(|(embedded, queued)| {
+                (
+                    u64::try_from(embedded).expect("a count of chunks is not negative"),
+                    u64::try_from(queued).expect("a count of chunks is not negative"),
+                )
+            })
+            .expect("reading what the index holds")
+    }
+
+    /// An embedding pass that is stopped before it has reported anything at
+    /// all — the run of a person who pressed Stop in its first instant.
+    fn a_pass_stopped_before_reporting(state: &Arc<AppState>) -> Box<FakePass> {
+        let stopping = Arc::downgrade(state);
+        Box::new(move |_cancel, _on_progress| {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+            Ok(mnema_embed::EmbedTally {
+                embedded: 0,
+                failed: 0,
+            })
+        })
+    }
+
+    /// An embedding pass that reports one refusal, is stopped, and answers with
+    /// a tally of one embedded and one refused.
+    ///
+    /// 🔴 **The report carries `done: 0`, and that is what makes the published
+    /// `seconds_left` a state pair rather than a formality.**
+    /// [`job::seconds_left`] answers `None` at `done == 0` — nothing of this
+    /// pass has been timed yet — so a phase that offset the counts BEFORE the
+    /// estimate was computed would hand the estimate a `done` of `base`, work
+    /// this run did not do in time it did not spend, and publish a number here.
+    fn a_pass_refusing_one_then_stopped(state: &Arc<AppState>, queue: u64) -> Box<FakePass> {
+        let stopping = Arc::downgrade(state);
+        Box::new(move |_cancel, on_progress| {
+            on_progress(mnema_embed::EmbedProgress {
+                done: 0,
+                total: queue,
+                failed: 1,
+            });
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+            Ok(mnema_embed::EmbedTally {
+                embedded: 1,
+                failed: 1,
+            })
+        })
+    }
+
+    /// Every `Embedding` phase a surface was shown, in order, each with the
+    /// whole state it was read from — the tray reads the state, not the counts.
+    ///
+    /// ⚠️ The first one or two of these are not `embed_after`'s: `start_inner`
+    /// claims the slot for an `EmbedOnly` entry with `Embedding { counts:
+    /// Progress::default() }` (`:259-265`), before any index has been read, so
+    /// a list of these always opens with at least one pair of zeroes. Nothing
+    /// below counts positions from the front for that reason.
+    fn embedding_announcements(
+        snapshots: &[crate::scan_state::ScanState],
+    ) -> Vec<(&crate::scan_state::ScanState, Progress)> {
+        snapshots
+            .iter()
+            .filter_map(|state| match &state.snapshot {
+                crate::scan_state::ScanSnapshot::Running {
+                    phase: Phase::Embedding { counts },
+                    ..
+                } => Some((state, counts.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where in `announcements` the phase said `counts`, or a failure naming
+    /// what it said instead.
+    fn announced_at(
+        announcements: &[(&crate::scan_state::ScanState, Progress)],
+        counts: &Progress,
+        what: &str,
+    ) -> usize {
+        announcements
+            .iter()
+            .position(|(_, seen)| seen == counts)
+            .unwrap_or_else(|| {
+                let seen: Vec<_> = announcements.iter().map(|(_, counts)| counts).collect();
+                panic!("{what}; the phase announced {seen:?}")
+            })
+    }
+
+    /// The folder both halves of the pair below are built from: enough files
+    /// that `base`, `base + 1`, `base + 3`, `1` and `3` are five different
+    /// numbers, so an offset that was dropped, doubled or applied to the wrong
+    /// field cannot land on a value some other assertion would have accepted.
+    const A_FOLDER_OF_SEVEN: &[&str] = &[
+        "a1.txt", "a2.txt", "a3.txt", "a4.txt", "a5.txt", "a6.txt", "a7.txt",
+    ];
+
+    /// How many chunks the pair below leaves for the pass to work through.
+    const LEFT_QUEUED: u64 = 3;
+
+    /// One reading pass over `A_FOLDER_OF_SEVEN`, which queues every chunk and
+    /// embeds none of them: there is no key, so the embedding phase is reached
+    /// and declines to run. Answers with the queue it left behind.
+    fn a_read_folder_with_nothing_embedded(turn: &ScanTurn, state: &Arc<AppState>) -> u64 {
+        let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
+        run_scan(turn, state, Entry::Full, deps);
+        let (embedded, queued) = index_counts(state);
+        assert_eq!(
+            embedded, 0,
+            "the reading pass embedded something on its own, so `base` below is not this \
+             test's to set"
+        );
+        queued
+    }
+
+    /// 🔴 F5: the embedding phase's counts measure the INDEX, so a resumption
+    /// carries on from where the index is instead of starting again at zero.
+    ///
+    /// The pair, over one fixture and one code path: an index holding `base`
+    /// embedded chunks, against the same index holding none (the mirror below).
+    /// Before this, both reported the PASS — `total` the queue this run was
+    /// handed, `done` counting up from zero — so somebody who stopped an
+    /// embedding and pressed Resume watched the tray go back to
+    /// «Вбудовування 0 %» over an archive that was almost entirely embedded,
+    /// and the ending said "40 of 40" about an index holding nine thousand.
+    /// Owner's ruling, 2026-09-06: the percentage is the share of the index
+    /// that is embedded.
+    #[test]
+    fn the_embedding_counts_measure_the_whole_index_and_not_only_this_pass() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(A_FOLDER_OF_SEVEN);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let whole_queue = a_read_folder_with_nothing_embedded(&turn, &state);
+        assert!(
+            whole_queue > LEFT_QUEUED + 3,
+            "the folder queued {whole_queue} chunks, too few for the five numbers this test \
+             tells apart to be five different numbers"
+        );
+        embed_by_hand(&state, (whole_queue - LEFT_QUEUED) as usize);
+        let (base, queue) = index_counts(&state);
+        assert_eq!(
+            queue, LEFT_QUEUED,
+            "the hand-written vectors did not leave the queue this test's numbers assume"
+        );
+
+        let (deps, calls) =
+            deps_counting_embeds(a_key, a_pass_refusing_one_then_stopped(&state, queue));
+        let (snapshots, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let report = report_of(&settled);
+        assert_eq!(
+            report.embedding,
+            EmbedOutcome::Ran {
+                done: base + 1,
+                total: base + queue,
+                refused: 1
+            },
+            "the ending counts this pass rather than the index, so «Вбудовано фрагментів» \
+             is a number about a run nobody can see: {report:?}"
+        );
+        assert_eq!(report.reason, EndReason::Cancelled, "{report:?}");
+        assert_eq!(report.resume, Some(Entry::EmbedOnly), "{report:?}");
+
+        let announcements = embedding_announcements(&snapshots);
+        let opening = announced_at(
+            &announcements,
+            &Progress {
+                done: base,
+                total: base + queue,
+                ..Progress::default()
+            },
+            "the phase was never announced with what the index holds, so every surface drew \
+             a bar at zero over an archive that is nearly embedded",
+        );
+        let reported = announced_at(
+            &announcements,
+            &Progress {
+                done: base,
+                total: base + queue,
+                refused: 1,
+                ..Progress::default()
+            },
+            "the pass's own report reached a surface as something other than the index's \
+             numbers with a pass-relative estimate",
+        );
+        assert!(
+            opening < reported,
+            "the phase counted the pass's report before it had announced itself"
+        );
+
+        assert_ne!(
+            crate::tray::status_label(crate::locale::Lang::Uk, announcements[opening].0),
+            format!(
+                "{} 0 %",
+                crate::locale::t(crate::locale::Lang::Uk, crate::locale::Key::TrayEmbedding)
+            ),
+            "the tray restarted the percentage at zero over an index that is {base} of {} \
+             embedded",
+            base + queue
+        );
+
+        // The same index, stopped in the pass's first instant — before it had
+        // reported anything for a denominator to be taken from. The queue this
+        // side measured is what stands, because the alternative is an ending
+        // that says «{base} з {base}» to somebody who has just stopped it: the
+        // shape of an archive that is finished.
+        let (deps, calls) = deps_counting_embeds(a_key, a_pass_stopped_before_reporting(&state));
+        let (_, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            report_of(&settled).embedding,
+            EmbedOutcome::Ran {
+                done: base,
+                total: base + queue,
+                refused: 0
+            },
+            "a pass stopped before its first report ended over a denominator nothing \
+             measured: {settled:?}"
+        );
+    }
+
+    /// The mirror: an index with nothing embedded reports the pass's own
+    /// numbers, unchanged.
+    ///
+    /// Without it, "the counts include what the index already holds" is
+    /// satisfied by a phase that added any number at all — the queue, the file
+    /// count, a constant — and by one that added the offset twice. Here the
+    /// base is zero, so every number below is the pass's own, and they are the
+    /// numbers this build reported before the offset existed.
+    #[test]
+    fn an_index_with_nothing_embedded_yet_reports_the_passs_own_numbers() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(A_FOLDER_OF_SEVEN);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let queue = a_read_folder_with_nothing_embedded(&turn, &state);
+
+        let (deps, calls) =
+            deps_counting_embeds(a_key, a_pass_refusing_one_then_stopped(&state, queue));
+        let (snapshots, settled) = run_scan(&turn, &state, Entry::EmbedOnly, deps);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let report = report_of(&settled);
+        assert_eq!(
+            report.embedding,
+            EmbedOutcome::Ran {
+                done: 1,
+                total: queue,
+                refused: 1
+            },
+            "an index with nothing embedded had something added to what its pass did: \
+             {report:?}"
+        );
+
+        let announcements = embedding_announcements(&snapshots);
+        let opening = announced_at(
+            &announcements,
+            &Progress {
+                done: 0,
+                total: queue,
+                ..Progress::default()
+            },
+            "an index with nothing embedded was announced at something other than nothing \
+             done over its own queue",
+        );
+        let reported = announced_at(
+            &announcements,
+            &Progress {
+                done: 0,
+                total: queue,
+                refused: 1,
+                ..Progress::default()
+            },
+            "the pass's own report was published as something other than what the pass said",
+        );
+        assert!(
+            opening < reported,
+            "the phase counted the pass's report before it had announced itself"
+        );
     }
 
     /// 🔴 A folder that was only partly seen stays partly seen after a

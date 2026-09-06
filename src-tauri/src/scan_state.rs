@@ -120,6 +120,21 @@ pub enum Phase {
         counts: crate::job::Progress,
     },
     Embedding {
+        /// 🔴 **`done` and `total` are the ACTIVE SPACE's, not this pass's**
+        /// (F5, owner's ruling 2026-09-06): `done` is every chunk the space has
+        /// a vector for plus what this pass has embedded, `total` is that plus
+        /// the queue. So a resumption carries on from the percentage the last
+        /// one stopped at instead of starting again at zero, and «Опрацьовано X
+        /// з Y» is a sentence about the archive. `crate::scan_job::IndexCounts`
+        /// is where the offset is applied and argued.
+        ///
+        /// The other fields are still this pass's alone. `refused` is the one
+        /// worth naming: it counts what this run gave up on, and the space's
+        /// cumulative figure is [`crate::models::IndexRead::failed_chunks`], a
+        /// different number on a different screen. `seconds_left` is the pass's
+        /// rate over the pass's remainder — the offset is deliberately applied
+        /// after it, because the chunks a previous run embedded are not work
+        /// this one did in the time it has spent.
         counts: crate::job::Progress,
     },
     Removing {
@@ -213,12 +228,19 @@ pub enum EmbedOutcome {
     NotReached,
     /// The phase was reached and declined to run, for a reason a person can
     /// act on.
-    Skipped {
-        why: SkipWhy,
-    },
+    Skipped { why: SkipWhy },
     Ran {
+        /// Every chunk the active space has embedded, this pass's included —
+        /// the same scale [`Phase::Embedding::counts`] reports on, and for the
+        /// same reason (F5). «Вбудовано фрагментів: X з Y» is therefore about
+        /// the index; a resumption's line does not read as though the archive
+        /// held only what this run reached.
         done: u64,
+        /// `done` plus what is still queued.
         total: u64,
+        /// **This pass's refusals**, unlike the two above: what one run gave up
+        /// on is what a person can act on now, and the space's running total is
+        /// [`crate::models::IndexRead::failed_chunks`].
         refused: u64,
     },
 }
