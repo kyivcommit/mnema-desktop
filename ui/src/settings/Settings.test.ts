@@ -605,11 +605,20 @@ test('a running tick with an unchanged files count does not re-read', async () =
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
 });
 
-// A job nobody asked for and that owes no report (`OtherJob`, `ipc.ts`) ends
-// by going straight back to `idle` — no `ended` snapshot exists for it to
-// reach. With `files` unchanged across both the `running` tick and the
-// `idle` that follows it, neither half of the trigger should fire.
-test('a probe job ending in idle with an unchanged files count does not re-read', async () => {
+// 🔴 Final review, Area C, Important 1. A job nobody asked for and that owes no
+// report (`OtherJob`, `ipc.ts`) ends by going straight back to `idle` — no
+// `ended` snapshot exists for it to reach, `readSeq` does not move because it
+// read no folder, and `files` does not move because it deleted no row. All
+// three of the window's named triggers are blind to it, so the fourth is not a
+// fact about the job at all: leaving `running` is the trigger.
+//
+// The probe is the harmless half and is asserted anyway, because the fix is
+// deliberately written without naming any `OtherJob`: one extra
+// `model_settings` after a probe rewrites the same numbers invisibly, and the
+// alternative — a list of job kinds in this file — is a list the next kind is
+// not on. Its own pair is `a running tick with an unchanged files count does
+// not re-read` above: a tick that stays `running` still fires nothing.
+test('a probe leaving running re-reads once, even though it moved neither counter', async () => {
   render(Settings);
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
@@ -627,16 +636,63 @@ test('a probe job ending in idle with an unchanged files count does not re-read'
     revision: 7, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
   };
   await emit(idleAfterProbe);
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+
+  // ONCE, not once per emission afterwards: the trigger is the transition, and
+  // an idle snapshot following an idle one is not one.
+  const stillIdle: ScanState = {
+    revision: 8, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  };
+  await emit(stillIdle);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline + 1);
+});
+
+// 🔴 The half that costs something. `set_embedding_model` claims the same slot
+// as `Other { ModelAdoption }` and releases it by `Drop`, which for `Other`
+// writes `Idle` — the same shape as the probe above, and the same blindness.
+// What it MOVES is exactly what this section draws: adopting a different
+// embedding model creates a new space, so `pendingChunks` goes from nought to
+// the whole archive at once.
+//
+// Both halves asserted, because the call count alone would be satisfied by a
+// window that re-read and then drew nothing with the answer: the section must
+// end up showing the queue row AND «Продовжити вбудовування» for work that now
+// covers everything. Before this, it showed neither until some unrelated scan
+// happened to end.
+test('a model adoption leaving running re-reads, and the queue it created is offered', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const baseline = modelSettings.mock.calls.length;
+  // The state this test is about is the ABSENCE of the offer beforehand, so it
+  // is asserted rather than assumed.
+  expect(screen.queryByTestId('scanning-continue')).toBeNull();
+
+  // `files` and `readSeq` hold the values this window was SEEDED with, so
+  // neither of the two named triggers can fire anywhere in this fixture and the
+  // transition is the only thing left that could.
+  const adoptionRunning: ScanState = {
+    revision: 9, files: 0, readSeq: 0, lastReading: null,
+    snapshot: {
+      kind: 'running', cancellable: false, phase: { kind: 'other', job: 'modelAdoption' },
+    },
+  };
+  await emit(adoptionRunning);
   await tick();
   expect(modelSettings.mock.calls.length).toBe(baseline);
 
-  // Minor 3 (review, fix round 1), the same pair as the previous test's own:
-  // an `ended` snapshot right after DOES reach the subscriber and DOES
-  // trigger a read, so this file's "no call" assertions above are not
-  // vacuously satisfied by a stream that never reached `Settings.svelte` at
-  // all.
-  await emit(endedOnce(11, 0));
+  // The new space: everything queued, nothing embedded, and NEITHER `readSeq`
+  // nor `files` different from the tick before it.
+  modelSettings.mockResolvedValueOnce(readFixture({ pendingChunks: 902, indexedFiles: 12 }));
+  const idleAfterAdoption: ScanState = {
+    revision: 10, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  };
+  await emit(idleAfterAdoption);
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(visible(screen.getByTestId('scanning-continue'))).toBe('Continue embedding');
 });
 
 // Task 11a (Task 8 M6/M7): the window's own `jobs.state` subscription is

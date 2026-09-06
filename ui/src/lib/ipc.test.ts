@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
-import { camelOf, camelOfSnake, rustEnumVariants, rustStructFields } from './rust-enum';
+import { camelOf, camelOfSnake, rustEnumVariants, rustStructFields, rustVariantFields } from './rust-enum';
 import type {
   AppPrefs,
   AutostartState,
+  Counts,
   HotkeyState,
   HotkeyStatus,
   IndexSettings,
@@ -738,6 +739,50 @@ test('ScanState is exactly what scan_state.rs defines, field for field', () => {
   expect(Object.keys(SCAN_STATE_FIXTURE).sort()).toEqual(
     rustStructFields(SCAN_STATE_RS, 'ScanState').map(camelOfSnake).sort(),
   );
+});
+
+// 🔴 Final review, Area C, Minor 2. The four pins above stop exactly where the
+// `rename_all_fields` hazard lives: they cover the plain structs and none of
+// the STRUCT VARIANTS, which is where `rename_all` alone would leave a field in
+// snake_case beside a correctly spelled `kind`. A Rust-side rename there failed
+// `every_snapshot_has_its_wire_shape_pinned` on that side and nothing at all on
+// this one, so the two mirrors were kept in step by whoever happened to edit
+// the Rust pin.
+//
+// `rustVariantFields` also refuses an enum that has stopped declaring
+// `rename_all_fields = "camelCase"` — the check the names alone cannot make,
+// since this side derives camelCase from the Rust spelling either way and would
+// go on agreeing with itself while the wire changed shape.
+//
+// `kind` is dropped from each fixture before comparing: it is serde's own tag,
+// not a field of the variant.
+const withoutKind = (o: object) => Object.keys(o).filter((k) => k !== 'kind').sort();
+
+// The counts every running phase carries. Its own field-for-field pin against
+// `job.rs` lives with the `JobProgress` mirror; here it is only a value of the
+// right shape to put in a variant fixture.
+const PROGRESS_FIXTURE: Counts = {
+  done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null,
+};
+
+test('every struct variant on the wire is exactly what scan_state.rs defines, field for field', () => {
+  const cases: ReadonlyArray<[string, string, object]> = [
+    ['Phase', 'Reading', {
+      kind: 'reading', rootIndex: 0, rootCount: 0, rootPath: '', counts: PROGRESS_FIXTURE,
+    }],
+    ['Phase', 'Embedding', { kind: 'embedding', counts: PROGRESS_FIXTURE }],
+    ['ScanSnapshot', 'Running', {
+      kind: 'running', phase: { kind: 'embedding', counts: PROGRESS_FIXTURE }, cancellable: true,
+    }],
+    ['ScanSnapshot', 'Ended', { kind: 'ended', report: SCAN_REPORT_FIXTURE }],
+    ['EmbedOutcome', 'Ran', { kind: 'ran', done: 0, total: 0, refused: 0 }],
+    ['SkipWhy', 'StoreUnavailable', { kind: 'storeUnavailable', message: '' }],
+  ];
+  for (const [enumName, variant, fixture] of cases) {
+    expect(withoutKind(fixture)).toEqual(
+      rustVariantFields(SCAN_STATE_RS, enumName, variant).map(camelOfSnake).sort(),
+    );
+  }
 });
 
 test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {

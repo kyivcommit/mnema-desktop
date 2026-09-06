@@ -104,10 +104,6 @@
     // whole state on every change, so a progress tick changes the object
     // without ever being an ending. Seeded with what the store already holds,
     // so a section switch back does not re-read on the same mount.
-    //
-    // ⚠️ Task 8 replaces this with `readSeq`, which is the fact this section
-    // actually wants: an ended snapshot fires for every scan job, and only
-    // `readSeq` says whether a reading pass was one of them.
     let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;

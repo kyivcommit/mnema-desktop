@@ -150,12 +150,37 @@
     let seenFiles = get(jobs.state).scan.files;
     const stop = jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seenSnapshot) return;
+      // 🔴 The fourth trigger, and the one that names no fact about the job at
+      // all: ANY transition out of `running`. `set_embedding_model` claims the
+      // single slot as `Other { ModelAdoption }` and, having no `finish`,
+      // releases it through `Drop` — which for `Other` writes `Idle`, never
+      // `Ended`. It is not a reading pass, so `readSeq` stands still; it deletes
+      // no `path` row, so `files` stands still. All three triggers above are
+      // blind to it, and what it moves is exactly what this section draws:
+      // adopting a different embedding model creates a NEW SPACE, so
+      // `pendingChunks` goes from nought to the whole archive and
+      // `failedChunks` drops to the new space's nought. The section went on
+      // offering nothing over a queue that now covers everything, and showed a
+      // stale `indexing_index_failed_chunks` count from the space that had just
+      // been retired — correcting itself only when some unrelated scan ended.
+      //
+      // Written as "left running" rather than as a list of `OtherJob`s on
+      // purpose: it covers `ModelAdoption`, the probe, and any job this
+      // application gains later, without this file having to know their names.
+      // What it costs is one extra `model_settings` after a probe, which
+      // changes nothing and rewrites the same numbers invisibly. The three
+      // triggers above are kept: an `ended` snapshot can arrive without this
+      // window having seen the `running` one it followed, and `readSeq` moves
+      // mid-run, where no transition has happened at all.
+      const leftRunning = seenSnapshot.kind === 'running' && scan.snapshot.kind !== 'running';
       seenSnapshot = scan.snapshot;
       const readSeqChanged = scan.readSeq !== seenReadSeq;
       seenReadSeq = scan.readSeq;
       const filesChanged = scan.files !== seenFiles;
       seenFiles = scan.files;
-      if (readSeqChanged || filesChanged || scan.snapshot.kind === 'ended') void refresh();
+      if (readSeqChanged || filesChanged || leftRunning || scan.snapshot.kind === 'ended') {
+        void refresh();
+      }
     });
     void refresh();
     // Returned, so Svelte tears the subscription down when this window closes

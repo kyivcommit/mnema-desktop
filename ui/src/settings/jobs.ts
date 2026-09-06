@@ -155,11 +155,35 @@ export function createJobController(): JobController {
   // treats every object as changed, so a store handed back its own value still
   // wakes every subscriber. The read and the write are one step — there is no
   // `await` between them and nothing else on this thread to interleave.
-  const absorb = (incoming: ScanState) => {
+  //
+  // 🔴 **`fromEvent` decides whether the standing sentence dies with this
+  // state, and the two callers are not interchangeable.** `note` is written by
+  // every rejection and used to be cleared in exactly one place — the top of
+  // `scan()` — so a refused Stop sat on the strip beneath a live
+  // `indexing_reading_root` line until the person pressed Scan, and a refused first `jobStatus`
+  // sat there for the life of the window while every state after it arrived
+  // correctly. `Settings.svelte` states the opposite rule for its own banner in
+  // this same window, and paid a fix round for it: a successful read takes the
+  // failure sentence away, because a sentence that outlives the state it
+  // describes is this project's own dominant late-PR class.
+  //
+  // It cannot simply be cleared on every applied state. `scan()`'s error path
+  // says its sentence and then re-reads `job_status` for itself, and that
+  // re-read applies a newer state immediately — so a blanket clear would delete
+  // the sentence about the press before anybody could read it, which is what
+  // `a re-read refused after a refused scan keeps the sentence about the press`
+  // exists to protect. The distinction is whose statement the state is: an
+  // EVENT is the core speaking about the world, and it postdates whatever was
+  // refused; a re-read is this window answering its own question.
+  //
+  // Cleared only when the state is actually taken, so «nothing newer arrived»
+  // stays one fact rather than two: an event carrying a revision this window
+  // has already seen says nothing new and takes nothing away.
+  const absorb = (incoming: ScanState, fromEvent = false) => {
     const current = get(store);
     const scan = apply(current.scan, incoming);
     if (scan === current.scan) return;
-    store.set({ ...current, scan });
+    store.set({ ...current, scan, note: fromEvent ? null : current.note });
   };
 
   const say = (e: unknown) => store.update((s) => ({ ...s, note: sentenceOf(e) }));
@@ -225,7 +249,9 @@ export function createJobController(): JobController {
 
     void listenScanProgress((incoming) => {
       if (destroyed) return;
-      absorb(incoming);
+      // `true`: this is the core speaking, and it postdates any rejection still
+      // on screen. See `absorb`.
+      absorb(incoming, true);
     })
       .then((fn) => {
         // `destroy` may already have run, with nothing to call. The unlisten is

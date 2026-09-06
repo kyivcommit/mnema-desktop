@@ -548,6 +548,65 @@ test('cancelling an idle application says nothing, and a refused stop says the s
   expect(get(jobs.state).note).toBe('nothing is running');
 });
 
+// 🔴 The other half of the sentence's life, and the half that was missing: a
+// rejection is about a moment, and the next thing the CORE says postdates it.
+//
+// The sequence is an ordinary one. A person presses Stop as the job is ending;
+// the command is refused («nothing is running»); the next scan starts. Before
+// this, that sentence sat on the strip underneath a live «Індексація теки 1 з
+// 2» until the person happened to press Scan or Continue — the one place `note`
+// was cleared.
+//
+// Asserted with the state as well as the sentence, because a controller that
+// dropped the event entirely would also show `note` as null.
+test('a refused stop\'s sentence dies with the next state the core sends', async () => {
+  const { jobs } = await mounted();
+
+  replies({ job_status: IDLE, cancel_job: new Error('nothing is running') });
+  await jobs.cancel();
+  expect(get(jobs.state).note).toBe('nothing is running');
+
+  emit(runningAt(4));
+
+  expect(get(jobs.state).note).toBeNull();
+  expect(get(jobs.state).scan.revision).toBe(4);
+  expect(get(jobs.state).scan.snapshot.kind).toBe('running');
+});
+
+// The same rule at the other rejection this controller can carry for the life
+// of a window: the first `job_status` is refused, and every state after it
+// arrives correctly. `a refused initial snapshot is a sentence, and the
+// subscription still delivers` (below) asserts the states arrive and says
+// nothing about the sentence, which is how it stood for the life of the window.
+test('a refused first snapshot\'s sentence dies with the first event', async () => {
+  replies({ job_status: new Error('the index could not be opened') });
+  const { jobs } = await mounted();
+  await vi.waitFor(() => expect(get(jobs.state).note).toBe('the index could not be opened'));
+
+  emit(runningAt(3));
+
+  expect(get(jobs.state).note).toBeNull();
+});
+
+// The mirror, and it is what keeps the clear narrow: an event carrying nothing
+// newer is not the core saying anything, so it takes nothing away. Without this
+// the rule would be "any event clears", and a duplicate delivery — which
+// `a repeated revision does not wake the subscribers` shows the core can
+// send — would silently swallow a sentence a person had not read yet.
+test('an event with nothing newer in it leaves the standing sentence alone', async () => {
+  const { jobs } = await mounted();
+
+  emit(runningAt(5));
+  replies({ job_status: IDLE, cancel_job: new Error('nothing is running') });
+  await jobs.cancel();
+  expect(get(jobs.state).note).toBe('nothing is running');
+
+  emit(runningAt(5));
+
+  expect(get(jobs.state).note).toBe('nothing is running');
+  expect(get(jobs.state).scan.revision).toBe(5);
+});
+
 // 🔴 `mount` returns before `listen` resolves, so `destroy` can be called with
 // no unlisten function to call yet — a section switch during boot is exactly
 // that. Both halves: the unlisten arrives and is used ONCE, and the handler

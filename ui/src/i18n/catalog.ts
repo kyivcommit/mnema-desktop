@@ -712,7 +712,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
     indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
-    indexing_walk_ended_completed: 'Теку проіндексовано повністю.',
+    indexing_walk_ended_completed: 'Теки проіндексовано повністю.',
     // `reason: completed` with `complete: false` (job.rs): phase 1 never saw
     // the whole tree, so what stopped being seen is still searchable. That is
     // why the word "done" cannot appear here.
@@ -744,7 +744,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `frozen: []`, and on the completed walk that does show it reconciliation
     // ran everywhere except the prefixes it goes on to name. Same class, two
     // different true scopes; each decided on its own evidence.
-    indexing_walk_ended_partly_read: 'Теку проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    indexing_walk_ended_partly_read: 'Теки проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цих теках не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
     indexing_walk_ended_cancelled: 'Сканування зупинено на ваше прохання.',
     indexing_walk_ended_failed: 'Сканування обірвалося через збій.',
     // The four sentences below are not about a malfunction: they are decisions
@@ -1127,8 +1127,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {seconds} s left.',
     indexing_eta_unknown: 'How much time is left is not known yet.',
-    indexing_walk_ended_completed: 'The folder was indexed in full.',
-    indexing_walk_ended_partly_read: 'The folder was only partly indexed: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+    indexing_walk_ended_completed: 'The folders were indexed in full.',
+    indexing_walk_ended_partly_read: 'The folders were only partly indexed: some subfolders could not be entered. Nothing in these folders was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
     indexing_walk_ended_cancelled: 'The scan was stopped at your request.',
     indexing_walk_ended_failed: 'The scan broke off because something went wrong.',
     indexing_walk_ended_broken_worker: 'The scan stopped: the helper program that reads files stopped answering.',

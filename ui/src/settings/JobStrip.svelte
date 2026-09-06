@@ -230,6 +230,19 @@
   // `ended` alike (D-e) — during a run the live phase above replaces it, so
   // this is `null` exactly when `snapshot.kind === 'running'` as well as when
   // no reading has ever finished.
+  //
+  // ⚠️ **It describes the LAST READING PASS, not the index as it stands now,
+  // and after a folder removal those are different things.** `lastReading` is
+  // replaced only by the next reading phase, and a removal ends the slot with
+  // `finish(Idle, Some(files))` — so the rows below can go on naming a folder
+  // the list in the section beneath no longer has, its `indexing_root_partly_read`
+  // row included. Accepted rather than filtered: the direction is the
+  // safe one (a partial-read warning that over-warns costs a re-read of
+  // unchanged files; one that under-warns leaves a person believing an archive
+  // is fully indexed), and dropping the rows for roots absent from the current
+  // listing would need this component to read that listing, which is a second
+  // reader of `list_tree` on the window's status line. The sentence a person
+  // reads is about a pass, and the pass really did meet that folder.
   const readingBlock = $derived.by(() => {
     void $locale;
     const reading = scan.lastReading;

@@ -433,12 +433,12 @@ test('Stop asks the backend, and the ending that follows is what says it stopped
 // split of `completed`, never reachable through `reason` alone.
 const WALK_SENTENCES: Record<EndReason | 'partlyRead', { uk: string; en: string }> = {
   completed: {
-    uk: 'Теку проіндексовано повністю.',
-    en: 'The folder was indexed in full.',
+    uk: 'Теки проіндексовано повністю.',
+    en: 'The folders were indexed in full.',
   },
   partlyRead: {
-    uk: 'Теку проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цій теці не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
-    en: 'The folder was only partly indexed: some subfolders could not be entered. Nothing in this folder was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
+    uk: 'Теки проіндексовано лише частково: до якихось підтек не вдалося зайти. Нічого в цих теках не звіряли з індексом, тож і видалені файли, і файли під вашими правилами виключення досі знаходяться пошуком — не лише всередині тих підтек.',
+    en: 'The folders were only partly indexed: some subfolders could not be entered. Nothing in these folders was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
   },
   cancelled: {
     uk: 'Сканування зупинено на ваше прохання.',
