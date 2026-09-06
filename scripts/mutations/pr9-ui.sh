@@ -217,6 +217,24 @@ case_ "a read that succeeds must take the failure sentence away with it" \
   "      settings = s; // mutant: the failure sentence outlives the failure" \
   src/settings/Settings.test.ts 'a live success after a rejection takes the failure banner away and shows the new numbers' runner=vitest
 
+# `Models.svelte` reads `model_settings` on its own account rather than
+# through `Settings.svelte`'s props (unlike `Scanning.svelte`), so it carries
+# a second, independent copy of the exact same shape — its own `settings`,
+# `loadError`, `settingsSeq`, `refresh()` — and needed the identical guard
+# added to it separately (a mount that fails, then a scan-ended re-read that
+# succeeds, used to leave the mount's sentence standing forever beside a
+# panel the re-read had already confirmed). Same mutant, one file over.
+# Re-indented at review Critical 1: `refresh()`'s success lines moved inside a
+# `try` block (so the rejection path could set `loadError` under the same
+# `settingsSeq` stamp), which put them one level deeper — six spaces, matching
+# `Settings.svelte`'s own shape exactly now. The mutant and the code it names
+# are unchanged; only the leading whitespace the expression matches is.
+case_ "the Models section's own copy of the state also clears the failure sentence on a read that succeeds" \
+  ui/src/settings/Models.svelte \
+  "s~      settings = s;\n      loadError = null;~      settings = s; // mutant: the failure sentence outlives the failure~" \
+  "      settings = s; // mutant: the failure sentence outlives the failure" \
+  src/settings/Models.test.ts 'a read that succeeds after a failed one takes the failure sentence away' runner=vitest
+
 # 🔴 Rewritten at Task 11b, and the ARGUMENT changed with the code rather than
 # only the file name. The old sentence was "a nav change destroys this section,
 # so its listener must die with it" — and since F10 (Task 10e) a nav change
