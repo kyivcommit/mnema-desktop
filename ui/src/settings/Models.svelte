@@ -54,14 +54,16 @@
   // shown verbatim beside the control — never branched on, only displayed
   // (§10 / the umbrella rejection rule).
   let actionError = $state<string | null>(null);
-  // A rejected read of `model_settings`, from EITHER caller of `refresh()` —
-  // the mount read below and the scan-ended re-read further down both route
-  // through `reportLoadFailure`. It is bounded but real: the command itself
-  // cannot fail (`model_settings` returns `ModelSettings`, not `Result`), so
-  // what arrives here is an IPC-layer failure. Held apart from `actionError`
-  // because nothing on this screen offers a manual retry for it — the
-  // scan-ended re-read is the only thing that ever tries again, on its own
-  // schedule, not a button a person presses.
+  // A rejected read of `model_settings`. `refresh()` below is the only
+  // function that ever writes this — every caller (the mount read, the
+  // scan-ended re-read, and `commitEmbedding`'s recovery re-read) reports
+  // through it by construction, not by each one remembering to. It is
+  // bounded but real: the command itself cannot fail (`model_settings`
+  // returns `ModelSettings`, not `Result`), so what arrives here is an
+  // IPC-layer failure. Held apart from `actionError` because nothing on this
+  // screen offers a manual retry for it — the scan-ended re-read is the only
+  // thing that ever tries again, on its own schedule, not a button a person
+  // presses.
   //
   // A read that succeeds takes this away with it: `refresh()` clears it on
   // its success branch, the same rule `Settings.svelte:95-104` already keeps
@@ -84,33 +86,44 @@
   // word once `set_chat_model`'s own refresh comes in after it.
   let settingsSeq = 0;
 
+  // §10: a rejection arrives as a sentence, never as a kind, and this is the
+  // ONE place that ever happens — the mount read, the scan-ended re-read, and
+  // `commitEmbedding`'s recovery re-read all call this same function, so a
+  // rejection is reported here regardless of which of them triggered it. A
+  // call site's own `.catch(...)` exists only to keep the rethrow below from
+  // becoming an unhandled rejection; it never needs to inspect or report the
+  // error itself, because by the time it runs `loadError` is already set (or
+  // deliberately left alone — see the stamp check).
+  //
+  // 🔴 Review Critical 1: an earlier version of this reported the error in
+  // the CALLER's `.catch`, outside `refresh()`, with no `settingsSeq` stamp of
+  // its own — so an OLDER read's rejection could overwrite a NEWER read's
+  // success, the rejection-side twin of the resolution ordering guard below.
+  // The stamp has to be checked here, inside `refresh()`, because `seq` is
+  // this call's own local variable; a caller has no way to know whether it is
+  // still the latest by the time its `.catch` runs.
   async function refresh() {
     const seq = ++settingsSeq;
-    const s = await modelSettings();
-    if (seq !== settingsSeq) return; // superseded before this reply arrived
-    settings = s;
-    loadError = null;
-  }
-
-  // §10: a rejection arrives as a sentence, never as a kind. Shown verbatim,
-  // beside a catalogue sentence naming what failed; never branched on. One
-  // place for every caller of `refresh()`, mount and the scan-ended re-read
-  // below alike — `loadError`'s own doc comment above once claimed it
-  // "survives no re-read", which was true of the mount call only because the
-  // OTHER caller swallowed its rejection instead of routing it here.
-  //
-  // `settings` itself needs no handling on this path: `refresh()` assigns it
-  // only on the success branch, so a rejected re-read leaves whatever
-  // `settings` a previous successful read produced exactly as it was. The
-  // panel below stays on screen, stale, beside this sentence — a blank panel
-  // would say less than the last confirmed numbers do, and the sentence
-  // already says the confirmation itself just failed.
-  function reportLoadFailure(e: unknown) {
-    loadError = e instanceof Error ? e.message : String(e);
+    try {
+      const s = await modelSettings();
+      if (seq !== settingsSeq) return; // superseded before this reply arrived
+      settings = s;
+      loadError = null;
+    } catch (e) {
+      // A superseded read's rejection says nothing about the CURRENT state —
+      // a newer read already settled, resolved or refused, and that answer is
+      // the one standing. Silently dropped here, the same as the resolution
+      // side dropping a superseded `settings = s` two lines up.
+      if (seq === settingsSeq) loadError = e instanceof Error ? e.message : String(e);
+      throw e; // callers that need the rejection (e.g. commitEmbedding) still get it
+    }
   }
 
   onMount(() => {
-    refresh().catch(reportLoadFailure);
+    // Empty on purpose: `refresh()` already reported the failure above (when
+    // it was not superseded); this only stops the rethrow from surfacing as
+    // an unhandled promise rejection.
+    refresh().catch(() => {});
     void loadCatalogue('embedding');
     // The index is asked again whenever a scan ends, because an ending is the
     // one moment the counts `degraded` is read from can have changed. The
@@ -131,7 +144,10 @@
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;
       seen = scan.snapshot;
-      if (scan.snapshot.kind === 'ended') void refresh().catch(reportLoadFailure);
+      // Empty on purpose, same as the mount call above: `refresh()` already
+      // reported the failure; this only stops the rethrow from surfacing as
+      // an unhandled promise rejection.
+      if (scan.snapshot.kind === 'ended') void refresh().catch(() => {});
     });
   });
 
@@ -485,6 +501,11 @@
       // says next is decided by re-reading the state — `model_settings` for
       // what the index is in, `job_status` for whether a job is still going —
       // and never by matching on the message text.
+      //
+      // The catch here is empty for the same reason as `onMount`'s: `refresh()`
+      // already reported this rejection through `loadError` (unless a newer
+      // read has since superseded it); this only stops the rethrow from
+      // surfacing as an unhandled promise rejection.
       await refresh().catch(() => {});
       jobRunning = await jobStatus()
         .then((s) => s.snapshot.kind === 'running')

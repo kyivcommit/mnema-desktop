@@ -122,10 +122,16 @@ function walk(dir: string): string[] {
 
 // English literals that survive `visibleTextOnly` for a reason other than "this
 // is a user-facing string someone forgot to route through the catalogue" —
-// each entry names the one file and the one literal it excuses, so it cannot
-// silently cover a second, unrelated occurrence of the same word. Matching is
-// by base name, not by suffix: an entry for `s.svelte` must not stand in for
-// `Settings.svelte`.
+// each entry names the one file and the one literal it excuses. That excuses
+// EVERY occurrence of that literal in that file, not only the one that
+// motivated the entry: `isAllowlisted` matches on (file, text) alone, with no
+// notion of location, so a second `Ctrl` added anywhere else in `shortcut.ts`
+// is just as invisible to this sweep as the first one. That is the accepted
+// cost of an allowlist keyed this coarsely, not a guarantee — an earlier
+// version of this comment claimed the opposite ("cannot silently cover a
+// second, unrelated occurrence"), and a reviewer's second `'Ctrl'` proved it
+// false by staying green. Matching is by base name, not by suffix: an entry
+// for `s.svelte` must not stand in for `Settings.svelte`.
 type Allowlisted = { file: string; text: string; reason: string };
 const LATIN_ALLOWLIST: Allowlisted[] = [
   // shortcut.ts emits the DISPLAY vocabulary a global shortcut is drawn
@@ -152,7 +158,7 @@ const LATIN_ALLOWLIST: Allowlisted[] = [
   { file: 'shortcut.ts', text: 'ShiftRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
   { file: 'shortcut.ts', text: 'MetaLeft', reason: 'KeyboardEvent.code value for a bare modifier press' },
   { file: 'shortcut.ts', text: 'MetaRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
-  { file: 'shortcut.ts', text: 'Space', reason: 'key name: both a stored-shortcut token and a KeyboardEvent.code' },
+  { file: 'shortcut.ts', text: 'Space', reason: "key name: a stored-shortcut token, a KeyboardEvent.code, and the literal keyName (shortcut.ts:147) returns and formatShortcut then displays verbatim (e.g. '⌃Space') — not a sentence" },
   { file: 'shortcut.ts', text: 'Escape', reason: "the recorder's own cancel key, a KeyboardEvent.key/code value" },
   { file: 'shortcut.ts', text: 'mac', reason: "the Platform union's own tag, matched in a type argument and a comparison, not prose" },
 
@@ -408,7 +414,16 @@ function latinOffenses(file: string, src: string, list: Allowlisted[] = LATIN_AL
 //   - the whole argument list of a call to `t(...)` — the catalogue
 //     accessor, blanked WHOLE rather than just an immediate string, so a key
 //     hidden in a ternary (`t(cond ? 'a' : 'b')`) is not read as two
-//     hardcoded words — mirroring `{t('key')}` being blanked whole in markup;
+//     hardcoded words — mirroring `{t('key')}` being blanked whole in markup.
+//     Known blind spot, NOT closed by this: the first argument is the
+//     catalogue KEY and an optional second is the interpolation VALUES
+//     object (`t('k', { count: n })`) — blanking the whole call also blanks
+//     any hardcoded string sitting in that second argument, so
+//     `t('k', { x: 'Zebra' })` is invisible to this sweep; `'Zebra'` would
+//     never be reported. Every real call site today builds that object from
+//     variables, never a literal, so this has cost nothing measured so far —
+//     closing it would need scanning the second argument on its own, which
+//     this sweep does not do;
 //   - a `case` label — a discriminant tag matched against a union type, the
 //     same "fixed vocabulary, not a sentence" class as `role`/`type` in the
 //     Svelte attribute sweep.
@@ -547,7 +562,17 @@ function visibleStringLiteralsOnly(src: string): string {
         if (src[j] === '\\') { j += 2; continue; }
         j++;
       }
-      if (j >= src.length) throw new Error(`unterminated string literal at index ${i}`);
+      // This scanner does not recognise regex literals: a quote character
+      // sitting inside a `/regex/` (`/['"]/`, say) reads to it as an opening
+      // quote like any other, and then it hunts for a matching close that is
+      // never coming. The likeliest cause is named in the message rather than
+      // fixed here — loud is the point.
+      if (j >= src.length) {
+        throw new Error(
+          `unterminated string literal at index ${i} — likely cause: a regex literal ` +
+          'holding a quote character, which this scanner reads as an opening quote rather than as a regex',
+        );
+      }
       out.push(blank(quote));
       out.push(isMachineToken ? blank(src.slice(i + 1, j)) : src.slice(i + 1, j));
       out.push(blank(quote));
@@ -837,6 +862,17 @@ describe('Svelte hardcode guard', () => {
       .filter((p) => p.endsWith('.svelte') && !p.includes(join('src', 'i18n')))
       .flatMap((p) => latinOffenses(p, readFileSync(p, 'utf8')).map((o) => `${p}:${o}`));
     expect(offenders).toEqual([]);
+  });
+
+  // Minor 6 (review): this scanner has no notion of a regex literal, so a
+  // quote character sitting inside one — `/['"]/`, the shape a "strip
+  // dangerous characters" helper would actually write — is read as an
+  // opening string quote and never finds a close. Asserted as the loud
+  // failure it is meant to be, not silently blanked to end of file, with the
+  // message naming the likely cause rather than leaving a bare index.
+  it('a quote inside a regex literal throws, naming the regex as the likely cause', () => {
+    expect(() => visibleStringLiteralsOnly("const RE = /['\"]/;\n"))
+      .toThrow(/unterminated string literal.*regex literal/s);
   });
 
   // The `.svelte` sweep above never looks at `.ts` files, so a `.ts` module

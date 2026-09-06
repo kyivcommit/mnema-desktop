@@ -224,10 +224,15 @@ case_ "a read that succeeds must take the failure sentence away with it" \
 # added to it separately (a mount that fails, then a scan-ended re-read that
 # succeeds, used to leave the mount's sentence standing forever beside a
 # panel the re-read had already confirmed). Same mutant, one file over.
+# Re-indented at review Critical 1: `refresh()`'s success lines moved inside a
+# `try` block (so the rejection path could set `loadError` under the same
+# `settingsSeq` stamp), which put them one level deeper — six spaces, matching
+# `Settings.svelte`'s own shape exactly now. The mutant and the code it names
+# are unchanged; only the leading whitespace the expression matches is.
 case_ "the Models section's own copy of the state also clears the failure sentence on a read that succeeds" \
   ui/src/settings/Models.svelte \
-  "s~    settings = s;\n    loadError = null;~    settings = s; // mutant: the failure sentence outlives the failure~" \
-  "    settings = s; // mutant: the failure sentence outlives the failure" \
+  "s~      settings = s;\n      loadError = null;~      settings = s; // mutant: the failure sentence outlives the failure~" \
+  "      settings = s; // mutant: the failure sentence outlives the failure" \
   src/settings/Models.test.ts 'a read that succeeds after a failed one takes the failure sentence away' runner=vitest
 
 # 🔴 Rewritten at Task 11b, and the ARGUMENT changed with the code rather than

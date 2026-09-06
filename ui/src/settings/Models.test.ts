@@ -1071,6 +1071,36 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
 });
 
+// Reviewer's probe (Critical 1): `reportLoadFailure` carried no `settingsSeq`
+// stamp of its own, so an OLDER read's rejection landed on `loadError`
+// whatever a newer read had already done — the rejection-side twin of the
+// resolution-side guard proved above. Two reads in flight, the mount's own
+// (older) and the scan-ended re-read (newer): the newer settles first with
+// real data, then the older rejects late. The failure sentence must not
+// appear over a panel a newer read already confirmed.
+test('a stale rejection from an older read does not overwrite a newer success', async () => {
+  const queue = queuedModelSettings();
+
+  renderModels(); // issues the mount's own call — call #0, deferred
+  await waitFor(() => expect(queue.length).toBe(1));
+
+  emit(endedScan()); // scan-ended re-read — call #1, deferred, still concurrent
+  await waitFor(() => expect(queue.length).toBe(2));
+
+  // The newer call settles first, with real settings.
+  queue[1].resolve(settings({ key: { kind: 'present' } }));
+  await waitFor(() => expect(screen.getByTestId('model-key-saved')).toBeTruthy());
+
+  // The mount's OLDER call rejects late. It must not overwrite the newer
+  // success with a failure sentence.
+  queue[0].reject(new Error('a read nobody is waiting for any more'));
+  await tick();
+  await tick();
+  await tick();
+  expect(screen.queryByTestId('model-load-failure')).toBeNull();
+  expect(screen.getByTestId('model-key-saved')).toBeTruthy();
+});
+
 test('a model_settings reply landing while set_chat_model is still pending does not block the new choice once it resolves', async () => {
   mockCatalogues({ chat: catalogueOf([entry('gpt-a'), entry('gpt-b')]) });
   const queue = queuedModelSettings();
