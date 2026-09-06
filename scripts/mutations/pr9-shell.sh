@@ -508,26 +508,42 @@ case_ "the outgoing job writes its ending before it announces, never after" \
 # substitutions in one expression on purpose: the marker proves the first
 # applied, the occurrence count proves the second did.
 #
-# ⚠️ **What the second substitution actually silences, corrected at Task 11b.**
-# It empties `JobSlot::announce`, not `JobSlot::drop` — and `announce` is what
-# `update`, `mark_reading_done`, `finish` AND `drop` all call, so the mutant
-# takes away every announcement a slot ever makes, not only the one on the way
-# out. That is deliberate and it is what the case needs (the point is that the
-# ONLY announcement left is the new one at the stop request), but the sentence
-# above used to read as though `drop` were the site, and a reader checking this
-# case against `state.rs` would have gone looking for a block that is not there.
-# The slot-side ordering of the write and the announcement is a different case
-# and lives two above this one; the same rule on `finish`'s own path is
-# `scripts/mutations/pr9b-scan.sh`'s.
+# ⚠️ **What the second substitution silences, corrected TWICE — read this before
+# re-anchoring it a third time.**
 #
-# ⚠️ The second substitution was re-anchored for the review's first fix.
-# `JobSlot::announce` now READS the shared observer cell instead of a field
-# holding a copy, so the block it empties is a lock-and-clone followed by the
-# call rather than a bare `if let` over `&self.observer`. What it silences is
-# unchanged, and so is the sentence above about how much of it that is.
+# Until Task 11b the comment said it emptied `JobSlot::drop`; it emptied
+# `JobSlot::announce`, which `update`, `mark_reading_done`, `finish` AND `drop`
+# all call. That was acceptable while the CLAIM announced through its own inline
+# `if let Some(f) = &slot.observer` in `claim_job`, because emptying `announce`
+# then left the claim speaking and the named test still died on its RELEASE
+# assertion.
+#
+# 🔴 The review's first fix routed the claim through `slot.announce()` as well,
+# and that quietly turned this case into a duplicate of «claiming the job slot
+# announces itself» two above: the same mutant now silences the claim, and the
+# named test dies on its FIRST assertion instead. Measured at `7e6bd3c` — «left:
+# [], right: [Running { … }]», the claim's message, where at `241db06` the same
+# case failed with «releasing must announce itself too». Red either way, and
+# staleness cannot see it: staleness proves a pattern still matches, never that
+# the named test still dies for the named reason. The round that re-anchored it
+# also wrote «what it silences is unchanged», which was false as measured.
+#
+# So the second substitution now empties the RELEASE's own call site — the
+# `self.announce()` at the foot of `JobSlot::finish`, anchored on the
+# `self.finished = true;` above it — and nothing else. `announce` itself is
+# untouched, so the claim, `update` and `mark_reading_done` all still speak, and
+# the ONLY announcement the named test can still hear is the new one at the stop
+# request, which it never makes. It dies on «releasing must announce itself
+# too», which is this case's own property and not its neighbour's.
+#
+# `finish` and not `drop`, because the named test releases through `finish`.
+# `drop`'s own announcement is a different write with its own guards — the
+# ordering case two above this one, and `pr9b-scan.sh`'s revision cases — and
+# folding it in here would need a third substitution the harness checks neither
+# the marker nor the occurrence count of.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
-  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        let observer = self\n            \.observer\n            \.lock\(\)\n            \.unwrap_or_else\(std::sync::PoisonError::into_inner\)\n            \.clone\(\);\n        if let Some\(f\) = observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
+  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        self\.finished = true;\n        self\.announce\(\);~        self.finished = true;\n        // mutant: the ending is not announced~' \
   '// mutant: the release is announced when a stop is requested' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 

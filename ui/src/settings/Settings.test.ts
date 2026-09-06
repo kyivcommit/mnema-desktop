@@ -1221,12 +1221,79 @@ test('an ending that read no folder leaves the mask question standing', async ()
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   const cost = visible(screen.getByTestId('mask-confirm-cost'));
 
-  // `readSeq` STILL 0 — the seeded value — on an ending with a higher revision.
+  // `readSeq` STILL 0 — the seeded value — on an ending with a higher revision,
+  // and `files` still 0 as well, so neither of the two facts a `mask_preview`
+  // result is made of has moved.
   await emit(endedOnce(12, 0));
   await tick();
 
   expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
   expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+});
+
+// 🔴 External review round 1, Minor 2. The other way the same estimate goes
+// wrong. `mask_preview` counts indexed paths and the documents that would stop
+// being findable; removing a watched folder deletes those rows and ends through
+// `finish(Terminal::Idle, Some(files))` (`bridge.rs`), which moves
+// `ScanState.files` and never `readSeq`. A withdrawal keyed on `readSeq` alone
+// left the question quoting a count from before the removal — the harm inverts
+// rather than disappearing, since the frozen number then overstates what the
+// mask takes.
+//
+// RED, with `filesMoved` deleted from the subscription in `Masks.svelte`: the
+// question stands and
+// `expect(screen.queryByTestId('mask-confirm')).toBeNull()` fails as
+// "AssertionError: expected <div data-testid="mask-confirm">…(4)</div> to be
+// null".
+test('a removal that dropped the index file count withdraws the mask question, and a running tick that moved nothing keeps it', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  // An index holding three files, delivered BEFORE the question is raised: the
+  // editor seeds its count from a store that starts at nought, so a removal has
+  // to have something to remove and the question has to be asked over the state
+  // that is already on screen.
+  await emit({ revision: 29, files: 3, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
+  await tick();
+
+  await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.doc' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  const cost = visible(screen.getByTestId('mask-confirm-cost'));
+
+  // The pair, and it goes FIRST so the withdrawal below cannot be credited to
+  // it: a running tick that moves neither counter must leave the question
+  // exactly as it was. `files` stays at the 3 the editor has already seen.
+  await emit({
+    revision: 30, files: 3, readSeq: 0, jobsDone: 0, lastReading: null,
+    snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'probe' } },
+  });
+  await tick();
+  await emit({
+    revision: 31, files: 3, readSeq: 0, jobsDone: 0, lastReading: null,
+    snapshot: {
+      kind: 'running', cancellable: false,
+      phase: { kind: 'removing', rootPath: '/home/a/papers' },
+    },
+  });
+  await tick();
+  expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
+  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+
+  // The removal's own ending: a bare `idle` with a LOWER `files`, `readSeq`
+  // untouched — the one shape a `readSeq` trigger cannot see.
+  await emit({ revision: 32, files: 0, readSeq: 0, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' } });
+  await tick();
+
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
+  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toBe(
+    'The question about mask “*.doc” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
+  );
+  // The draft survives a removal the same way it survives a reading pass.
+  expect((screen.getByLabelText('New mask:') as HTMLInputElement).value).toBe('*.doc');
+  expect(addMask).not.toHaveBeenCalled();
 });
 
 // ---------------------------------------------------------------------------

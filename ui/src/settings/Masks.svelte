@@ -140,19 +140,39 @@
   // already moved and every frozen number already stale. Seeded from the store
   // so a pass that ended before this component existed is not read as one that
   // ended under a question it never saw.
+  //
+  // 🔴 **And on `ScanState.files`, which is a second way the same estimate goes
+  // wrong** (external review round 1, Minor 2). `mask_preview` counts indexed
+  // paths and the documents that would stop being findable; removing a watched
+  // folder deletes those rows and ends through `finish(Terminal::Idle,
+  // Some(files))` (`bridge.rs`) — which moves `files` and never `readSeq`, the
+  // same asymmetry `Settings.svelte`'s own `filesChanged` arm exists for. The
+  // harm inverts rather than disappearing: the frozen number then OVERSTATES
+  // what the mask takes, and confirming it stores a rule over fewer documents
+  // than the sentence promised. It is still an estimate answered against an
+  // index that moved underneath it.
+  //
+  // Not `jobsDone`, which would be the third and would withdraw over jobs that
+  // changed nothing this question counts — a probe, a model adoption, an
+  // `embedOnly` run. These two name the facts a `mask_preview` result is made
+  // of; a count of endings names none of them.
   onMount(() => {
     let seenReadSeq = get(jobs.state).scan.readSeq;
+    let seenFiles = get(jobs.state).scan.files;
     return jobs.state.subscribe(({ scan }) => {
-      if (scan.readSeq <= seenReadSeq) return;
+      const readingEnded = scan.readSeq > seenReadSeq;
+      const filesMoved = scan.files !== seenFiles;
       seenReadSeq = scan.readSeq;
-      withdrawQuestion();
+      seenFiles = scan.files;
+      if (readingEnded || filesMoved) withdrawQuestion();
     });
   });
 
   function withdrawQuestion() {
-    // The generation moves whether or not a question is open: a `checking`
-    // reply is in flight exactly when `pending` is `checking`, and bumping
-    // here is what keeps it from landing.
+    // The generation moves whether the question is still `checking` or already
+    // raised: a preview is in flight exactly while `pending` is `checking`, so
+    // the early return below cannot skip a reply — every other path that clears
+    // `pending` under a live preview bumps the counter itself.
     const p = pending;
     if (p === null) return;
     ++previews;
