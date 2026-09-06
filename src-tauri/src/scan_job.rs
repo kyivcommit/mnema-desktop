@@ -566,9 +566,12 @@ fn read_every_root(
     // `\"0\"` from this arm", which is a property of the `if let` below rather
     // than something a test could observe.
     //
-    // This codebase has no logging facility (`rg -n 'log::|tracing::'
-    // src-tauri crates` is empty), so unlike the review's own suggestion
-    // ("log at debug"), the clock failure is not logged — it is silent the
+    // This codebase has no logging facility: no manifest under `src-tauri` or
+    // `crates` depends on `log` or `tracing` (an `rg -n 'log::|tracing::'`
+    // over the source is not the check — it also matches
+    // `tauri_plugin_dialog::init()`, since "dialog::" itself contains
+    // "log::"). So unlike the review's own suggestion ("log at debug"), the
+    // clock failure is not logged — it is silent the
     // same way every other swallowed error in this function is (the
     // `SCAN_INCOMPLETE` writes above use `let _ =` for the same reason: a
     // failure to write a hint for the next run is not a reason to fail the

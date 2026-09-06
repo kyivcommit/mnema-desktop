@@ -1192,45 +1192,85 @@ mod tests {
     /// than one branch: a probe and a model adoption owe the user no report at
     /// all, so an ending written for them would put a failure on screen that
     /// belongs to nothing the user asked for.
+    ///
+    /// Task 11a (debt sweep). `claim_job` and `drop` used to be checked only
+    /// through the state AFTER the drop, dropped in the very statement that
+    /// claimed it (`drop(state.claim_job(...).expect(...))`) — so this test
+    /// never looked at what the slot held while it was still alive. A `Drop`
+    /// that did nothing at all, from a phase `claim_job` never actually wrote
+    /// as `Running` in the first place, would leave the same `Idle` this test
+    /// checks for: it would be proving Drop's policy by leaning on a claim it
+    /// never itself confirmed. Each phase is now claimed into a binding, its
+    /// running state asserted, and only then dropped — so this test stands on
+    /// its own precondition instead of a neighbour's.
     #[test]
     fn a_job_with_nothing_to_report_goes_back_to_idle_when_it_vanishes() {
         let state = state();
-        drop(state.claim_job(probe(), true).expect("the slot is free"));
+        let probe_slot = state.claim_job(probe(), true).expect("the slot is free");
+        assert!(
+            state.job_is_running(),
+            "the probe must actually be running before it vanishes, or dropping it proves \
+             nothing about the Drop policy"
+        );
+        drop(probe_slot);
         assert_eq!(
             state.scan_state().snapshot,
             ScanSnapshot::Idle,
             "a probe that vanished is not a scan that failed"
         );
-        drop(
-            state
-                .claim_job(
-                    Phase::Other {
-                        job: OtherJob::ModelAdoption,
-                    },
-                    false,
-                )
-                .expect("the slot is free again"),
+
+        let adoption_slot = state
+            .claim_job(
+                Phase::Other {
+                    job: OtherJob::ModelAdoption,
+                },
+                false,
+            )
+            .expect("the slot is free again");
+        assert!(
+            state.job_is_running(),
+            "the model adoption must actually be running before it vanishes, or dropping it \
+             proves nothing about the Drop policy"
         );
-        assert_eq!(state.scan_state().snapshot, ScanSnapshot::Idle);
+        drop(adoption_slot);
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a model adoption that vanished is not a scan that failed"
+        );
     }
 
     /// Removal is the third phase with nothing to report: it is not a scan, and
     /// a folder taken out of the index that fails half-way is reported by the
     /// command that asked for it, which has a caller to answer.
+    ///
+    /// Task 11a (debt sweep): the same fix as the pair above, and for the same
+    /// reason — the slot is claimed into a binding and its running state
+    /// asserted before it is dropped, so the `Idle` this test checks for is
+    /// proven to be `Drop`'s own transition rather than a state the removal
+    /// was never actually claimed into.
     #[test]
     fn a_removal_that_vanished_goes_back_to_idle() {
         let state = state();
-        drop(
-            state
-                .claim_job(
-                    Phase::Removing {
-                        root_path: "/nonexistent/mnema-removed-root".to_string(),
-                    },
-                    false,
-                )
-                .expect("the slot is free"),
+        let slot = state
+            .claim_job(
+                Phase::Removing {
+                    root_path: "/nonexistent/mnema-removed-root".to_string(),
+                },
+                false,
+            )
+            .expect("the slot is free");
+        assert!(
+            state.job_is_running(),
+            "the removal must actually be running before it vanishes, or dropping it proves \
+             nothing about the Drop policy"
         );
-        assert_eq!(state.scan_state().snapshot, ScanSnapshot::Idle);
+        drop(slot);
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "a removal that vanished is not a scan that failed"
+        );
         state
             .claim_job(probe(), true)
             .expect("the slot is free again");

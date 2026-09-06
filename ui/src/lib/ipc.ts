@@ -603,7 +603,13 @@ export type Counts = JobProgress;
 // either, and neither owes a report when it ends; they are here because they
 // hold the same single slot, which is the whole reason a surface has to be able
 // to draw "busy" for them.
-export type OtherJob = 'probe' | 'modelAdoption';
+//
+// A runtime array with the union derived from it, `ENTRIES`'s own shape: a
+// union and a list kept in step by hand are two places for one fact, and
+// `ipc.test.ts` needs the values at run time to pin them against
+// `scan_state.rs`.
+export const OTHER_JOBS = ['probe', 'modelAdoption'] as const;
+export type OtherJob = (typeof OTHER_JOBS)[number];
 
 // What the running job is doing, in the terms a person reads. Four variants and
 // not four job types: they are four things a surface has to draw differently. A

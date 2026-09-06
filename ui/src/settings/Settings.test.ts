@@ -639,6 +639,11 @@ test('a probe job ending in idle with an unchanged files count does not re-read'
   await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
 });
 
+// Task 11a (Task 8 M6/M7): the window's own `jobs.state` subscription is
+// torn down on unmount independently of `jobs.mount`'s own teardown — see
+// `Settings.jobs-teardown.test.ts`, which mocks `./jobs` from the top of its
+// own file so the property can be observed apart from that neighbour.
+
 // ---------------------------------------------------------------------------
 // Two reads in flight, and the older one answering last — moved here from
 // `Scanning.test.ts` (Task 8): the `settingsSeq` stamp these two pin is now

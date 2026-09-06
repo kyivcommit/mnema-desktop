@@ -96,3 +96,76 @@ export function rustEnumVariants(rawSource: string, enumName: string): string[] 
 // `excludedByAncestor`, `unusableName`), none of which get an interior letter
 // touched.
 export const camelOf = (pascal: string): string => pascal.charAt(0).toLowerCase() + pascal.slice(1);
+
+// Task 11a (Task 6, deferred). The struct-field sibling of `rustEnumVariants`
+// above — a window that mirrors a `#[derive(Serialize)] pub struct` field for
+// field needs the same pin an enum's variants get, and for the same reason:
+// `ipc.ts` mirrors roughly forty fields across `ScanState`, `ScanReport`,
+// `ReadingOutcome` and `RootOutcome` with no field-level guard at all before
+// this, so a Rust field renamed, dropped or added reached every TS caller as
+// `undefined` with nothing here to say so.
+//
+// The field NAMES of `pub struct <structName>`, in source order and in
+// Rust's own snake_case spelling — `camelOfSnake` below turns one into its
+// wire name. Comments are stripped BEFORE the depth walk, for the identical
+// reason `rustEnumVariants` gives: a doc comment carrying a brace must not be
+// read as one.
+//
+// Reads only `pub <name>: <Type>,` fields at the struct's own top level. A
+// private field is invisible to it — the same trade `rustEnumVariants` makes
+// for a variant-level rename it cannot see — but every field mirrored by
+// `ipc.ts` is `pub`, because a private one cannot reach `serde::Serialize` at
+// all. Depth is tracked over `{}`, `()` AND `<>` so a field typed
+// `Option<Vec<T>>` does not have its own brackets mistaken for the struct's
+// closing brace or its own comma mistaken for a field separator; it does NOT
+// distinguish `<`/`>` as brackets from `<`/`>` as comparison or shift
+// operators, which is not a shape any field type in this codebase takes.
+export function rustStructFields(rawSource: string, structName: string): string[] {
+  const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+  const m = new RegExp(`pub struct ${structName}\\s*\\{`).exec(source);
+  if (!m) {
+    throw new Error(`struct ${structName} not found in the Rust source — has it moved or been renamed?`);
+  }
+  let depth = 1;
+  let i = m.index + m[0].length;
+  const start = i;
+  while (depth > 0) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
+    i++;
+    if (i > source.length) {
+      throw new Error(`ran off the end of the file looking for the closing brace of ${structName}`);
+    }
+  }
+  const body = source.slice(start, i - 1);
+
+  const fields: string[] = [];
+  let d = 0;
+  let cur = '';
+  for (const ch of body) {
+    if (ch === '{' || ch === '(' || ch === '<') d++;
+    if (ch === '}' || ch === ')' || ch === '>') d--;
+    if (ch === ',' && d === 0) {
+      if (cur.trim()) fields.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) fields.push(cur.trim());
+
+  return fields.map((f) => {
+    const name = /^pub\s+([A-Za-z0-9_]+)\s*:/.exec(f.trim());
+    if (!name) throw new Error(`could not parse a "pub <name>: <Type>" field out of: ${f}`);
+    return name[1];
+  });
+}
+
+// snake_case → camelCase the way serde's own `RenameRule::CamelCase` does it
+// for a STRUCT FIELD (`serde_derive::internals::case`) — every `_x` becomes an
+// uppercase `X`, the underscore dropped. Distinct from `camelOf` above: an
+// enum variant is already PascalCase in Rust and this rule only lowercases
+// its first letter, but a struct field is snake_case to begin with, so the
+// same wire convention is reached by a different transform.
+export const camelOfSnake = (snake: string): string =>
+  snake.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());

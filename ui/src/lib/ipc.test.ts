@@ -3,18 +3,24 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as ipc from './ipc';
-import { camelOf, rustEnumVariants } from './rust-enum';
+import { camelOf, camelOfSnake, rustEnumVariants, rustStructFields } from './rust-enum';
 import type {
   AppPrefs,
   AutostartState,
   HotkeyState,
   HotkeyStatus,
   IndexSettings,
+  OtherJob,
+  ReadingOutcome,
+  RootOutcome,
+  ScanReport,
+  ScanState,
   SourceAround,
   StoredExclusion,
   SubfolderListing,
   SubfolderState,
 } from './ipc';
+import { OTHER_JOBS } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -649,4 +655,75 @@ test('app prefs reject Rust snake_case spellings', () => {
   };
 
   expect(prefs.hotkey.shortcut).toBe('Alt+Space');
+});
+
+// ---------------------------------------------------------------------------
+// Task 11a (Task 6, deferred). `ScanState`/`ScanReport`/`ReadingOutcome`/
+// `RootOutcome` mirror roughly forty `scan_state.rs` fields between them with
+// no field-level guard until now — `rustStructFields` (`rust-enum.ts`) is the
+// struct-field sibling of `rustEnumVariants` above, extended for exactly this.
+//
+// Each fixture is typed directly as the struct it pins, not built through a
+// helper this file also controls: a field `scan_state.rs` drops, renames or
+// adds compiles cleanly on the TypeScript side regardless (there is no shared
+// compiler), so nothing but a fixture TypeScript itself refuses to compile
+// incomplete or excessive stands between a Rust rename and every caller
+// reading `undefined`. `Object.keys` of that fixture is therefore exactly
+// `keyof` the struct — not a list copied out by hand a second time — compared
+// against the Rust field names read out of `scan_state.rs` and converted
+// through the same `camelCase` rule serde applies.
+// ---------------------------------------------------------------------------
+
+const SCAN_STATE_RS = readFileSync(join(HERE, '../../../src-tauri/src/scan_state.rs'), 'utf8');
+
+const ROOT_OUTCOME_FIXTURE: RootOutcome = {
+  rootPath: '/a', reason: 'completed', complete: true, message: null,
+  done: 0, total: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0,
+  contended: 0, frozen: [],
+};
+
+test('RootOutcome is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(ROOT_OUTCOME_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'RootOutcome').map(camelOfSnake).sort(),
+  );
+});
+
+const READING_OUTCOME_FIXTURE: ReadingOutcome = {
+  reason: 'completed', complete: true, rootsRead: 0, rootCount: 0,
+  done: 0, total: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0,
+  contended: 0, roots: [],
+};
+
+test('ReadingOutcome is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(READING_OUTCOME_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ReadingOutcome').map(camelOfSnake).sort(),
+  );
+});
+
+const SCAN_REPORT_FIXTURE: ScanReport = {
+  embedding: { kind: 'notReached' }, endedIn: 'reading', reason: 'completed',
+  message: null, resume: null,
+};
+
+test('ScanReport is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(SCAN_REPORT_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ScanReport').map(camelOfSnake).sort(),
+  );
+});
+
+const SCAN_STATE_FIXTURE: ScanState = {
+  revision: 0, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+};
+
+test('ScanState is exactly what scan_state.rs defines, field for field', () => {
+  expect(Object.keys(SCAN_STATE_FIXTURE).sort()).toEqual(
+    rustStructFields(SCAN_STATE_RS, 'ScanState').map(camelOfSnake).sort(),
+  );
+});
+
+test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {
+  const jobs: readonly OtherJob[] = OTHER_JOBS;
+  expect(jobs.slice().sort()).toEqual(
+    rustEnumVariants(SCAN_STATE_RS, 'OtherJob').map(camelOf).sort(),
+  );
 });

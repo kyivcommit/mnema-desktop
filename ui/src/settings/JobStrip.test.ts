@@ -344,7 +344,6 @@ test('a fresh embedding pass says it is starting rather than showing 0 of 0, and
 
   await emit(embedding({ done: 0, total: 0 }));
   expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
-  expect(visible(screen.getByTestId('indexing-pass'))).not.toBe('Індексація теки 1 з 2: /home/a/notes');
   expect(visible(screen.getByTestId('indexing-counts'))).toBe('Вбудовування починається…');
 
   await emit(embedding({ done: 3, total: 10 }));

@@ -3876,12 +3876,10 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
         EndReason::Completed,
         "the scan over thirty files did not complete: {reading:?}"
     );
-    // Both directions, because the upper bound alone is satisfied by zero and
-    // a review measured exactly that: made to send nothing at all, this test
-    // passed — `len() < 15` held and the exactness check below found nothing
-    // to disagree with, its `.expect()` never reached by a report that could
-    // have contradicted it. A bar that never moves is not a throttle working
-    // well, it is a progress channel that is broken.
+    // Both directions, because the upper bound alone is satisfied by zero — a
+    // build that stopped sending progress entirely would still hold `len() <
+    // 15`. A bar that never moves is not a throttle working well, it is a
+    // progress channel that is broken.
     //
     // Filtered to `done > 0` for the EMPTINESS check only, and for the same
     // reason `an_uncontended_walk_reports_no_contention_on_any_event` is: the
@@ -3897,11 +3895,6 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     // all.
     let real_progress: Vec<_> = progress_events.iter().filter(|p| p.done > 0).collect();
     assert!(
-        !real_progress.is_empty(),
-        "thirty files produced no progress events from actually reading a file — the bar \
-         would never move: {progress_events:?}"
-    );
-    assert!(
         progress_events.len() < 15,
         "thirty files produced {} progress events — throttling did not \
          meaningfully reduce anything: {progress_events:?}",
@@ -3912,9 +3905,19 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
     // stops one file short of the end looks like a hang. The last event must
     // already show the true final count — not a stale one the throttle
     // happened to let through earlier and then withheld the correction for.
-    let last = real_progress
-        .last()
-        .expect("the emptiness assertion above already established there is one");
+    //
+    // The emptiness check and the exactness check used to be two separate
+    // assertions, and the first was rescued by the second: deleting it left
+    // `real_progress.last().expect(...)` to panic on the same empty vector
+    // anyway, so its own mutant died on a neighbour rather than on itself.
+    // One `match` names the field this test is actually about either way.
+    let last = match real_progress.last() {
+        Some(last) => last,
+        None => panic!(
+            "thirty files produced no progress events from actually reading a file — the bar \
+             would never move: {progress_events:?}"
+        ),
+    };
     assert_eq!(
         last.done, reading.done,
         "the last progress event before the scan ended did not show the true count: {last:?}"

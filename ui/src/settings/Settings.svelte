@@ -257,14 +257,17 @@
            triggers: a re-read when `readSeq` grows or the snapshot becomes
            `ended`, and a withdrawal of the pending questions when `readSeq`
            grows. Both fire while the section is hidden, which is the half this
-           change had to keep. Neither fires on a progress tick, so the counts
-           in this panel can be as stale as a reading pass is long, and the
-           pass's ending is what re-reads them. That was already true while the
-           section was shown; hiding it changes nothing about it, and nothing
-           here claims a hidden panel follows a running scan. And its
-           subscription is
-           now open for the window's life, which is what a person expects of a
-           question that is still waiting for them. -->
+           change had to keep. A tick that only moves counts fires neither —
+           the one progress tick that is more than that, the embedding phase's
+           first `running` snapshot of a `full` scan, is exactly where
+           `readSeq` has just grown, so the withdrawal above already covers it.
+           Short of that one tick, the counts in this panel can be as stale as
+           a reading pass is long, and the pass's ending is what re-reads them.
+           That was already true while the section was shown; hiding it
+           changes nothing about it, and nothing here claims a hidden panel
+           follows a running scan. And its subscription is now open for the
+           window's life, which is what a person expects of a question that is
+           still waiting for them. -->
       <div data-testid="settings-panel-folders" hidden={section !== 'folders'}>
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />

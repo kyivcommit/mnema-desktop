@@ -965,7 +965,17 @@ mod tests {
                 ),
             }
         };
-        let handler = &production[handler_at..handler_at + balanced_len(&production[handler_at..])];
+        // Balanced on the BLANKED source, not the raw one: a brace inside a
+        // comment inside the handler (a doc comment's own example, say) would
+        // otherwise count toward the depth the raw walk balances against,
+        // closing `handler` early or late without either failure mode saying
+        // so — `blank_comments` preserves every byte offset (its own
+        // `debug_assert_eq!` says so), so the length it returns slices
+        // `production` exactly the same as balancing the raw text would, for
+        // every handler that has no such comment, and correctly for the one
+        // that does.
+        let handler_len = balanced_len(&blank_comments(&production[handler_at..]));
+        let handler = &production[handler_at..handler_at + handler_len];
         // 🔴 **Comments are blanked before the search, byte for byte.** The
         // arm's own comment explains the fix in the words `scan_job::start`,
         // and a guard that reads prose as code fails on the sentence that
@@ -1062,6 +1072,35 @@ mod tests {
         }
         panic!(
             "braces never balanced — this guard's own brace-matching broke, not the invariant it protects"
+        );
+    }
+
+    /// The case `the_menu_handler_starts_a_scan_only_off_the_main_thread`'s
+    /// fix (balancing `handler` on the BLANKED source) exists for, exercised
+    /// on a fixture string rather than on the real handler — a comment
+    /// carrying its own unbalanced `}` belongs in a test, not in production
+    /// source that guard is supposed to leave alone.
+    #[test]
+    fn balancing_a_brace_inside_a_comment_needs_the_blanked_source() {
+        let src = "before { // a stray } inside a comment\n    real body\n} after";
+        let comment_brace = src.find("stray }").unwrap() + "stray ".len();
+        let real_brace = src.rfind('}').unwrap();
+        assert!(
+            comment_brace < real_brace,
+            "the fixture must carry two `}}`s, the comment's own before the real one"
+        );
+
+        assert_eq!(
+            balanced_len(src),
+            comment_brace,
+            "balancing the RAW source is expected to close on the comment's own `}}` — this pins \
+             down the failure mode the fix avoids, not a property to keep"
+        );
+        assert_eq!(
+            balanced_len(&blank_comments(src)),
+            real_brace,
+            "balancing the BLANKED source must close on the REAL brace, not the one a comment \
+             happens to hold"
         );
     }
 }

@@ -1445,13 +1445,20 @@ fn a_run_started_from_the_window_embeds_the_queue_and_reports_what_it_did() {
     // at `scan_job.rs:192` and the phase update at `scan_job.rs:507`), so the
     // unfiltered vector is never empty regardless of what the pass actually
     // reports.
+    //
+    // The emptiness check and the exactness check used to be two separate
+    // assertions, and the first was rescued by the second: deleting it left
+    // `real_progress.last().expect(...)` to panic on the same empty vector
+    // anyway, so its own mutant died on a neighbour rather than on itself.
+    // One `match` names the field this test is actually about either way.
     let real_progress: Vec<_> = progress.iter().filter(|p| p.done > 0).collect();
-    assert!(
-        !real_progress.is_empty(),
-        "the window was shown no progress from actually embedding a chunk, so the bar \
-         never moved: {progress:?}"
-    );
-    let last = real_progress.last().expect("the assertion above found one");
+    let last = match real_progress.last() {
+        Some(last) => last,
+        None => panic!(
+            "the window was shown no progress from actually embedding a chunk, so the bar \
+             never moved: {progress:?}"
+        ),
+    };
     assert_eq!(
         last.done, done,
         "the last progress report the window saw is short of the ending: {last:?}"
