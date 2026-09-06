@@ -42,12 +42,19 @@
 # profile's artifacts, and the next `cargo test` pays for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# The two checks that read comments rather than code, first because they cost
-# about a second and compile nothing: an obligation written into a comment
-# (`check-booked.sh`, its own self-test first — it writes failures to stderr,
-# so silencing its stdout hides only the success line) and a citation whose
-# line is past the end of its file (`check-citations.sh`). `ci.yml` runs the
-# same in its `mutations` job.
+# Three checks first, because none of them compiles anything: two that read
+# comments rather than code — an obligation written into one
+# (`check-booked.sh`, its own self-test first — it writes failures to
+# stderr, so silencing its stdout hides only the success line) and a
+# citation whose line is past the end of its file (`check-citations.sh`) —
+# and one below that reads the mutation cases themselves
+# (`mutation-staleness.sh`), asking whether each still matches the code and
+# test it was written against. Measured together on an Apple M2 Max: about
+# 1s for the first two, ~25s for the third (`mutation-staleness.sh`'s own
+# header has the current figure and what moves it) — not "about a second"
+# for all three, which this line used to claim before guard 4 made the third
+# one the dominant cost. `ci.yml` runs all three of these — same order,
+# same scripts — in its `sweeps` job.
 scripts/check-booked.sh --self-test > /dev/null
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
@@ -61,6 +68,16 @@ cit="$(mktemp)"; trap 'rm -f "$cit"' EXIT
 scripts/check-citations.sh > "$cit" \
   || { awk '/^--- [0-9]+ mechanical problem/ {p = 1} p' "$cit" | grep . || tail -n 20 "$cit"; exit 1; }
 rm -f "$cit"
+# A third comment-only check, same reason as the two above: `mutation-staleness.sh`
+# compiles nothing (`scripts/mutation-staleness.sh`'s own header has the current
+# timing). Unlike the citation sweep it does not print one line per case even
+# when it passes — only the file list it read, a skip line if any, and a
+# handful of summary lines — so unlike the citation sweep's output, which is
+# worth filtering down to its problem list, this one is short enough that the
+# whole thing is worth showing on failure without filtering it first.
+stale="$(mktemp)"; trap 'rm -f "$stale"' EXIT
+scripts/mutation-staleness.sh > "$stale" 2>&1 || { cat "$stale"; exit 1; }
+rm -f "$stale"
 # Formatting, before clippy: it compiles nothing and `ci.yml`'s `check` job
 # runs the same line first. PR #29 reached CI with eight rustfmt differences in
 # a file every local gate had passed, because nothing here asked.
