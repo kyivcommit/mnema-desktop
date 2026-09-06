@@ -1014,14 +1014,32 @@ mod tests {
         /// armed are recorded but never sent — the one test that uses this
         /// arms it only after the calls it does not care about have already
         /// happened.
+        ///
+        /// Poison-absorbing, like every other lock this module's tests take
+        /// (`take_hook_turn`, `set_test_hook`): this runs on the main test
+        /// thread AFTER thread A is confirmed parked and BEFORE it is
+        /// released, so a `.unwrap()` that turned a poisoned lock into a panic
+        /// here would strand A holding `PREFS_LOCK` for the rest of the test
+        /// binary instead of merely failing this one test.
         fn watch(&self, tx: std::sync::mpsc::Sender<(usize, String)>) {
-            *self.call_tx.lock().unwrap() = Some(tx);
+            *self.call_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
         }
 
+        /// Same reasoning as `watch`: this runs on thread A or B, and a
+        /// poisoned lock propagates to every later `.lock()` on the same
+        /// mutex — including the main thread's, in the same risk window.
         fn record(&self, call: String) {
             let seq = self.next_seq();
-            self.calls.lock().unwrap().push((seq, call.clone()));
-            if let Some(tx) = self.call_tx.lock().unwrap().as_ref() {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((seq, call.clone()));
+            if let Some(tx) = self
+                .call_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 // The receiver may already be gone (the test dropped it after
                 // its one `recv_timeout`); a call arriving after that is not
                 // this fake's problem to report.
@@ -1050,35 +1068,56 @@ mod tests {
         // changes each, then check the state is consistent" test passes on an
         // unserialised implementation whenever the interleaving happens not to
         // occur. This one parks the first change INSIDE its persist and then
-        // proves the second has not touched the operating system through two
-        // discriminators that do not depend on a sleep outrunning the mutant:
+        // proves the second has not touched the operating system, through two
+        // discriminators sharing one event:
         //
         // 1. EVENT: once B is spawned, every registrar call is also sent on
         //    `call_rx` the instant it is recorded (`CountingRegistrar::watch`,
-        //    below). Serialised, B is blocked on `lock_hotkey_change` and
-        //    cannot call the registrar until A is released — long after this
-        //    `recv_timeout` — so nothing ever arrives and it always times out.
-        //    Unserialised, B's `unregister`/`register` calls race ahead
-        //    immediately and land on the channel within microseconds: this
-        //    call comes back `Ok` almost at once rather than needing the full
-        //    window to elapse before a length check would notice anything.
-        //    (Note: the discriminator is NOT "B reached the write-key hook" —
-        //    `PREFS_LOCK` alone already serialises entry to that hook, mutant
-        //    or not, so it could never tell the two apart. The registrar is
-        //    the thing this bug actually leaves unserialised.)
+        //    below). (Not "B reached the write-key hook" — `PREFS_LOCK` alone
+        //    already serialises entry to that hook, mutant or not, so it
+        //    could never tell the two apart; the registrar is the thing this
+        //    bug actually leaves unserialised.)
         // 2. SEQUENCE: `a_released`, a position drawn from the same counter
         //    every registrar call draws from, marked immediately before A is
-        //    released. Serialised, B cannot reach the registrar until after
-        //    that release, so both of its calls are guaranteed a later
-        //    position — not by racing a clock, but because the mutex B blocks
-        //    on cannot be acquired before the release happens. Unserialised,
-        //    B's calls are already on the list before this mark is even
-        //    taken.
+        //    released.
         //
-        // Either half alone kills the mutation at
-        // `scripts/mutations/pr9-shell.sh` that comments out
-        // `state.lock_hotkey_change()`; both are proven independently in the
-        // task's own verification, not just by this test passing.
+        // 🔴 **The event both react to is the same one, and only the PASS
+        // direction is free of a sleep — the KILL direction still is not.**
+        // On the correct code, PASS is deterministic by construction, not by
+        // timing: `lock_hotkey_change()` is the FIRST statement of
+        // `change_hotkey` (its call site, `prefs.rs:518`), so B cannot reach
+        // the registrar before that mutex, and A holds it across the whole
+        // call — past `a_released`, past the release itself — so neither
+        // discriminator can see a rogue call no matter how long the test
+        // waits. That is what changed from the sleep this replaced: the PASS
+        // side rests on a mutex, not on a duration racing a mutant to finish
+        // first.
+        //
+        // The KILL side did not gain the same property. Both discriminators
+        // fire on the identical fact — "did B call the registrar before
+        // `a_released`" — so they are not two independent proofs, only two
+        // readings of one. Under the mutant B is free to run the instant it
+        // is spawned, but WHETHER it does so inside the 300ms this test
+        // still waits is still a scheduler guarantee this test does not
+        // have and cannot get from inside `change_hotkey`: nothing observes
+        // B's entry earlier than the registrar itself, because there is
+        // nowhere above `lock_hotkey_change()` in the correct code to put a
+        // hook that would not also have to exist in the mutant it is
+        // supposed to catch. A scheduler that starves B for longer than the
+        // window defeats both halves together, not one of them.
+        //
+        // What this rewrite actually bought, then, is narrower than "no
+        // sleep": failure is immediate and names the offending call instead
+        // of needing the full window to elapse before a length check would
+        // notice anything, and the pass-side guarantee no longer depends on
+        // timing at all. The debt the 300ms window represents is reduced,
+        // not paid off — paying it off would need an instrumentation point
+        // inside `change_hotkey` ABOVE `lock_hotkey_change()`, one this test
+        // does not have and production code has no other reason to grow.
+        //
+        // Kills the mutation at `scripts/mutations/pr9-shell.sh` that
+        // comments out `state.lock_hotkey_change()` — proven by hand in the
+        // task's own verification, not only by this test passing.
         use std::sync::Arc;
         use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 
@@ -1139,11 +1178,19 @@ mod tests {
         // the correct code nothing B does can predate it.
         let a_released = registrar.next_seq();
 
-        // Mark and release BEFORE asserting anything: a panic between the two
-        // would leave thread A parked holding `PREFS_LOCK` for the life of
-        // this binary, and every later test that writes preferences would
-        // block on it, so cargo would report a timeout instead of this
-        // failure.
+        // Release BEFORE the `match` below can panic — that is the one
+        // ordering this line guarantees. It is narrower than "before
+        // asserting anything": `_turn.clear()`, `registrar.watch()` and the
+        // `thread::spawn` above all run earlier, after A is confirmed parked
+        // and before this release, and a panic from any of THEM would strand
+        // A just the same. They are not risk-free by being earlier, only by
+        // what they are: `_turn.clear()` and `registrar.watch()` both go
+        // through poison-absorbing locks (no panic to have), and
+        // `thread::spawn` carries the same risk every other spawn in this
+        // module already does. The `match` below is the one place this test
+        // deliberately puts a call that is SUPPOSED to be able to fail, which
+        // is why it is the one required to come after this line rather than
+        // merely encouraged to.
         release_tx.send(()).unwrap();
 
         match rogue_call {
