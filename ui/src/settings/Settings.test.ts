@@ -63,11 +63,19 @@ const APP_PREFS: AppPrefs = {
 // subfolder commands join it because a panel expanded here is a real
 // expansion — `Folders.svelte` calls them, and a mock factory that leaves
 // them out hands the component `undefined` to call.
+//
+// Fix round 1, Important 1 does the same to the mask editor's two commands,
+// for the same two reasons: `list_masks` is now read once per WINDOW and this
+// file counts it, and a question raised in that editor is a real
+// `mask_preview` call rather than a `vi.fn()` answering `undefined`.
 const modelSettings = vi.fn();
 const listTree = vi.fn();
 const listSubfolders = vi.fn();
 const listExclusions = vi.fn();
 const excludeSubfolder = vi.fn();
+const listMasks = vi.fn();
+const maskPreview = vi.fn();
+const addMask = vi.fn();
 let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
@@ -85,9 +93,9 @@ vi.mock('../lib/ipc', () => ({
   // and every test in this file would run beside an unhandled rejection —
   // `jobStatus` below is the same lesson. An empty list is enough: nothing
   // here exercises the editor's own behaviour, that lives in Masks.test.ts.
-  listMasks: () => Promise.resolve([]),
-  maskPreview: vi.fn(),
-  addMask: vi.fn(),
+  listMasks: (...a: unknown[]) => listMasks(...a),
+  maskPreview: (...a: unknown[]) => maskPreview(...a),
+  addMask: (...a: unknown[]) => addMask(...a),
   removeMask: vi.fn(),
   addWatchedFolder: vi.fn(),
   removeWatchedFolder: vi.fn(),
@@ -134,6 +142,15 @@ beforeEach(() => {
   listExclusions.mockReset();
   listExclusions.mockResolvedValue([]);
   excludeSubfolder.mockReset();
+  // The empty mask list this file has always answered with, now through a
+  // countable mock. `maskPreview`'s two numbers differ on purpose, the way
+  // `Masks.test.ts` states it: a fixture whose numbers are equal cannot tell
+  // them apart.
+  listMasks.mockReset();
+  listMasks.mockResolvedValue([]);
+  maskPreview.mockReset();
+  maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
+  addMask.mockReset();
   deliver = null;
 });
 
@@ -863,7 +880,11 @@ test('an expanded panel and a pending question survive a switch to another secti
 
   expect(foldersShown()).toBe(true);
   // The panel is still expanded — `list_subfolders` is not asked again, and
-  // the row it drew is the same one.
+  // the row it drew is the same one. (Fix round 1, Minor 3: the call count is
+  // the half of that claim the two locators below cannot make. A section
+  // rebuilt on the way back would re-read this level before drawing the same
+  // row, and every assertion here would stay green.)
+  expect(listSubfolders).toHaveBeenCalledTimes(1);
   expect(screen.getByTestId('folder-panel-1')).toBeTruthy();
   expect(screen.getByTestId('subfolder-1-drop')).toBeTruthy();
   // And the press is still waiting for an answer, with the same words on it.
@@ -946,4 +967,55 @@ test('the folder list is read once when the window opens, and not again on a sec
   // altogether would pass the assertion above for the wrong reason.
   await emit(endedOnce(2, 1));
   await waitFor(() => expect(listTree.mock.calls.length).toBe(2));
+});
+
+// 🔴 Fix round 1, Important 1 (by ruling). The mask editor shares the folders
+// panel and was left behind by the first round: it stayed under an `{#if}`
+// inside the section that had become permanent, so a mask typed but not yet
+// added, and a question waiting to be confirmed, were still lost by a nav
+// click — the very thing F10 ruled against, one component to the left. It is
+// mounted under the same `hidden` as the folder list now.
+//
+// The state pair is the same as the folder tree's: "another section is shown"
+// versus "this editor was destroyed". A draft is the sharper half of it,
+// because nothing on screen ever said it went: the field simply comes back
+// empty, and a person who typed a mask reads that as their own mistake.
+//
+// RED, measured with `<Masks>` still behind its inner `{#if}`:
+//   AssertionError: expected '' to be '*.pdf' // Object.is equality
+// and, with that claim and the two beside it neutralised so the last one can
+// be reached, the count fails on the second visit's own read:
+//   AssertionError: expected "spy" to be called 1 times, but got 2 times
+test('a mask draft and its pending question survive a switch to another section and back', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  const draft = () => screen.getByLabelText('New mask:') as HTMLInputElement;
+  await fireEvent.input(draft(), { target: { value: '*.pdf' } });
+  // And a question standing over it, which is the other thing a nav click used
+  // to discard: this press has already cost a `mask_preview` over every
+  // indexed path, and answering it is the only thing that stores anything.
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  const cost = visible(screen.getByTestId('mask-confirm-cost'));
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(foldersShown()).toBe(false);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+
+  expect(foldersShown()).toBe(true);
+  // The draft is still what was typed, in the same field.
+  expect(draft().value).toBe('*.pdf');
+  // The question is still standing, with the numbers it was asked on.
+  expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
+  // And still unanswered: the preview was asked once, and nothing was stored.
+  expect(maskPreview).toHaveBeenCalledTimes(1);
+  expect(addMask).not.toHaveBeenCalled();
+  // The pair, and the reason the editor is mounted rather than re-created:
+  // one read of the mask list for the window, not one per visit.
+  expect(listMasks).toHaveBeenCalledTimes(1);
 });

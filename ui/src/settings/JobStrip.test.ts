@@ -182,6 +182,13 @@ let replies: Replies = {};
 function reply(extra: Replies = {}) {
   replies = {
     list_tree: ROOTS,
+    // F10 (Task 10e, fix round 1) mounts the folders panel — the list and the
+    // mask editor beside it — for the window's life, so `list_masks` is now
+    // asked in every test in this file. Answered honestly for the reason the
+    // rest of this map is: an unanswered command resolves `undefined` here,
+    // and the editor would draw "no mask has been added yet" from a fixture
+    // that never said so.
+    list_masks: [],
     model_settings: READY_SETTINGS,
     provider_models: EMPTY_CATALOGUE,
     job_status: IDLE_SCAN,

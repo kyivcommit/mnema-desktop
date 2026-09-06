@@ -199,9 +199,10 @@
        that are not the same one. This one, `<JobStrip>`, is outside because it
        is the WINDOW's status line — it must be readable and stoppable from
        every section, and it is drawn once, here, above the pair of columns.
-       `<Folders>` is outside because of F10: it keeps state a person built by
-       hand, so it stays mounted and is merely `hidden` while another section
-       is shown (see the panel below). Neither is a precedent for the other: a
+       The folders panel — `<Folders>` and the `<Masks>` editor beside it — is
+       outside because of F10: both keep state a person built by hand, so the
+       panel stays mounted and is merely `hidden` while another section is
+       shown (see it below). Neither is a precedent for the other: a
        section hidden in place still costs its subscriptions and its polling
        for the window's whole life, which is exactly why the other three keep
        their `{#if}`.
@@ -247,11 +248,21 @@
            takes the section out of the accessibility tree with it, so nothing
            here is read out or reachable by keyboard while another section is
            shown. There is no CSS in this project to say it a second time.
-           Two consequences are handled rather than hoped away. `Folders.svelte`
-           re-reads `list_tree` on ITS mount, which now happens once per window
-           instead of once per visit — its own `jobs.state` subscription is
-           what keeps it current after that, and it re-reads and withdraws
-           while hidden exactly as it does while shown. And its subscription is
+           Two consequences are handled rather than hoped away, and the first
+           is stated narrowly on purpose (fix round 1, Minor 2 — an earlier
+           draft said the subscription "keeps it current", which is more than
+           the subscription does). `Folders.svelte` re-reads `list_tree` on ITS
+           mount, which now happens once per window instead of once per visit.
+           What its `jobs.state` subscription adds after that is exactly two
+           triggers: a re-read when `readSeq` grows or the snapshot becomes
+           `ended`, and a withdrawal of the pending questions when `readSeq`
+           grows. Both fire while the section is hidden, which is the half this
+           change had to keep. Neither fires on a progress tick, so the counts
+           in this panel can be as stale as a reading pass is long, and the
+           pass's ending is what re-reads them. That was already true while the
+           section was shown; hiding it changes nothing about it, and nothing
+           here claims a hidden panel follows a running scan. And its
+           subscription is
            now open for the window's life, which is what a person expects of a
            question that is still waiting for them. -->
       <div data-testid="settings-panel-folders" hidden={section !== 'folders'}>
@@ -261,20 +272,19 @@
              mask is global to the index, so drawing it under one root would
              say it belongs to that root. It takes no `jobs` — nothing here
              starts a job.
-             Still behind an `{#if}`, INSIDE the section that is now permanent,
-             and this is a scope line rather than a claim about the editor. F10
-             ruled on the FOLDER list — its expanded panels and its questions —
-             and told this task not to widen the change; `Masks.svelte` keeps
-             its per-mount `list_masks` and its per-visit lifetime exactly as
-             it had them. What that leaves standing is real and is written down
-             here rather than implied away: a typed but unadded mask, and a
-             mask question waiting to be confirmed, are still lost by a nav
-             click. If that is worth fixing it is the same one-line change as
-             this one, on evidence from a live run — not a thing to do quietly
-             on the way past. -->
-        {#if section === 'folders'}
-          <Masks />
-        {/if}
+             🔴 Mounted under the same `hidden` as the folder list, and by the
+             owner's ruling on fix round 1 rather than by this file's own
+             reading of the scope. The first round left it behind an `{#if}`
+             inside the permanent section and wrote down what that cost: a
+             mask typed but not yet added, and a question waiting to be
+             confirmed, were still lost by a nav click. That is F10's own
+             finding one component to the left — the draft is the sharper case,
+             because nothing on screen says it went and a person reads the
+             empty field as their own mistake — so the editor keeps its state
+             the same way the list beside it does. Its `list_masks` therefore
+             runs once per window, not once per visit; nothing else changes
+             about it. -->
+        <Masks />
       </div>
       {#if section === 'models'}
         <h2>{modelsLabel}</h2>

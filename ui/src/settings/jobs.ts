@@ -13,8 +13,13 @@
 //
 // **Where this lives is still a decision, not an accident.** `Settings.svelte`
 // creates exactly one of these, above every section, and hands it down: a
-// controller created inside a section is destroyed the moment somebody clicks
-// another one, taking the subscription and the Stop button with it.
+// controller created inside a section is destroyed when that section is,
+// taking the subscription and the Stop button with it. Three of the four
+// sections are destroyed by the next nav click; the fourth, the folders panel,
+// is kept mounted and hidden by F10 (Task 10e), and that is the window's
+// decision about one section rather than a property this controller may lean
+// on — which is why it is created above all four and not inside the one that
+// happens to survive today.
 import { get, writable, type Readable } from 'svelte/store';
 import {
   cancelJob, jobStatus, listenScanProgress, startScanJob,
