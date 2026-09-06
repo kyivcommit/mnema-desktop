@@ -26,8 +26,11 @@
 #   the panel loop      — every open panel, by the paths that panel has open
 #   the withdrawal      — a question standing when a job ends is taken back
 #   the withdrawal's bump — and the check already on the wire is stopped with it
-#   the withdrawal's pass — only a WALK's ending takes a question back, never
-#                            an embedding pass's (fix round 2, review I1)
+#   the withdrawal's pass — only a READING pass ending takes a question back,
+#                            never an embedding-only run's (fix round 2, review
+#                            I1; re-anchored at Task 11b on `ScanState.readSeq`,
+#                            since PR 9b made the scan one job and `pass ===
+#                            'walk'` stopped having a referent)
 #   the panel's identity — a kept panel is one whose PATH is still the same, in
 #                            BOTH directions: kept when it is, dropped when the
 #                            id has been handed to another folder (round 4, I1)
@@ -187,7 +190,7 @@ case_ "a finished scan must re-read the panel, not only the row above it" \
   ui/src/settings/Folders.svelte \
   "s{    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().catch((e) => \{}" \
   "    refresh().catch((e) => {" \
-  src/settings/JobStrip.test.ts 'a finished scan re-reads the open panel, so a renamed folder stops reading as excluded' runner=vitest
+  src/settings/Folders.test.ts 'a job ending re-reads every expanded panel, not only one root' runner=vitest
 
 # The half of `rereadPanels` that reads. Deleting it leaves the withdrawal
 # behind, which is why the withdrawal test is NOT the one named here: measured,
@@ -206,7 +209,7 @@ case_ "every open panel must be re-read, and by the set of paths it has open" \
     for (const [key, panel] of Object.entries(panels)) {
     }
   }" \
-  src/settings/Folders.test.ts 'a job ending re-reads every expanded panel, not only the root whose Scan was pressed' runner=vitest
+  src/settings/Folders.test.ts 'a job ending re-reads every expanded panel, not only one root' runner=vitest
 
 # The other half, and the mirror of the case above: deleting the withdrawal
 # leaves the read, and the panel test passes against it. A question left
@@ -220,11 +223,18 @@ case_ "every open panel must be re-read, and by the set of paths it has open" \
 # than the block: it is about the withdrawal happening at all, not about which
 # pass it fires on (the case after next) nor about where it sits relative to the
 # refresh (the last case in this group).
+#
+# Rewritten at Task 11b. PR 9b made the scan ONE job over every folder, so
+# `pass === 'walk'` has no referent: what invalidates a frozen number is a
+# READING pass having ended, which `ScanState.readSeq` counts, and `reread` now
+# takes a plain boolean the subscription decides. The case's own subject is
+# unchanged — the withdrawal happening at all — and so is the test, renamed with
+# the phase.
 case_ "a question standing when a job ends must be withdrawn, not left over the new listing" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(pass === 'walk'\) withdrawQuestions\(\);}{    /* mutant: no withdrawal */}" \
+  "s{    if \(withdraw\) withdrawQuestions\(\);}{    /* mutant: no withdrawal */}" \
   "/* mutant: no withdrawal */" \
-  src/settings/Folders.test.ts 'a question standing when a job ends is withdrawn by name, and nothing is stored' runner=vitest
+  src/settings/Folders.test.ts 'a question standing when a reading pass ends is withdrawn by name, and nothing is stored' runner=vitest
 
 # And the generation bump inside it, which clearing `pending` alone does not do.
 # Without it the press whose `list_tree` was still on the wire when the ending
@@ -250,9 +260,9 @@ case_ "withdrawing a question must also stop the check already on the wire" \
 # clause, not the `refresh().then(rereadPanels)` beside it.
 case_ "the withdrawal must not fire on a pass that changed nothing about the question" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(pass === 'walk'\) withdrawQuestions\(\);}{    withdrawQuestions(); /* mutant: any pass withdraws */}" \
+  "s{    if \(withdraw\) withdrawQuestions\(\);}{    withdrawQuestions(); /* mutant: any pass withdraws */}" \
   "withdrawQuestions(); /* mutant: any pass withdraws */" \
-  src/settings/Folders.test.ts 'an embedding pass ending does not withdraw a question raised after the walk that chained it' runner=vitest
+  src/settings/Folders.test.ts 'a question raised after the reading counter last moved survives the job ending that follows' runner=vitest
 
 # ── Fix round 1, I1 ───────────────────────────────────────────────────────────
 #
@@ -270,9 +280,9 @@ case_ "the withdrawal must not fire on a pass that changed nothing about the que
 # inside the `then`.
 case_ "the withdrawal must not depend on a call that can fail" \
   ui/src/settings/Folders.svelte \
-  "s{    if \(pass === 'walk'\) withdrawQuestions\(\);\n(    //[^\n]*\n)+    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().then(() => \{ if (pass === 'walk') withdrawQuestions(); rereadPanels(); \}).catch((e) => \{ /* mutant: withdrawal downstream of the refresh */}" \
+  "s{    if \(withdraw\) withdrawQuestions\(\);\n(    //[^\n]*\n)+    refresh\(\)\.then\(rereadPanels\)\.catch\(\(e\) => \{}{    refresh().then(() => \{ if (withdraw) withdrawQuestions(); rereadPanels(); \}).catch((e) => \{ /* mutant: withdrawal downstream of the refresh */}" \
   "/* mutant: withdrawal downstream of the refresh */" \
-  src/settings/Folders.test.ts 'a walk ending withdraws the question even when the re-read that follows it fails' runner=vitest
+  src/settings/Folders.test.ts 'a reading pass ending withdraws the question even when the re-read that follows it fails' runner=vitest
 
 # ── Fix round 4, item 1: the panel's identity ─────────────────────────────────
 #

@@ -257,10 +257,15 @@ case_ "include_subfolder must report false when there was nothing to remove" \
 # completes — and the rule does nothing. That is the shape this whole task
 # exists to close, and it is invisible to every case above, all of which stop
 # at the row in the database.
+# Rewritten at Task 11b: the line moved from `walk_job::start_walk_job` (deleted
+# by Task 3b) to `scan_job::read_roots`, which builds one `WalkRules` per
+# watched folder under one index read. Same rule, same fixture, same test; the
+# mask set is now cloned per folder, which is why the tail of the expression
+# reads `masks.clone()`.
 case_ "the walk must build its rules from the stored prefixes, not from an empty list" \
-  src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks)?;}' \
-  'let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks)?;' \
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks.clone())?;}' \
+  'let rules = WalkRules::new(true, true, Vec::new())?.with_masks(masks.clone())?;' \
   mnema-desktop 'a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers' --test commands
 
 # Task 3, and the risk the brief names as the whole risk of the task. The
@@ -272,11 +277,18 @@ case_ "the walk must build its rules from the stored prefixes, not from an empty
 # covered goes to a third-party provider. `Vec::new()` above is the same
 # failure by omission; this is it by exception handling, and no test above
 # can tell either from a working walk.
+# Rewritten at Task 11b, and the TEST was renamed too: what a bad prefix now
+# refuses is the whole scan rather than one folder's walk, and the scan still
+# has to report the refusal to the window
+# (`a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_
+# reports_it`). The refusal itself is unchanged — `read_roots` propagates the
+# `RulesError` through `?`, so a stored prefix that will not validate stops the
+# run rather than being silently absent from it.
 case_ "a stored prefix that cannot become a rule must refuse the job, not be walked around" \
-  src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default().with_masks(masks)?;}' \
-  'let rules = WalkRules::new(true, true, user_prefixes).unwrap_or_default().with_masks(masks)?;' \
-  mnema-desktop 'a_stored_exclusion_that_no_longer_validates_refuses_the_walk' --test commands
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = WalkRules::new(true, true, prefixes).unwrap_or_default().with_masks(masks.clone())?;}' \
+  'let rules = WalkRules::new(true, true, prefixes).unwrap_or_default().with_masks(masks.clone())?;' \
+  mnema-desktop 'a_stored_exclusion_that_no_longer_validates_refuses_the_scan_and_still_reports_it' --test commands
 
 # Review round 1, B1, and it is the case the set was missing: the vector
 # truncated to its first entry. Everything still compiles, the walk still
@@ -287,10 +299,12 @@ case_ "a stored prefix that cannot become a rule must refuse the job, not be wal
 # Measured in review round 1, before the test it names existed: this exact
 # mutant left `cargo test -p mnema-desktop` at 233 passed, 0 failed. The two cases above
 # cannot see it: one prefix is enough to kill both of them.
+# Rewritten at Task 11b — same line, same truncation, now in
+# `scan_job::read_roots`.
 case_ "every stored prefix must reach WalkRules::new, not only the first" \
-  src-tauri/src/walk_job.rs \
-  's{    let rules = WalkRules::new\(true, true, user_prefixes\)\?\.with_masks\(masks\)\?;}{    let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?.with_masks(masks)?;}' \
-  'let rules = WalkRules::new(true, true, user_prefixes.into_iter().take(1).collect())?.with_masks(masks)?;' \
+  src-tauri/src/scan_job.rs \
+  's{        let rules = WalkRules::new\(true, true, prefixes\)\?\.with_masks\(masks\.clone\(\)\)\?;}{        let rules = WalkRules::new(true, true, prefixes.into_iter().take(1).collect())?.with_masks(masks.clone())?;}' \
+  'let rules = WalkRules::new(true, true, prefixes.into_iter().take(1).collect())?.with_masks(masks.clone())?;' \
   mnema-desktop 'a_walk_applies_every_stored_exclusion_not_only_the_first' --test commands
 
 # Review round 2, N5. The one behaviour this feature turns on whose guard

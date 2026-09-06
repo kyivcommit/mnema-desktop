@@ -129,9 +129,20 @@ case_ "the file count on the wire must be read from the index, not sent as a con
   'indexed_files: 0, // mutant: a constant that looks like an empty index' \
   mnema-desktop 'the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment' --test commands
 
+# Rewritten at Task 11b. F7 (Task 10b) replaced the bare `db.last_indexed_at()?`
+# this quoted with a preference — `scan_job::LAST_READING_AT` when it is there
+# and parses, the ingest-stage query when it is not — so the case was born stale
+# the day that landed. WHICH of the two answers wins is pinned by four tests of
+# its own in `models.rs` (`last_indexed_at_falls_back_to_the_ingest_query_when_
+# the_meta_key_is_absent`, `the_meta_key_wins_over_an_older_ingest_row`,
+# `an_older_meta_key_still_beats_a_newer_ingest_row`,
+# `an_unparseable_meta_value_falls_back_to_the_ingest_query_rather_than_failing_
+# the_read`); what none of them asks is the question this case has always asked,
+# which is whether the field on the wire is read from the index AT ALL. So the
+# expression now takes the whole preference away and leaves the constant.
 case_ "the moment on the wire must be read from the index, not sent as a constant" \
   src-tauri/src/models.rs \
-  's~        last_indexed_at: db\.last_indexed_at\(\)\?,~        last_indexed_at: None, // mutant: a constant that looks like a fresh index~' \
+  's~        last_indexed_at: match db\n            \.meta_get\(crate::scan_job::LAST_READING_AT\)\?\n            \.and_then\(\|v\| v\.parse::<i64>\(\)\.ok\(\)\)\n        \{\n            Some\(at\) => Some\(at\),\n            None => db\.last_indexed_at\(\)\?,\n        \},~        last_indexed_at: None, // mutant: a constant that looks like a fresh index~' \
   'last_indexed_at: None, // mutant: a constant that looks like a fresh index' \
   mnema-desktop 'the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment' --test commands
 
@@ -175,20 +186,34 @@ case_ "pending_chunks must be read from the index, not sent as a constant" \
 # the wire is unchanged, so nothing but a walk that actually met a held lock
 # can tell the difference — the mirror case (`an_uncontended_walk_reports_no_
 # contention_on_any_event`) passes under this mutant, which is the point of it.
+# Rewritten at Task 11b. The line lived in `walk_job::start_walk_job`'s progress
+# closure until Task 3b deleted that command; the same forwarding is now
+# `scan_job::RootProgress::observe`, which builds the `Progress` every reading
+# announcement carries. The property, the fixture and the named test are
+# unchanged — only the file the value passes through moved.
+#
+# Not to be confused with `pr9b-scan.sh`'s «contention must be recorded from
+# every callback, not only the published ones», which is about the OTHER
+# `contended` in that function: the counter stored ahead of the throttle, which
+# survives into the folder's ending. This one is the number a running bar draws.
 case_ "the shell must forward the walk's own contention, not a zero" \
-  src-tauri/src/walk_job.rs \
-  's~                            contended: progress\.contended,~                            contended: 0, // mutant: the busy index never reaches the window~' \
+  src-tauri/src/scan_job.rs \
+  's~            contended: progress\.contended,~            contended: 0, // mutant: the busy index never reaches the window~' \
   'contended: 0, // mutant: the busy index never reaches the window' \
   mnema-desktop 'a_walk_that_meets_a_busy_index_says_so_on_the_wire' --test commands
 
 # The line drawn on every running pass. It reads as an explanation of the
 # skipped number, so on a scan that met no lock at all it is simply false — and
 # it would be on screen for the whole of every ordinary run.
+# Rewritten at Task 11b. The strip now derives `counts` once and every line
+# reads it, so the guard is `counts === null || counts.contended === 0` rather
+# than a phase check of its own; and the two directions the old case split
+# across two test names are one test now, which is what the name below is.
 case_ "the busy-index line must be drawn only when the scan actually met the lock" \
   ui/src/settings/JobStrip.svelte \
-  "s~    if \(phase\.kind !== 'running' \|\| phase\.counts\.contended === 0\) return null;~    if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy~" \
-  "if (phase.kind !== 'running') return null; // mutant: drawn whether or not the index was busy" \
-  src/settings/JobStrip.test.ts 'a scan that met no busy index says nothing about one' runner=vitest
+  "s~    if \(counts === null \|\| counts\.contended === 0\) return null;~    if (counts === null) return null; // mutant: drawn whether or not the index was busy~" \
+  "if (counts === null) return null; // mutant: drawn whether or not the index was busy" \
+  src/settings/JobStrip.test.ts 'a scan that met a busy index says so without touching the counts, and one that did not says nothing' runner=vitest
 
 # 🔴 The decision guard. `contended` counts files that are journalled as skips
 # a moment later and counted in `skipped` too, so adding the two counts one
@@ -196,8 +221,14 @@ case_ "the busy-index line must be drawn only when the scan actually met the loc
 # total that already contains what it is explaining. This mutant is the tidier
 # arithmetic and the wrong one, and only an assertion that reads the whole
 # rendered counts line can tell them apart. A testid could not.
+#
+# The test name was corrected at Task 11b: it had been renamed (the two
+# directions the strip's busy sentence has are one test now, and the language
+# sweep moved elsewhere) and this case had been naming a test that does not
+# exist — a BASELINE FAILURE that took the whole file down with it, which is
+# how `pr8-ui-folders.sh` had been failing too.
 case_ "the skipped number must not absorb the contended files it already counts" \
   ui/src/settings/JobStrip.svelte \
   's~    const common = \{ done: counts\.done, skipped: counts\.skipped, refused: counts\.refused \};~    const common = { done: counts.done, skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice~' \
   'skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice' \
-  src/settings/JobStrip.test.ts 'a scan that met a busy index says so, in both languages, without touching the counts' runner=vitest
+  src/settings/JobStrip.test.ts 'a scan that met a busy index says so without touching the counts, and one that did not says nothing' runner=vitest

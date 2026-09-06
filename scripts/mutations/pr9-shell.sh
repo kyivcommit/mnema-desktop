@@ -501,6 +501,18 @@ case_ "the outgoing job writes its ending before it announces, never after" \
 # every job that finishes on its own, crashes, or is never cancelled at all. Two
 # substitutions in one expression on purpose: the marker proves the first
 # applied, the occurrence count proves the second did.
+#
+# ⚠️ **What the second substitution actually silences, corrected at Task 11b.**
+# It empties `JobSlot::announce`, not `JobSlot::drop` — and `announce` is what
+# `update`, `mark_reading_done`, `finish` AND `drop` all call, so the mutant
+# takes away every announcement a slot ever makes, not only the one on the way
+# out. That is deliberate and it is what the case needs (the point is that the
+# ONLY announcement left is the new one at the stop request), but the sentence
+# above used to read as though `drop` were the site, and a reader checking this
+# case against `state.rs` would have gone looking for a block that is not there.
+# The slot-side ordering of the write and the announcement is a different case
+# and lives two above this one; the same rule on `finish`'s own path is
+# `scripts/mutations/pr9b-scan.sh`'s.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
   's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        if let Some\(f\) = &self\.observer \{\n            f\(\);\n        \}~        let _ = \&self.observer;~' \
@@ -511,9 +523,17 @@ case_ "the release is announced when the job ends, not when a stop is asked for"
 # where it would rebuild a menu item no dispatcher arm answers and no catalog
 # key labels. This is the case that makes the spec assertion falsifiable, which
 # a list compared against itself would not be.
+#
+# Rewritten twice at Task 11b, for one change and then another: PR 9 replaced
+# the `"stop_indexing"` literal with the `STOP_ID` constant, and Task 10c added
+# `RESUME_ID` beneath it (F4, «Продовжити сканування»). The anchor is the tail
+# of the array either way — the last two entries and the closing bracket —
+# because that is the part the mutation has to insert INTO, and naming the
+# constants rather than their values is what keeps this case honest about which
+# list it is amending.
 case_ "the tray item list is the amended spec 8, not the one before it" \
   src-tauri/src/tray.rs \
-  's~    "stop_indexing",\n    "quit",\n\];~    "stop_indexing",\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
+  's~    STOP_ID,\n    RESUME_ID,\n    "quit",\n\];~    STOP_ID,\n    RESUME_ID,\n    "check_updates", // mutant: the deleted update check is back\n    "quit",\n];~' \
   '// mutant: the deleted update check is back' \
   mnema-desktop 'tray::tests::tray_item_ids_match_spec_order' --lib
 
@@ -568,16 +588,20 @@ case_ "the shared fixture kills a wrong per-platform spelling of the command key
   '// mutant: the parsers spelling on a platform that prints Win' \
   mnema-desktop 'shortcut::tests::the_shared_fixture_is_what_this_formatter_produces' --lib
 
-# External review P1. The post-walk read of the cancellation flag dropped:
-# `walk_root` observes the flag only between files, so a Stop raised after the
-# last observation is never seen by it and the walk returns `Completed`. Under
-# this mutant the walk ends `completed` while the person is looking at a Stop
-# they pressed, `jobs.ts` chains the embedding pass off `completed`, and
-# `claim_job` clears the flag as it takes the slot — so the Stop is erased and
-# the text goes to a provider. Every existing walk test survives it: none of
-# them raises the flag inside the last progress report.
-case_ "a Stop that lands after the walks last cancellation check is honoured" \
-  src-tauri/src/walk_job.rs \
-  's~        let stopped_late = slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\);~        let stopped_late = false; // mutant: the walk stops reading the flag it was given~' \
-  '// mutant: the walk stops reading the flag it was given' \
-  mnema-desktop 'a_stop_after_the_last_file_is_not_lost_to_the_walk_ending_completed' --test commands
+# 🔴 RETIRED at Task 11b — «a Stop that lands after the walks last cancellation
+# check is honoured». The late-Stop read it quoted belonged to
+# `walk_job::start_walk_job`, the one-folder-per-job command Task 3b deleted:
+# one folder was one job, the slot changed hands the moment it answered, and
+# that read was the only place left to catch a Stop the walk had not seen.
+#
+# The property did not go with it — it moved UP a level and got sharper. The
+# scan reads every folder under ONE claim, so the same fact is now D-h in
+# `scan_job::read_every_root`: after the last folder's report and before the
+# embedding phase, a pass that would end `Completed` is rewritten to `Cancelled`
+# if the flag is set. `walk_job.rs`'s own doc comment argues why a per-folder
+# rewrite would be the wrong layer twice over.
+#
+# Its carrier is `scan_job::tests::a_stop_after_the_last_root_report_still_ends_
+# cancelled_with_resume_full`, and the mutant is
+# `scripts/mutations/pr9b-scan.sh`'s «a Stop landing after the last folder's
+# report must still end the scan».

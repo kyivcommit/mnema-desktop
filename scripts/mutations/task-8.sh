@@ -202,10 +202,29 @@ case_ "build: a comment saying unwind does not count as declaring it" \
   '# this used to be panic = "unwind"' \
   mnema-desktop 'the_release_profile_unwinds_because_the_shell_catches_unwinds' --test unwind_profile
 
+# ⚠️ **`inherits = "release"` is part of the mutation, and it is there so that
+# the mutation still COMPILES.** Fixed at Task 11b, having been broken by cargo
+# rather than by this repository: measured on cargo 1.97.1, renaming the section
+# alone makes every cargo invocation exit with
+#
+#   error: profile `release-was-here` is missing an `inherits` directive
+#   (`inherits` is required for all profiles except `dev` or `release`)
+#
+# — so the named test never ran and the harness scored a BROKEN CASE, which is
+# the honest verdict and not a result about the test. With the directive the
+# manifest is valid, the profile is gone, and the test panics on its own
+# `expect`: "the workspace manifest has no [profile.release] section". Verified
+# by hand at Task 11b with the mutation applied to the real manifest.
+#
+# The fix is to the CASE and not to the profile, deliberately: `[profile.release]`
+# is one of the two names cargo exempts, and giving the real section an
+# `inherits` it does not need to make a mutation convenient would be changing the
+# product to suit the instrument.
 case_ "build: the profile section must exist at all" \
   Cargo.toml \
-  's{\[profile\.release\]}{[profile.release-was-here]}' \
-  '[profile.release-was-here]' \
+  's{\[profile\.release\]}{[profile.release-was-here]\ninherits = "release"}' \
+  '[profile.release-was-here]
+inherits = "release"' \
   mnema-desktop 'the_release_profile_unwinds_because_the_shell_catches_unwinds' --test unwind_profile
 
 case_ "commands: job_status reports the running job" \
