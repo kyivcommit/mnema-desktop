@@ -498,6 +498,21 @@ pub fn run() -> anyhow::Result<()> {
             "stop_indexing" => {
                 app.state::<state::AppState>().cancel_job();
             }
+            // F4 (Task 10c): the other half of the pair above — the tray could
+            // stop a scan and not carry one on, so a person who pressed Stop
+            // here had to open the settings window to find «Продовжити».
+            // `scan_job::start` is handed in rather than reached for inside:
+            // it is the same function `start_scan_job` calls, so a tray press
+            // and the window's button start the same scan. What entry that is,
+            // and whether a press starts anything at all, is
+            // `scan_job::resume_scan`'s decision and is tested there — the item
+            // is enabled only when the ended report names a resume
+            // (`tray::resume_enabled`, drawn by `tray::refresh_tray`), and a
+            // press on a snapshot that has moved on since the draw is refused
+            // by the job slot and logged, not shown (§6).
+            "resume" => {
+                scan_job::resume_scan(&app.state::<state::AppState>(), scan_job::start);
+            }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
             "quit" => app.exit(0),

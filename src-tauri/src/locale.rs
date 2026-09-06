@@ -69,13 +69,16 @@ pub enum Key {
     TrayShowSearch,      // "Показати пошук" / "Show search"
     TrayOpenSettings,    // "Відкрити налаштування" / "Open settings"
     TrayStopIndexing,    // "Зупинити сканування" / "Stop scanning"
-    TrayQuit,            // "Вийти" / "Quit"
-    MenuLanguage,        // submenu title "Мова" / "Language"
-    LangAuto,            // "Авто (система)" / "Auto (system)"
-    SettingsTitle,       // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,       // "Закрити налаштування" / "Close Settings"
-    MenuEdit,            // "Редагувати" / "Edit"
-    MenuWindow,          // "Вікно" / "Window"
+    // F4 (Task 10 live run): the tray offered a way to stop a scan and no way
+    // to carry one on — the resume button lived only in the settings window.
+    TrayResumeScanning, // "Продовжити сканування" / "Continue scanning"
+    TrayQuit,           // "Вийти" / "Quit"
+    MenuLanguage,       // submenu title "Мова" / "Language"
+    LangAuto,           // "Авто (система)" / "Auto (system)"
+    SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
+    CloseSettings,      // "Закрити налаштування" / "Close Settings"
+    MenuEdit,           // "Редагувати" / "Edit"
+    MenuWindow,         // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
     // here, and not in `error.rs` with every other rejection sentence, because
     // each answers a PRESS a person made and there is a better sentence for it
@@ -97,6 +100,7 @@ pub const ALL_KEYS: &[Key] = &[
     Key::TrayShowSearch,
     Key::TrayOpenSettings,
     Key::TrayStopIndexing,
+    Key::TrayResumeScanning,
     Key::TrayQuit,
     Key::MenuLanguage,
     Key::LangAuto,
@@ -127,6 +131,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayOpenSettings) => "Open settings",
         (Lang::Uk, TrayStopIndexing) => "Зупинити сканування",
         (Lang::En, TrayStopIndexing) => "Stop scanning",
+        (Lang::Uk, TrayResumeScanning) => "Продовжити сканування",
+        (Lang::En, TrayResumeScanning) => "Continue scanning",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, MenuLanguage) => "Мова",

@@ -144,6 +144,44 @@ pub(crate) fn start(state: &AppState, entry: Entry) -> Result<(), Error> {
     start_inner(state, entry, deps)
 }
 
+/// The tray's «Продовжити сканування», as everything except the click — F4
+/// (Task 10 live run): a person who pressed Stop on the tray had to open the
+/// settings window to find the button that carries on, and the surface they
+/// had just used offered nothing.
+///
+/// It reads the ENDED REPORT'S OWN `resume` ([`crate::tray::resume_entry`],
+/// the same fact the settings strip's «Продовжити» is drawn from) and starts
+/// that entry. Deriving the entry here a second time is what would let the
+/// tray and the window disagree about what a press does.
+///
+/// 🔴 **`start_scan` is a parameter, and the production call site hands it
+/// [`start`]** — the function [`start_scan_job`] itself calls, so the tray and
+/// the command cannot start two different scans. It is a parameter because the
+/// decision this function makes (which entry, and whether to start at all) is
+/// the half worth testing, and the only other way to read that decision back
+/// is to run a whole second scan and infer it.
+///
+/// 🔴 **A refusal is logged and never shown.** A tray callback has no UI
+/// channel of its own (§6), and the refusal this will actually meet is
+/// `JobAlreadyRunning`: the menu was drawn from a snapshot at most one tick old
+/// (`refresh_tray` redraws on every announcement), so a job can claim the slot
+/// between the draw and the press. That is a stale enabled item, not a fault a
+/// person has anything to do about.
+pub(crate) fn resume_scan(
+    state: &AppState,
+    start_scan: impl FnOnce(&AppState, Entry) -> Result<(), Error>,
+) {
+    // One read of the snapshot, cloned out from under the state's lock by
+    // `scan_state` — the entry acted on is the entry that was read, and not a
+    // second read that could have moved in between.
+    let Some(entry) = crate::tray::resume_entry(&state.scan_state()) else {
+        return;
+    };
+    if let Err(e) = start_scan(state, entry) {
+        eprintln!("mnema: the tray's resume did not start a scan: {e}");
+    }
+}
+
 /// The key the index carries while a scan is under way, and the one it keeps if
 /// the scan never gets to the end.
 ///
@@ -3300,6 +3338,205 @@ mod tests {
             whole.read_seq,
             seq_after_reading + 1,
             "a whole scan is one reading pass more than the resumption before it"
+        );
+    }
+    // ── the tray's «Продовжити сканування» (Task 10c, F4) ─────────────────
+
+    /// A spy in place of [`start`]: it records the entry it was asked for and
+    /// answers `Ok`, so a test can say WHICH scan a tray press would have
+    /// started without starting one.
+    ///
+    /// `resume_scan` takes the starter as a parameter for exactly this reason —
+    /// the decision it makes (which entry, and whether to start at all) is the
+    /// half worth pinning, and running a real second scan to read it back would
+    /// pin the scan instead.
+    fn recording_starter(
+        seen: &Arc<std::sync::Mutex<Vec<Entry>>>,
+    ) -> impl FnOnce(&AppState, Entry) -> Result<(), Error> + use<'_> {
+        let seen = Arc::clone(seen);
+        move |_state, entry| {
+            seen.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+            Ok(())
+        }
+    }
+
+    /// The tray press after a Stop inside the EMBEDDING pass starts
+    /// `EmbedOnly`, and the press after a Stop inside the READING pass starts
+    /// `Full` — the state pair, both halves driven by real scans rather than a
+    /// hand-built report, so a `resume_scan` that read the snapshot's SHAPE
+    /// («it ended, so start a whole scan») instead of the report's own
+    /// `resume` goes red on the first half.
+    ///
+    /// Two scans in one test and one turn held across both: the second scan's
+    /// state is a fresh `AppState`, so the only thing the two share is this
+    /// module's hook turn.
+    #[test]
+    fn a_tray_resume_starts_the_scan_with_the_reports_own_entry() {
+        // Half one: stopped in the embedding phase → `EmbedOnly`.
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let stopping = Arc::downgrade(&state);
+        let (deps, _) = deps_counting_embeds(a_key, move |_cancel, on_progress| {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+            on_progress(mnema_embed::EmbedProgress {
+                done: 2,
+                total: 5,
+                failed: 0,
+            });
+            Ok(mnema_embed::EmbedTally {
+                embedded: 2,
+                failed: 0,
+            })
+        });
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert_eq!(
+            report_of(&settled).resume,
+            Some(Entry::EmbedOnly),
+            "this half is about an embedding that was stopped; it ended \
+             otherwise, so it is about something else: {settled:?}"
+        );
+
+        let seen: Arc<std::sync::Mutex<Vec<Entry>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        resume_scan(&state, recording_starter(&seen));
+        assert_eq!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            [Entry::EmbedOnly],
+            "the tray press after an embedding was stopped asked for the wrong \
+             scan — a `Full` here re-reads the whole archive to find nothing"
+        );
+        drop(turn);
+
+        // Half two: stopped in the reading phase → `Full`. Same press, the
+        // other answer.
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["b1.txt", "b2.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let stopping = Arc::downgrade(&state);
+        let turn = take_scan_turn_boundary(Arc::new(move || {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+        }));
+        let (deps, _) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert_eq!(
+            report_of(&settled).resume,
+            Some(Entry::Full),
+            "this half is about a reading that was stopped; it ended otherwise, \
+             so it is about something else: {settled:?}"
+        );
+
+        let seen: Arc<std::sync::Mutex<Vec<Entry>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        resume_scan(&state, recording_starter(&seen));
+        assert_eq!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            [Entry::Full],
+            "the tray press after a reading was stopped asked for the wrong scan"
+        );
+    }
+
+    /// The other direction of the pair above: a state with nothing to carry on
+    /// from starts NOTHING. Two such states, because they reach the guard by
+    /// different routes — a fresh application that has never scanned (`Idle`),
+    /// and a scan that ran to the end and has no work left (`Ended` with
+    /// `resume: None`).
+    ///
+    /// This is the assertion a `resume_scan` that started `Entry::Full`
+    /// whenever it could not find an entry would go red on, which is the
+    /// failure a person would meet as their whole archive re-read itself after
+    /// a press on a stale menu.
+    #[test]
+    fn a_tray_resume_starts_nothing_when_there_is_nothing_to_carry_on_from() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+
+        let seen: Arc<std::sync::Mutex<Vec<Entry>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        resume_scan(&state, recording_starter(&seen));
+        assert!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "an application that has never scanned started one from the tray"
+        );
+
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+        let (deps, _) = deps_counting_embeds(a_key, a_pass_that_embeds(1));
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert_eq!(
+            report_of(&settled).resume,
+            None,
+            "this test is about a scan with nothing left to do; it ended \
+             otherwise, so it is about something else: {settled:?}"
+        );
+
+        resume_scan(&state, recording_starter(&seen));
+        assert!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "a completed scan started a second one from the tray"
+        );
+    }
+
+    /// A refusal is swallowed, never propagated: `resume_scan` answers `()`,
+    /// and the one caller — the tray's menu handler — has no channel to show a
+    /// rejection on (§6). The refusal it will actually meet is
+    /// `JobAlreadyRunning`: the menu was drawn from a snapshot at most one tick
+    /// old, so a job can have claimed the slot between the draw and the press.
+    ///
+    /// The assertion is that the starter WAS called and the call returning
+    /// `Err` changed nothing about how this function returns — a `resume_scan`
+    /// that propagated (or unwrapped) would fail to compile against this call
+    /// site, or panic here.
+    #[test]
+    fn a_refused_resume_is_swallowed_rather_than_raised() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let stopping = Arc::downgrade(&state);
+        let (deps, _) = deps_counting_embeds(a_key, move |_cancel, on_progress| {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+            on_progress(mnema_embed::EmbedProgress {
+                done: 1,
+                total: 4,
+                failed: 0,
+            });
+            Ok(mnema_embed::EmbedTally {
+                embedded: 1,
+                failed: 0,
+            })
+        });
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert!(
+            report_of(&settled).resume.is_some(),
+            "this test needs a press that reaches the starter at all: {settled:?}"
+        );
+
+        let called = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&called);
+        resume_scan(&state, move |_state, _entry| {
+            seen.store(true, Ordering::SeqCst);
+            Err(Error::JobAlreadyRunning)
+        });
+        assert!(
+            called.load(Ordering::SeqCst),
+            "the starter was never reached, so the refusal path was not the \
+             thing under test"
         );
     }
 }

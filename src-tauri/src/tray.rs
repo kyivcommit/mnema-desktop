@@ -68,6 +68,7 @@ pub fn tray_label(lang: Lang, id: &str, hotkey: &HotkeyState) -> String {
         },
         "open_settings" => format!("⚙ {}", locale::t(lang, Key::TrayOpenSettings)),
         "stop_indexing" => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
+        "resume" => format!("▶ {}", locale::t(lang, Key::TrayResumeScanning)),
         "quit" => format!("⏻ {}", locale::t(lang, Key::TrayQuit)),
         other => panic!("unknown tray id {other}"),
     }
@@ -87,6 +88,7 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     "show_search",
     "open_settings",
     "stop_indexing",
+    "resume",
     "quit",
 ];
 
@@ -220,6 +222,44 @@ pub fn stop_enabled(state: &crate::scan_state::ScanState) -> bool {
     )
 }
 
+/// Which entry point the tray's «Продовжити сканування» would start with, or
+/// `None` when there is nothing to carry on from — F4 (Task 10 live run): a
+/// person who pressed Stop had to open the settings window to find the button
+/// that resumes, and the tray, the surface Stop was pressed on, offered
+/// nothing.
+///
+/// The fact is the ENDED REPORT'S OWN `resume` and nothing else, which is the
+/// same fact the settings strip's «Продовжити» is drawn from
+/// ([`crate::scan_job::resume_for`] is where the table lives). Deriving it a
+/// second time here — "cancelled, so offer Full" — is how the tray and the
+/// window come to disagree about what a press would do: `resume_for` answers
+/// `EmbedOnly` for a stop inside the embedding pass and `None` for the endings
+/// that have nothing left (a `Skipped` embedding, a completed scan), and none
+/// of that is recoverable from the snapshot's shape alone.
+///
+/// Pure, like [`status_label`] and [`stop_enabled`] beside it: no `AppState`,
+/// no clock, no index, so it is pinned against a literal `ScanState`.
+pub fn resume_entry(state: &crate::scan_state::ScanState) -> Option<crate::scan_state::Entry> {
+    match &state.snapshot {
+        crate::scan_state::ScanSnapshot::Ended { report } => report.resume,
+        _ => None,
+    }
+}
+
+/// Whether the tray's «Продовжити сканування» should be clickable — read off
+/// the snapshot on every redraw, never remembered across an announcement, for
+/// the reason [`stop_enabled`]'s doc gives.
+///
+/// It is [`resume_entry`] asked as a yes/no rather than a second predicate:
+/// the item is enabled exactly when a press would have an entry to start, so
+/// there is no state in which the item is clickable and the click does nothing
+/// on purpose. (A click can still find the state moved on — the snapshot the
+/// menu was drawn from is at most one tick old — and
+/// [`crate::scan_job::resume_scan`] is where that is handled.)
+pub fn resume_enabled(state: &crate::scan_state::ScanState) -> bool {
+    resume_entry(state).is_some()
+}
+
 /// Assembles the tray menu for a resolved language, the persisted choice
 /// behind it, and the scan the moment this is called — §8, plus the «Мова»
 /// submenu (§D129) that lets the user pin a language or return to Auto
@@ -291,6 +331,16 @@ pub fn build_tray_menu<R: Runtime>(
         stop_enabled(scan),
         None::<&str>,
     )?;
+    // F4: «Продовжити сканування», seeded from `scan` like Stop beside it and
+    // for the same reason — the menu has to be right the first time it is
+    // opened, and nobody polls it before then.
+    let resume = MenuItem::with_id(
+        app,
+        "resume",
+        tray_label(lang, "resume", hotkey),
+        resume_enabled(scan),
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(
         app,
         "quit",
@@ -309,11 +359,19 @@ pub fn build_tray_menu<R: Runtime>(
             &language_menu,
             &PredefinedMenuItem::separator(app)?,
             &stop,
+            &resume,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
-    Ok((menu, TrayItems { status, stop }))
+    Ok((
+        menu,
+        TrayItems {
+            status,
+            stop,
+            resume,
+        },
+    ))
 }
 
 /// The handles to the tray's live status and Stop items, as managed state
@@ -334,6 +392,10 @@ pub fn build_tray_menu<R: Runtime>(
 pub struct TrayItems<R: Runtime> {
     pub status: MenuItem<R>,
     pub stop: MenuItem<R>,
+    /// F4: «Продовжити сканування». Held here for [`refresh_tray`] to
+    /// re-enable, exactly like `stop` — an item whose enabled state is a fact
+    /// about the current scan is an item something has to redraw.
+    pub resume: MenuItem<R>,
 }
 
 /// Re-reads the scan and the locale from `AppState` and redraws both tray
@@ -371,6 +433,7 @@ pub fn refresh_tray<R: Runtime>(app: &tauri::AppHandle<R>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _ = guard.status.set_text(status_label(lang, &scan));
     let _ = guard.stop.set_enabled(stop_enabled(&scan));
+    let _ = guard.resume.set_enabled(resume_enabled(&scan));
 }
 
 /// Rebuilds the tray menu in `lang` and puts it on the live tray, keeping
@@ -618,6 +681,22 @@ mod tests {
         );
     }
 
+    /// Both languages, for the reason the Stop item's twin above gives: the
+    /// glyph is composed at the call site and the words come from the catalog,
+    /// so a label that lost either half would still be non-empty and
+    /// `every_tray_id_has_a_non_empty_label...` would go on passing.
+    #[test]
+    fn the_resume_item_composes_its_glyph_with_both_translations() {
+        assert_eq!(
+            tray_label(crate::locale::Lang::Uk, "resume", &registered("Alt+Space")),
+            "▶ Продовжити сканування"
+        );
+        assert_eq!(
+            tray_label(crate::locale::Lang::En, "resume", &registered("Alt+Space")),
+            "▶ Continue scanning"
+        );
+    }
+
     #[test]
     fn tray_item_ids_match_spec_order() {
         assert_eq!(
@@ -627,6 +706,9 @@ mod tests {
                 "show_search",
                 "open_settings",
                 "stop_indexing",
+                // F4: «Продовжити сканування» sits directly under Stop — the
+                // item a person reaches for after pressing the one above it.
+                "resume",
                 "quit"
             ],
             "the tray menu drifted from spec §8"
@@ -723,7 +805,7 @@ mod tests {
     // ── `status_label` / `stop_enabled` (Task 5) ──────────────────────────
 
     use crate::job::Progress;
-    use crate::scan_state::{OtherJob, Phase, ScanReport, ScanSnapshot, ScanState};
+    use crate::scan_state::{Entry, OtherJob, Phase, ScanReport, ScanSnapshot, ScanState};
 
     fn counts(done: u64, total: u64) -> Progress {
         Progress {
@@ -937,6 +1019,73 @@ mod tests {
             "Other carries no `files` field of its own — it draws ScanState::files, 0 here"
         );
         assert_eq!(status_label(Lang::Uk, &ended(7)), want);
+    }
+
+    /// An `Ended` snapshot whose report names `resume` — the one shape the
+    /// tray's «Продовжити сканування» is allowed to be clickable in.
+    fn ended_resuming(resume: Option<Entry>) -> ScanState {
+        ScanState {
+            snapshot: ScanSnapshot::Ended {
+                report: ScanReport {
+                    resume,
+                    ..ScanReport::default()
+                },
+            },
+            ..ScanState::default()
+        }
+    }
+
+    /// `resume_enabled` over every shape the slot can be in, as one table for
+    /// the reason `stop_is_enabled_only_while_a_cancellable_job_is_running`
+    /// gives: a variant added to `ScanSnapshot` without a row here would
+    /// silently narrow what this test claims to cover.
+    ///
+    /// The state pair this exists for is the last two rows — two `Ended`
+    /// snapshots that differ in nothing but `report.resume`. `true` on the one
+    /// that carries an entry, `false` on the one that does not, so an
+    /// implementation that answered `matches!(snapshot, Ended { .. })` (the
+    /// obvious wrong one: every ending would offer a button) goes red on the
+    /// `None` row, and one that answered a constant `false` goes red on the
+    /// `Some` rows.
+    #[test]
+    fn resume_is_enabled_only_when_the_ended_report_carries_its_own_resume() {
+        let rows: [(ScanState, bool); 8] = [
+            (idle(0), false),
+            (reading(0, 1), false),
+            (embedding(0, 1), false),
+            (removing(), false),
+            (other(OtherJob::ModelAdoption, false), false),
+            (other(OtherJob::Probe, true), false),
+            (ended_resuming(None), false),
+            (ended_resuming(Some(Entry::EmbedOnly)), true),
+        ];
+        for (state, want) in &rows {
+            assert_eq!(
+                resume_enabled(state),
+                *want,
+                "state = {state:?}, want resume_enabled = {want}"
+            );
+        }
+    }
+
+    /// `resume_enabled` is a boolean and the click needs the ENTRY, so the
+    /// entry is what the tray reads and the boolean is derived from it — this
+    /// pins that the entry handed on is the report's own and not a fixed one.
+    /// Both variants, because a `resume_entry` hardcoded to `Some(Entry::Full)`
+    /// would make every `resume_enabled` row above pass while a person who
+    /// stopped the embedding pass got their whole archive re-read.
+    #[test]
+    fn resume_entry_is_the_reports_own_entry_and_not_a_fixed_one() {
+        assert_eq!(
+            resume_entry(&ended_resuming(Some(Entry::Full))),
+            Some(Entry::Full)
+        );
+        assert_eq!(
+            resume_entry(&ended_resuming(Some(Entry::EmbedOnly))),
+            Some(Entry::EmbedOnly)
+        );
+        assert_eq!(resume_entry(&ended_resuming(None)), None);
+        assert_eq!(resume_entry(&reading(0, 1)), None);
     }
 
     /// `stop_enabled` over every shape the slot can be in, asserted as one
