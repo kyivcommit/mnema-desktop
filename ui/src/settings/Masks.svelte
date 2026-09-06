@@ -1,7 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import { listMasks, maskPreview, addMask, removeMask } from '../lib/ipc';
+  import type { JobController } from './jobs';
+
+  // 🔴 Taken for one reason only, and it is the independent review's second
+  // finding: this editor has to hear a reading pass end. It starts no job and
+  // presses no control of the controller's — `scan` and `cancel` are never
+  // called here — so what it uses is the store and nothing else.
+  let { jobs }: { jobs: JobController } = $props();
 
   // 🔴 The editor computes no counts of its own. `mask_preview` is the only
   // thing that may answer "how much goes", because it asks the walk's own
@@ -60,6 +68,11 @@
   // person told "you already have this" looks for what they typed and does not
   // find it in the list above.
   let alreadyStored = $state<string | null>(null);
+  // 🔴 The mask a withdrawn question was about, and the path `Folders.svelte`'s
+  // own `withdrawn` takes: the MASK, never the finished sentence, so a note
+  // standing on screen through a language switch is re-rendered in the language
+  // the person switched to.
+  let withdrawn = $state<string | null>(null);
 
   // Not `$state`: nothing renders from it. The list read is reachable from
   // three places — mount, an add and a remove — so two `list_masks` calls can
@@ -96,11 +109,67 @@
 
   onMount(refresh);
 
+  // 🔴 **A question outliving the reading pass that made its number wrong** —
+  // the independent review's second finding, and a regression F10 (Task 10e)
+  // introduced rather than an old defect: leaving this section used to destroy
+  // the question, and this editor now stays mounted for the window's life.
+  //
+  // The `add` question carries `paths` and `documents` frozen from ONE
+  // `mask_preview` reply (see `Pending`), computed against the documents the
+  // index held at the press. A reading pass that ends afterwards changes that
+  // set — the probe reproduced it: a question stating "this mask takes nothing"
+  // was still on screen, word for word, over an index a re-run of the same
+  // preview then costed at a hundred. Confirming it stores the mask against a
+  // set of documents the estimate never saw.
+  //
+  // What is withdrawn and what is kept are different decisions:
+  //   • the QUESTION goes, both kinds. The `remove` question quotes no number,
+  //     but its cost sentence is about the files a stored mask is holding back,
+  //     and that is what a pass has just re-read.
+  //   • a `checking` reply still on the wire is dropped, by the same generation
+  //     counter `askRemove` and `dismiss` bump — otherwise the preview issued
+  //     before the pass lands after it and raises the very question this just
+  //     took away.
+  //   • the DRAFT stays. It is what the person typed, no scan makes it wrong,
+  //     and losing it silently is F10's own sharper half.
+  //
+  // 🔴 Keyed on `ScanState.readSeq`, not on the snapshot becoming `ended`, for
+  // the two states `Folders.svelte`'s subscription spells out: an `embedOnly`
+  // run ends without reading a folder and invalidates nothing, while the
+  // embedding phase of a `full` run arrives as `running` with the counter
+  // already moved and every frozen number already stale. Seeded from the store
+  // so a pass that ended before this component existed is not read as one that
+  // ended under a question it never saw.
+  onMount(() => {
+    let seenReadSeq = get(jobs.state).scan.readSeq;
+    return jobs.state.subscribe(({ scan }) => {
+      if (scan.readSeq <= seenReadSeq) return;
+      seenReadSeq = scan.readSeq;
+      withdrawQuestion();
+    });
+  });
+
+  function withdrawQuestion() {
+    // The generation moves whether or not a question is open: a `checking`
+    // reply is in flight exactly when `pending` is `checking`, and bumping
+    // here is what keeps it from landing.
+    const p = pending;
+    if (p === null) return;
+    ++previews;
+    pending = null;
+    withdrawn = p.mask;
+  }
+
   function forget() {
     refused = null;
     actionError = null;
     alreadyGone = false;
     alreadyStored = null;
+    // The note is what the LAST press led to, and it stands until the next one
+    // — `Folders.svelte`'s rule for its own `withdrawn`. Both callers of this
+    // are presses that raise a new question, so the note goes with the answer
+    // it was standing in for.
+    withdrawn = null;
   }
 
   async function askAdd() {
@@ -198,6 +267,11 @@
   const alreadyGoneLabel = $derived.by(() => {
     void $locale;
     return alreadyGone ? t('settings_masks_already_gone') : null;
+  });
+  const withdrawnLabel = $derived.by(() => {
+    void $locale;
+    const mask = withdrawn;
+    return mask === null ? null : t('settings_masks_question_withdrawn', { mask });
   });
   const alreadyStoredLabel = $derived.by(() => {
     void $locale;
@@ -377,6 +451,9 @@
       {/if}
     </div>
   {/if}
+  <!-- Where the question was, so a person coming back to this panel reads the
+       withdrawal in the place they left the press. -->
+  {#if withdrawnLabel}<p data-testid="mask-question-withdrawn">{withdrawnLabel}</p>{/if}
   {#if alreadyGoneLabel}<p data-testid="mask-already-gone">{alreadyGoneLabel}</p>{/if}
   {#if alreadyStoredLabel}<p data-testid="mask-already-stored">{alreadyStoredLabel}</p>{/if}
   {#if refusal}

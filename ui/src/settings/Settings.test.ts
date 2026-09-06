@@ -1080,3 +1080,131 @@ test('a mask draft and its pending question survive a switch to another section 
   // one read of the mask list for the window, not one per visit.
   expect(listMasks).toHaveBeenCalledTimes(1);
 });
+
+// ---------------------------------------------------------------------------
+// 🔴 Independent review, finding 2. The half of F10 (Task 10e) that kept more
+// than it should have: `<Masks>` stays mounted for the window's life, so a
+// pending question survives a nav click — and so does the `mask_preview`
+// result frozen inside it, which a reading pass ending underneath makes wrong.
+// The three tests below are the whole window, with the real `Masks` and the
+// real controller, because the event has to travel the way it does in
+// production: through `Settings.svelte`'s controller into a section that is
+// `hidden` rather than unmounted.
+// ---------------------------------------------------------------------------
+
+// RED, with the `readSeq` subscription deleted from `Masks.svelte`: the
+// question is still standing on the return to Folders, and
+// `expect(screen.queryByTestId('mask-confirm')).toBeNull()` fails as
+// "AssertionError: expected <div data-testid="mask-confirm">…(4)</div> to be
+// null". The neighbour below goes red in the same run, on the note that never
+// appears: "TestingLibraryElementError: Unable to find an element by:
+// [data-testid="mask-question-withdrawn"]".
+test('a reading pass ending while the folders section is hidden withdraws the mask question, keeps the draft, and says so on return', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  const draft = () => screen.getByLabelText('New mask:') as HTMLInputElement;
+  await fireEvent.input(draft(), { target: { value: '*.txt' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  // The state the withdrawal is about is the question STANDING beforehand, so
+  // it is asserted rather than assumed.
+  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  expect(foldersShown()).toBe(false);
+
+  // A reading pass ends while the panel is hidden: `readSeq` 0 -> 1, which is
+  // the fact the withdrawal is keyed on.
+  await emit(endedOnce(10, 1));
+  await tick();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  expect(foldersShown()).toBe(true);
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
+  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toBe(
+    'The question about mask “*.txt” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
+  );
+  // The draft is what the person typed and no scan makes it wrong — this is the
+  // half F10 was right about, and withdrawing the question must not take it.
+  expect(draft().value).toBe('*.txt');
+  // Nothing was stored on the frozen estimate, and nothing re-asked behind the
+  // person's back: the next preview is the one THEY press for.
+  expect(addMask).not.toHaveBeenCalled();
+  expect(maskPreview).toHaveBeenCalledTimes(1);
+
+  // And pressing again asks it afresh, against the index as it now is — the
+  // other direction, and what makes the withdrawal a withdrawal rather than a
+  // dead end.
+  maskPreview.mockResolvedValue({ paths: 100, documents: 100 });
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  await waitFor(() => expect(maskPreview).toHaveBeenCalledTimes(2));
+  expect(visible(screen.getByTestId('mask-confirm-cost'))).toContain('100');
+  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+});
+
+// The generation half. A `checking` question is a `mask_preview` already on the
+// wire, and its answer is about the index as it stood at the press; landing
+// after the pass, it would raise the very question the withdrawal has just
+// taken away, carrying numbers a pass has already invalidated.
+//
+// RED, with `++previews` deleted from `withdrawQuestion` and the subscription
+// otherwise intact — so the withdrawal itself still happens and this test is
+// about the generation alone: the stale reply lands, raises the question again,
+// and `expect(screen.queryByTestId('mask-confirm')).toBeNull()` fails as
+// "AssertionError: expected <div data-testid="mask-confirm">…(4)</div> to be
+// null".
+test('a mask preview that answers after the reading pass ended raises nothing', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  const reply = deferredPromise<{ paths: number; documents: number }>();
+  maskPreview.mockReturnValueOnce(reply.promise);
+  await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.md' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  // In flight, not answered: the question on screen is the «checking» one.
+  await waitFor(() => expect(screen.getByTestId('mask-confirm')).toBeTruthy());
+  expect(screen.queryByTestId('mask-confirm-cost')).toBeNull();
+
+  await emit(endedOnce(11, 1));
+  await tick();
+  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toContain('*.md');
+
+  // The pre-scan answer, arriving after the pass that made it wrong.
+  reply.resolve({ paths: 7, documents: 3 });
+  await tick();
+  await tick();
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
+  expect(screen.queryByTestId('mask-confirm-cost')).toBeNull();
+  // The note is still the one the withdrawal wrote, not replaced by a question.
+  expect(visible(screen.getByTestId('mask-question-withdrawn'))).toContain('*.md');
+});
+
+// The pair, and the state that separates «a reading pass ended» from «a job
+// ended»: an `embedOnly` run ends like any other and reads no folder, so
+// nothing it did makes a frozen preview wrong. Withdrawing there would discard
+// a press and print "indexing has finished" over a run that read nothing —
+// the same distinction `Folders.svelte`'s own subscription is written on.
+test('an ending that read no folder leaves the mask question standing', async () => {
+  setLocale('en'); // seed, do not inherit
+  render(Settings);
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
+  await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.rtf' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  const cost = visible(screen.getByTestId('mask-confirm-cost'));
+
+  // `readSeq` STILL 0 — the seeded value — on an ending with a higher revision.
+  await emit(endedOnce(12, 0));
+  await tick();
+
+  expect(visible(screen.getByTestId('mask-confirm-cost'))).toBe(cost);
+  expect(screen.queryByTestId('mask-question-withdrawn')).toBeNull();
+});

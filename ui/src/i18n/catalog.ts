@@ -75,7 +75,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_confirm_cancel_named'
   | 'settings_masks_refused_add' | 'settings_masks_refused_store' | 'settings_masks_refused_remove'
   | 'settings_masks_refused_case_note' | 'settings_masks_already_gone'
-  | 'settings_masks_already_stored'
+  | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
   | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
@@ -666,6 +666,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // лише «таке правило вже є», шукала б у переліку те, що щойно ввела, і не
     // знайшла б його.
     settings_masks_already_stored: 'Таке правило у вас уже є — воно записане як «{stored}». Нічого не додано.',
+    // 🔴 Власний ключ, а не `settings_folders_question_withdrawn`: там панель
+    // ПЕРЕЧИТАНО, а тут застарів РОЗРАХУНОК — питання про маску несе число,
+    // яке дав `mask_preview` до того, як індексація змінила набір документів.
+    settings_masks_question_withdrawn: 'Питання про маску «{mask}» знято: індексацію закінчено, і розрахунок застарів. Натисніть ще раз, якщо це досі потрібно.',
     // Task 7 — the live reading phase names the folder it is on, one-based the
     // way `scan_job.rs`'s own comment states it ("3 of 7" is what a person
     // reads, and `rootIndex` is the folder being read now, not how many are
@@ -1118,6 +1122,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_refused_case_note: 'The answer above can quote your mask in a different letter case than the one you typed: masks are compared with letter case ignored.',
     settings_masks_already_gone: 'There was no such mask left to remove. The list has been re-read.',
     settings_masks_already_stored: 'You already have this rule — it is stored as {stored}. Nothing was added.',
+    settings_masks_question_withdrawn: 'The question about mask “{mask}” has been withdrawn: indexing has finished and the estimate is stale. Press again if you still want to.',
     indexing_reading_root: 'Indexing folder {rootIndex} of {rootCount}: {rootPath}',
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',

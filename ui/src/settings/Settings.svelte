@@ -298,8 +298,15 @@
         <Folders {jobs} />
         <!-- Beside the folder list, never inside a folder row (§9.2, D-c): a
              mask is global to the index, so drawing it under one root would
-             say it belongs to that root. It takes no `jobs` — nothing here
-             starts a job.
+             say it belongs to that root.
+             🔴 It takes `jobs`, and the reason is the independent review's
+             second finding rather than a control of its own — this editor
+             starts no job and stops none. What it needs the store for is the
+             same thing `<Folders>` beside it needs it for: a mask question
+             carries a `mask_preview` result frozen at the press, and a reading
+             pass ending underneath it makes that number wrong. Before this it
+             was the one half of the permanently-mounted panel that could not
+             hear the pass end.
              🔴 Mounted under the same `hidden` as the folder list, and by the
              owner's ruling on fix round 1 rather than by this file's own
              reading of the scope. The first round left it behind an `{#if}`
@@ -312,7 +319,7 @@
              the same way the list beside it does. Its `list_masks` therefore
              runs once per window, not once per visit; nothing else changes
              about it. -->
-        <Masks />
+        <Masks {jobs} />
       </div>
       {#if section === 'models'}
         <h2>{modelsLabel}</h2>
