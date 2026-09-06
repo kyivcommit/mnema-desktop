@@ -102,10 +102,16 @@ pub(crate) fn progress_from(progress: EmbedProgress, elapsed: Duration) -> Progr
 /// as it wrote. The last report is whatever the throttle let through, and on a
 /// run whose sends were failing it is not even that.
 ///
-/// `total` is the queue as it stood when the run began — carried from the
-/// reports rather than re-read from the database, because a second measurement
-/// after the run would be a different number (the queue has just been emptied)
-/// standing where the first one's denominator belongs.
+/// `total` is the queue as it stood when the run BEGAN, and the rule is about
+/// when it was measured rather than by whom: a second measurement taken after
+/// the run would be a different number (the queue has just been emptied)
+/// standing where the starting denominator belongs. Its one caller passes the
+/// run's own reported total once any report has arrived, and otherwise the
+/// count `scan_job`'s embedding phase took on its own connection just before
+/// the pass — both are the same `queued_chunk_count` over the same space, and
+/// both are from before. `scan_job::IndexCounts` is where that choice is
+/// argued, and the offset that turns this number into the whole index's is
+/// applied there too, after this function has had it.
 ///
 /// **`done + refused < total` is a normal ending, not a broken one.** A chunk
 /// whose text changed while its own request was in flight leaves the queue
