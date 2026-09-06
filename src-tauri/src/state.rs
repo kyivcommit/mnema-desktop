@@ -484,9 +484,21 @@ impl AppState {
     /// this far rather than restoring any overwritten `Ended`: `Removing` and
     /// the scan phases are the person's own doing, so their own ending is what
     /// should stand; and an ending with no `resume` has nothing a probe or an
-    /// adoption should be able to bring back — a stale "no key" sentence
-    /// surviving a key probe that just succeeded would be worse than the
-    /// `Idle` it replaces, not better.
+    /// adoption should be able to bring back — [`crate::tray::resume_entry`]
+    /// and the settings strip's own offer both read `report.resume` alone, so
+    /// restoring a report that carries `None` there would change nothing
+    /// either one draws.
+    ///
+    /// **Kept is not the same as trustworthy for the life of the `Other`
+    /// job.** A kept report's `resume`, `reason` and `ended_in` stay true for
+    /// as long as the slot holds it — nothing an `Other` job does can make a
+    /// past ending have stopped somewhere else. `embedding: Ran { done, total
+    /// }` is not like the other three: it is a count against
+    /// `meta.active_space` (F5, [`crate::scan_state::EmbedOutcome::Ran`]'s own
+    /// doc), and a model adoption's whole job is to repoint that meta key.
+    /// [`JobSlot::forget_restore`] is the escape hatch for exactly that job —
+    /// see its own doc for where it is called and why only that one count,
+    /// not the rest of the report, forces giving up the whole thing.
     pub fn claim_job(
         &self,
         initial: crate::scan_state::Phase,
@@ -692,12 +704,44 @@ pub struct JobSlot {
     /// Both `take()` it rather than clone it: whichever of the two runs is the
     /// only one that ever will, and a report clung to past that point is a
     /// leak of exactly the memory this whole mechanism is about.
+    ///
+    /// [`JobSlot::forget_restore`] can also empty this early, from inside the
+    /// `Other` job itself — see that method's own doc for the one caller that
+    /// needs to.
     restore: Option<crate::scan_state::ScanSnapshot>,
 }
 
 impl JobSlot {
     pub fn cancel_flag(&self) -> &AtomicBool {
         &self.cancel
+    }
+
+    /// Drops whatever [`AppState::claim_job`] kept in [`JobSlot::restore`], so
+    /// this slot's terminal write is plain `Idle` regardless of what it would
+    /// otherwise have carried back.
+    ///
+    /// For the one caller that must not carry a kept report home: `models.rs`'s
+    /// `set_embedding_model`, once `adopt_retiring_whatever_blocks` has
+    /// actually repointed `meta.active_space`. A kept report's `resume`,
+    /// `reason` and `ended_in` stay honest describing a run that really did
+    /// stop with something left to finish — but `embedding: Ran { done, total
+    /// }` is documented, on [`crate::scan_state::EmbedOutcome::Ran`] itself, as
+    /// every chunk the ACTIVE space has embedded (F5): read back after
+    /// adoption has moved that pointer, `done`/`total` would describe a space
+    /// nothing points at any more, not the new one the person just adopted.
+    /// `resume`/`reason`/`ended_in` are cheap to get wrong by comparison — they
+    /// name a fact about the past, not a count of the present index — which is
+    /// why only this one field is the reason to give up the whole report
+    /// rather than repairing it in place.
+    ///
+    /// Called at the one event that invalidates the numbers, not merely
+    /// inside a phase that might: [`crate::scan_state::Phase::Other`] is also
+    /// the probe's phase (`bridge.rs`'s `start_probe_job`), which moves
+    /// nothing and must go on restoring — calling this unconditionally at
+    /// claim time, or from the phase alone, would take the resume offer from
+    /// every probe too.
+    pub(crate) fn forget_restore(&mut self) {
+        self.restore = None;
     }
 
     /// Replaces what the running job says it is doing.
@@ -1671,6 +1715,56 @@ mod tests {
             state.scan_state().snapshot,
             ScanSnapshot::Ended { report: own_report },
             "a job that has its own report to give must give that one, never the kept one"
+        );
+    }
+
+    /// `forget_restore`'s own contract, through `finish`: once called, the
+    /// slot's `Terminal::Idle` arm writes plain `Idle` even though the claim
+    /// kept a resumable ending — the escape hatch `set_embedding_model` uses
+    /// once it has actually moved `meta.active_space`.
+    #[test]
+    fn forget_restore_makes_the_terminal_write_plain_idle_through_finish() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        seeding.finish(
+            Terminal::Ended {
+                report: ended_offering(Some(Entry::EmbedOnly)),
+            },
+            None,
+        );
+
+        let mut probe = state.claim_job(probe(), true).expect("the slot is free");
+        probe.forget_restore();
+        probe.finish(Terminal::Idle, None);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "forget_restore must make finish's Idle arm plain again, not the kept ending"
+        );
+    }
+
+    /// The same contract through `Drop`: `forget_restore` called and then the
+    /// slot vanished without `finish` at all must still land on plain `Idle`.
+    #[test]
+    fn forget_restore_makes_the_terminal_write_plain_idle_through_drop() {
+        let state = state();
+        let seeding = state.claim_job(reading(), true).expect("the slot is free");
+        seeding.finish(
+            Terminal::Ended {
+                report: ended_offering(Some(Entry::Full)),
+            },
+            None,
+        );
+
+        let mut probe = state.claim_job(probe(), true).expect("the slot is free");
+        probe.forget_restore();
+        drop(probe);
+
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "forget_restore must make Drop's fallback plain Idle too, not the kept ending"
         );
     }
 

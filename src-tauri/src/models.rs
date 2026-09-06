@@ -448,8 +448,9 @@ pub fn set_embedding_model(
     // the flag already exists to provide, and it holds in both directions — a
     // job cannot start while a change is in flight either.
     //
-    // **`let _slot`, never `let _`**: the second drops the slot at once and
-    // leaves nothing held at all.
+    // **`let mut slot`, never `let _`**: the second drops the slot at once and
+    // leaves nothing held at all, and `mut` is now load-bearing —
+    // `forget_restore` below takes `&mut self`.
     //
     // Claimed **after** the key is read — this command's own answer to the
     // same question `scan_job::embed_after`'s D-g answers the other way for
@@ -457,7 +458,7 @@ pub fn set_embedding_model(
     // the credential store can put an authorisation dialog on screen, and the
     // slot must not be held while somebody decides what to do about it.
     // Everything after this point that touches the index is inside the claim.
-    let _slot = state.claim_job(
+    let mut slot = state.claim_job(
         crate::scan_state::Phase::Other {
             job: crate::scan_state::OtherJob::ModelAdoption,
         },
@@ -482,6 +483,14 @@ pub fn set_embedding_model(
             existing_vectors,
         ))
     })??;
+    // 🔴 Right here, and nowhere earlier: this is the line that moves
+    // `meta.active_space`, and a kept resumable report's `embedding: Ran {
+    // done, total }` is a count against whichever space is active
+    // (`JobSlot::forget_restore`'s own doc). Before this point the two `?`s
+    // above can still leave with nothing retired and nothing repointed, in
+    // which case a kept report is still honest and must stay kept — an
+    // adoption that FAILS is not the event this forgets on.
+    slot.forget_restore();
     Ok(AdoptedModel {
         model,
         dim,
