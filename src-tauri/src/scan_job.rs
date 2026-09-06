@@ -161,12 +161,21 @@ pub(crate) fn start(state: &AppState, entry: Entry) -> Result<(), Error> {
 /// the half worth testing, and the only other way to read that decision back
 /// is to run a whole second scan and infer it.
 ///
-/// 🔴 **A refusal is logged and never shown.** A tray callback has no UI
-/// channel of its own (§6), and the refusal this will actually meet is
-/// `JobAlreadyRunning`: the menu was drawn from a snapshot at most one tick old
-/// (`refresh_tray` redraws on every announcement), so a job can claim the slot
-/// between the draw and the press. That is a stale enabled item, not a fault a
-/// person has anything to do about.
+/// 🔴 **ANY refusal is logged and never shown**, and «any» is the word review
+/// round 1 asked for rather than the one refusal that first came to mind. A
+/// tray callback has no UI channel of its own (§6), so every rejection [`start`]
+/// can answer with ends here as a press that appears to do nothing.
+///
+/// `JobAlreadyRunning` is the benign one and the one to expect: the menu was
+/// drawn from a snapshot at most one tick old (`refresh_tray` redraws on every
+/// announcement), so a job can claim the slot between the draw and the press —
+/// a stale enabled item, not a fault a person has anything to do about. The
+/// others are not benign. A stored exclusion prefix that `WalkRules::new`
+/// refuses fails an `Entry::Full` start every time it is pressed, and this is
+/// where the person is told nothing about it; the settings window's own button
+/// is the surface that has a sentence for that, and it is the surface a person
+/// has to reach for. Widening the tray to carry a refusal is out of this
+/// task's scope and is written down here rather than left to be rediscovered.
 pub(crate) fn resume_scan(
     state: &AppState,
     start_scan: impl FnOnce(&AppState, Entry) -> Result<(), Error>,
@@ -3487,11 +3496,14 @@ mod tests {
         );
     }
 
-    /// A refusal is swallowed, never propagated: `resume_scan` answers `()`,
+    /// ANY refusal is swallowed, never propagated: `resume_scan` answers `()`,
     /// and the one caller — the tray's menu handler — has no channel to show a
-    /// rejection on (§6). The refusal it will actually meet is
-    /// `JobAlreadyRunning`: the menu was drawn from a snapshot at most one tick
-    /// old, so a job can have claimed the slot between the draw and the press.
+    /// rejection on (§6). `JobAlreadyRunning` is used here because it is the
+    /// refusal to expect (the menu was drawn from a snapshot at most one tick
+    /// old, so a job can have claimed the slot between the draw and the press),
+    /// but nothing in this test or in `resume_scan` distinguishes it from the
+    /// rest — a `WalkRules` refusal over a stored exclusion prefix takes the
+    /// same silent path, which `resume_scan`'s own doc records.
     ///
     /// The assertion is that the starter WAS called and the call returning
     /// `Err` changed nothing about how this function returns — a `resume_scan`

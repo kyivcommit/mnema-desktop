@@ -22,6 +22,24 @@ use tauri::{
 use crate::locale::{self, Key, Lang, LocaleChoice};
 use crate::prefs::{HotkeyState, HotkeyStatus};
 
+/// The two tray ids that more than one module has to spell: the item's own
+/// menu entry is built here and its press is dispatched in `lib.rs`, so the
+/// string is written in two files that no compiler check ties together — a
+/// dispatcher arm spelled `"resume_scan"` against a menu item built as
+/// `"resume"` is an item that silently does nothing when pressed.
+///
+/// Only these two. The other ids (`show_search`, `open_settings`, `quit`, the
+/// language items) are left as the bare literals they have always been:
+/// widening this to all of them is a rename, not a fix, and the review that
+/// asked for these two asked for exactly these two.
+///
+/// `TRAY_ITEM_IDS` is built from them, and so is [`tray_label`]'s match — but
+/// `tray_item_ids_match_spec_order` deliberately keeps its literals, because a
+/// list compared against the constants it is built from is a list compared
+/// against itself.
+pub const STOP_ID: &str = "stop_indexing";
+pub const RESUME_ID: &str = "resume";
+
 /// Composes one tray item's label from the catalog (§D129). The emoji is a
 /// literal here and not in the catalog: the same glyph in both languages, not
 /// translatable text.
@@ -67,8 +85,8 @@ pub fn tray_label(lang: Lang, id: &str, hotkey: &HotkeyState) -> String {
             }
         },
         "open_settings" => format!("⚙ {}", locale::t(lang, Key::TrayOpenSettings)),
-        "stop_indexing" => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
-        "resume" => format!("▶ {}", locale::t(lang, Key::TrayResumeScanning)),
+        STOP_ID => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
+        RESUME_ID => format!("▶ {}", locale::t(lang, Key::TrayResumeScanning)),
         "quit" => format!("⏻ {}", locale::t(lang, Key::TrayQuit)),
         other => panic!("unknown tray id {other}"),
     }
@@ -87,8 +105,8 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     "status",
     "show_search",
     "open_settings",
-    "stop_indexing",
-    "resume",
+    STOP_ID,
+    RESUME_ID,
     "quit",
 ];
 
@@ -326,8 +344,8 @@ pub fn build_tray_menu<R: Runtime>(
 
     let stop = MenuItem::with_id(
         app,
-        "stop_indexing",
-        tray_label(lang, "stop_indexing", hotkey),
+        STOP_ID,
+        tray_label(lang, STOP_ID, hotkey),
         stop_enabled(scan),
         None::<&str>,
     )?;
@@ -336,8 +354,8 @@ pub fn build_tray_menu<R: Runtime>(
     // opened, and nobody polls it before then.
     let resume = MenuItem::with_id(
         app,
-        "resume",
-        tray_label(lang, "resume", hotkey),
+        RESUME_ID,
+        tray_label(lang, RESUME_ID, hotkey),
         resume_enabled(scan),
         None::<&str>,
     )?;
@@ -664,19 +682,11 @@ mod tests {
     #[test]
     fn the_stop_item_composes_its_glyph_with_both_translations() {
         assert_eq!(
-            tray_label(
-                crate::locale::Lang::Uk,
-                "stop_indexing",
-                &registered("Alt+Space")
-            ),
+            tray_label(crate::locale::Lang::Uk, STOP_ID, &registered("Alt+Space")),
             "⏹ Зупинити сканування"
         );
         assert_eq!(
-            tray_label(
-                crate::locale::Lang::En,
-                "stop_indexing",
-                &registered("Alt+Space")
-            ),
+            tray_label(crate::locale::Lang::En, STOP_ID, &registered("Alt+Space")),
             "⏹ Stop scanning"
         );
     }
@@ -688,11 +698,11 @@ mod tests {
     #[test]
     fn the_resume_item_composes_its_glyph_with_both_translations() {
         assert_eq!(
-            tray_label(crate::locale::Lang::Uk, "resume", &registered("Alt+Space")),
+            tray_label(crate::locale::Lang::Uk, RESUME_ID, &registered("Alt+Space")),
             "▶ Продовжити сканування"
         );
         assert_eq!(
-            tray_label(crate::locale::Lang::En, "resume", &registered("Alt+Space")),
+            tray_label(crate::locale::Lang::En, RESUME_ID, &registered("Alt+Space")),
             "▶ Continue scanning"
         );
     }

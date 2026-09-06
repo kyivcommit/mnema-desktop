@@ -495,7 +495,7 @@ pub fn run() -> anyhow::Result<()> {
             // enabled only while a cancellable job runs (`tray::stop_enabled`,
             // drawn by `tray::refresh_tray`) so as not to offer a control that
             // does nothing, which is a different concern from safety.
-            "stop_indexing" => {
+            tray::STOP_ID => {
                 app.state::<state::AppState>().cancel_job();
             }
             // F4 (Task 10c): the other half of the pair above — the tray could
@@ -509,9 +509,31 @@ pub fn run() -> anyhow::Result<()> {
             // is enabled only when the ended report names a resume
             // (`tray::resume_enabled`, drawn by `tray::refresh_tray`), and a
             // press on a snapshot that has moved on since the draw is refused
-            // by the job slot and logged, not shown (§6).
-            "resume" => {
-                scan_job::resume_scan(&app.state::<state::AppState>(), scan_job::start);
+            // and logged, not shown (§6).
+            //
+            // 🔴 **On a thread of its own, and that is not a nicety.** This
+            // handler runs on the main thread. `scan_job::start` reaches
+            // `start_inner`, which claims the slot, opens a job index and runs
+            // `read_roots` — a `with_index` call that blocks for as long as
+            // another job holds the connection (a folder removal alone, on the
+            // order of twenty seconds). Inline, a press would freeze every
+            // window redraw and every other menu click for that time. This is
+            // the same thing `start_scan_job` buys with
+            // `#[tauri::command(async)]`, which exists for exactly this reason
+            // (`bridge::open_index`'s doc): a call that can wait on that mutex
+            // must not be the one left running inline on the main thread.
+            // `std::thread::spawn` rather than the async runtime because the
+            // work is blocking and synchronous either way, and this is the
+            // shape `refresh_tray`'s own hop already uses. Nothing is awaited:
+            // the press's whole answer is the scan starting, which the tray
+            // learns about through the job observer like every other surface.
+            // `the_menu_handler_starts_a_scan_only_off_the_main_thread` is the
+            // guard.
+            tray::RESUME_ID => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    scan_job::resume_scan(&app.state::<state::AppState>(), scan_job::start);
+                });
             }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
@@ -877,6 +899,169 @@ mod tests {
             !body.contains("with_index"),
             "a `with_index` call reached the main-thread closure — this would block the whole \
              application for as long as a job holds the index. Closure body:\n{body}"
+        );
+    }
+    /// 🔴 **The second region of the same brittle guard above, and for a
+    /// harder-won reason.** Review round 1, Important 1: the `"resume"` arm
+    /// called `scan_job::resume_scan` inline on the main thread, and the start
+    /// it leads to is not cheap — `scan_job::start_inner` claims the slot,
+    /// opens a job index and runs `read_roots`, which is a `with_index` call.
+    /// `with_index` blocks for as long as another job holds the connection (a
+    /// folder removal alone, on the order of twenty seconds), so the press
+    /// would have frozen every window redraw and every other menu click for
+    /// that long. The window never had this defect: `start_scan_job` is
+    /// `#[tauri::command(async)]` precisely so that a command which waits on
+    /// that mutex is not left running inline on the main thread. The tray now
+    /// buys the same thing with `std::thread::spawn`.
+    ///
+    /// The guard is the whole `on_menu_event` handler, not just the one arm:
+    /// EVERY occurrence of the needles below anywhere in that handler must sit
+    /// inside a spawned closure. A future arm that starts a scan of its own
+    /// inline is the same defect and is caught by the same assertion, without
+    /// this test having to know the arm exists.
+    ///
+    /// 🔴 **The needles are the CALL, not the function's name alone.** The
+    /// review named `scan_job::start(` — that literal appears nowhere, because
+    /// `start` is passed to `resume_scan` as a function REFERENCE and never
+    /// called from this file at all, so a guard built on it would be a guard
+    /// that cannot fail. `resume_scan(` is the call this handler actually
+    /// makes, and the bare `scan_job::start` is kept beside it so that handing
+    /// the starter to anything else in this handler is caught too.
+    ///
+    /// Its limits are the neighbouring guard's: it protects the call sites
+    /// this file WRITES. A start reached indirectly through a function this
+    /// test cannot see into slips past, and so does a spawn hidden behind a
+    /// helper of another name.
+    #[test]
+    fn the_menu_handler_starts_a_scan_only_off_the_main_thread() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lib.rs could not read its own source at {path:?}: {e}"));
+
+        // The production half only, for `the_main_thread_closure_never_touches_
+        // the_index`'s reason: this test's own needles are string literals in
+        // the module below `#[cfg(test)]`, and a match against them is
+        // indistinguishable from a match against the handler.
+        let cfg_test_at = src
+            .find("#[cfg(test)]")
+            .expect("this file must carry its own #[cfg(test)] module marker");
+        let production = &src[..cfg_test_at];
+
+        // `concat!` for the same reason the neighbouring guard gives: no single
+        // literal in this file spells a whole needle out.
+        let handler_at = {
+            let opener = concat!(".on_menu_event", "(|app, event| match");
+            let found: Vec<usize> = production.match_indices(opener).map(|(i, _)| i).collect();
+            match found.as_slice() {
+                [one] => *one,
+                [] => panic!(
+                    "no `{opener}` found above #[cfg(test)] — the menu handler moved, was \
+                     renamed, or was removed, and this guard is now protecting nothing"
+                ),
+                many => panic!(
+                    "found {} occurrences of `{opener}` — this guard only knows how to check \
+                     ONE menu handler. Byte offsets: {many:?}",
+                    many.len()
+                ),
+            }
+        };
+        let handler = &production[handler_at..handler_at + balanced_len(&production[handler_at..])];
+        // 🔴 **Comments are blanked before the search, byte for byte.** The
+        // arm's own comment explains the fix in the words `scan_job::start`,
+        // and a guard that reads prose as code fails on the sentence that
+        // documents it — which is not a defect, it is a guard measuring the
+        // wrong thing. Blanking with SPACES (one byte each, as many as the
+        // comment held) keeps every offset in `code` equal to its offset in
+        // `handler`, so the failure message can quote the real source.
+        //
+        // It is `//` to end of line, the same rule `tests/locale_guard.rs`'s
+        // own sweep uses. A `//` inside a string literal would be blanked too;
+        // there is none in this handler, and the day there is, the guard's
+        // failure mode is a false GREEN — which is why the needles below are
+        // asserted to be present at all.
+        let code = blank_comments(handler);
+
+        // Every `std::thread::spawn(move || {` body inside the handler, as
+        // half-open byte ranges — the regions a start is allowed to happen in.
+        let spawn_opener = concat!("std::thread::spawn", "(move || {");
+        let spawned: Vec<std::ops::Range<usize>> = code
+            .match_indices(spawn_opener)
+            .map(|(at, _)| {
+                let body = at + spawn_opener.len();
+                body..body + balanced_len_from_inside(&code[body..])
+            })
+            .collect();
+
+        for needle in [concat!("resume_scan", "("), concat!("scan_job::", "start")] {
+            let hits: Vec<usize> = code.match_indices(needle).map(|(i, _)| i).collect();
+            assert!(
+                !hits.is_empty(),
+                "no `{needle}` in the menu handler — the resume arm moved or was renamed, and \
+                 this guard is now unfalsifiable"
+            );
+            for at in hits {
+                assert!(
+                    spawned.iter().any(|body| body.contains(&at)),
+                    "`{needle}` at byte {at} of the menu handler is NOT inside a \
+                     `{spawn_opener}` closure — it would run on the main thread, and the start \
+                     it leads to opens the index (`scan_job::start_inner` → `read_roots` → \
+                     `with_index`), freezing every window redraw and every other menu click \
+                     for as long as a job holds the connection. Handler:\n{handler}"
+                );
+            }
+        }
+    }
+
+    /// `src` with every `//`-to-end-of-line comment replaced by exactly as many
+    /// SPACES as it held bytes, so that offsets into the answer are offsets
+    /// into `src`.
+    fn blank_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        for line in src.split_inclusive('\n') {
+            match line.find("//") {
+                Some(at) => {
+                    out.push_str(&line[..at]);
+                    let commented = &line[at..];
+                    let newline = commented.ends_with('\n');
+                    let blanked = commented.len() - usize::from(newline);
+                    out.push_str(&" ".repeat(blanked));
+                    if newline {
+                        out.push('\n');
+                    }
+                }
+                None => out.push_str(line),
+            }
+        }
+        debug_assert_eq!(out.len(), src.len(), "blanking moved the offsets");
+        out
+    }
+
+    /// The byte length of `src` from its FIRST `{` through the `}` that closes
+    /// it — the shape both source-reading guards need and neither should write
+    /// twice.
+    fn balanced_len(src: &str) -> usize {
+        let open = src.find('{').expect("no `{` to balance from");
+        open + 1 + balanced_len_from_inside(&src[open + 1..])
+    }
+
+    /// The byte length of the region from `src`'s start (already INSIDE one
+    /// open brace) up to, but not including, the `}` that closes it.
+    fn balanced_len_from_inside(src: &str) -> usize {
+        let mut depth: i32 = 1;
+        for (offset, ch) in src.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!(
+            "braces never balanced — this guard's own brace-matching broke, not the invariant it protects"
         );
     }
 }
