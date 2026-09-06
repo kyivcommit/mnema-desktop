@@ -982,25 +982,62 @@ mod tests {
     /// fakes with failure modes live in `tests/commands.rs`, where the fixtures
     /// that need them are; this one exists because `change_hotkey`'s critical
     /// section cannot be driven through the IPC.
+    ///
+    /// Every call gets a position from one shared counter (`seq`), and — once
+    /// [`watch`](Self::watch) is armed — is also sent on a channel the instant
+    /// it is recorded. Both exist for
+    /// `two_hotkey_changes_cannot_interleave`'s two independent
+    /// discriminators: the channel turns "did a rogue call happen" into an
+    /// event instead of a sleep, and the shared counter lets a call be
+    /// compared against a moment the test itself marks, without a sleep
+    /// either.
     #[derive(Default)]
     struct CountingRegistrar {
-        calls: Mutex<Vec<String>>,
+        calls: Mutex<Vec<(usize, String)>>,
+        seq: std::sync::atomic::AtomicUsize,
+        call_tx: Mutex<Option<std::sync::mpsc::Sender<(usize, String)>>>,
+    }
+
+    impl CountingRegistrar {
+        /// One order shared by every call this registrar records and by
+        /// whatever moments a test marks alongside them — `next_seq` alone,
+        /// called with nothing recorded against it, is how the test marks
+        /// such a moment.
+        fn next_seq(&self) -> usize {
+            self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// From this point on, every recorded call also arrives on `tx`
+        /// immediately, so a caller can `recv_timeout` for "did anything call
+        /// the operating system" instead of sleeping a fixed amount of time
+        /// and inspecting the tally afterwards. Calls made before `watch` is
+        /// armed are recorded but never sent — the one test that uses this
+        /// arms it only after the calls it does not care about have already
+        /// happened.
+        fn watch(&self, tx: std::sync::mpsc::Sender<(usize, String)>) {
+            *self.call_tx.lock().unwrap() = Some(tx);
+        }
+
+        fn record(&self, call: String) {
+            let seq = self.next_seq();
+            self.calls.lock().unwrap().push((seq, call.clone()));
+            if let Some(tx) = self.call_tx.lock().unwrap().as_ref() {
+                // The receiver may already be gone (the test dropped it after
+                // its one `recv_timeout`); a call arriving after that is not
+                // this fake's problem to report.
+                let _ = tx.send((seq, call));
+            }
+        }
     }
 
     impl crate::os_services::ShortcutRegistrar for std::sync::Arc<CountingRegistrar> {
         fn register(&self, shortcut: &str) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("register({shortcut})"));
+            self.record(format!("register({shortcut})"));
             Ok(())
         }
 
         fn unregister(&self, shortcut: &str) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("unregister({shortcut})"));
+            self.record(format!("unregister({shortcut})"));
             Ok(())
         }
     }
@@ -1012,17 +1049,38 @@ mod tests {
         // uses one function up — and for the same reason: a "two threads, N
         // changes each, then check the state is consistent" test passes on an
         // unserialised implementation whenever the interleaving happens not to
-        // occur. This one parks the first change INSIDE its persist and asserts
-        // that the second has not yet touched the operating system.
+        // occur. This one parks the first change INSIDE its persist and then
+        // proves the second has not touched the operating system through two
+        // discriminators that do not depend on a sleep outrunning the mutant:
         //
-        // 🔴 The discriminator is the REGISTRAR's call list, not the file.
-        // Without the lock the second caller does not block until `write_key`,
-        // which is several operating-system calls later — so by the time it
-        // waits it has already unregistered a shortcut the first caller gave up
-        // and registered one over the top. The file would look the same either
-        // way; the recorded calls do not.
+        // 1. EVENT: once B is spawned, every registrar call is also sent on
+        //    `call_rx` the instant it is recorded (`CountingRegistrar::watch`,
+        //    below). Serialised, B is blocked on `lock_hotkey_change` and
+        //    cannot call the registrar until A is released — long after this
+        //    `recv_timeout` — so nothing ever arrives and it always times out.
+        //    Unserialised, B's `unregister`/`register` calls race ahead
+        //    immediately and land on the channel within microseconds: this
+        //    call comes back `Ok` almost at once rather than needing the full
+        //    window to elapse before a length check would notice anything.
+        //    (Note: the discriminator is NOT "B reached the write-key hook" —
+        //    `PREFS_LOCK` alone already serialises entry to that hook, mutant
+        //    or not, so it could never tell the two apart. The registrar is
+        //    the thing this bug actually leaves unserialised.)
+        // 2. SEQUENCE: `a_released`, a position drawn from the same counter
+        //    every registrar call draws from, marked immediately before A is
+        //    released. Serialised, B cannot reach the registrar until after
+        //    that release, so both of its calls are guaranteed a later
+        //    position — not by racing a clock, but because the mutex B blocks
+        //    on cannot be acquired before the release happens. Unserialised,
+        //    B's calls are already on the list before this mark is even
+        //    taken.
+        //
+        // Either half alone kills the mutation at
+        // `scripts/mutations/pr9-shell.sh` that comments out
+        // `state.lock_hotkey_change()`; both are proven independently in the
+        // task's own verification, not just by this test passing.
         use std::sync::Arc;
-        use std::sync::mpsc::sync_channel;
+        use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
@@ -1041,7 +1099,6 @@ mod tests {
         // Reach `Registered("Alt+Space")` through the function itself, before
         // the hook is installed — otherwise this write would park too.
         change_hotkey(&state, "Alt+Space".to_string()).unwrap();
-        let after_drive = registrar.calls.lock().unwrap().len();
 
         let (parked_tx, parked_rx) = sync_channel::<()>(1);
         let (release_tx, release_rx) = sync_channel::<()>(1);
@@ -1065,23 +1122,40 @@ mod tests {
         // this binary can be caught by it.
         _turn.clear();
 
+        // Armed only now: A's own two calls above must never reach this
+        // channel, or a correct run would see them and look like a rogue call
+        // from B.
+        let (call_tx, call_rx) = std::sync::mpsc::channel();
+        registrar.watch(call_tx);
+
         let b_state = state.clone();
         let b = std::thread::spawn(move || change_hotkey(&b_state, "Ctrl+Shift+Space".to_string()));
-        // Long enough for an unserialised second caller to have finished both
-        // of its operating-system calls, which take no time against a fake.
-        std::thread::sleep(Duration::from_millis(300));
-        let while_parked = registrar.calls.lock().unwrap().clone();
-        // Read, then release, THEN assert — a panic between the two would leave
-        // thread A parked holding `PREFS_LOCK` for the life of this binary and
-        // every later test that writes preferences would block on it, so cargo
-        // would report a timeout instead of this failure.
+
+        // Discriminator 1. 300ms is generous against a fake registrar, whose
+        // calls take no perceptible time either way; the correct code spends
+        // all of it waiting, the mutant almost none.
+        let rogue_call = call_rx.recv_timeout(Duration::from_millis(300));
+        // Discriminator 2's mark, taken before the release below so that on
+        // the correct code nothing B does can predate it.
+        let a_released = registrar.next_seq();
+
+        // Mark and release BEFORE asserting anything: a panic between the two
+        // would leave thread A parked holding `PREFS_LOCK` for the life of
+        // this binary, and every later test that writes preferences would
+        // block on it, so cargo would report a timeout instead of this
+        // failure.
         release_tx.send(()).unwrap();
-        assert_eq!(
-            while_parked.len(),
-            after_drive + 2,
-            "the second change reached the operating system while the first was still \
-             inside its critical section: {while_parked:?}"
-        );
+
+        match rogue_call {
+            Ok((seq, call)) => panic!(
+                "the second change reached the operating system ({call}, sequence {seq}) \
+                 while the first was still inside its critical section"
+            ),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("the call channel disconnected before anything used it")
+            }
+        }
 
         let a = a.join().unwrap().expect("the first change failed");
         let b = b.join().unwrap().expect("the second change failed");
@@ -1092,8 +1166,10 @@ mod tests {
             Some(&json!("Ctrl+Shift+Space")),
             "the change that finished last must be the one on disk"
         );
+
+        let calls = registrar.calls.lock().unwrap().clone();
         assert_eq!(
-            *registrar.calls.lock().unwrap(),
+            calls.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
             vec![
                 "register(Alt+Space)".to_string(),
                 "unregister(Alt+Space)".to_string(),
@@ -1103,6 +1179,17 @@ mod tests {
             ],
             "serialised, the two changes are one sequence with no shortcut given up twice"
         );
+        // Discriminator 2's assertion: B's own two calls, named by the
+        // shortcuts only it ever touches, must both sit after `a_released`.
+        for (seq, call) in &calls {
+            if call == "unregister(Ctrl+Alt+Space)" || call == "register(Ctrl+Shift+Space)" {
+                assert!(
+                    *seq > a_released,
+                    "B's call {call} (sequence {seq}) happened at or before A's release \
+                     (sequence {a_released}): {calls:?}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
