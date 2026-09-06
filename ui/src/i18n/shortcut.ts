@@ -19,10 +19,15 @@ import type { Platform } from '../lib/ipc';
 // which is `prefs.rs`'s `MODIFIER_SPELLINGS`; `MODIFIER_ALIASES` below says
 // where the two differ and what that difference costs a person. Nothing here is
 // a sentence; every sentence this section shows comes from `catalog.ts` or
-// verbatim from the backend. Every one of these tokens is carried by its OWN
-// named entry in `guard.test.ts`'s `LATIN_ALLOWLIST`, not by an exemption for
-// this file: a new one added here needs a new entry there with a reason that
-// is actually true, or the sweep fails on it — loudly, by design.
+// verbatim from the backend. Every token WRITTEN AS A STRING LITERAL in this
+// file (`Ctrl`, `Alt`, `Shift`, `Super`, `Space`, the aliases) is carried by
+// its OWN named entry in `guard.test.ts`'s `LATIN_ALLOWLIST`, not by an
+// exemption for this file: a new literal added here needs a new entry there
+// with a reason that is actually true, or the sweep fails on it — loudly, by
+// design. The key names sliced out of `event.code` (`F1`, `ArrowUp`) reach the
+// screen without ever being a literal here, so the sweep never sees them and
+// no entry exists for them; an arm of that kind is pinned by
+// `shortcut.test.ts`'s `shortcutFromEvent` cases, not by the sweep.
 
 // The canonical order, and it is canonical rather than incidental. The parser
 // is indifferent to the order of the modifiers AMONG THEMSELVES but not to the
