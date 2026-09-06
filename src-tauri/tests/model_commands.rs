@@ -2512,6 +2512,70 @@ fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed()
     );
 }
 
+/// The residual gap review round 3 found in `set_embedding_model`'s
+/// `forget_restore` fix: `adopt_retiring_whatever_blocks` can drop a space
+/// and THEN fail (`Error::RetiredThenFailed`, `failure_after_retiring`'s own
+/// doc) — the drop already committed before this function ever sees the
+/// error, so the space moved just as much as a plain success does.
+/// `forget_restore` must run on this exit too, not only on `Ok`.
+#[test]
+fn an_adoption_that_retired_a_space_and_then_failed_forgets_the_resumable_ending() {
+    // The same squatting-table lever
+    // `an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed`
+    // uses: the first attempt drops the old (non-empty) space and commits;
+    // the retry's own `CREATE TABLE` for the new space collides with this one
+    // and fails with an error that is not `SpaceNotEmpty`, so
+    // `adopt_retiring_whatever_blocks` returns `RetiredThenFailed` rather than
+    // looping again.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    fx.state()
+        .with_index(|db| {
+            let seq: i64 = db.conn().query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'embedding_space'",
+                [],
+                |r| r.get(0),
+            )?;
+            db.conn()
+                .execute(&format!("CREATE TABLE vec_emb_{} (x)", seq + 1), [])?;
+            Ok(())
+        })
+        .expect("the squatting table is created");
+
+    let report = a_resumable_embedding_ending();
+    fx.state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
+        .expect_err("the squatting table makes the retry fail");
+    assert!(
+        matches!(refusal, Error::RetiredThenFailed { .. }),
+        "the wrong refusal proves nothing about a space having moved: {refusal:?}"
+    );
+
+    assert_eq!(
+        fx.state().scan_state().snapshot,
+        ScanSnapshot::Idle,
+        "a space was retired before this failure — the kept ending's numbers are just as \
+         stale as after a success, and must not survive either"
+    );
+}
+
 /// The default set is applied inside the job slot, and a slot that is taken
 /// means it is simply not applied — a default the next key or the next explicit
 /// choice will apply anyway.
