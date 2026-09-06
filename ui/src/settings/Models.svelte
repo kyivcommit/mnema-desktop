@@ -63,12 +63,13 @@
   // scan-ended re-read is the only thing that ever tries again, on its own
   // schedule, not a button a person presses.
   //
-  // 🔴 Left open rather than fixed here: a successful re-read never clears
-  // this. A mount that fails and a LATER scan-ended re-read that succeeds
-  // would show the fresh panel beside a stale "could not be read" sentence —
-  // a claim outliving its own guard. Out of scope for the fix this comment
-  // sits beside, which is about the opposite order (a re-read failing AFTER
-  // a successful mount): named here so it is not mistaken for unconsidered.
+  // A read that succeeds takes this away with it: `refresh()` clears it on
+  // its success branch, the same rule `Settings.svelte:95-104` already keeps
+  // for its own copy of this state (mutation-guarded there, `pr9-ui.sh`,
+  // "a read that succeeds must take the failure sentence away with it"). A
+  // mount that fails followed by a later scan-ended re-read that succeeds
+  // must not leave a stale "could not be read" sentence beside a panel a
+  // newer read has already confirmed — a claim outliving its own guard.
   let loadError = $state<string | null>(null);
   let removal = $state<KeyRemoval['kind'] | null>(null);
 
@@ -88,6 +89,7 @@
     const s = await modelSettings();
     if (seq !== settingsSeq) return; // superseded before this reply arrived
     settings = s;
+    loadError = null;
   }
 
   // §10: a rejection arrives as a sentence, never as a kind. Shown verbatim,

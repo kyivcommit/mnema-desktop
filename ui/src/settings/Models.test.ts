@@ -701,6 +701,30 @@ test('a rejected re-read after a scan ends leaves the sentence on screen, and th
   expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
 });
 
+// The other direction: a mount that fails, followed by a scan-ended re-read
+// that SUCCEEDS. `refresh()` used to write `settings` on success without ever
+// clearing `loadError`, so the stale "could not be read" sentence would sit
+// forever beside a panel a later read had already confirmed — a claim
+// outliving its own guard, the same class `Settings.svelte` already guards
+// for its own copy of this state (`Settings.svelte:95-104`, mutation case
+// pr9-ui.sh "a read that succeeds must take the failure sentence away with
+// it"). Both directions asserted: the sentence is gone, and the panel the
+// successful re-read produced is actually on screen, not merely "no crash".
+test('a read that succeeds after a failed one takes the failure sentence away', async () => {
+  setLocale('en');
+  modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
+
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+  emit(endedScan());
+
+  await waitFor(() => expect(screen.queryByTestId('model-load-failure')).toBeNull());
+  expect(screen.queryByTestId('model-load-reason')).toBeNull();
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+});
+
 // ---------------------------------------------------------------------------
 // Review P3-8: `startEditing` clears `actionError` and `cancelEditing` did
 // not, so a failed Save followed by Cancel left the failure sentence beside a
