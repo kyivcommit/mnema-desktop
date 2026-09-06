@@ -527,10 +527,17 @@ jobs:
     # and a cold key adds one cold dependency build to every leg (3:02–3:23
     # on 33671866360), which still fits.
     #
-    # `pr9b-scan` joined at Task 11b, and it is the leg to watch: 31 cases —
-    # more than any file here but `embedding` — and most of them run a REAL
-    # scan over a temporary folder rather than a pure function, several
-    # through `#[cfg(unix)]` fixtures that make a subdirectory unreadable.
+    # `pr9b-scan` joined at Task 11b, and it is the leg to watch. Most of its
+    # cases run a REAL scan over a temporary folder rather than a pure
+    # function, several through `#[cfg(unix)]` fixtures that make a
+    # subdirectory unreadable.
+    #
+    # ⚠️ No count of its cases here, and that is the second time this comment
+    # has been wrong about one: it said 31 when the file held 32, and the file
+    # holds 35 now. A number in a comment is a definition, and this one drifts
+    # every time a review adds a guard. Re-derive:
+    #
+    #   grep -c '^case_ ' scripts/mutations/pr9b-scan.sh
     # Measured locally on an Apple M2 Max with `MNEMA_MUTATION_TARGET_DIR`
     # warm: **2m18s of harness, 145% cpu**, which puts it between
     # `pr8-subfolders-linux` and `embedding` rather than above either. The one

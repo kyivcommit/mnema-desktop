@@ -70,10 +70,13 @@
 #     reads the folder's real path and the compare below still refuses. Not an
 #     equivalent mutant; simply one no fixture here reaches.
 #
-# CLOSED in fix round 1, and named so the list reads as a history rather than
-# as a standing gap: `revision` not bumped on `finish` had no oracle when this
-# file was written. `state::tests::an_ending_moves_the_revision_once_and_is_
-# announced_after_it_is_written` is that oracle now, and the case is below.
+# CLOSED, and named so the list reads as a history rather than as a standing
+# gap. Fix round 1: `revision` not bumped on `finish` had no oracle when this
+# file was written; `state::tests::an_ending_moves_the_revision_once_and_is_
+# announced_after_it_is_written` is that oracle now. Final fix round 1: the
+# three REMAINING writes to `ScanState` — `drop`, `update` and
+# `mark_reading_done` — had the same hole, and `drop`'s is the one no later
+# write can repair. All four cases are below, together.
 
 # ── The job slot: what a surface is told, and when (Task 1) ──────────────────
 
@@ -114,6 +117,62 @@ case_ "an ending must move the revision, or no surface can tell it happened" \
   's~            if let Some\(files\) = files \{\n                scan\.files = files;\n            \}\n            scan\.revision \+= 1;\n        \}~            if let Some(files) = files \{\n                scan.files = files;\n            \}\n            // mutant: the ending carries the revision the last tick already had\n        \}~' \
   '// mutant: the ending carries the revision the last tick already had' \
   mnema-desktop 'state::tests::an_ending_moves_the_revision_once_and_is_announced_after_it_is_written' --lib
+
+# 🔴 **The same defect at the three remaining writes, and `Drop`'s is the one
+# that never recovers.** `revision` is the only thing that makes a write visible
+# — `apply` keeps the strictly greater state and throws the rest away — and the
+# state itself is left perfectly correct by every one of these mutants, so an
+# assertion phrased on the snapshot passes against all three. `finish` had this
+# guard from fix round 1; the final review found the other three writes with no
+# test that could tell them from a version that skipped the bump.
+#
+# Each is anchored on the lines above the bump rather than on the bump itself:
+# `scan.revision += 1;` occurs six times in this file and nothing else about
+# them differs.
+
+# 🔴 The worst of the three. A scan that panics or returns through `?` inside the
+# reading pass leaves its ending to `Drop` — and there is NO LATER WRITE, because
+# the job that would have announced again has gone. The strip goes on drawing a
+# reading pass with Stop live over a slot that is free, for the life of the
+# window; only a reload recovers, since `mount()` reads `jobStatus` against
+# `apply`'s revision-0 default. The tray is unaffected — it re-reads
+# `scan_state()` — so the two surfaces disagree and only the window is wrong.
+case_ "a job that vanished must move the revision, or the window never hears it ended" \
+  src-tauri/src/state.rs \
+  's~            \} else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n            scan\.revision \+= 1;~            } else \{\n                crate::scan_state::ScanSnapshot::Idle\n            \};\n            // mutant: a job that vanished leaves the counter where it was~' \
+  '// mutant: a job that vanished leaves the counter where it was' \
+  mnema-desktop 'state::tests::a_reading_job_that_vanished_ends_with_the_report_nobody_wrote' --lib
+
+# 🔴 `update` is the ONLY write during a running scan: the claim publishes
+# `root_count: 0` and an empty path, and everything after it — the real folder
+# count, every throttled progress tick, every folder change, and the Reading →
+# Embedding phase change — is this function. With no bump `apply` discards all of
+# it, so the strip draws «0 з 0» over an empty folder name for the whole scan and
+# then jumps straight to the report, with the phase never changing on screen.
+case_ "a progress tick must move the revision, or the whole scan is invisible" \
+  src-tauri/src/state.rs \
+  's~                phase,\n                cancellable: self\.cancellable,\n            \};\n            scan\.revision \+= 1;~                phase,\n                cancellable: self.cancellable,\n            \};\n            // mutant: a progress tick leaves the counter where it was~' \
+  '// mutant: a progress tick leaves the counter where it was' \
+  mnema-desktop 'state::tests::only_a_finished_reading_pass_moves_read_seq' --lib
+
+# The milder of the three, and the guard is owed anyway. `mark_reading_done`
+# moves `read_seq` and `last_reading` with NO snapshot change at all, so
+# `revision` is the only thing that can carry it: unbumped, the window never
+# learns the reading pass ended, does not re-read the index, and the partial-read
+# warning never appears. It is transient rather than permanent — the next write
+# carries the same fields with a higher revision — but what makes it transient is
+# a caller's behaviour, not this function's contract.
+#
+# ⚠️ This case and the one above name the SAME test, and that is the point: until
+# the final review that test asserted `done.revision > claimed.revision` end to
+# end, which either bump satisfies alone. It now reads the revision between the
+# two calls and asserts each step is exactly one, so each mutant dies on its own
+# assertion rather than on its neighbour's.
+case_ "a reading pass ending must move the revision on its own, not on the tick before it" \
+  src-tauri/src/state.rs \
+  's~            scan\.last_reading = Some\(outcome\);\n            scan\.read_seq \+= 1;\n            scan\.revision \+= 1;~            scan.last_reading = Some(outcome);\n            scan.read_seq += 1;\n            // mutant: the pass ends without moving the counter~' \
+  '// mutant: the pass ends without moving the counter' \
+  mnema-desktop 'state::tests::only_a_finished_reading_pass_moves_read_seq' --lib
 
 # 🔴 A reading job that vanished, sent back to `Idle`. The window then says the
 # folder was read to the end when it was not — an idle application over an index
