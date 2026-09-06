@@ -9,6 +9,47 @@ const CYRILLIC = /[Ѐ-ӿ]/;
 // entry written for the first one silently forgave its unrelated neighbour.
 const LATIN_RUN = /[A-Za-z]{2,}/g;
 
+// Blanks `.ts` comments (`//` and `/* */`) so the Cyrillic sweep can look past
+// a developer citation — `recency.ts:46` quotes a Ukrainian spec heading
+// verbatim in a doc comment — without excluding the whole file, which would
+// also hide a real Cyrillic literal added there later. String/template
+// content is walked and kept as-is (a `//` inside a string is consumed by the
+// quote jump below, never independently reached as a comment marker), so this
+// only ever removes developer prose, never code or string content. Not used
+// for `.svelte` files: a raw `//` in visible markup text (a URL typed with no
+// surrounding quotes) would be misread as a comment there, which `.ts` source
+// does not risk the same way.
+function stripJsComments(src: string): string {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      const end = nl === -1 ? src.length : nl;
+      i = end;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      const end = close === -1 ? src.length : close + 2;
+      i = end;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c;
+      let j = i + 1;
+      while (j < src.length && src[j] !== q) { if (src[j] === '\\') j++; j++; }
+      out.push(src.slice(i, Math.min(j + 1, src.length)));
+      i = j + 1;
+      continue;
+    }
+    out.push(c);
+    i++;
+  }
+  return out.join('');
+}
+
 // Attribute names whose value is never prose. Every attribute NOT named here
 // has its string value scanned, which is the point: naming the readable ones
 // instead would be a closed list over an open set, and every component prop a
@@ -86,7 +127,46 @@ function walk(dir: string): string[] {
 // by base name, not by suffix: an entry for `s.svelte` must not stand in for
 // `Settings.svelte`.
 type Allowlisted = { file: string; text: string; reason: string };
-const LATIN_ALLOWLIST: Allowlisted[] = [];
+const LATIN_ALLOWLIST: Allowlisted[] = [
+  // shortcut.ts emits the DISPLAY vocabulary a global shortcut is drawn
+  // with — modifier names, key names, their Windows/Linux spellings — never
+  // a sentence (every sentence this module shows comes from `catalog.ts`).
+  // Each token is a name printed on a physical key or a DOM `KeyboardEvent`
+  // constant, not prose read as a phrase.
+  { file: 'shortcut.ts', text: 'Ctrl', reason: 'modifier name, printed on the key' },
+  { file: 'shortcut.ts', text: 'Alt', reason: 'modifier name, printed on the key' },
+  { file: 'shortcut.ts', text: 'Shift', reason: 'modifier name, printed on the key' },
+  { file: 'shortcut.ts', text: 'Super', reason: 'modifier name, Linux spelling' },
+  { file: 'shortcut.ts', text: 'Win', reason: 'modifier name, Windows spelling' },
+  { file: 'shortcut.ts', text: 'Cmd', reason: 'modifier name for prose, mac Command key' },
+  { file: 'shortcut.ts', text: 'Control', reason: 'KeyboardEvent.key value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'AltGraph', reason: 'KeyboardEvent.key value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'Meta', reason: 'KeyboardEvent.key value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'OS', reason: 'KeyboardEvent.key value some browsers report for Meta' },
+  { file: 'shortcut.ts', text: 'CapsLock', reason: 'KeyboardEvent.key/code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'ControlLeft', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'ControlRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'AltLeft', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'AltRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'ShiftLeft', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'ShiftRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'MetaLeft', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'MetaRight', reason: 'KeyboardEvent.code value for a bare modifier press' },
+  { file: 'shortcut.ts', text: 'Space', reason: 'key name: both a stored-shortcut token and a KeyboardEvent.code' },
+  { file: 'shortcut.ts', text: 'Escape', reason: "the recorder's own cancel key, a KeyboardEvent.key/code value" },
+  { file: 'shortcut.ts', text: 'mac', reason: "the Platform union's own tag, matched in a type argument and a comparison, not prose" },
+
+  // index.ts: BCP-47 locale codes and the two halves of Tauri command/event
+  // names, none of it prose.
+  { file: 'index.ts', text: 'uk', reason: 'BCP-47 locale code, not prose' },
+  { file: 'index.ts', text: 'en', reason: 'BCP-47 locale code, not prose' },
+  { file: 'index.ts', text: 'locale', reason: "half of the Tauri event name 'locale-changed'" },
+  { file: 'index.ts', text: 'changed', reason: "half of the Tauri event name 'locale-changed'" },
+  { file: 'index.ts', text: 'get', reason: "half of the Tauri command name 'get_locale'" },
+
+  // recency.ts: an Intl formatting option, not prose.
+  { file: 'recency.ts', text: 'long', reason: 'Intl.DateTimeFormat dateStyle option value' },
+];
 
 function isAllowlisted(file: string, text: string, list: Allowlisted[]): boolean {
   return list.some((e) => basename(file) === e.file && e.text === text);
@@ -288,10 +368,13 @@ function visibleTextOnly(src: string): string {
   return blankEntities(out.join(''));
 }
 
-// Runs `visibleTextOnly` over `src` and returns `"<line>: <match>"` for every
-// remaining run of two-or-more Latin letters not on the allowlist.
-function latinOffenses(file: string, src: string, list: Allowlisted[] = LATIN_ALLOWLIST): string[] {
-  return visibleTextOnly(src)
+// Shared by both sweeps below: given text already reduced to "what a person
+// could read", split into lines and report every Latin run not on the
+// allowlist. This is the one place the allowlist rule itself lives, so the
+// `.ts` sweep further down is a different REDUCTION over the same rule, not a
+// second copy of it.
+function offensesFrom(file: string, reduced: string, list: Allowlisted[]): string[] {
+  return reduced
     .split('\n')
     .flatMap((line, idx) =>
       [...line.matchAll(LATIN_RUN)]
@@ -301,14 +384,214 @@ function latinOffenses(file: string, src: string, list: Allowlisted[] = LATIN_AL
     );
 }
 
+// Runs `visibleTextOnly` over `src` and returns `"<line>: <match>"` for every
+// remaining run of two-or-more Latin letters not on the allowlist.
+function latinOffenses(file: string, src: string, list: Allowlisted[] = LATIN_ALLOWLIST): string[] {
+  return offensesFrom(file, visibleTextOnly(src), list);
+}
+
+// ---------------------------------------------------------------------------
+// The sweep above only ever looks at `.svelte` markup. A `.ts` module under
+// `src/i18n` can emit its own display words without ever touching a `<...>`
+// tag — `shortcut.ts` is the concrete case: `Ctrl`, `Alt`, `Win`, the DOM key
+// names, none of it routed through `catalog.ts` — and no sweep looked at it
+// at all. `visibleTextOnly` cannot be reused as-is; it walks HTML/Svelte
+// markup and a `.ts` file has none. What follows is the same IDEA — reduce
+// the file to only the characters that could ever become something a person
+// reads, blank the rest — applied to plain TypeScript instead: keep only the
+// CONTENTS of string literals, and blank four things that are lexically
+// string literals but are never prose:
+//
+//   - a comment, in either form — developer text, never shown to a user;
+//   - an import/export module specifier — an address, the same reason `href`
+//     is excluded from the attribute sweep above;
+//   - the whole argument list of a call to `t(...)` — the catalogue
+//     accessor, blanked WHOLE rather than just an immediate string, so a key
+//     hidden in a ternary (`t(cond ? 'a' : 'b')`) is not read as two
+//     hardcoded words — mirroring `{t('key')}` being blanked whole in markup;
+//   - a `case` label — a discriminant tag matched against a union type, the
+//     same "fixed vocabulary, not a sentence" class as `role`/`type` in the
+//     Svelte attribute sweep.
+//
+// Nothing here parses TypeScript; it is the same left-to-right character walk
+// as `visibleTextOnly`, with the same failure mode — an unterminated
+// construct throws rather than silently blanking to end of file.
+// ---------------------------------------------------------------------------
+
+// Index just past the `)` matching the `(` at `src[start]`. String/template/
+// comment awareness mirrors `exprEnd`; the nesting tracked is parentheses
+// rather than braces, because this blanks a whole call's argument list.
+function parenEnd(src: string, start: number): number {
+  let depth = 1;
+  let i = start + 1;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      const q = c;
+      i++;
+      while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; }
+      i++;
+      continue;
+    }
+    if (c === '`') {
+      i++;
+      let tdepth = 0;
+      while (i < src.length) {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (tdepth === 0 && src[i] === '`') { i++; break; }
+        if (src[i] === '$' && src[i + 1] === '{') { tdepth++; i += 2; continue; }
+        if (tdepth > 0 && src[i] === '}') { tdepth--; i++; continue; }
+        i++;
+      }
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      i = close === -1 ? src.length : close + 2;
+      continue;
+    }
+    if (c === '(') { depth++; i++; continue; }
+    if (c === ')') { depth--; i++; if (depth === 0) return i; continue; }
+    i++;
+  }
+  return -1;
+}
+
+// Reads a template literal starting at the backtick `src[start]`. Literal
+// segments are kept — they are exactly the string's own text — and every
+// `${...}` is blanked whole via `exprEnd`, the same way a markup expression
+// is blanked whole above, so a nested call or a nested backtick inside it is
+// never read twice. Returns the kept/blanked text and the index just past
+// the closing backtick.
+function readTemplate(src: string, start: number): [string, number] {
+  const out: string[] = [blank('`')];
+  let i = start + 1;
+  let segStart = i;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      out.push(src.slice(segStart, i));
+      out.push(blank('`'));
+      return [out.join(''), i + 1];
+    }
+    if (c === '$' && src[i + 1] === '{') {
+      out.push(src.slice(segStart, i));
+      const end = exprEnd(src, i + 1);
+      if (end === -1) throw new Error(`unterminated template expression at index ${i}`);
+      out.push(blank(src.slice(i, end)));
+      i = end;
+      segStart = i;
+      continue;
+    }
+    i++;
+  }
+  throw new Error(`unterminated template literal at index ${start}`);
+}
+
+// The `.ts` analogue of `visibleTextOnly`: reduces a plain TypeScript source
+// file to only the contents of its string literals, minus the four machine
+// categories the block comment above names.
+function visibleStringLiteralsOnly(src: string): string {
+  const out: string[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+
+    if (c === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      const end = nl === -1 ? src.length : nl;
+      out.push(blank(src.slice(i, end)));
+      i = end;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      if (close === -1) throw new Error(`unterminated block comment at index ${i}`);
+      out.push(blank(src.slice(i, close + 2)));
+      i = close + 2;
+      continue;
+    }
+
+    // A call to `t(...)`, the catalogue accessor. `t` must stand alone (not
+    // the tail of a longer identifier like `format`), which the lookbehind
+    // enforces the same way `isMachineAttr`'s callers do above.
+    if (c === '(' && /(^|[^A-Za-z0-9_$])t$/.test(src.slice(0, i))) {
+      const end = parenEnd(src, i);
+      if (end === -1) throw new Error(`unterminated call at index ${i}`);
+      out.push(blank(src.slice(i, end)));
+      i = end;
+      continue;
+    }
+
+    if (c === '"' || c === "'" || c === '`') {
+      const before = src.slice(0, i).trimEnd();
+      const isMachineToken =
+        /(^|[^A-Za-z0-9_$])from$/.test(before) || // import/export module specifier
+        /(^|[^A-Za-z0-9_$])import\($/.test(before) || // dynamic import()
+        /(^|[^A-Za-z0-9_$])case$/.test(before); // switch/case discriminant tag
+      if (c === '`') {
+        const [content, end] = readTemplate(src, i);
+        out.push(isMachineToken ? blank(content) : content);
+        i = end;
+        continue;
+      }
+      const quote = c;
+      let j = i + 1;
+      while (j < src.length && src[j] !== quote) {
+        if (src[j] === '\\') { j += 2; continue; }
+        j++;
+      }
+      if (j >= src.length) throw new Error(`unterminated string literal at index ${i}`);
+      out.push(blank(quote));
+      out.push(isMachineToken ? blank(src.slice(i + 1, j)) : src.slice(i + 1, j));
+      out.push(blank(quote));
+      i = j + 1;
+      continue;
+    }
+
+    out.push(blank(c));
+    i++;
+  }
+  return out.join('');
+}
+
+// The `.ts` counterpart of `latinOffenses`: same allowlist rule
+// (`offensesFrom`), a different reduction (`visibleStringLiteralsOnly`).
+function tsStringLiteralOffenses(file: string, src: string, list: Allowlisted[] = LATIN_ALLOWLIST): string[] {
+  return offensesFrom(file, visibleStringLiteralsOnly(src), list);
+}
+
 describe('Svelte hardcode guard', () => {
   const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..'); // ui/src (ESM-safe, no __dirname)
   const uiRoot = join(srcRoot, '..'); // ui/ — the Vite entry HTML shells live here, one level above src/
 
-  it('no Cyrillic literals outside src/i18n', () => {
+  // Was "outside src/i18n": excluding the whole directory let a Cyrillic
+  // literal in `shortcut.ts` or `recency.ts` pass unseen. The real boundary
+  // is narrower — `catalog.ts` is the one file allowed to hold Cyrillic
+  // because it is bilingual by design — so only it (and test fixtures) are
+  // excluded now; every other `.ts`/`.svelte` file in the tree, i18n
+  // directory included, is scanned.
+  //
+  // `.ts` files are scanned with comments stripped first (`stripJsComments`):
+  // `recency.ts:46`'s doc comment quotes a Ukrainian spec heading verbatim
+  // (§9.3, D-e) as a citation for whoever traces the function back to the
+  // requirement — never a string a person sees on screen, and there is
+  // nothing to "move to the catalogue" for a comment. Stripping the comment
+  // rather than excluding the file keeps this sweep able to catch a REAL
+  // Cyrillic literal added to `recency.ts`, or any other `.ts` module, later.
+  it('no Cyrillic literals outside the catalogue', () => {
     const offenders = walk(srcRoot)
-      .filter((p) => /\.(ts|svelte)$/.test(p) && !p.includes(join('src', 'i18n')) && !p.endsWith('.test.ts'))
-      .filter((p) => CYRILLIC.test(readFileSync(p, 'utf8')));
+      .filter((p) => /\.(ts|svelte)$/.test(p) && basename(p) !== 'catalog.ts' && !p.endsWith('.test.ts'))
+      .filter((p) => {
+        const src = readFileSync(p, 'utf8');
+        return CYRILLIC.test(p.endsWith('.ts') ? stripJsComments(src) : src);
+      });
     expect(offenders).toEqual([]);
   });
 
@@ -553,6 +836,20 @@ describe('Svelte hardcode guard', () => {
     const offenders = walk(srcRoot)
       .filter((p) => p.endsWith('.svelte') && !p.includes(join('src', 'i18n')))
       .flatMap((p) => latinOffenses(p, readFileSync(p, 'utf8')).map((o) => `${p}:${o}`));
+    expect(offenders).toEqual([]);
+  });
+
+  // The `.svelte` sweep above never looks at `.ts` files, so a `.ts` module
+  // under `src/i18n` that builds display words of its own — `shortcut.ts` —
+  // was invisible to every sweep in this file. `tsStringLiteralOffenses`
+  // closes that: same allowlist, a reduction built for plain TypeScript. The
+  // catalogue and every `.test.ts` are excluded — the catalogue is
+  // intentionally bilingual, and a test's fixtures are not product text.
+  it('no unlisted Latin string literals in i18n .ts modules other than the catalogue', () => {
+    const offenders = walk(srcRoot)
+      .filter((p) => p.includes(join('src', 'i18n')) && p.endsWith('.ts'))
+      .filter((p) => basename(p) !== 'catalog.ts' && !p.endsWith('.test.ts'))
+      .flatMap((p) => tsStringLiteralOffenses(p, readFileSync(p, 'utf8')).map((o) => `${p}:${o}`));
     expect(offenders).toEqual([]);
   });
 });
