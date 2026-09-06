@@ -1325,7 +1325,23 @@ fn read_settings(db: &mnema_index::Db) -> Result<IndexSettings, mnema_index::Err
         // two numbers and the Models section's three counts describe one state
         // of the index rather than five.
         indexed_files: db.indexed_file_count()?,
-        last_indexed_at: db.last_indexed_at()?,
+        // F7 (Task 10 live run). `Db::last_indexed_at` names when CONTENT was
+        // last processed (`MAX(ingest_stage.updated_at)`), which a reading pass
+        // whose files hash the same as what the index already had never moves —
+        // 2228 such files left this line naming a moment long before the scan
+        // that had just read them. `scan_job::LAST_READING_AT` is the scan's own
+        // clock, written unconditionally at the end of every reading phase
+        // (`scan_job.rs`), so it is read here IN PREFERENCE to the query — not
+        // beside it, not the newer of the two — whenever it parses. The query
+        // remains the fallback for an index scanned before this change ever
+        // wrote the key.
+        last_indexed_at: match db
+            .meta_get(crate::scan_job::LAST_READING_AT)?
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(at) => Some(at),
+            None => db.last_indexed_at()?,
+        },
         // In this snapshot with the counts above, so a window drawing "an
         // unfinished scan left this many chunks queued" is reading one moment
         // of the index rather than two.
@@ -2074,6 +2090,189 @@ mod tests {
         assert_grants(
             "src-tauri/capabilities/default.json",
             include_str!("../capabilities/default.json"),
+        );
+    }
+
+    // ── F7 (Task 10 live run): `last_indexed_at` prefers the scan's own clock ──
+
+    /// An `AppState` over a temporary data directory, with its index open.
+    /// `scan_job.rs`'s own `state_in`, copied rather than shared for the same
+    /// reason `bridge.rs`'s copy gives: it lives behind `#[cfg(test)]` in a
+    /// different file, and none of these tests spawns a walk that would need a
+    /// real extraction worker binary.
+    fn state_in(data_dir: &std::path::Path) -> AppState {
+        let state = AppState::new(
+            data_dir.to_path_buf(),
+            std::path::PathBuf::new(),
+            "http://127.0.0.1:1".to_string(),
+            format!("mnema-desktop-models-test-{}", data_dir.display()),
+        );
+        state.open_index().expect("the index would not open");
+        state
+    }
+
+    /// One indexed document with one path under `root`, its `chunk`/`done`
+    /// ingest stage stamped at `updated_at` — the row `Db::last_indexed_at`'s
+    /// own query joins against. `bridge.rs`'s own `seed_one_file` plus
+    /// `crates/mnema-index/tests/tree.rs`'s own `seed_indexed`, combined: the
+    /// former has no ingest stage at all, and the latter is a different crate's
+    /// private test helper this file cannot reach.
+    fn seed_indexed(state: &AppState, root: i64, content_hash: &str, updated_at: i64) {
+        state
+            .with_index(|db| {
+                db.insert_document(content_hash, "text/plain", 1, mnema_core::SourceKind::Document)?;
+                db.set_document_status(content_hash, mnema_index::DocumentStatus::Indexed)?;
+                db.insert_path(
+                    root,
+                    &format!("{content_hash}.txt"),
+                    content_hash,
+                    mnema_core::OnDisk {
+                        size_bytes: 1,
+                        mtime: 1,
+                    },
+                    "text",
+                    1,
+                )?;
+                db.record_stage(content_hash, "chunk", "done")?;
+                db.conn().execute(
+                    "UPDATE ingest_stage SET updated_at = ?2 WHERE content_hash = ?1 AND stage = 'chunk'",
+                    rusqlite::params![content_hash, updated_at],
+                )?;
+                Ok(())
+            })
+            .expect("seeding one indexed document");
+    }
+
+    /// `read_settings`'s own `last_indexed_at`, over an index with nothing
+    /// written to either place: the empty case the pair below (`the_meta_key…`
+    /// and `an_older_meta_key…`) is measured against.
+    #[test]
+    fn last_indexed_at_falls_back_to_the_ingest_query_when_the_meta_key_is_absent() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let root_dir = tempfile::tempdir().expect("a watched-folder directory");
+        let state = state_in(data.path());
+        let root = state
+            .with_index(|db| db.insert_watched_root(&root_dir.path().display().to_string()))
+            .expect("watching a folder");
+
+        seed_indexed(&state, root, &"a".repeat(64), 1000);
+
+        let settings = state
+            .with_index(read_settings)
+            .expect("reading the settings");
+        let IndexSettings::Read(read) = settings else {
+            panic!("an open index with a watched folder read as Unreadable: {settings:?}");
+        };
+        assert_eq!(
+            read.last_indexed_at,
+            Some(1000),
+            "no scan.last_reading_at meta key exists, so this must be the ingest \
+             query's own answer, unchanged"
+        );
+    }
+
+    /// The meta key wins even over a NEWER-looking ingest row — the pair the
+    /// live run's own finding turns on: `scan.last_reading_at` is the scan's
+    /// own clock, and this test's ingest row is what an implementation that
+    /// merely took `max(meta, query)` would still get right by accident.
+    /// `an_older_meta_key_still_beats_a_newer_ingest_row` below is the one that
+    /// tells the two apart.
+    #[test]
+    fn the_meta_key_wins_over_an_older_ingest_row() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let root_dir = tempfile::tempdir().expect("a watched-folder directory");
+        let state = state_in(data.path());
+        let root = state
+            .with_index(|db| db.insert_watched_root(&root_dir.path().display().to_string()))
+            .expect("watching a folder");
+
+        seed_indexed(&state, root, &"a".repeat(64), 1000);
+        state
+            .with_index(|db| db.meta_set(crate::scan_job::LAST_READING_AT, "5000"))
+            .expect("writing the meta key by hand");
+
+        let settings = state
+            .with_index(read_settings)
+            .expect("reading the settings");
+        let IndexSettings::Read(read) = settings else {
+            panic!("an open index with a watched folder read as Unreadable: {settings:?}");
+        };
+        assert_eq!(
+            read.last_indexed_at,
+            Some(5000),
+            "the ingest row (1000) answered instead of the scan's own clock (5000)"
+        );
+    }
+
+    /// 🔴 The `max` an implementation could get away with above: here the ingest
+    /// row is the NEWER of the two, and the meta key must still win — a copied
+    /// batch of files with hashes the index already had is exactly a newer
+    /// `ingest_stage.updated_at` over an OLDER `scan.last_reading_at`, since the
+    /// meta key is written once at the end of the reading pass that copied them
+    /// and the rows it copied keep whatever `updated_at` an earlier pass gave
+    /// them. `last(query, max(query, meta))` and `if meta.is_some() { meta }
+    /// else { query }` agree on the test above and disagree on this one.
+    #[test]
+    fn an_older_meta_key_still_beats_a_newer_ingest_row() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let root_dir = tempfile::tempdir().expect("a watched-folder directory");
+        let state = state_in(data.path());
+        let root = state
+            .with_index(|db| db.insert_watched_root(&root_dir.path().display().to_string()))
+            .expect("watching a folder");
+
+        seed_indexed(&state, root, &"a".repeat(64), 9000);
+        state
+            .with_index(|db| db.meta_set(crate::scan_job::LAST_READING_AT, "2000"))
+            .expect("writing the meta key by hand");
+
+        let settings = state
+            .with_index(read_settings)
+            .expect("reading the settings");
+        let IndexSettings::Read(read) = settings else {
+            panic!("an open index with a watched folder read as Unreadable: {settings:?}");
+        };
+        assert_eq!(
+            read.last_indexed_at,
+            Some(2000),
+            "the newer ingest row (9000) answered instead of the scan's own \
+             clock (2000) — this is the meta key losing to a `max`, not to \
+             absence"
+        );
+    }
+
+    /// A meta value that will not parse (an index the reading pass never
+    /// touched but that once had this key written by a build with a different
+    /// format, or bit rot) must not crash the read — it falls back exactly as
+    /// an absent key does, which `Option::and_then(|v| v.parse().ok())` gives
+    /// for free but is worth pinning: a version that used `.expect()` on the
+    /// parse instead would turn one bad row into a settings window that never
+    /// opens.
+    #[test]
+    fn an_unparseable_meta_value_falls_back_to_the_ingest_query_rather_than_failing_the_read() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let root_dir = tempfile::tempdir().expect("a watched-folder directory");
+        let state = state_in(data.path());
+        let root = state
+            .with_index(|db| db.insert_watched_root(&root_dir.path().display().to_string()))
+            .expect("watching a folder");
+
+        seed_indexed(&state, root, &"a".repeat(64), 1000);
+        state
+            .with_index(|db| db.meta_set(crate::scan_job::LAST_READING_AT, "not-a-number"))
+            .expect("writing an unparseable meta value by hand");
+
+        let settings = state
+            .with_index(read_settings)
+            .expect("reading the settings did not fail over the bad meta value");
+        let IndexSettings::Read(read) = settings else {
+            panic!("an open index with a watched folder read as Unreadable: {settings:?}");
+        };
+        assert_eq!(
+            read.last_indexed_at,
+            Some(1000),
+            "an unparseable meta value must fall back to the ingest query, not \
+             to None and not to a crash"
         );
     }
 }

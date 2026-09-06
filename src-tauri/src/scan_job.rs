@@ -153,6 +153,19 @@ pub(crate) fn start(state: &AppState, entry: Entry) -> Result<(), Error> {
 /// asked for under another.
 pub(crate) const SCAN_INCOMPLETE: &str = "scan.incomplete";
 
+/// When a reading phase last ended — complete, cancelled, or failed — as unix
+/// seconds. F7 (Task 10 live run): `mnema_index::Db::last_indexed_at` answers
+/// when CONTENT was last processed (`MAX(ingest_stage.updated_at)`), which is
+/// blind to a reading pass whose files hash the same as what the index already
+/// had — 2228 copied files moved nothing there, and the section reported
+/// "1 hour ago" straight after a scan that had just read them. This key is the
+/// scan's own clock instead: written unconditionally at the end of every
+/// reading phase, because the index was written either way (`SCAN_INCOMPLETE`
+/// itself, if nothing else). `models::index_settings` reads it in preference to
+/// the ingest-stage query, and falls back to that query only when this key is
+/// absent — an index scanned before this change.
+pub(crate) const LAST_READING_AT: &str = "scan.last_reading_at";
+
 /// 🔴 **The order of the first three steps is the decision this file is about**
 /// (D-f), and it is not the order that reads most naturally.
 ///
@@ -459,6 +472,18 @@ fn read_every_root(
     if outcome.roots_read == outcome.root_count && outcome.reason == EndReason::Completed {
         let _ = job_db.meta_set(SCAN_INCOMPLETE, "0");
     }
+
+    // F7 (Task 10 live run). Unconditional — complete, cancelled, or failed,
+    // the index was written by this pass, so its own clock moves regardless of
+    // how it ended. Before `mark_reading_done`, the same ordering `SCAN_INCOMPLETE`
+    // above already keeps and for the same reason: an observer woken by the pass
+    // ending reads the index for itself, and would otherwise find no fresher
+    // moment than whatever an earlier scan (or none) left behind.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = job_db.meta_set(LAST_READING_AT, &now.to_string());
 
     slot.mark_reading_done(outcome.clone());
 
@@ -2444,6 +2469,93 @@ mod tests {
             marker(&state).as_deref(),
             Some("0"),
             "a scan with nothing to visit visited everything there was"
+        );
+    }
+
+    /// The value under [`LAST_READING_AT`], parsed — or a fixture failure
+    /// naming what was there instead, so a test reading this gets a number and
+    /// never a silent `None` mistaken for zero.
+    fn last_reading_at(state: &AppState) -> u64 {
+        let written = state
+            .with_index(|db| db.meta_get(LAST_READING_AT))
+            .expect("reading scan.last_reading_at")
+            .unwrap_or_else(|| panic!("the reading pass never wrote scan.last_reading_at"));
+        written.parse().unwrap_or_else(|e| {
+            panic!("scan.last_reading_at was not a unix timestamp: {written:?} ({e})")
+        })
+    }
+
+    /// F7 (Task 10 live run). `models::index_settings`'s "Останнє оновлення"
+    /// must be able to read a moment THIS scan produced, not only a moment some
+    /// earlier content-processing pass produced — the pair below
+    /// (`a_cancelled_reading_still_writes_last_reading_at`) is what tells "every
+    /// reading phase" apart from "only a completed one".
+    #[test]
+    fn a_completed_reading_writes_last_reading_at_no_earlier_than_it_started() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock")
+            .as_secs();
+
+        let (deps, _) = deps_counting_embeds(no_key, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert_eq!(
+            report_of(&settled).reason,
+            EndReason::Completed,
+            "this test is about a completed reading; it did not complete: {settled:?}"
+        );
+
+        let written = last_reading_at(&state);
+        assert!(
+            written >= before,
+            "scan.last_reading_at ({written}) is earlier than the moment this \
+             test started the scan ({before})"
+        );
+    }
+
+    /// The pair, and the finding's own emphasis: F7 says the index was WRITTEN
+    /// regardless of how the pass ended, so a Stop mid-reading owes this marker
+    /// exactly as much as a completed pass does — a person who stops a scan
+    /// still sees the files read before the Stop, and the section's date must
+    /// speak of them rather than of whatever ran before.
+    #[test]
+    fn a_cancelled_reading_still_writes_last_reading_at() {
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt", "a2.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+
+        let stopping = Arc::downgrade(&state);
+        let turn = take_scan_turn_boundary(Arc::new(move || {
+            if let Some(state) = stopping.upgrade() {
+                state.cancel_job();
+            }
+        }));
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock")
+            .as_secs();
+
+        let (deps, _) = deps_counting_embeds(a_key, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+        assert_eq!(
+            report_of(&settled).reason,
+            EndReason::Cancelled,
+            "this test is about a cancelled reading; it did not cancel: {settled:?}"
+        );
+
+        let written = last_reading_at(&state);
+        assert!(
+            written >= before,
+            "scan.last_reading_at ({written}) is earlier than the moment this \
+             test started the scan ({before})"
         );
     }
 

@@ -446,6 +446,114 @@ test('a growing readSeq re-reads even mid-run, but not when readSeq stays put; a
   expect(modelSettings.mock.calls.length).toBe(baseline + 2);
 });
 
+// F1/F9 (Task 10 live run). A folder removal ends the slot with
+// `finish(Terminal::Idle, Some(files))` (`bridge.rs:182`) — the snapshot goes
+// straight to `idle` with a NEW `files` count, never through `ended` and
+// never bumping `readSeq` (a removal is not a reading pass), so neither half
+// of the trigger above fires. Two things then went stale together: the
+// section kept showing the file count from before the removal, and an
+// `ended{cancelled in embedding, resume: embedOnly}` report the strip had
+// drawn its own «Продовжити вбудовування» from is REPLACED by this later,
+// report-less idle snapshot — the strip's offer disappears with the report,
+// and nothing in the section had re-read the index's own `pendingChunks`
+// marker to offer it a different way. Fix: the same subscription also calls
+// `refresh()` when `scan.files` differs from the value it last acted on,
+// seeded from what the store already holds — the same shape as
+// `seenReadSeq`/`seenSnapshot` above.
+//
+// RED (fix round 1): with the `filesChanged` clause deleted from
+// `Settings.svelte`, this test's first `waitFor` below timed out with
+// "Timed out in waitFor: Expected mock function to have been called 2 times,
+// but it was called 1 time(s)." — the ended report's own re-read happened
+// (`afterEnded` above baseline), the removal's idle snapshot did not.
+test('a files count that changed on an idle snapshot re-reads, revealing the queue the vanished report offered', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const baseline = modelSettings.mock.calls.length;
+
+  // The ending re-reads on its own (the earlier test's own pair) — this is
+  // the baseline the removal's own re-read is measured from, not the claim
+  // this test makes.
+  const endedEmbeddingCancelled: ScanState = {
+    revision: 20, files: 668, readSeq: 3, lastReading: null,
+    snapshot: {
+      kind: 'ended',
+      report: {
+        embedding: { kind: 'ran', done: 4, total: 10, refused: 0 },
+        endedIn: 'embedding', reason: 'cancelled', message: null, resume: 'embedOnly',
+      },
+    },
+  };
+  await emit(endedEmbeddingCancelled);
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(baseline + 1));
+  const afterEnded = modelSettings.mock.calls.length;
+
+  // A removal: `files` drops (668 -> 0, the empty list this fixture's own
+  // `listTree` mock answers), the snapshot is a bare `idle`, and `readSeq` did
+  // not move. This is the ONE state in the sequence a `readSeq`-or-`ended`
+  // trigger cannot see at all.
+  const idleAfterRemoval: ScanState = {
+    revision: 21, files: 0, readSeq: 3, lastReading: null, snapshot: { kind: 'idle' },
+  };
+  // The re-read this removal earns answers with a queue still pending — the
+  // fact the vanished `ended` report is no longer here to say for itself.
+  modelSettings.mockResolvedValueOnce(readFixture({ pendingChunks: 3, indexedFiles: 0 }));
+  await emit(idleAfterRemoval);
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBe(afterEnded + 1));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-pending-chunks')).toBeTruthy());
+  expect(screen.getByTestId('scanning-continue')).toBeTruthy();
+});
+
+// The pair: `running` ticks the store on every progress event even when
+// nothing a re-read would answer differently has moved — `files` here stays
+// at the seeded 0 (`NO_SCAN`), so this is not the removal case above wearing
+// a different snapshot kind.
+test('a running tick with an unchanged files count does not re-read', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const baseline = modelSettings.mock.calls.length;
+
+  const running: ScanState = {
+    revision: 5, files: 0, readSeq: 0, lastReading: null,
+    snapshot: {
+      kind: 'running', cancellable: true,
+      phase: { kind: 'embedding', counts: { done: 1, total: 10, skipped: 0, refused: 0, contended: 0, secondsLeft: null } },
+    },
+  };
+  await emit(running);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline);
+});
+
+// A job nobody asked for and that owes no report (`OtherJob`, `ipc.ts`) ends
+// by going straight back to `idle` — no `ended` snapshot exists for it to
+// reach. With `files` unchanged across both the `running` tick and the
+// `idle` that follows it, neither half of the trigger should fire.
+test('a probe job ending in idle with an unchanged files count does not re-read', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  const baseline = modelSettings.mock.calls.length;
+
+  const probeRunning: ScanState = {
+    revision: 6, files: 0, readSeq: 0, lastReading: null,
+    snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'probe' } },
+  };
+  await emit(probeRunning);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline);
+
+  const idleAfterProbe: ScanState = {
+    revision: 7, files: 0, readSeq: 0, lastReading: null, snapshot: { kind: 'idle' },
+  };
+  await emit(idleAfterProbe);
+  await tick();
+  expect(modelSettings.mock.calls.length).toBe(baseline);
+});
+
 // ---------------------------------------------------------------------------
 // Two reads in flight, and the older one answering last — moved here from
 // `Scanning.test.ts` (Task 8): the `settingsSeq` stamp these two pin is now

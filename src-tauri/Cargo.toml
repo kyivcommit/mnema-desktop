@@ -107,3 +107,10 @@ mnema-mock-provider = { workspace = true }
 # enable it for `cargo build`, so nothing here reaches a shipped binary.
 mnema-secrets = { path = "../crates/mnema-secrets", features = ["test-store"] }
 tempfile = { workspace = true }
+# Task 10b's own `models.rs` tests stamp an `ingest_stage` row's `updated_at`
+# by hand, the same way `crates/mnema-index/tests/tree.rs`'s `seed_indexed`
+# does through `Db::conn()` — no writer on `Db` takes an explicit timestamp,
+# `record_stage` always stamps `unixepoch()`. Dev-only, so
+# `tests/dependency_boundary.rs` is unaffected the same way `tauri-utils`
+# above already is.
+rusqlite = { workspace = true }

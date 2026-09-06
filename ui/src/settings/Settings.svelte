@@ -128,12 +128,22 @@
     // very first snapshot as a change.
     let seenSnapshot = get(jobs.state).scan.snapshot;
     let seenReadSeq = get(jobs.state).scan.readSeq;
+    // 🔴 F1/F9 (Task 10 live run). A folder removal ends the slot with
+    // `finish(Terminal::Idle, Some(files))` (`bridge.rs:182`) — straight to a
+    // bare `idle` snapshot, never `ended`, and it is not a reading pass so it
+    // never bumps `readSeq` either: the two conditions above are both blind to
+    // it. `files` (`ScanState.files`, the index's own count) is the one field
+    // a removal always moves, so it is watched the same way — seeded here for
+    // the same reason `seenSnapshot`/`seenReadSeq` are.
+    let seenFiles = get(jobs.state).scan.files;
     const stop = jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seenSnapshot) return;
       seenSnapshot = scan.snapshot;
       const readSeqChanged = scan.readSeq !== seenReadSeq;
       seenReadSeq = scan.readSeq;
-      if (readSeqChanged || scan.snapshot.kind === 'ended') void refresh();
+      const filesChanged = scan.files !== seenFiles;
+      seenFiles = scan.files;
+      if (readSeqChanged || filesChanged || scan.snapshot.kind === 'ended') void refresh();
     });
     void refresh();
     // Returned, so Svelte tears the subscription down when this window closes
