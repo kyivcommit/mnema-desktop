@@ -503,6 +503,7 @@ jobs:
           - pr9-shell
           - pr9-index
           - pr9-ui
+          - pr9b-scan
         include:
           - file: pr8-ui-folders
             node: true
@@ -511,6 +512,8 @@ jobs:
           - file: pr9-index
             node: true
           - file: pr9-ui
+            node: true
+          - file: pr9b-scan
             node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
@@ -523,6 +526,17 @@ jobs:
     # for the same reason, about three and a half times the slowest leg —
     # and a cold key adds one cold dependency build to every leg (3:02–3:23
     # on 33671866360), which still fits.
+    #
+    # `pr9b-scan` joined at Task 11b, and it is the leg to watch: 31 cases —
+    # more than any file here but `embedding` — and most of them run a REAL
+    # scan over a temporary folder rather than a pure function, several
+    # through `#[cfg(unix)]` fixtures that make a subdirectory unreadable.
+    # Measured locally on an Apple M2 Max with `MNEMA_MUTATION_TARGET_DIR`
+    # warm: **2m18s of harness, 145% cpu**, which puts it between
+    # `pr8-subfolders-linux` and `embedding` rather than above either. The one
+    # measurement that exists for both machines says the runner is about twice
+    # this one (6m17s there against 3m17s here), so this leg is expected
+    # around 4–5 minutes cold — inside the same margin every other leg has.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
