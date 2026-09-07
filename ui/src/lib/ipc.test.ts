@@ -621,7 +621,7 @@ test('setAutostart invokes set_autostart with the boolean, and answers the OS st
   expect(state).toEqual(reply);
 });
 
-test('setTheme invokes set_theme with the choice under its camelCase name', async () => {
+test('setTheme invokes set_theme with the choice under the key the command declares', async () => {
   invoke.mockResolvedValue(undefined);
 
   await ipc.setTheme('dark');

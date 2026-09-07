@@ -26,8 +26,8 @@
 #
 # Not here, and why: `apply_to_windows` calling `set_theme` on each window is
 # invisible under the mock runtime (its `set_theme` is `Ok(())` and records
-# nothing) — the same limit `set_hotkey`'s tray relabel records. The live run
-# is the check.
+# nothing) — the same limit `prefs::set_hotkey`'s tray relabel runs into. The
+# live run is the check.
 
 case_ "theme: an unknown value must fall back to System, not to Dark" \
   src-tauri/src/theme.rs \
@@ -71,6 +71,12 @@ case_ "theme.ts: the snapshot must not overwrite a live event that landed during
   "s~  if \(!liveEventSeen\) theme\.set~  theme.set~" \
   "  theme.set(isThemeChoice(reply.choice) ? reply.choice : 'system');" \
   src/theme.test.ts 'a switch during boot wins over the stale snapshot reply' runner=vitest
+
+case_ "theme.ts: the listener must go up before the snapshot is taken" \
+  ui/src/theme.ts \
+  "s~  let liveEventSeen = false;\n  await listen<string>\('theme-changed', \(e\) => \{\n    liveEventSeen = true;\n    theme\.set\(isThemeChoice\(e\.payload\) \? e\.payload : 'system'\);\n  \}\);\n  const reply = await invoke<\{ choice: string \}>\('get_theme'\);~  let liveEventSeen = false;\n  const reply = await invoke<{ choice: string }>('get_theme'); // mutant: snapshot before listener\n  await listen<string>('theme-changed', (e) => {\n    liveEventSeen = true;\n    theme.set(isThemeChoice(e.payload) ? e.payload : 'system');\n  });~" \
+  "const reply = await invoke<{ choice: string }>('get_theme'); // mutant: snapshot before listener" \
+  src/theme.test.ts 'registers the theme-changed listener before taking the snapshot' runner=vitest
 
 case_ "Application: the pressed button must follow the store, not its negation" \
   ui/src/settings/Application.svelte \

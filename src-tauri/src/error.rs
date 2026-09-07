@@ -35,8 +35,8 @@ pub enum Error {
         path: String,
         source: std::io::Error,
     },
-    /// `locale::write_choice` failed — the prefs file could not be written
-    /// (permissions, a full disk, a data dir that vanished underneath it).
+    /// A `write_choice` (locale or theme) failed — the prefs file could not be
+    /// written (permissions, a full disk, a data dir that vanished underneath it).
     /// `#[from]`, unlike [`Error::DataDir`] above: there is no separate path
     /// to attach here, since `write_choice` already names the file inside its
     /// own `std::io::Error` context where one is available, and this is the

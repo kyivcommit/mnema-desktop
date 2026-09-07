@@ -389,7 +389,9 @@
   // the `theme` store — the same store `bootTheme` seeds from `get_theme` and
   // moves on `theme-changed`, and the same store whose subscription writes
   // `data-theme` on this document. This section never reads `get_theme`
-  // itself: by the time it mounts, `main.ts` has already asked.
+  // itself: `main.ts` starts `bootTheme()` before mounting, and until that
+  // snapshot lands the segment shows the store's default, `system`, then
+  // follows the store when it does.
   // ---------------------------------------------------------------------------
 
   const themeLabelText = $derived.by(() => { void $locale; return t('application_theme'); });
@@ -416,7 +418,7 @@
     try {
       await setTheme(choice);
       // The reply is the truth: `Ok` means the file holds the choice and every
-      // window's frame was told. Rust also broadcasts `theme-changed`, which
+      // window's frame was asked to follow. Rust also broadcasts `theme-changed`, which
       // lands in this window's `bootTheme` listener with the same value — but
       // that broadcast is best-effort (`let _ = emit`) and this window need not
       // wait on its own echo. One store, one attribute writer, same value.
@@ -518,11 +520,11 @@
     >{autostartActionLabel}</button>
   {/if}
 
+  <p id="application-theme-label">{themeLabelText}</p>
   {#if themeError !== null}
     <p data-testid="application-theme-failed">{themeFailedLabel}</p>
     <p data-testid="application-theme-error">{themeError}</p>
   {/if}
-  <p id="application-theme-label">{themeLabelText}</p>
   <!-- Three explicit buttons rather than an `{#each}` over the choices: three
        literal `data-testid` strings stay greppable from the tests, and a loop
        over a three-member union costs more to read than the three lines it
