@@ -46,7 +46,10 @@
     "resources": {
       "../vendor/pdfium/lib/libpdfium.dylib": "pdfium/lib/libpdfium.dylib",
       "../vendor/pdfium/VERSION": "pdfium/VERSION",
-      "../vendor/pdfium/LICENSE": "pdfium/LICENSE"
+      "../vendor/pdfium/LICENSE": "pdfium/LICENSE",
+      "../ui/src/styles/fonts/spectral/OFL.txt": "fonts/spectral/OFL.txt",
+      "../ui/src/styles/fonts/ibm-plex-sans/OFL.txt": "fonts/ibm-plex-sans/OFL.txt",
+      "../ui/src/styles/fonts/ibm-plex-mono/OFL.txt": "fonts/ibm-plex-mono/OFL.txt"
     },
     "icon": [
       "icons/32x32.png",

@@ -374,4 +374,47 @@ else
   $(printf '%s' "${answer}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 fi
 
+# --- the font licences --------------------------------------------------------
+#
+# The interface is set in three OFL families (ui/src/styles/fonts/). Their woff2
+# files reach the user compiled into the executable with the rest of ui/dist, and
+# the OFL's condition 2 says every distributed copy carries the copyright notice
+# and the licence text — "as stand-alone text files" is one of the forms it
+# names. The subsetted files themselves carry only the copyright and a licence
+# URL in their name table (measured with fontTools: no nameID 13, no WOFF2
+# extended metadata), so the text has to travel beside them, and it does not
+# travel by itself: Vite copies nothing it is not asked to import, and this
+# repository shipped a build with every font and no licence before this check
+# existed. bundle.resources in src-tauri/tauri.conf.json is what puts each
+# family's OFL.txt under Contents/Resources/fonts/<family>/.
+#
+# The list of families is read from the source tree, not written here: a fourth
+# family added to fonts/ without a resources line is exactly the state this has
+# to catch, and a list kept in this file would have to be edited in step with it.
+font_src="${repo_root}/ui/src/styles/fonts"
+[ -d "${font_src}" ] || fail "${font_src} does not exist; the font-licence question
+  cannot be asked and is UNANSWERED."
+family_count="$(find "${font_src}" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[ "${family_count}" -gt 0 ] || fail "${font_src} holds no family directory; the
+  font-licence question cannot be asked and is UNANSWERED."
+for family_dir in "${font_src}"/*/; do
+  family="$(basename "${family_dir}")"
+  source_ofl="${family_dir}OFL.txt"
+  [ -f "${source_ofl}" ] || fail "${source_ofl} is missing in the source tree, so the
+  ${family} family cannot be shipped with its licence at all. scripts/fetch-fonts.sh
+  writes it; re-run that."
+  shipped_ofl="${app}/Contents/Resources/fonts/${family}/OFL.txt"
+  [ -f "${shipped_ofl}" ] || fail "${product}.app carries no OFL.txt for ${family}: the
+  family's woff2 files ship inside the executable and its licence does not. The OFL
+  requires the notice and the text beside every distributed copy; bundle.resources in
+  src-tauri/tauri.conf.json is what puts it at Contents/Resources/fonts/${family}/."
+  cmp -s "${source_ofl}" "${shipped_ofl}" || fail "the shipped OFL.txt for ${family} is not
+  the one in the source tree (${source_ofl}); the notice a user gets is not the one
+  the fonts were fetched with."
+  grep -q 'SIL OPEN FONT LICENSE Version 1.1' "${shipped_ofl}" || fail "the shipped
+  OFL.txt for ${family} does not contain the SIL Open Font License 1.1 text; a file of
+  that name that says something else is not the licence."
+done
+echo "verify-bundle: ${family_count} font families ship with their OFL.txt beside the executable"
+
 echo "verify-bundle: OK"

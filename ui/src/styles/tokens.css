@@ -55,9 +55,9 @@
   --shadow: rgba(30, 40, 70, .20);
   --glow: rgba(59, 73, 168, .22);
 
-  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --serif: Georgia, 'Times New Roman', serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --serif: 'Spectral', Georgia, 'Times New Roman', serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -91,9 +91,9 @@
     --shadow: rgba(0, 0, 0, .55);
     --glow: rgba(147, 160, 238, .25);
 
-    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-    --serif: Georgia, 'Times New Roman', serif;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --serif: 'Spectral', Georgia, 'Times New Roman', serif;
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 }
 
@@ -129,9 +129,9 @@
   --shadow: rgba(0, 0, 0, .55);
   --glow: rgba(147, 160, 238, .25);
 
-  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --serif: Georgia, 'Times New Roman', serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --serif: 'Spectral', Georgia, 'Times New Roman', serif;
+  --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 :root[data-theme="light"] {
