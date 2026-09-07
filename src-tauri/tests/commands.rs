@@ -11794,3 +11794,44 @@ fn an_unfinished_scan_leaves_a_mark_the_settings_screen_can_read() {
 
 #[cfg(unix)]
 use app::app_with_a_worker_that_reads_nothing;
+
+#[test]
+fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
+    // Reachability through the real `invoke_handler` plus the round trip the
+    // window depends on. The mock runtime implements the per-window
+    // `set_theme` (`Ok(())`) and NOT `AppHandle::set_theme` (`unimplemented!`),
+    // which is why `theme::apply_to_windows` walks the windows — this test is
+    // the one that would panic if that ever changed.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let before = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(before["choice"], json!("system"), "no file yet: {before}");
+
+    call(&webview, "set_theme", json!({ "choice": "dark" })).expect("set_theme rejected");
+
+    let after = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(
+        after["choice"],
+        json!("dark"),
+        "the choice must come back: {after}"
+    );
+
+    let raw = std::fs::read_to_string(dir.path().join("prefs.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        parsed["theme"],
+        json!("dark"),
+        "the file is the truth: {raw}"
+    );
+
+    // An unknown value on the wire is not an error and not a fourth state.
+    call(&webview, "set_theme", json!({ "choice": "sepia" })).expect("set_theme rejected");
+    let fallen = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(
+        fallen["choice"],
+        json!("system"),
+        "unknown → system: {fallen}"
+    );
+}
