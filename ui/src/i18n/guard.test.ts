@@ -10,6 +10,18 @@ const CYRILLIC = /[Ѐ-ӿ]/;
 // entry written for the first one silently forgave its unrelated neighbour.
 const LATIN_RUN = /[A-Za-z]{2,}/g;
 
+// The Cyrillic sweep's own predicate, extracted so a fixture test can drive
+// the EXACT function the production sweep below calls, over synthetic files,
+// rather than asserting `CYRILLIC` matches a bare string in isolation
+// (external review, Important 1). The difference matters: a regression that
+// re-wraps `read` in a comment/`//`-line stripper — restoring either of the
+// two holes `stripJsComments` had — changes what THIS function returns, so a
+// fixture test built on it catches that regression; a test that only calls
+// `CYRILLIC.test(...)` directly never goes near `read` and cannot.
+function cyrillicOffenders(files: string[], read: (file: string) => string): string[] {
+  return files.filter((p) => CYRILLIC.test(read(p)));
+}
+
 // Attribute names whose value is never prose. Every attribute NOT named here
 // has its string value scanned, which is the point: naming the readable ones
 // instead would be a closed list over an open set, and every component prop a
@@ -122,9 +134,15 @@ const LATIN_ALLOWLIST: Allowlisted[] = [
   { file: 'shortcut.ts', text: 'Escape', reason: "the recorder's own cancel key, a KeyboardEvent.key/code value" },
   { file: 'shortcut.ts', text: 'mac', reason: "the Platform union's own tag, matched in a type argument and a comparison, not prose" },
 
-  // index.ts: BCP-47 locale codes and the two halves of Tauri command/event
-  // names, none of it prose.
-  { file: 'index.ts', text: 'uk', reason: 'BCP-47 locale code, not prose' },
+  // index.ts: a BCP-47 locale code and the two halves of Tauri command/event
+  // names, none of it prose. `'uk'` needs no entry here: every occurrence in
+  // this file (the `Loc` alias, and two generic type arguments) is a string
+  // literal TYPE, not a value — `isTypePosition` in the sweep above excludes
+  // all three before the allowlist is ever consulted, so an entry for `'uk'`
+  // would excuse nothing (review, Minor 1). `'en'` still needs one:
+  // `writable<Loc>('en')` and `const FALLBACK: Loc = 'en'` are real runtime
+  // values, the only two, so this stays a live entry rather than a second
+  // dead one.
   { file: 'index.ts', text: 'en', reason: 'BCP-47 locale code, not prose' },
   { file: 'index.ts', text: 'locale', reason: "half of the Tauri event name 'locale-changed'" },
   { file: 'index.ts', text: 'changed', reason: "half of the Tauri event name 'locale-changed'" },
@@ -438,6 +456,15 @@ function contentSpan(sourceFile: ts.SourceFile, node: ts.Node): [number, number]
 // only the immediate parent, because the catalogue key is not always an
 // immediate child of the call (`t(cond ? 'a' : 'b')`'s `'a'` is two levels
 // down, inside the `ConditionalExpression` that IS the first argument).
+//
+// This is by NAME alone, the same as the deleted hand-rolled version's
+// lookbehind was: a local variable or parameter that shadows `t` with
+// something that is NOT the catalogue accessor (review, Minor 3) would still
+// have its first argument skipped here. That is the QUIET failure direction
+// — a real hardcoded string going unreported rather than a false alarm — and
+// unlike every other blind spot named in this file it is not asserted shut
+// by a test, only accepted: no call site anywhere in this codebase shadows
+// `t` today, and the day one does, this comment is where to look.
 function isCatalogueKey(node: ts.Node): boolean {
   let current: ts.Node = node;
   for (let parent = current.parent; parent; current = parent, parent = current.parent) {
@@ -494,15 +521,27 @@ function isTypePosition(node: ts.Node): boolean {
   return !!node.parent && ts.isLiteralTypeNode(node.parent);
 }
 
-// `ts.createSourceFile`'s parser populates this while parsing, ahead of any
-// later type-check; it is not part of the public `.d.ts` (@internal), so the
-// cast is the price of asking the question this cheaply. A shape probing
-// hostile to that field simply comes back with `undefined`, which the
-// `?? []` below turns into "no diagnostics" rather than a crash — the loud
-// failure this function raises is for a source file the parser could not
-// read, not for a `typescript` release that stopped exposing the field.
-function parseDiagnosticsOf(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {
-  return (sourceFile as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+// The first syntax error `src` produces, or `null` if it parses cleanly.
+//
+// An earlier revision read `ts.createSourceFile(...).parseDiagnostics`
+// directly — a field the parser genuinely populates, but one that is not
+// part of the package's public `.d.ts` (@internal), reached only through a
+// cast. `ts.transpileModule` with `reportDiagnostics: true` asks the same
+// question through the public surface instead: it runs the same parser and
+// returns the same syntactic diagnostics, without a full type-checking pass
+// (nothing here needs one, and a free identifier like `cond` in
+// `t(cond ? 'a' : 'b')` must not itself count as invalid). Diagnostics from
+// `transpileModule` are less specific than `getSyntacticDiagnostics` off a
+// real `ts.Program` would be — no source-mapped location — but this
+// function only ever needs to know THAT parsing failed and WHY, both of
+// which `messageText` carries.
+function invalidTypeScriptDiagnostic(src: string): string | null {
+  const { diagnostics } = ts.transpileModule(src, {
+    reportDiagnostics: true,
+    compilerOptions: { target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext },
+  });
+  if (!diagnostics || diagnostics.length === 0) return null;
+  return ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n');
 }
 
 // The `.ts` analogue of `visibleTextOnly`: reduces a plain TypeScript source
@@ -512,11 +551,9 @@ function parseDiagnosticsOf(sourceFile: ts.SourceFile): readonly ts.Diagnostic[]
 // the same rule `visibleTextOnly` follows for markup: a syntax error must
 // not read as "nothing to report".
 function visibleStringLiteralsOnly(src: string): string {
+  const invalid = invalidTypeScriptDiagnostic(src);
+  if (invalid !== null) throw new Error(`invalid TypeScript source, cannot be scanned: ${invalid}`);
   const sourceFile = ts.createSourceFile('guarded.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const diagnostics = parseDiagnosticsOf(sourceFile);
-  if (diagnostics.length > 0) {
-    throw new Error(`invalid TypeScript source, cannot be scanned: ${ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n')}`);
-  }
 
   // Split by UTF-16 code unit, not code point (`[...src]` would), because
   // `ts.Node` positions are UTF-16 offsets — this file's own emoji markers
@@ -559,7 +596,12 @@ describe('Svelte hardcode guard', () => {
   // is narrower — `catalog.ts` is the one file allowed to hold Cyrillic
   // because it is bilingual by design — so only it (and test fixtures) are
   // excluded now; every other `.ts`/`.svelte` file in the tree, i18n
-  // directory included, is scanned.
+  // directory included, is scanned. Excluded by its full path within
+  // `srcRoot`, not by base name (review, Minor 2): `walk` covers all of
+  // `ui/src`, not only `src/i18n`, and a base-name match would exempt any
+  // OTHER file anywhere in the tree that happened to share the name
+  // `catalog.ts` — which the "strictly stronger" claim below must hold
+  // unconditionally, not only in the layout this tree happens to have today.
   //
   // Reads the RAW file text, unconditionally — no comment-stripping step of
   // any kind. An earlier revision ran `.ts` files through a hand-written
@@ -572,12 +614,13 @@ describe('Svelte hardcode guard', () => {
   // written for. `recency.ts` is now reworded to carry no Cyrillic at all
   // (D144: the guard reads comments too), which removes the reason the
   // stripper existed rather than papering over its two holes — this sweep is
-  // strictly stronger than the one on `main` that shipped before this PR.
+  // strictly stronger than the one on `main` that shipped before this PR, a
+  // property pinned directly below rather than only argued here in prose.
   it('no Cyrillic literals outside the catalogue', () => {
-    const offenders = walk(srcRoot)
-      .filter((p) => /\.(ts|svelte)$/.test(p) && basename(p) !== 'catalog.ts' && !p.endsWith('.test.ts'))
-      .filter((p) => CYRILLIC.test(readFileSync(p, 'utf8')));
-    expect(offenders).toEqual([]);
+    const catalogue = join(srcRoot, 'i18n', 'catalog.ts');
+    const files = walk(srcRoot)
+      .filter((p) => /\.(ts|svelte)$/.test(p) && p !== catalogue && !p.endsWith('.test.ts'));
+    expect(cyrillicOffenders(files, (p) => readFileSync(p, 'utf8'))).toEqual([]);
   });
 
   it('no Cyrillic literals in the top-level HTML shells', () => {
@@ -595,7 +638,7 @@ describe('Svelte hardcode guard', () => {
   // outside an expression must come from the catalogue in both locales; this
   // guard cannot see whether a key resolves in both, only that a `{...}`
   // expression stands where a hardcoded literal would otherwise sit.
-  it('the stripper keeps a catalogue call and drops everything else', () => {
+  it('the markup reduction keeps a catalogue call and drops everything else', () => {
     const fixture = `<script lang="ts">
   import { t } from '../i18n';
   const heading = t('models_heading');
@@ -621,7 +664,7 @@ describe('Svelte hardcode guard', () => {
     expect(stripped).toContain('Models');
   });
 
-  it('rejects a bare Latin literal the stripper would otherwise miss', () => {
+  it('rejects a bare Latin literal the markup reduction would otherwise miss', () => {
     // Same three traps named in the plan for this task: a literal between two
     // expressions, one that follows an attribute containing `>` (an arrow
     // function), and a comment immediately next to real text.
@@ -853,6 +896,9 @@ describe('Svelte hardcode guard', () => {
   // read as prose.
   it('scans every argument of a `t(...)` call except the first', () => {
     expect(tsStringLiteralOffenses('f.ts', "t('k');\n")).toEqual([]);
+    // A key picked by a ternary is still the first argument, at one level
+    // down — both branches must stay unreported, the same as a bare literal.
+    expect(tsStringLiteralOffenses('f.ts', "t(cond ? 'a' : 'b');\n")).toEqual([]);
     expect(tsStringLiteralOffenses('f.ts', "t('k', { x: 'Zebra' });\n")).toEqual(['1: Zebra']);
   });
 
@@ -893,19 +939,37 @@ describe('Svelte hardcode guard', () => {
     expect(tsStringLiteralOffenses('f.ts', "const RE = /['\"]/; const z = 'Zebra';\n")).toEqual(['1: Zebra']);
   });
 
+  // External review, Important 2: the loud throw above is only as trustworthy
+  // as the check that feeds it. Pinned at two levels — the outward behaviour
+  // (`tsStringLiteralOffenses` throws) AND the detector it is built on
+  // (`invalidTypeScriptDiagnostic` itself fires non-null on broken input and
+  // stays null on good input) — so a change that makes the detector always
+  // agree with one side cannot pass both.
+  it('an invalid TypeScript source is refused before any scanning happens', () => {
+    expect(() => tsStringLiteralOffenses('f.ts', 'const a = ;\n')).toThrow(/invalid TypeScript source/);
+  });
+
+  it('the diagnostic check the refusal is built on actually distinguishes broken from good source', () => {
+    expect(invalidTypeScriptDiagnostic('const a = ;\n')).not.toBeNull();
+    expect(invalidTypeScriptDiagnostic("const a = 1;\n")).toBeNull();
+  });
+
   // The Cyrillic sweep used to run every `.ts` file through `stripJsComments`
   // first so a citation inside a doc comment would not have to be excluded
   // file-wide. That stripper read a `//` inside a regex literal, or inside a
-  // nested template, the same wrong way `visibleStringLiteralsOnly` did above —
-  // proven directly against the unstripped regex the sweep actually runs: it
-  // is exactly as eager to match this text as any other Cyrillic literal, with
-  // nothing standing between it and a real file.
-  it('the Cyrillic sweep would catch these same two shapes, unstripped', () => {
-    const cyrillicFixtures = [
-      "export function label(path: string) { return /\\/\\//.test(path) ? 'Так' : 'Ні'; }\n",
-      'export function label(ok: boolean) { return `${ok ? `//` : `Ні`}`; }\n',
-    ];
-    for (const source of cyrillicFixtures) expect(CYRILLIC.test(source)).toBe(true);
+  // nested template, the same wrong way `visibleStringLiteralsOnly` did above.
+  // Driven through `cyrillicOffenders` itself — the exact function the
+  // production sweep above calls — over two synthetic files, not through a
+  // bare `CYRILLIC.test(...)` on an inline string: a bare regex test cannot
+  // notice a stripping step reappearing inside `cyrillicOffenders`, and one
+  // reviewer mutant that did exactly that (wrapping `read` in a naive
+  // `//`-to-end-of-line stripper) left every other test in this file green.
+  it('the sweep itself, not just the regex, catches a `//` inside a regex and inside a nested template', () => {
+    const content: Record<string, string> = {
+      'a.ts': "export function label(path: string) { return /\\/\\//.test(path) ? 'Так' : 'Ні'; }\n",
+      'b.ts': 'export function label(ok: boolean) { return `${ok ? `//` : `Ні`}`; }\n',
+    };
+    expect(cyrillicOffenders(Object.keys(content), (p) => content[p])).toEqual(['a.ts', 'b.ts']);
   });
 
   // The `.svelte` sweep above never looks at `.ts` files, so a `.ts` module
