@@ -42,7 +42,8 @@ function blankComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
 }
 
-// Keeps only the text inside <style>...</style> tags of a .svelte file,
+// Keeps only the text inside <style>...</style> tags of a file — a .svelte
+// component or an HTML entry point, both hold markup around their styles —
 // blanking everything else (markup, script) to spaces while preserving
 // newlines — so a line number reported below still points at the real
 // file, and script or markup text cannot trigger a CSS-shaped false
@@ -227,8 +228,10 @@ function forbiddenInStylesheet(line: string): string | null {
 // The two HTML entry points may not link a stylesheet or a preconnect hint
 // from the network either — the same "reaches outside the app" rule above,
 // expressed as a <link> tag instead of CSS. Deliberately narrow: only
-// rel="stylesheet" and rel="preconnect" are checked, since those are the
-// tags that actually fetch.
+// rel="stylesheet" and rel="preconnect" are checked, because those are the
+// two forms the mockups' heads actually contain and the ones a transcriber
+// would paste; other rels that also fetch (icon, preload, prefetch,
+// dns-prefetch, …) are not scanned.
 function forbiddenInHtml(line: string): string | null {
   const tags = line.match(/<link\b[^>]*>/gi) ?? [];
   for (const tag of tags) {
@@ -296,7 +299,7 @@ describe('tokens.css holds its two themes to each other', () => {
 
 describe('the stylesheets stay inside the app', () => {
   it('forbids a url() outside the app and any @import, in every stylesheet, svelte style block, and HTML entry point', () => {
-    // The predicate is checked against its own small table first, so a
+    // Both predicates are checked against their own small table first, so a
     // change that breaks a known shape is caught right here rather than
     // only if some future file happens to contain that exact shape.
     const table: [string, boolean][] = [
@@ -312,6 +315,15 @@ describe('the stylesheets stay inside the app', () => {
     ];
     for (const [line, expected] of table) {
       expect(forbiddenInStylesheet(line) !== null, line).toBe(expected);
+    }
+
+    const htmlTable: [string, boolean][] = [
+      ['<link rel="stylesheet" href="https://fonts.googleapis.com/css2">', true],
+      ['<link rel="preconnect" href="https://fonts.gstatic.com">', true],
+      ['<link rel="stylesheet" href="/src/x.css">', false],
+    ];
+    for (const [line, expected] of htmlTable) {
+      expect(forbiddenInHtml(line) !== null, line).toBe(expected);
     }
 
     // A guard that walks zero files of a kind is satisfied by nothing to
@@ -343,12 +355,20 @@ describe('the stylesheets stay inside the app', () => {
     }
 
     for (const file of htmlFiles) {
-      readFileSync(file, 'utf8')
-        .split('\n')
-        .forEach((line, idx) => {
-          const reason = forbiddenInHtml(line);
-          if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
-        });
+      const raw = readFileSync(file, 'utf8');
+      raw.split('\n').forEach((line, idx) => {
+        const reason = forbiddenInHtml(line);
+        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
+      });
+      // The mockups this project transcribes from are HTML with an inline
+      // <style> block as well as a <link>, so the HTML entries get the same
+      // CSS-content scan as a .svelte file's <style> block, not only the
+      // <link>-tag check above.
+      const styleOnly = blankComments(styleBlocksOnly(raw));
+      styleOnly.split('\n').forEach((line, idx) => {
+        const reason = forbiddenInStylesheet(line);
+        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
+      });
     }
 
     expect(offenders).toEqual([]);
