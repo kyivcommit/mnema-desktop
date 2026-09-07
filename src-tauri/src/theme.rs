@@ -73,8 +73,8 @@ pub fn forced(choice: ThemeChoice) -> Option<Theme> {
 /// Windows each window is told separately either way, and only the per-window
 /// call is implemented by Tauri's mock runtime — `AppHandle::set_theme` there is
 /// `unimplemented!()` (`tauri-2.11.5/src/test/mock_runtime.rs:257`). The
-/// integration test in `tests/commands.rs` pins reachability, the persist/apply
-/// round trip, and the `theme-changed` broadcast, and it would panic if this
+/// integration test in `tests/commands.rs` pins reachability, the persist and
+/// read-back round trip, and the `theme-changed` broadcast, and it would panic if this
 /// loop were replaced by `AppHandle::set_theme`, which is the `unimplemented!()`
 /// path under the mock.
 ///
@@ -117,9 +117,10 @@ pub struct ThemeReply {
 /// Reads the choice back for a window that has just booted.
 ///
 /// Unlike locale, `AppState` carries no cached field for this: `set_theme`
-/// writes the file and nothing else, so `state` here exists only to reach
-/// `data_dir()` and this command re-reads `read_choice` fresh on every call,
-/// the same source `apply_persisted` reads once at boot.
+/// updates no state field either — it writes the file and applies the
+/// choice — so `state` here exists only to reach `data_dir()`. This command
+/// re-reads `read_choice` fresh on every call, the same source
+/// `apply_persisted` reads once at boot.
 #[tauri::command(async)]
 pub fn get_theme(state: tauri::State<'_, crate::state::AppState>) -> ThemeReply {
     ThemeReply {

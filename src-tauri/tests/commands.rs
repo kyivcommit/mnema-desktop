@@ -11794,9 +11794,10 @@ fn an_unfinished_scan_leaves_a_mark_the_settings_screen_can_read() {
 
 #[test]
 fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
-    // Reachability through the real `invoke_handler`, the persist/apply round
-    // trip, and the `theme-changed` broadcast: the listener below fires once
-    // per `set_theme` call, with the payload `set_theme` was given. The
+    // Reachability through the real `invoke_handler`, the persist and
+    // read-back round trip, and the `theme-changed` broadcast: the listener
+    // below fires once per `set_theme` call, with the choice it persisted —
+    // the value it was given, or the one it fell back to. The
     // per-window `WebviewWindow::set_theme` loop inside `apply_to_windows`
     // stays unobservable here — the mock runtime's per-window dispatcher
     // returns `Ok(())` and records nothing, so this test cannot tell "the
