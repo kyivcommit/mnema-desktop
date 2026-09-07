@@ -1,0 +1,367 @@
+/* Settings window — the mockup's rules over the attributes the markup already
+ * carries. One global file on purpose: tokens.test.ts reads every var() in
+ * one place, and the mockup stays the single source. Selectors lean on
+ * attributes first (aria-pressed, aria-current, role, disabled), on elements
+ * under main (text and controls — the job strip sits outside .scols and must
+ * get them too) or .spane (headings, lists) second, and on the mockup's
+ * class names only where the markup has no attribute to stand on.
+ * data-testid is never a selector.
+ *
+ * Fonts: a rule that touches font-family, font-weight or font-style sets all
+ * three, and `font:` is only ever `inherit`. tokens.test.ts holds that
+ * grammar, so that every element's family/weight/style is one rule's triple
+ * and that triple is a face the bundle ships — a weight the bundle lacks is
+ * synthesised by the browser without a message.
+ */
+
+main {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* every sentence (mockup .hint) — under main, so the job strip's read too */
+main p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+main ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* buttons (mockup .btn.subtle); a pressed one (mockup .mtab.on) */
+main button {
+  height: 37px;
+  padding: 0 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: transparent;
+  font: inherit;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-style: normal;
+  font-size: 13px;
+  color: var(--ink-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+main button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+main button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+/* the current one (mockup .tree .row.sel) — cite tokens, as the spec says for "current" */
+main button[aria-current="true"] {
+  border-color: var(--cite-line);
+  background: var(--cite-wash);
+  color: var(--cite);
+}
+
+main input,
+main select {
+  height: 37px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+/* the key (mockup .input.mono) */
+main input[type="password"] {
+  font-family: var(--mono);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 12.5px;
+}
+
+main button:focus-visible,
+main input:focus-visible,
+main select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* the window's status line (mockup .statcard) — drawn before the two columns */
+.indexing {
+  margin: 12px 24px 0;
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* navigation | pane (mockup .sbody) */
+.scols {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.snav {
+  width: 196px;
+  flex: none;
+  padding: 12px 10px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* a navigation item is a button under main too: height and weight reset here */
+.snav .item {
+  height: auto;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-family: var(--sans);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 13.5px;
+  text-align: left;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* the active section (mockup .snav .item.on) */
+.snav .item[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-weight: 600;
+  font-style: normal;
+  box-shadow: 0 1px 3px -1px var(--shadow), inset 0 0 0 1px var(--line);
+}
+
+.spane {
+  flex: 1;
+  min-width: 0;
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+
+/* section title (mockup .stitle .t) */
+.spane h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-style: normal;
+  font-size: 16px;
+  color: var(--ink);
+}
+
+/* group heading (mockup .gh); 400 because Plex Mono ships no bold face */
+.spane h3 {
+  margin: 0;
+  font-family: var(--mono);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* controls in a line (mockup .row); the label above a control (mockup .field .fl) */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.fl {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-style: normal;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+/* a bordered panel (mockup .tabpane) */
+.group {
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.mtabs {
+  display: flex;
+  gap: 10px;
+}
+
+/* a watched folder (mockup .fitem + .frow) */
+.folders > ul > li {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 11px;
+}
+
+.fp {
+  font-family: var(--mono);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fc {
+  font-size: 12px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the opened folder's panel (mockup .fsubs) */
+.fsubs {
+  flex-basis: 100%;
+  margin: 6px -12px -10px;
+  padding: 10px 12px 10px 36px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fsubs button {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* a subfolder row; an excluded one (mockup .sub, .sub.excl) */
+.sub {
+  padding: 5px 7px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+}
+
+.sub.excl {
+  color: var(--ink-faint);
+}
+
+/* the level below a row is the row's own child <ul>: it starts a new line
+ * and steps in, so a tree reads as a tree and not as one long flex row */
+.sub > ul {
+  flex-basis: 100%;
+  padding-left: 18px;
+}
+
+/* masks (mockup .chips, .chip, .chip .x) */
+.masks ul {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.masks li {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-3);
+  font-family: var(--mono);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 12px;
+  color: var(--ink-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.masks li button {
+  height: auto;
+  padding: 0;
+  border: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* the theme choice (mockup .seg, .seg .opt, .seg .opt.on) */
+.spane [role="group"] {
+  align-self: flex-start;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-3);
+  display: inline-flex;
+  gap: 3px;
+}
+
+.spane [role="group"] button {
+  height: auto;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 7px;
+  font-family: var(--sans);
+  font-weight: 400;
+  font-style: normal;
+}
+
+.spane [role="group"] button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-weight: 600;
+  font-style: normal;
+  box-shadow: 0 1px 2px -1px var(--shadow);
+}
+
+/* the shortcut (mockup .kbd) */
+.kbd {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 13px;
+  color: var(--ink);
+  display: inline-flex;
+}
