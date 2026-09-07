@@ -2,8 +2,11 @@
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
-  import { appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState } from '../lib/ipc';
+  import {
+    appPrefs, setHotkey, setAutostart, setTheme, type AppPrefs, type AutostartState, type ThemeChoice,
+  } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
+  import { theme } from '../theme';
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
@@ -382,6 +385,54 @@
   }
 
   // ---------------------------------------------------------------------------
+  // The theme (D146, PR 10b): three buttons, one pressed. What is pressed is
+  // the `theme` store — the same store `bootTheme` seeds from `get_theme` and
+  // moves on `theme-changed`, and the same store whose subscription writes
+  // `data-theme` on this document. This section never reads `get_theme`
+  // itself: by the time it mounts, `main.ts` has already asked.
+  // ---------------------------------------------------------------------------
+
+  const themeLabelText = $derived.by(() => { void $locale; return t('application_theme'); });
+  const themeLightLabel = $derived.by(() => { void $locale; return t('theme_light'); });
+  const themeDarkLabel = $derived.by(() => { void $locale; return t('theme_dark'); });
+  const themeSystemLabel = $derived.by(() => { void $locale; return t('theme_system'); });
+  const themeFailedLabel = $derived.by(() => { void $locale; return t('application_theme_failed'); });
+
+  // A rejected `set_theme`'s own sentence, VERBATIM beside the catalogue
+  // lead-in, never branched on — the same shape as the two rejections above.
+  let themeError = $state<string | null>(null);
+  // The in-flight guard its two siblings have. Three buttons share it: a press
+  // on any of them while one call is out would send a second, and the store
+  // would be set from whichever reply resolved last.
+  let themeBusy = $state(false);
+
+  async function chooseTheme(choice: ThemeChoice) {
+    // Both halves, like the toggle: `disabled` is what a person sees, the early
+    // return is what holds — a `click` dispatched at a disabled element still
+    // reaches a listener.
+    if (themeBusy) return;
+    themeError = null;
+    themeBusy = true;
+    try {
+      await setTheme(choice);
+      // The reply is the truth: `Ok` means the file holds the choice and every
+      // window's frame was told. Rust also broadcasts `theme-changed`, which
+      // lands in this window's `bootTheme` listener with the same value — but
+      // that broadcast is best-effort (`let _ = emit`) and this window need not
+      // wait on its own echo. One store, one attribute writer, same value.
+      theme.set(choice);
+    } catch (err) {
+      // Nothing was written and nothing was applied (`set_theme` persists first
+      // and returns on failure), so the store — and the pressed button — are
+      // still right. No re-read, unlike the two rejections above: they carry a
+      // state the window cannot know; this one carries none.
+      themeError = err instanceof Error ? err.message : String(err);
+    } finally {
+      themeBusy = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // The version (D-h): shown as it is, with no "up to date" claim beside it.
   // ---------------------------------------------------------------------------
 
@@ -465,6 +516,39 @@
       disabled={autostartBusy}
       onclick={toggleAutostart}
     >{autostartActionLabel}</button>
+  {/if}
+
+  <p id="application-theme-label">{themeLabelText}</p>
+  <!-- Three explicit buttons rather than an `{#each}` over the choices: the
+       i18n guard scans template literals in attributes, and a computed
+       `data-testid` would trip it for no gain over three lines. Order is the
+       mockup's: light, dark, system. -->
+  <div role="group" aria-labelledby="application-theme-label">
+    <button
+      type="button"
+      data-testid="application-theme-light"
+      aria-pressed={$theme === 'light'}
+      disabled={themeBusy}
+      onclick={() => chooseTheme('light')}
+    >{themeLightLabel}</button>
+    <button
+      type="button"
+      data-testid="application-theme-dark"
+      aria-pressed={$theme === 'dark'}
+      disabled={themeBusy}
+      onclick={() => chooseTheme('dark')}
+    >{themeDarkLabel}</button>
+    <button
+      type="button"
+      data-testid="application-theme-system"
+      aria-pressed={$theme === 'system'}
+      disabled={themeBusy}
+      onclick={() => chooseTheme('system')}
+    >{themeSystemLabel}</button>
+  </div>
+  {#if themeError !== null}
+    <p data-testid="application-theme-failed">{themeFailedLabel}</p>
+    <p data-testid="application-theme-error">{themeError}</p>
   {/if}
 
   <p data-testid="application-version">{versionText}</p>
