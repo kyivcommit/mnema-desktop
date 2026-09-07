@@ -159,14 +159,16 @@ function loadThemes() {
 
 const sortedNames = (m: Map<string, string>) => [...m.keys()].sort();
 
-// Matches every way a stylesheet reaches across the network: `url(...)` with
-// an http(s) or scheme-relative (`//`) target, quoted or not, and the same
-// shapes right after a bare `@import` (with or without `url(...)`). A
-// scheme-relative `@import "//host/x.css"` resolves and fetches exactly like
-// an explicit `https:` one under this app's origin, so it counts as
-// external too. `data:` URIs and relative paths never match, on purpose.
+// No `url(...)` may resolve outside the app: an explicit `http(s)` target,
+// or a scheme-relative (`//`) one, which fetches under this app's own
+// origin exactly like an explicit `https:` target would; `data:` URIs and
+// relative paths never match, on purpose. No `@import` at all, of any
+// shape, local or remote: this project composes stylesheets only in the two
+// `main.ts` entry points (tokens.css, then base.css, then a window-specific
+// file), so a CSS `@import` would be a second, unaudited composition path,
+// and a rule with no scheme to parse cannot narrow itself again.
 function reachesNetwork(line: string): boolean {
-  return /(?:url\(\s*|@import\s+(?:url\(\s*)?)['"]?(?:https?:)?\/\//i.test(line);
+  return /url\(\s*['"]?(?:https?:)?\/\//i.test(line) || /@import\b/i.test(line);
 }
 
 describe('tokens.css holds its two themes to each other', () => {
@@ -222,9 +224,10 @@ describe('the stylesheets stay inside the app', () => {
       ['@import url("https://x")', true],
       ['@import "//x"', true],
       ["@import 'http://x'", true],
+      ['@import url("./launcher.css")', true],
+      ["@import './a.css'", true],
       ['url(data:font/woff2;base64,AA)', false],
       ['url(./fonts/a.woff2)', false],
-      ["@import './a.css'", false],
     ];
     for (const [line, expected] of table) {
       expect(reachesNetwork(line), line).toBe(expected);
