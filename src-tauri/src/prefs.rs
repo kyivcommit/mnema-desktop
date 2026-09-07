@@ -982,25 +982,80 @@ mod tests {
     /// fakes with failure modes live in `tests/commands.rs`, where the fixtures
     /// that need them are; this one exists because `change_hotkey`'s critical
     /// section cannot be driven through the IPC.
+    ///
+    /// Every call gets a position from one shared counter (`seq`), and — once
+    /// [`watch`](Self::watch) is armed — is also sent on a channel the instant
+    /// it is recorded. Both exist for
+    /// `two_hotkey_changes_cannot_interleave`'s two independent
+    /// discriminators: the channel turns "did a rogue call happen" into an
+    /// event instead of a sleep, and the shared counter lets a call be
+    /// compared against a moment the test itself marks, without a sleep
+    /// either.
     #[derive(Default)]
     struct CountingRegistrar {
-        calls: Mutex<Vec<String>>,
+        calls: Mutex<Vec<(usize, String)>>,
+        seq: std::sync::atomic::AtomicUsize,
+        call_tx: Mutex<Option<std::sync::mpsc::Sender<(usize, String)>>>,
+    }
+
+    impl CountingRegistrar {
+        /// One order shared by every call this registrar records and by
+        /// whatever moments a test marks alongside them — `next_seq` alone,
+        /// called with nothing recorded against it, is how the test marks
+        /// such a moment.
+        fn next_seq(&self) -> usize {
+            self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// From this point on, every recorded call also arrives on `tx`
+        /// immediately, so a caller can `recv_timeout` for "did anything call
+        /// the operating system" instead of sleeping a fixed amount of time
+        /// and inspecting the tally afterwards. Calls made before `watch` is
+        /// armed are recorded but never sent — the one test that uses this
+        /// arms it only after the calls it does not care about have already
+        /// happened.
+        ///
+        /// Poison-absorbing, like every other lock this module's tests take
+        /// (`take_hook_turn`, `set_test_hook`): this runs on the main test
+        /// thread AFTER thread A is confirmed parked and BEFORE it is
+        /// released, so a `.unwrap()` that turned a poisoned lock into a panic
+        /// here would strand A holding `PREFS_LOCK` for the rest of the test
+        /// binary instead of merely failing this one test.
+        fn watch(&self, tx: std::sync::mpsc::Sender<(usize, String)>) {
+            *self.call_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+        }
+
+        /// Same reasoning as `watch`: this runs on thread A or B, and a
+        /// poisoned lock propagates to every later `.lock()` on the same
+        /// mutex — including the main thread's, in the same risk window.
+        fn record(&self, call: String) {
+            let seq = self.next_seq();
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((seq, call.clone()));
+            if let Some(tx) = self
+                .call_tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                // The receiver may already be gone (the test dropped it after
+                // its one `recv_timeout`); a call arriving after that is not
+                // this fake's problem to report.
+                let _ = tx.send((seq, call));
+            }
+        }
     }
 
     impl crate::os_services::ShortcutRegistrar for std::sync::Arc<CountingRegistrar> {
         fn register(&self, shortcut: &str) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("register({shortcut})"));
+            self.record(format!("register({shortcut})"));
             Ok(())
         }
 
         fn unregister(&self, shortcut: &str) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("unregister({shortcut})"));
+            self.record(format!("unregister({shortcut})"));
             Ok(())
         }
     }
@@ -1012,17 +1067,59 @@ mod tests {
         // uses one function up — and for the same reason: a "two threads, N
         // changes each, then check the state is consistent" test passes on an
         // unserialised implementation whenever the interleaving happens not to
-        // occur. This one parks the first change INSIDE its persist and asserts
-        // that the second has not yet touched the operating system.
+        // occur. This one parks the first change INSIDE its persist and then
+        // proves the second has not touched the operating system, through two
+        // discriminators sharing one event:
         //
-        // 🔴 The discriminator is the REGISTRAR's call list, not the file.
-        // Without the lock the second caller does not block until `write_key`,
-        // which is several operating-system calls later — so by the time it
-        // waits it has already unregistered a shortcut the first caller gave up
-        // and registered one over the top. The file would look the same either
-        // way; the recorded calls do not.
+        // 1. EVENT: once B is spawned, every registrar call is also sent on
+        //    `call_rx` the instant it is recorded (`CountingRegistrar::watch`,
+        //    below). (Not "B reached the write-key hook" — `PREFS_LOCK` alone
+        //    already serialises entry to that hook, mutant or not, so it
+        //    could never tell the two apart; the registrar is the thing this
+        //    bug actually leaves unserialised.)
+        // 2. SEQUENCE: `a_released`, a position drawn from the same counter
+        //    every registrar call draws from, marked immediately before A is
+        //    released.
+        //
+        // 🔴 **The event both react to is the same one, and only the PASS
+        // direction is free of a sleep — the KILL direction still is not.**
+        // On the correct code, PASS is deterministic by construction, not by
+        // timing: `lock_hotkey_change()` is the FIRST statement of
+        // `change_hotkey` (its call site, `prefs.rs:518`), so B cannot reach
+        // the registrar before that mutex, and A holds it across the whole
+        // call — past `a_released`, past the release itself — so neither
+        // discriminator can see a rogue call no matter how long the test
+        // waits. That is what changed from the sleep this replaced: the PASS
+        // side rests on a mutex, not on a duration racing a mutant to finish
+        // first.
+        //
+        // The KILL side did not gain the same property. Both discriminators
+        // fire on the identical fact — "did B call the registrar before
+        // `a_released`" — so they are not two independent proofs, only two
+        // readings of one. Under the mutant B is free to run the instant it
+        // is spawned, but WHETHER it does so inside the 300ms this test
+        // still waits is still a scheduler guarantee this test does not
+        // have and cannot get from inside `change_hotkey`: nothing observes
+        // B's entry earlier than the registrar itself, because there is
+        // nowhere above `lock_hotkey_change()` in the correct code to put a
+        // hook that would not also have to exist in the mutant it is
+        // supposed to catch. A scheduler that starves B for longer than the
+        // window defeats both halves together, not one of them.
+        //
+        // What this rewrite actually bought, then, is narrower than "no
+        // sleep": failure is immediate and names the offending call instead
+        // of needing the full window to elapse before a length check would
+        // notice anything, and the pass-side guarantee no longer depends on
+        // timing at all. The debt the 300ms window represents is reduced,
+        // not paid off — paying it off would need an instrumentation point
+        // inside `change_hotkey` ABOVE `lock_hotkey_change()`, one this test
+        // does not have and production code has no other reason to grow.
+        //
+        // Kills the mutation at `scripts/mutations/pr9-shell.sh` that
+        // comments out `state.lock_hotkey_change()` — proven by hand in the
+        // task's own verification, not only by this test passing.
         use std::sync::Arc;
-        use std::sync::mpsc::sync_channel;
+        use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 
         let dir = tempfile::tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
@@ -1041,7 +1138,6 @@ mod tests {
         // Reach `Registered("Alt+Space")` through the function itself, before
         // the hook is installed — otherwise this write would park too.
         change_hotkey(&state, "Alt+Space".to_string()).unwrap();
-        let after_drive = registrar.calls.lock().unwrap().len();
 
         let (parked_tx, parked_rx) = sync_channel::<()>(1);
         let (release_tx, release_rx) = sync_channel::<()>(1);
@@ -1065,23 +1161,48 @@ mod tests {
         // this binary can be caught by it.
         _turn.clear();
 
+        // Armed only now: A's own two calls above must never reach this
+        // channel, or a correct run would see them and look like a rogue call
+        // from B.
+        let (call_tx, call_rx) = std::sync::mpsc::channel();
+        registrar.watch(call_tx);
+
         let b_state = state.clone();
         let b = std::thread::spawn(move || change_hotkey(&b_state, "Ctrl+Shift+Space".to_string()));
-        // Long enough for an unserialised second caller to have finished both
-        // of its operating-system calls, which take no time against a fake.
-        std::thread::sleep(Duration::from_millis(300));
-        let while_parked = registrar.calls.lock().unwrap().clone();
-        // Read, then release, THEN assert — a panic between the two would leave
-        // thread A parked holding `PREFS_LOCK` for the life of this binary and
-        // every later test that writes preferences would block on it, so cargo
-        // would report a timeout instead of this failure.
+
+        // Discriminator 1. 300ms is generous against a fake registrar, whose
+        // calls take no perceptible time either way; the correct code spends
+        // all of it waiting, the mutant almost none.
+        let rogue_call = call_rx.recv_timeout(Duration::from_millis(300));
+        // Discriminator 2's mark, taken before the release below so that on
+        // the correct code nothing B does can predate it.
+        let a_released = registrar.next_seq();
+
+        // Release BEFORE the `match` below can panic — that is the one
+        // ordering this line guarantees. It is narrower than "before
+        // asserting anything": `_turn.clear()`, `registrar.watch()` and the
+        // `thread::spawn` above all run earlier, after A is confirmed parked
+        // and before this release, and a panic from any of THEM would strand
+        // A just the same. They are not risk-free by being earlier, only by
+        // what they are: `_turn.clear()` and `registrar.watch()` both go
+        // through poison-absorbing locks (no panic to have), and
+        // `thread::spawn` carries the same risk every other spawn in this
+        // module already does. The `match` below is the one place this test
+        // deliberately puts a call that is SUPPOSED to be able to fail, which
+        // is why it is the one required to come after this line rather than
+        // merely encouraged to.
         release_tx.send(()).unwrap();
-        assert_eq!(
-            while_parked.len(),
-            after_drive + 2,
-            "the second change reached the operating system while the first was still \
-             inside its critical section: {while_parked:?}"
-        );
+
+        match rogue_call {
+            Ok((seq, call)) => panic!(
+                "the second change reached the operating system ({call}, sequence {seq}) \
+                 while the first was still inside its critical section"
+            ),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("the call channel disconnected before anything used it")
+            }
+        }
 
         let a = a.join().unwrap().expect("the first change failed");
         let b = b.join().unwrap().expect("the second change failed");
@@ -1092,8 +1213,10 @@ mod tests {
             Some(&json!("Ctrl+Shift+Space")),
             "the change that finished last must be the one on disk"
         );
+
+        let calls = registrar.calls.lock().unwrap().clone();
         assert_eq!(
-            *registrar.calls.lock().unwrap(),
+            calls.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
             vec![
                 "register(Alt+Space)".to_string(),
                 "unregister(Alt+Space)".to_string(),
@@ -1103,6 +1226,17 @@ mod tests {
             ],
             "serialised, the two changes are one sequence with no shortcut given up twice"
         );
+        // Discriminator 2's assertion: B's own two calls, named by the
+        // shortcuts only it ever touches, must both sit after `a_released`.
+        for (seq, call) in &calls {
+            if call == "unregister(Ctrl+Alt+Space)" || call == "register(Ctrl+Shift+Space)" {
+                assert!(
+                    *seq > a_released,
+                    "B's call {call} (sequence {seq}) happened at or before A's release \
+                     (sequence {a_released}): {calls:?}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

@@ -4,13 +4,14 @@ import type { Platform } from '../lib/ipc';
 // into something a person reads, and a keypress turned back into that string.
 //
 // 🔴 **Why this module is filed under `src/i18n/` — the reason is filing, not
-// the guard.** Every `.ts` file anywhere under `ui/src` is already outside the
-// F3 Latin sweep by construction (`guard.test.ts` walks `.svelte` files only),
-// so this directory buys nothing there and a reader must not take it for a way
-// of skipping a check. What it is: a locale-shaped mapping module. It turns one
-// stored value into the words and glyphs of the platform a person is on, which
-// is what `recency.ts` and the catalogue beside it do, and both halves are pure
-// functions unit-tested with no component in sight.
+// an exemption.** This file IS swept: `guard.test.ts`'s `.ts` literal sweep
+// (`tsStringLiteralOffenses`) walks every `.ts` module under `src/i18n` but the
+// catalogue itself, this one included — it once was not (F3's Latin sweep read
+// `.svelte` markup only), and that hole is closed. What this file is: a
+// locale-shaped mapping module. It turns one stored value into the words and
+// glyphs of the platform a person is on, which is what `recency.ts` and the
+// catalogue beside it do, and both halves are pure functions unit-tested with
+// no component in sight.
 //
 // ⚠️ The strings below are protocol tokens rather than prose — `Ctrl`, `Alt`,
 // `Shift`, `Super`, `Space`, `F1`, `ArrowUp` — the DISPLAY vocabulary this
@@ -18,7 +19,15 @@ import type { Platform } from '../lib/ipc';
 // which is `prefs.rs`'s `MODIFIER_SPELLINGS`; `MODIFIER_ALIASES` below says
 // where the two differ and what that difference costs a person. Nothing here is
 // a sentence; every sentence this section shows comes from `catalog.ts` or
-// verbatim from the backend.
+// verbatim from the backend. Every token WRITTEN AS A STRING LITERAL in this
+// file (`Ctrl`, `Alt`, `Shift`, `Super`, `Space`, the aliases) is carried by
+// its OWN named entry in `guard.test.ts`'s `LATIN_ALLOWLIST`, not by an
+// exemption for this file: a new literal added here needs a new entry there
+// with a reason that is actually true, or the sweep fails on it — loudly, by
+// design. The key names sliced out of `event.code` (`F1`, `ArrowUp`) reach the
+// screen without ever being a literal here, so the sweep never sees them and
+// no entry exists for them; an arm of that kind is pinned by
+// `shortcut.test.ts`'s `shortcutFromEvent` cases, not by the sweep.
 
 // The canonical order, and it is canonical rather than incidental. The parser
 // is indifferent to the order of the modifiers AMONG THEMSELVES but not to the

@@ -448,8 +448,9 @@ pub fn set_embedding_model(
     // the flag already exists to provide, and it holds in both directions — a
     // job cannot start while a change is in flight either.
     //
-    // **`let _slot`, never `let _`**: the second drops the slot at once and
-    // leaves nothing held at all.
+    // **`let mut slot`, never `let _`**: the second drops the slot at once and
+    // leaves nothing held at all, and `mut` is now load-bearing —
+    // `forget_restore` below takes `&mut self`.
     //
     // Claimed **after** the key is read — this command's own answer to the
     // same question `scan_job::embed_after`'s D-g answers the other way for
@@ -457,7 +458,7 @@ pub fn set_embedding_model(
     // the credential store can put an authorisation dialog on screen, and the
     // slot must not be held while somebody decides what to do about it.
     // Everything after this point that touches the index is inside the claim.
-    let _slot = state.claim_job(
+    let mut slot = state.claim_job(
         crate::scan_state::Phase::Other {
             job: crate::scan_state::OtherJob::ModelAdoption,
         },
@@ -466,13 +467,20 @@ pub fn set_embedding_model(
     let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
     let hash = mnema_chunk::chunker_hash();
     let dim = check.dim as i64;
-    // Two `?` for two failures that are not the same one. The outer is
-    // `with_index` never reaching the closure at all — a poisoned lock, an index
-    // nobody opened — where nothing was retired because nothing ran. The inner is
-    // the adoption's own, which may carry retirements with it. The closure's
-    // error type is fixed at `mnema_index::Error` by `with_index`'s signature, so
-    // the inner failure has to travel as a value rather than as an `Err`.
-    let (adopted, retired) = state.with_index(|db| {
+    // Two failures that are not the same one. The outer `?` is `with_index`
+    // never reaching the closure at all — a poisoned lock, an index nobody
+    // opened — where nothing was retired because nothing ran. The inner
+    // `match` is the adoption's own, which may carry retirements with it even
+    // while still failing: `adopt_retiring_whatever_blocks` drops a space and
+    // loops back for another attempt on `SpaceNotEmpty` under `Discard`, so a
+    // later drop, or a REPEAT `SpaceNotEmpty` for a space this run already
+    // retired (the loop's guard refuses to drop the same space twice), can fail
+    // after this run has already destroyed vectors — `Error::RetiredThenFailed`
+    // is that shape, `failure_after_retiring`'s own doc is where it is
+    // decided. The closure's error type is fixed at `mnema_index::Error` by
+    // `with_index`'s signature, so the inner failure has to travel as a value
+    // rather than as an `Err`.
+    let inner = state.with_index(|db| {
         Ok(adopt_retiring_whatever_blocks(
             db,
             &model,
@@ -481,7 +489,28 @@ pub fn set_embedding_model(
             &hash,
             existing_vectors,
         ))
-    })??;
+    })?;
+    // 🔴 **Two exits move the space, not one.** A plain success obviously
+    // does; `RetiredThenFailed` ALSO does, because it is only ever raised
+    // once `retired` is non-empty (`failure_after_retiring`) — the drop that
+    // put a space there already committed before this function ever sees the
+    // error. A kept resumable report's `embedding: Ran { done, total }` is a
+    // count against whichever space is active (`JobSlot::forget_restore`'s
+    // own doc), and that count is exactly as stale after a space was
+    // destroyed mid-adoption as after one was successfully repointed to. The
+    // one exit that does NOT move anything is `Error::Index` with nothing
+    // retired — `Keep`'s own refusal, and a `Discard` that fails before its
+    // first drop — where a kept report is still honest and must stay kept.
+    let (adopted, retired) = match inner {
+        Ok(pair) => pair,
+        Err(e) => {
+            if matches!(e, Error::RetiredThenFailed { .. }) {
+                slot.forget_restore();
+            }
+            return Err(e);
+        }
+    };
+    slot.forget_restore();
     Ok(AdoptedModel {
         model,
         dim,

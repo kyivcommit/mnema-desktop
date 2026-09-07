@@ -673,6 +673,58 @@ test('the mount failure sentence follows a language switch too', async () => {
   expect(after).toContain('the settings window could not reach the core');
 });
 
+// `loadError`'s own doc comment claimed it "survives no re-read: nothing on
+// this screen can retry it" — true only of the mount read. The re-read the
+// section fires when a scan ends (`onMount`'s `jobs.state.subscribe`) used to
+// route a rejection through `.catch(() => {})`, dropping it on the floor: the
+// mount's own rejection reached the screen, a later one after a scan ended
+// did not. Both directions asserted: the sentence appears, and the settings a
+// successful mount already rendered are not blanked out from under it — a
+// stale panel says less than a fresh one but more than an empty one, and
+// `settings` itself is never touched by a failed `refresh()` (only a
+// successful one assigns it), so the panel below the sentence is exactly what
+// the last good read produced.
+test('a rejected re-read after a scan ends leaves the sentence on screen, and the last good settings stay', async () => {
+  setLocale('en');
+  await renderWith(settings({ key: { kind: 'present' } }));
+  // The mount succeeded: something concrete is on screen before the scan ends,
+  // so "stay" below is a real claim about a rendered panel, not a vacuous one.
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+
+  modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
+  emit(endedScan());
+
+  await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
+  expect(screen.getByTestId('model-load-reason').textContent)
+    .toBe('the settings window could not reach the core');
+  // The panel the mount rendered is still there, not replaced by an empty one.
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+});
+
+// The other direction: a mount that fails, followed by a scan-ended re-read
+// that SUCCEEDS. `refresh()` used to write `settings` on success without ever
+// clearing `loadError`, so the stale "could not be read" sentence would sit
+// forever beside a panel a later read had already confirmed — a claim
+// outliving its own guard, the same class `Settings.svelte` already guards
+// for its own copy of this state (`Settings.svelte:95-104`, mutation case
+// pr9-ui.sh "a read that succeeds must take the failure sentence away with
+// it"). Both directions asserted: the sentence is gone, and the panel the
+// successful re-read produced is actually on screen, not merely "no crash".
+test('a read that succeeds after a failed one takes the failure sentence away', async () => {
+  setLocale('en');
+  modelSettings.mockRejectedValue(new Error('the settings window could not reach the core'));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByTestId('model-load-failure')).toBeTruthy());
+
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+  emit(endedScan());
+
+  await waitFor(() => expect(screen.queryByTestId('model-load-failure')).toBeNull());
+  expect(screen.queryByTestId('model-load-reason')).toBeNull();
+  expect(screen.getByTestId('model-key-saved').textContent).toBe('A key is saved.');
+});
+
 // ---------------------------------------------------------------------------
 // Review P3-8: `startEditing` clears `actionError` and `cancelEditing` did
 // not, so a failed Save followed by Cancel left the failure sentence beside a
@@ -1017,6 +1069,36 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   await tick();
   expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+});
+
+// Reviewer's probe (Critical 1): `reportLoadFailure` carried no `settingsSeq`
+// stamp of its own, so an OLDER read's rejection landed on `loadError`
+// whatever a newer read had already done — the rejection-side twin of the
+// resolution-side guard proved above. Two reads in flight, the mount's own
+// (older) and the scan-ended re-read (newer): the newer settles first with
+// real data, then the older rejects late. The failure sentence must not
+// appear over a panel a newer read already confirmed.
+test('a stale rejection from an older read does not overwrite a newer success', async () => {
+  const queue = queuedModelSettings();
+
+  renderModels(); // issues the mount's own call — call #0, deferred
+  await waitFor(() => expect(queue.length).toBe(1));
+
+  emit(endedScan()); // scan-ended re-read — call #1, deferred, still concurrent
+  await waitFor(() => expect(queue.length).toBe(2));
+
+  // The newer call settles first, with real settings.
+  queue[1].resolve(settings({ key: { kind: 'present' } }));
+  await waitFor(() => expect(screen.getByTestId('model-key-saved')).toBeTruthy());
+
+  // The mount's OLDER call rejects late. It must not overwrite the newer
+  // success with a failure sentence.
+  queue[0].reject(new Error('a read nobody is waiting for any more'));
+  await tick();
+  await tick();
+  await tick();
+  expect(screen.queryByTestId('model-load-failure')).toBeNull();
+  expect(screen.getByTestId('model-key-saved')).toBeTruthy();
 });
 
 test('a model_settings reply landing while set_chat_model is still pending does not block the new choice once it resolves', async () => {

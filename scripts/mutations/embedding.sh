@@ -450,11 +450,19 @@ case_ "index: a failed row must stop applying once the chunk's text changes" \
 # shapes, and the damage shows up only as a confident wrong answer at query
 # time. `check_rankable` does not close this: it asks whether a vector can be
 # ranked at all, not whether it matches this space's width.
+# N7 (review round 3): the deletion-shaped marker below was the closing
+# `}` and the next line's `for (chunk, vector) in …` — text the unmutated
+# file already holds contiguously (`lib.rs`'s loop over `vectors` is
+# immediately followed by the loop over `pending`), so guard 2 could not
+# distinguish this landing where it means to from a wrong-place substitution
+# that happened to leave the same tail behind. Replacing the deleted block
+# with a `// mutant: …` comment instead of nothing gives guard 2 text the
+# unmutated file does not contain, without changing what the mutation does:
+# the width check still never runs.
 case_ "embed: a vector of the wrong width must be refused before it is stored" \
   crates/mnema-embed/src/lib.rs \
-  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != call\.width \{\n            return Err\(Error::WidthMismatch \{\n                expected: call\.width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n}{}' \
-  '    }
-    for (chunk, vector) in pending.iter().zip(vectors) {' \
+  's{    for vector in vectors \{\n        if vector\.len\(\) as i64 != call\.width \{\n            return Err\(Error::WidthMismatch \{\n                expected: call\.width,\n                got: vector\.len\(\) as i64,\n            \}\);\n        \}\n    \}\n}{    // mutant: the width check (Error::WidthMismatch) is not run before vectors are stored\n}' \
+  '    // mutant: the width check (Error::WidthMismatch) is not run before vectors are stored' \
   mnema-embed 'a_vector_of_the_wrong_width_is_refused_before_it_is_stored' --test queue
 
 # "Before the write" is a claim about the batch, not about each vector, and a
@@ -522,12 +530,18 @@ case_ "embed: progress total must be the queue, not every chunk in the index" \
 # transaction as the write. With `insert_vector` a chunk that was refused once
 # and has since been embedded goes on being counted among the failures — a
 # number on the settings screen that nothing will ever clear.
+#
+# N7 (review round 3): the old marker, `Ok(true)` followed by the closing
+# `})` and `}`, is the unchanged tail every sibling function in this file
+# already ends on (see `insert_vector` a few lines above, or `delete_vector`
+# below) — present whether or not the DELETE was removed, so guard 2 could
+# not tell this landing apart from a substitution into the wrong function.
+# A `// mutant: …` comment left in the DELETE's place is text only the
+# mutated file holds.
 case_ "index: storing a vector must clear the row that gave up on the chunk (D95a)" \
   crates/mnema-index/src/space.rs \
-  's{            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n            Ok\(true\)}{            Ok(true)}' \
-  '            Ok(true)
-        })
-    }' \
+  's{            tx\.execute\(\n                "DELETE FROM chunk_embedding_state WHERE space_id = \?1 AND chunk_id = \?2",\n                params!\[space_id, chunk_id\],\n            \)\?;\n            Ok\(true\)}{            // mutant: the chunk_embedding_state row is no longer cleared here\n            Ok(true)}' \
+  '            // mutant: the chunk_embedding_state row is no longer cleared here' \
   mnema-embed 'an_edited_chunk_leaves_the_failed_number_and_is_tried_again' --test queue
 
 # A batch of nothing asks the database for zero chunks and gets zero back, so
@@ -874,17 +888,18 @@ case_ "embed: run must ask space_is_complete before marking a space ready (D95b 
 # it did the moment `create_space` wrote its first row — the whole defect this
 # task exists to close.
 #
-# ⚠️ M1 (review round 1): a pure deletion, and no code-only marker can
-# distinguish it from the file's unmutated state — the leftover `break;` and
-# the `one_batch` call after it already sit there before the mutation runs.
-# `git diff --quiet` is the guard doing the real work on this case; the
-# second-line check is not credited with more than that.
+# ⚠️ M1 (review round 1), resolved in review round 3 (N7): this was a pure
+# deletion, and the marker was `break;` followed by the `one_batch` call —
+# text the unmutated file already holds contiguously either side of the
+# removed block, so `git diff --quiet` was doing the only real work here and
+# the marker check could not distinguish this landing from a wrong-place
+# substitution. Replacing the deletion with a `// mutant: …` comment gives
+# the marker check text the unmutated file does not contain, without
+# changing what the mutation does: the space is still never marked ready.
 case_ "embed: run must mark a space ready once its queue empties clean (D95b)" \
   crates/mnema-embed/src/lib.rs \
-  's{            if db\.space_is_complete\(space\)\? \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{}' \
-  'break;
-        }
-        let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);' \
+  's{            if db\.space_is_complete\(space\)\? \{\n                db\.mark_space_ready\(space\)\?;\n            \}\n}{            // mutant: the space is no longer marked ready once its queue empties clean\n}' \
+  '            // mutant: the space is no longer marked ready once its queue empties clean' \
   mnema-embed 'a_space_becomes_ready_when_the_queue_empties' --test queue
 
 # Without this, a `ready` space never hears that new chunks arrived — the
@@ -896,17 +911,17 @@ case_ "embed: run must mark a space ready once its queue empties clean (D95b)" \
 # `total > 0` to `!db.space_is_complete(space)?` — see the case below for what
 # that move was for.
 #
-# ⚠️ M1 (review round 1): also a pure deletion, same limitation as the case
-# above — `let call = Call { ... }` is unmutated code that exists either way,
-# so only `git diff --quiet` distinguishes a landed mutation from a no-op here.
+# ⚠️ M1 (review round 1), resolved in review round 3 (N7): also a pure
+# deletion, same limitation as the case above — `let call = Call { ... }` is
+# unmutated code that exists either way, so only `git diff --quiet`
+# distinguished a landed mutation from a no-op here. A `// mutant: …` comment
+# in the deleted block's place is text the unmutated file does not hold,
+# without changing what the mutation does: a ready claim is still never
+# retracted here.
 case_ "embed: run must retract a ready claim when it starts against a non-empty queue (D95b)" \
   crates/mnema-embed/src/lib.rs \
-  's{    if !db\.space_is_complete\(space\)\? \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{}' \
-  'let call = Call {
-        db,
-        space,
-        width,
-        total,' \
+  's{    if !db\.space_is_complete\(space\)\? \{\n        db\.mark_space_building\(space\)\?;\n    \}\n}{    // mutant: a ready claim is no longer retracted when the run starts against a non-empty queue\n}' \
+  '    // mutant: a ready claim is no longer retracted when the run starts against a non-empty queue' \
   mnema-embed 'a_ready_space_goes_back_to_building_when_new_chunks_arrive' --test queue
 
 # Fix round 2's own finding, reverted: without `space_is_complete` governing
@@ -1078,9 +1093,28 @@ case_ "models: the settings must read the refusal count, not report zero (T8)" \
 # covers the other timing — cannot stand in for the claim, and the assertion
 # that fires is the one about the pointer having moved
 # (`left: Some(2), right: Some(1)`), not the one about which error came back.
+#
+# Task 9c (debt sweep), re-anchored: `3ba06ee` renamed the binding from
+# `let _slot` to `let mut slot` (`mut` became load-bearing for
+# `forget_restore`), so the old pattern matched nothing and both cases below
+# went stale silently green — a plain `let _slot = ();` mutant, applied by
+# hand against the pre-rename text, no longer even compiles against today's
+# function: two `slot.forget_restore();` calls would be method calls on `()`.
+# The expression is now two statements: the first stubs both
+# `slot.forget_restore();` calls to `();` (`/g`, since there are two, at
+# different indentation — the pattern is the common 4-space-plus-call suffix,
+# which is a substring of the deeper-indented one too, so both are hit without
+# disturbing either line's leading whitespace), so the mutant still compiles
+# with the claim gone; the second, LAST and deliberately without `/g`, is the
+# claim removal itself, which stays the one guard 3 actually protects at
+# "exactly one occurrence" — a compound expression's occurrence count is only
+# ever checked on its LAST statement (this file's own `expr_wants_every_match`
+# note explains why), so putting the single unique, safety-critical
+# substitution last is what keeps that check meaningful rather than one only
+# the less critical stub half would satisfy.
 case_ "models: a model change must not be possible while a job holds the slot (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
+  's{    slot\.forget_restore\(\);}{    ();}g; s{    let mut slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
 
@@ -1088,7 +1122,7 @@ case_ "models: a model change must not be possible while a job holds the slot (T
 # One case per test, since `case_` names one at a time.
 case_ "models: a model change must not be possible while a pass is writing (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
+  's{    slot\.forget_restore\(\);}{    ();}g; s{    let mut slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
 
@@ -1100,10 +1134,11 @@ case_ "models: a model change must not be possible while a pass is writing (T8)"
 # statements that would become adjacent). Substituting instead of deleting is
 # what makes a code-only discriminator exist at all here.
 #
-# ⚠️ `let _slot` and not `let _`: the second drops the slot at once and holds
-# nothing. No case here reddens on that one character — distinguishing them
-# needs a second job started from another thread *during* the command, which is
-# a race rather than a test. It is written on the line itself instead.
+# ⚠️ `let mut slot` and not `let _`: the second drops the slot at once and
+# holds nothing. No case here reddens on that one character — distinguishing
+# them needs a second job started from another thread *during* the command,
+# which is a race rather than a test. It is written on the line itself
+# instead.
 
 # ── Task 9: what the live acceptance run found, and what holds it ────────────
 #

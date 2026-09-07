@@ -13,14 +13,16 @@ use std::time::Duration;
 use fixture::{Fixture, vectors_for};
 use mnema_desktop::bridge;
 use mnema_desktop::error::Error;
-use mnema_desktop::job::{EndReason, JobEvent};
+use mnema_desktop::job::{EndReason, JobEvent, Progress};
 use mnema_desktop::models::{
     DEFAULT_MODELS, ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState,
     KeyStoreFailure, UnreadableCause, forget_key, key_present, model_settings, provider_models,
     set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
 use mnema_desktop::scan_job;
-use mnema_desktop::scan_state::{EmbedOutcome, Entry, Phase, ScanSnapshot, ScanState, SkipWhy};
+use mnema_desktop::scan_state::{
+    EmbedOutcome, EndedIn, Entry, Phase, ScanReport, ScanSnapshot, ScanState, SkipWhy, Terminal,
+};
 use mnema_mock_provider::Reply;
 use serde_json::Value;
 use support::scan::{report_of, run_scan_capturing_snapshots, scan_with};
@@ -953,6 +955,110 @@ fn changing_the_model_without_confirmation_leaves_the_space_alone() {
         fx.active_space(),
         Some(old),
         "a refused change moved the index off the space it refused to leave"
+    );
+}
+
+/// A resumable ending built directly through the slot, bypassing a real scan:
+/// what the two tests below are about is what `set_embedding_model` does with
+/// whatever it finds there, not how a scan produces it — `state.rs`'s own
+/// tests already cover that. `embedding: Ran` is what makes it dangerous: its
+/// `done`/`total` are a count against `meta.active_space` (F5), so they are
+/// exactly what an adoption that moves that pointer would make false.
+fn a_resumable_embedding_ending() -> ScanReport {
+    ScanReport {
+        embedding: EmbedOutcome::Ran {
+            done: 900,
+            total: 1000,
+            refused: 0,
+        },
+        ended_in: EndedIn::Embedding,
+        reason: EndReason::Cancelled,
+        message: None,
+        resume: Some(Entry::EmbedOnly),
+    }
+}
+
+/// Task 9c (debt sweep), review round 2, Important 1: a successful adoption
+/// moves `meta.active_space`, so a kept `embedding: Ran { done, total }` would
+/// describe a space nothing points at any more the moment it lands —
+/// `JobSlot::forget_restore` (`state.rs`) is what stops the ending from
+/// surviving a change that actually happened.
+#[test]
+fn a_successful_adoption_forgets_a_resumable_ending_rather_than_keeping_its_stale_numbers() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted"); // the implicit default adoption: check 1 of 2
+
+    fx.state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: a_resumable_embedding_ending(),
+            },
+            None,
+        );
+
+    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect("the space is empty, so `Keep` has nothing to refuse"); // check 2 of 2
+
+    assert_eq!(
+        fx.state().scan_state().snapshot,
+        ScanSnapshot::Idle,
+        "a resumable ending must not survive a model change that actually moved the space \
+         — restoring it here would draw stale numbers against the space it just adopted"
+    );
+}
+
+/// The sibling: an adoption that FAILS before it ever reaches
+/// `JobSlot::forget_restore` must still hand the resumable ending back whole.
+/// Reuses `changing_the_model_without_confirmation_leaves_the_space_alone`'s
+/// own refusal (`SpaceNotEmpty`, raised inside `with_index` before
+/// `forget_restore` is ever called) to prove the space genuinely did not move.
+#[test]
+fn a_failed_adoption_still_restores_a_resumable_ending() {
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    fx.adopt_default_model();
+    fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    let report = a_resumable_embedding_ending();
+    fx.state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
+        .expect_err("the space already holds embedded chunks");
+    assert!(
+        matches!(
+            refusal,
+            Error::Index(mnema_index::Error::SpaceNotEmpty { .. })
+        ),
+        "the wrong refusal proves nothing about restoring: {refusal:?}"
+    );
+
+    assert_eq!(
+        fx.state().scan_state().snapshot,
+        ScanSnapshot::Ended { report },
+        "an adoption that failed before moving the space must not have discarded the \
+         resumable ending either"
     );
 }
 
@@ -2403,6 +2509,70 @@ fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed()
         read_index(&recovered.index).embedding_model.as_deref(),
         Some(OTHER_MODEL),
         "the settings screen does not name the model the recovery adopted"
+    );
+}
+
+/// The residual gap review round 3 found in `set_embedding_model`'s
+/// `forget_restore` fix: `adopt_retiring_whatever_blocks` can drop a space
+/// and THEN fail (`Error::RetiredThenFailed`, `failure_after_retiring`'s own
+/// doc) — the drop already committed before this function ever sees the
+/// error, so the space moved just as much as a plain success does.
+/// `forget_restore` must run on this exit too, not only on `Ok`.
+#[test]
+fn an_adoption_that_retired_a_space_and_then_failed_forgets_the_resumable_ending() {
+    // The same squatting-table lever
+    // `an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed`
+    // uses: the first attempt drops the old (non-empty) space and commits;
+    // the retry's own `CREATE TABLE` for the new space collides with this one
+    // and fails with an error that is not `SpaceNotEmpty`, so
+    // `adopt_retiring_whatever_blocks` returns `RetiredThenFailed` rather than
+    // looping again.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 2);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    fx.embed_chunks_in_the_active_space(EMBEDDED);
+
+    fx.state()
+        .with_index(|db| {
+            let seq: i64 = db.conn().query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'embedding_space'",
+                [],
+                |r| r.get(0),
+            )?;
+            db.conn()
+                .execute(&format!("CREATE TABLE vec_emb_{} (x)", seq + 1), [])?;
+            Ok(())
+        })
+        .expect("the squatting table is created");
+
+    let report = a_resumable_embedding_ending();
+    fx.state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+
+    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
+        .expect_err("the squatting table makes the retry fail");
+    assert!(
+        matches!(refusal, Error::RetiredThenFailed { .. }),
+        "the wrong refusal proves nothing about a space having moved: {refusal:?}"
+    );
+
+    assert_eq!(
+        fx.state().scan_state().snapshot,
+        ScanSnapshot::Idle,
+        "a space was retired before this failure — the kept ending's numbers are just as \
+         stale as after a success, and must not survive either"
     );
 }
 

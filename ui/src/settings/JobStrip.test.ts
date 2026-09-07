@@ -527,6 +527,41 @@ test('a failure carries its own text, and survives its absence', async () => {
   expect(visible(screen.getByTestId('indexing-walk-outcome'))).toBe(WALK_SENTENCES.failed.uk);
 });
 
+// Task 9c (debt sweep). `scan_job.rs`'s own comment on the preflight
+// `rulesNotApplied` refusal says the person's next step is «Теки», not a
+// retry — but `read_roots` fails before a folder is ever read, so this
+// ending never calls `mark_reading_done` and `scan.lastReading` is never
+// touched. `readingBlock` (built from exactly that field) therefore draws
+// nothing here — `ended(over, null)` is the fixture for precisely that,
+// `reading: null` — and this failure message is the ONLY sentence a person
+// sees. It used to be the Rust refusal's own text alone, naming the rule but
+// never saying where to go fix it.
+test('a preflight rules refusal shows the refusal and points at Теки', async () => {
+  await openWindow();
+
+  await emit(ended({
+    reason: 'rulesNotApplied', endedIn: 'reading',
+    message: 'the stored exclusion mask no longer validates', resume: null,
+  }, null));
+
+  expect(screen.queryByTestId('indexing-walk-outcome')).toBeNull();
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe(
+    'Програма повідомила: the stored exclusion mask no longer validates Виправте правило в розділі «Теки».',
+  );
+});
+
+// The other direction, on the `reason` half of the guard: an ordinary
+// failure carries a message too, and must not grow a pointer that has
+// nothing to do with it.
+test('an ordinary failure does not grow the rules pointer', async () => {
+  await openWindow();
+
+  await emit(endedReading('failed', { message: 'the worker binary could not be started' }));
+
+  expect(visible(screen.getByTestId('indexing-ended-failure')))
+    .toBe('Програма повідомила: the worker binary could not be started');
+});
+
 // 🔴 An ending is a STATE: a scan that finished stays finished until the next
 // job claims the slot, and so does the reading it left behind. The pair this
 // separates is «the window heard the ending» from «the window was opened after

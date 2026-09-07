@@ -43,13 +43,15 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
 }
 
 /**
- * The same instant as a DATE, for §9.3's «останнє оновлення з датою» (D-e).
+ * The same instant as a DATE, for §9.3's "last update, shown with its date"
+ * requirement (D-e).
  *
  * It lives beside `formatIndexedAt` so one module still answers for one kind of
- * time, and it is not a duplicate of it: «3 дні тому» is what a person feels,
- * the date is what they compare against the file they edited this morning. The
- * Recents card's argument for a relative phrase ONLY (the header above) held
- * because that card has no zone to be right about; §9.3 does — it is a person
+ * time, and it is not a duplicate of it: a relative phrase like "3 days ago" is
+ * what a person feels, the date is what they compare against the file they
+ * edited this morning. The Recents card's argument for a relative phrase ONLY
+ * (the header above) held because that card has no zone to be right about;
+ * §9.3 does — it is a person
  * reading their own index on their own machine, so the machine's own zone is
  * the right one and `Intl.DateTimeFormat` is left to take it from the runtime.
  *
@@ -80,14 +82,15 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
  * for whoever hits it on a distro-packaged Node, not a known failure.
  *
  * 🔴 **F1 (measured live, 2026-09-04): a trailing stop stripped, unconditionally.**
- * ICU's own `uk` long-date form ends in «р.» — an abbreviation stop that is
- * part of the date, not of any sentence — and `indexing_index_updated`
- * (`catalog.ts`) wraps this in a sentence with a full stop of its own:
- * «Останнє оновлення: 1 вересня 2026 р..» read with two stops where a reader
- * expects one. One rule for every locale, here rather than in the catalogue
- * or the caller, so the sentence's own stop is the only one regardless of
- * which locale's CLDR data happens to end a long date in punctuation. `en`'s
- * form ends in a bare year and is unaffected either way.
+ * ICU's own `uk` long-date form ends in an abbreviation stop after the word
+ * for "year" — an abbreviation stop that is part of the date, not of any
+ * sentence — and `indexing_index_updated` (`catalog.ts`) wraps this in a
+ * sentence with a full stop of its own: the Ukrainian sentence for "Last
+ * updated: September 1, 2026" reads with two stops where a reader expects
+ * one. One rule for every locale, here rather than in the catalogue or the
+ * caller, so the sentence's own stop is the only one regardless of which
+ * locale's CLDR data happens to end a long date in punctuation. `en`'s form
+ * ends in a bare year and is unaffected either way.
  */
 export function formatIndexedDate(indexedAt: number, locale: Loc): string {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'long' })
