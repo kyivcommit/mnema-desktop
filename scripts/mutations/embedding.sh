@@ -1093,9 +1093,28 @@ case_ "models: the settings must read the refusal count, not report zero (T8)" \
 # covers the other timing — cannot stand in for the claim, and the assertion
 # that fires is the one about the pointer having moved
 # (`left: Some(2), right: Some(1)`), not the one about which error came back.
+#
+# Task 9c (debt sweep), re-anchored: `3ba06ee` renamed the binding from
+# `let _slot` to `let mut slot` (`mut` became load-bearing for
+# `forget_restore`), so the old pattern matched nothing and both cases below
+# went stale silently green — a plain `let _slot = ();` mutant, applied by
+# hand against the pre-rename text, no longer even compiles against today's
+# function: two `slot.forget_restore();` calls would be method calls on `()`.
+# The expression is now two statements: the first stubs both
+# `slot.forget_restore();` calls to `();` (`/g`, since there are two, at
+# different indentation — the pattern is the common 4-space-plus-call suffix,
+# which is a substring of the deeper-indented one too, so both are hit without
+# disturbing either line's leading whitespace), so the mutant still compiles
+# with the claim gone; the second, LAST and deliberately without `/g`, is the
+# claim removal itself, which stays the one guard 3 actually protects at
+# "exactly one occurrence" — a compound expression's occurrence count is only
+# ever checked on its LAST statement (this file's own `expr_wants_every_match`
+# note explains why), so putting the single unique, safety-critical
+# substitution last is what keeps that check meaningful rather than one only
+# the less critical stub half would satisfy.
 case_ "models: a model change must not be possible while a job holds the slot (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
+  's{    slot\.forget_restore\(\);}{    ();}g; s{    let mut slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_model_change_is_refused_while_a_job_holds_the_slot' --test model_commands
 
@@ -1103,7 +1122,7 @@ case_ "models: a model change must not be possible while a job holds the slot (T
 # One case per test, since `case_` names one at a time.
 case_ "models: a model change must not be possible while a pass is writing (T8)" \
   src-tauri/src/models.rs \
-  's{    let _slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
+  's{    slot\.forget_restore\(\);}{    ();}g; s{    let mut slot = state\.claim_job\(\n        crate::scan_state::Phase::Other \{\n            job: crate::scan_state::OtherJob::ModelAdoption,\n        \},\n        false,\n    \)\?;}{    let _slot = ();}' \
   '    let _slot = ();' \
   mnema-desktop 'a_run_leaves_no_vectors_in_a_space_nothing_points_at' --test model_commands
 
@@ -1115,10 +1134,11 @@ case_ "models: a model change must not be possible while a pass is writing (T8)"
 # statements that would become adjacent). Substituting instead of deleting is
 # what makes a code-only discriminator exist at all here.
 #
-# ⚠️ `let _slot` and not `let _`: the second drops the slot at once and holds
-# nothing. No case here reddens on that one character — distinguishing them
-# needs a second job started from another thread *during* the command, which is
-# a race rather than a test. It is written on the line itself instead.
+# ⚠️ `let mut slot` and not `let _`: the second drops the slot at once and
+# holds nothing. No case here reddens on that one character — distinguishing
+# them needs a second job started from another thread *during* the command,
+# which is a race rather than a test. It is written on the line itself
+# instead.
 
 # ── Task 9: what the live acceptance run found, and what holds it ────────────
 #
