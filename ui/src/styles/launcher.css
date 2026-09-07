@@ -1,0 +1,8 @@
+/* The launcher is a frameless, transparent window (tauri.conf.json:
+ * "transparent": true). Its cards paint their own ground; the document must
+ * not, or the window becomes an opaque rectangle. Imported after base.css by
+ * the launcher entry only.
+ */
+body {
+  background: transparent;
+}

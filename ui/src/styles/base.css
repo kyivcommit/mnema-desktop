@@ -1,0 +1,19 @@
+/* Base — the document, and nothing a component owns.
+ *
+ * Imported after tokens.css by both windows. The launcher then overrides the
+ * body background to transparent (launcher.css); the settings window keeps
+ * --surface. Component styling arrives in later changes, on the attributes
+ * the markup already carries (aria-current, aria-pressed, role, data-testid
+ * never) — not here.
+ */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: 14px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}

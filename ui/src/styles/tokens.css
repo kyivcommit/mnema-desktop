@@ -1,0 +1,139 @@
+/* Design tokens — the one place both themes are written down.
+ *
+ * Copied from the two interface mockups (docs/private, 2026-08-21), which are
+ * the source of truth for every colour value here. The scene-only tokens of
+ * those mockups (--wall, --menubar: the drawn desktop and menu bar) are not
+ * transferred; nothing in the app has a desktop to paint.
+ *
+ * Theme mechanism, complete in CSS:
+ *   :root                                  light values
+ *   @media dark  :root:not([data-theme=light])   dark when the OS is dark
+ *                                          and no explicit light choice
+ *   :root[data-theme=dark]                 the same dark values, for an
+ *                                          explicit choice on any OS theme
+ *   :root[data-theme=light]                only forces color-scheme back to
+ *                                          light; the light values above
+ *                                          already apply otherwise
+ * A later preference switch sets ONLY the data-theme attribute.
+ *
+ * Font stacks name no family the app does not ship: the mockups' families
+ * are not transferred; a bundled family lands with its @font-face in a
+ * later change, and is prepended here then.
+ *
+ * tokens.test.ts reads this file as text and holds the blocks to each other;
+ * keep the four selectors above spelled exactly as they are.
+ */
+:root {
+  color-scheme: light dark;
+
+  --ground: #E7ECF3;
+  --surface: #FFFFFF;
+  --surface-2: #F4F6FB;
+  --surface-3: #ECF0F7;
+  --panel: rgba(255, 255, 255, .90);
+
+  --ink: #1B2331;
+  --ink-soft: #586274;
+  --ink-faint: #8A93A6;
+
+  --line: #E1E6EF;
+  --line-strong: #CDD4E0;
+
+  --accent: #3B49A8;
+  --accent-soft: #E7EAF7;
+  --cite: #9A6708;
+  --cite-wash: #FBEBC8;
+  --cite-line: #E6CE93;
+  --ok: #2C7A57;
+  --ok-wash: #DCEFE5;
+  --err: #C2453B;
+  --err-wash: #F7E0DD;
+  --add: #7A3E9C;
+  --add-wash: #F0E6F6;
+  --add-line: #DEC9EA;
+
+  --shadow: rgba(30, 40, 70, .20);
+  --glow: rgba(59, 73, 168, .22);
+
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --serif: Georgia, 'Times New Roman', serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0C0F15;
+    --surface: #1A1E27;
+    --surface-2: #141821;
+    --surface-3: #20252F;
+    --panel: rgba(26, 30, 39, .90);
+
+    --ink: #E8EBF1;
+    --ink-soft: #9AA3B5;
+    --ink-faint: #6B7488;
+
+    --line: #2B323E;
+    --line-strong: #39414F;
+
+    --accent: #93A0EE;
+    --accent-soft: #23283A;
+    --cite: #E6BC66;
+    --cite-wash: #3A3320;
+    --cite-line: #59492A;
+    --ok: #62C398;
+    --ok-wash: #1E3A2E;
+    --err: #E8877C;
+    --err-wash: #3A211D;
+    --add: #C79BE0;
+    --add-wash: #2A2135;
+    --add-line: #43324F;
+
+    --shadow: rgba(0, 0, 0, .55);
+    --glow: rgba(147, 160, 238, .25);
+
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --serif: Georgia, 'Times New Roman', serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ground: #0C0F15;
+  --surface: #1A1E27;
+  --surface-2: #141821;
+  --surface-3: #20252F;
+  --panel: rgba(26, 30, 39, .90);
+
+  --ink: #E8EBF1;
+  --ink-soft: #9AA3B5;
+  --ink-faint: #6B7488;
+
+  --line: #2B323E;
+  --line-strong: #39414F;
+
+  --accent: #93A0EE;
+  --accent-soft: #23283A;
+  --cite: #E6BC66;
+  --cite-wash: #3A3320;
+  --cite-line: #59492A;
+  --ok: #62C398;
+  --ok-wash: #1E3A2E;
+  --err: #E8877C;
+  --err-wash: #3A211D;
+  --add: #C79BE0;
+  --add-wash: #2A2135;
+  --add-line: #43324F;
+
+  --shadow: rgba(0, 0, 0, .55);
+  --glow: rgba(147, 160, 238, .25);
+
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --serif: Georgia, 'Times New Roman', serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
