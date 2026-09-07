@@ -621,6 +621,14 @@ test('setAutostart invokes set_autostart with the boolean, and answers the OS st
   expect(state).toEqual(reply);
 });
 
+test('setTheme invokes set_theme with the choice under its camelCase name', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.setTheme('dark');
+
+  expect(invoke).toHaveBeenCalledWith('set_theme', { choice: 'dark' });
+});
+
 test('the hotkey status is a tagged union of exactly two arms', () => {
   // A `Record` over the discriminant rather than a list: an arm added on the
   // Rust side and left unmapped here is a compile error, which is what keeps

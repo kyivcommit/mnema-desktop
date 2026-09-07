@@ -8,6 +8,10 @@ const h = vi.hoisted(() => {
   const state: { handler: ((e: { payload: string }) => void) | null } = { handler: null };
   const invoke = vi.fn();
   const listen = vi.fn(async (_name: string, cb: (e: { payload: string }) => void) => {
+    // The `await` before this deferred so a missing `await listen(...)` in
+    // `bootTheme` is distinguishable: without it, `invoke` (synchronous in the
+    // ordering test below) would run first regardless of this assignment.
+    await Promise.resolve();
     state.handler = cb;
     return () => {};
   });
@@ -32,6 +36,7 @@ describe('bootTheme ordering', () => {
   it('registers the theme-changed listener before taking the snapshot', async () => {
     const order: string[] = [];
     h.listen.mockImplementationOnce(async (_n: string, cb: (e: { payload: string }) => void) => {
+      await Promise.resolve();
       order.push('listen');
       h.state.handler = cb;
       return () => {};

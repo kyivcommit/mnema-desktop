@@ -1,10 +1,12 @@
 import { writable } from 'svelte/store';
 import type { ThemeChoice } from './lib/ipc';
 
-// The one writer of `data-theme` on this document. Three feeders — the boot
-// snapshot, the `theme-changed` event from Rust, and the settings window's own
-// successful `set_theme` — all go through this store, so there is one place the
-// attribute is decided and one subscription that writes it.
+// The one writer of `data-theme` on this document. Two feeders live here —
+// the boot snapshot and the `theme-changed` event, which Rust broadcasts to
+// the asking window too; the settings section adds a third by setting the
+// store after a successful `set_theme` reply (PR 10b, Task 3). All three go
+// through this store, so there is one place the attribute is decided and one
+// subscription that writes it.
 export const theme = writable<ThemeChoice>('system');
 
 export function isThemeChoice(v: unknown): v is ThemeChoice {
@@ -12,8 +14,8 @@ export function isThemeChoice(v: unknown): v is ThemeChoice {
 }
 
 // Explicit choice → the attribute; system → NO attribute. `tokens.css` reads
-// `:root[data-theme="dark"]` and `:root:not([data-theme="light"])` under
-// `prefers-color-scheme: dark`, so absence IS "follow the OS". A literal
+// `:root[data-theme="dark"]` on its own, and `:root:not([data-theme="light"])`
+// under `prefers-color-scheme: dark`, so absence IS "follow the OS". A literal
 // "system" value would behave the same today and stop the day a stylesheet
 // matches `[data-theme]` at all — so it is deleted, not renamed.
 export function applyTheme(choice: ThemeChoice) {
