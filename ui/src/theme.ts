@@ -38,8 +38,10 @@ let changeSeq = 0;
 
 // Persists `choice` and, if no newer change has started since, moves the store.
 // Rejects with the backend's own sentence; nothing was written and nothing was
-// applied in that case (`set_theme` persists first), so the store is still
-// right and the caller re-reads nothing.
+// applied in that case (`set_theme` persists first), so this call left the
+// store alone and the caller re-reads nothing. A change that succeeded
+// alongside a rejected newer one is not this call's to apply — its own
+// `theme-changed` broadcast is what moves the store then.
 export async function changeTheme(choice: ThemeChoice): Promise<void> {
   const mine = ++changeSeq;
   await setTheme(choice);

@@ -432,9 +432,11 @@
       await changeTheme(choice);
     } catch (err) {
       // Nothing was written and nothing was applied (`set_theme` persists first
-      // and returns on failure), so the store — and the pressed button — are
-      // still right. No re-read, unlike the two rejections above: they carry a
-      // state the window cannot know; this one carries none.
+      // and returns on failure), so this call left the store — and the pressed
+      // button — alone; if an older change succeeded alongside, its own
+      // `theme-changed` broadcast is what moves them. No re-read, unlike the
+      // two rejections above: they carry a state the window cannot know; this
+      // one carries none.
       themeError = err instanceof Error ? err.message : String(err);
     } finally {
       themeBusy = false;

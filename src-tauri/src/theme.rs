@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(forced(ThemeChoice::Dark), Some(Theme::Dark));
     }
 
-    /// From the owner's review of PR #38, P2: persist → apply → broadcast has
+    /// External review of PR #38, P2: persist → apply → broadcast has
     /// to be one ordered operation. A is parked between its persist and its
     /// apply, B is started, and when A is released the file, the last
     /// broadcast and the order of the broadcasts must all agree on B — because
@@ -368,11 +368,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = tauri::test::mock_app();
 
-        // Every broadcast, in the order it was emitted. A Rust-side listener
-        // is called before `Emitter::emit` returns — `tests/commands.rs` reads
-        // one with `try_recv` immediately after the command it belongs to — so
-        // this vector's order is the order of the broadcasts and not an order
-        // some queue chose afterwards.
+        // Every broadcast, in the order it was emitted. What is measured:
+        // `tests/commands.rs` reads a Rust-side listener with `try_recv`
+        // right after the COMMAND returns, so a listener has run by then.
+        // This test does not need the stronger "before `emit` returns": A's
+        // emit completes before B may enter the lock, so any first-in
+        // first-out delivery keeps the order this vector records.
         let broadcasts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         {
             let broadcasts = broadcasts.clone();
