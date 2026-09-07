@@ -518,11 +518,15 @@
     >{autostartActionLabel}</button>
   {/if}
 
+  {#if themeError !== null}
+    <p data-testid="application-theme-failed">{themeFailedLabel}</p>
+    <p data-testid="application-theme-error">{themeError}</p>
+  {/if}
   <p id="application-theme-label">{themeLabelText}</p>
-  <!-- Three explicit buttons rather than an `{#each}` over the choices: the
-       i18n guard scans template literals in attributes, and a computed
-       `data-testid` would trip it for no gain over three lines. Order is the
-       mockup's: light, dark, system. -->
+  <!-- Three explicit buttons rather than an `{#each}` over the choices: three
+       literal `data-testid` strings stay greppable from the tests, and a loop
+       over a three-member union costs more to read than the three lines it
+       saves. Order is the mockup's: light, dark, system. -->
   <div role="group" aria-labelledby="application-theme-label">
     <button
       type="button"
@@ -546,10 +550,6 @@
       onclick={() => chooseTheme('system')}
     >{themeSystemLabel}</button>
   </div>
-  {#if themeError !== null}
-    <p data-testid="application-theme-failed">{themeFailedLabel}</p>
-    <p data-testid="application-theme-error">{themeError}</p>
-  {/if}
 
   <p data-testid="application-version">{versionText}</p>
 {/if}
