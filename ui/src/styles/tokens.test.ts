@@ -16,6 +16,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import * as ts from 'typescript';
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // ui/src/styles
 const SRC = join(HERE, '..'); // ui/src
@@ -578,24 +579,45 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
   // default) as a data: URI — and the app's CSP, `default-src 'self'`,
   // refuses a data: font. The only trace is a devtools console line, which
   // a shipped app never shows; the text falls back to the next family. A
-  // subset can weigh less than that default. This reads the config as text
-  // rather than importing it: the config uses `__dirname`, which is not
-  // reliably present when a test module imports it under ESM. The build
-  // itself is the proof that the phrase means what it says —
-  // `grep -c 'url(data:font' dist/assets/*.css` must print 0.
+  // subset can weigh less than that default. This reads the config with
+  // TypeScript's own parser rather than importing it (the config uses
+  // `__dirname`, which is not reliably present when a test module imports
+  // it under ESM) and rather than a regex over the text: a regex was fooled
+  // by `/* assetsInlineLimit: 0, */` — the value commented out, the guard
+  // green — and `stripComments` above is fooled the other way by the
+  // config's own `/**/` glob strings. The build itself is the proof that
+  // the value means what it says — `grep -c 'url(data:font'
+  // dist/assets/*.css` must print 0.
   it('keeps vite from inlining any asset as a data: URI', () => {
-    // Not stripComments (above): that helper only understands CSS's
-    // /* ... */ and is fooled by this very file's glob strings —
-    // '**/src-tauri/**' and 'src/**/*.{test,spec}.ts' each contain a /*
-    // and a */ that don't open or close a real comment, so stripComments
-    // would eat everything between them, assetsInlineLimit included. A
-    // line stripper matching TS's actual // comment syntax has no such
-    // false pair to find.
-    const raw = readFileSync(VITE_CONFIG_PATH, 'utf8');
-    const text = raw
-      .split('\n')
-      .map((line) => (/^\s*\/\//.test(line) ? '' : line))
-      .join('\n');
-    expect(text, 'ui/vite.config.ts: build.assetsInlineLimit must be 0').toMatch(/assetsInlineLimit:\s*0\b/);
+    const source = ts.createSourceFile(
+      'vite.config.ts',
+      readFileSync(VITE_CONFIG_PATH, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const propertyName = (p: ts.ObjectLiteralElementLike): string | undefined =>
+      p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : undefined;
+    // `build: { assetsInlineLimit: <initializer> }` — the initializer's
+    // source text, or undefined when no such property is declared under
+    // `build` (a top-level one, or one inside `server`, would not count).
+    let limit: string | undefined;
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isPropertyAssignment(node) &&
+        propertyName(node) === 'build' &&
+        ts.isObjectLiteralExpression(node.initializer)
+      ) {
+        for (const p of node.initializer.properties) {
+          if (ts.isPropertyAssignment(p) && propertyName(p) === 'assetsInlineLimit') {
+            limit = p.initializer.getText(source);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(limit, 'ui/vite.config.ts: build.assetsInlineLimit must be declared').toBeDefined();
+    expect(limit, 'ui/vite.config.ts: build.assetsInlineLimit must be 0').toBe('0');
   });
 });

@@ -22,7 +22,8 @@
 #                       the build was told to ship
 #   the inline limit  — without the limit Vite folds every subset under its
 #                       default 4096 bytes into a data: URI, which the CSP
-#                       refuses
+#                       refuses; and a value inside a comment is no value,
+#                       which the regex this guard first used could not tell
 #
 # "the alphabet" targets U+2116 (№), not U+0490-0491 (Ґ/ґ) as a first draft of
 # this case did: the cyrillic (non-ext) block lists Ge-with-upturn explicitly,
@@ -87,6 +88,12 @@ case_ "fonts.css: the format must be woff2, not a stray TTF under a woff2 name" 
   "s~format\('woff2'\)~format('truetype')~g" \
   "format('truetype')" \
   src/styles/tokens.test.ts 'declares font-display: block and format woff2 on every face' runner=vitest
+
+case_ "vite.config.ts: a commented-out inline limit is no limit" \
+  ui/vite.config.ts \
+  's~    assetsInlineLimit: 0,~    /* assetsInlineLimit: 0, */~' \
+  '/* assetsInlineLimit: 0, */' \
+  src/styles/tokens.test.ts 'keeps vite from inlining any asset as a data: URI' runner=vitest
 
 case_ "vite.config.ts: the inline limit must be zero, not the default" \
   ui/vite.config.ts \
