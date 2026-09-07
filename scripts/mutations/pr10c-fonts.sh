@@ -7,19 +7,22 @@
 # What is here, by name:
 #
 #   the file          — a src url() that names no file is a face the browser
-#                       replaces with the next family, silently
+#                       replaces with the next family, silently; and a file
+#                       that no src url() names is dead weight in the bundle
 #   the leader        — a stack that does not start with a bundled family
-#                       renders in whatever the machine has installed
+#                       renders in whatever the machine has installed; and a
+#                       bundled family that leads no stack ships for nobody
+#   the three blocks  — the stacks are the same in light, media-dark and
+#                       attribute-dark, or one theme renders in another face
 #   the alphabet      — a face without a Ukrainian-only codepoint paints that
 #                       character in the fallback family, mid-word
 #   the display       — `swap` would flash the fallback family before the
 #                       local file, for a file that is already on disk
-#   the inline limit  — without the limit Vite folds the three smallest
-#                       subsets into data: URIs, which the CSP refuses
-#
-# Not here: the second direction of "the file" (a font file nobody names) —
-# a mutation is an edit to a tracked file, and that state is an ADDED file.
-# It was seen red by hand in the task report and is left there.
+#   the format        — a file declared as anything but woff2 is not what
+#                       the build was told to ship
+#   the inline limit  — without the limit Vite folds every subset under its
+#                       default 4096 bytes into a data: URI, which the CSP
+#                       refuses
 #
 # "the alphabet" targets U+2116 (№), not U+0490-0491 (Ґ/ґ) as a first draft of
 # this case did: the cyrillic (non-ext) block lists Ge-with-upturn explicitly,
@@ -43,11 +46,29 @@ case_ "fonts.css: a src url() must name a file that exists" \
   'spectral-400-normal-latin-missing.woff2' \
   src/styles/tokens.test.ts 'names a file that exists in every src url, and names every font file' runner=vitest
 
-case_ "tokens.css: every stack must lead with a bundled family, in all three theme blocks" \
+case_ "fonts.css: a face pointing at another face's file leaves its own file unnamed" \
+  ui/src/styles/fonts.css \
+  's~fonts/ibm-plex-mono/ibm-plex-mono-500-normal-latin-ext\.woff2~fonts/ibm-plex-mono/ibm-plex-mono-500-normal-latin.woff2~' \
+  'ibm-plex-mono-500-normal-latin.woff2) format' \
+  src/styles/tokens.test.ts 'names a file that exists in every src url, and names every font file' runner=vitest
+
+case_ "tokens.css: every stack must lead with a bundled family" \
   ui/src/styles/tokens.css \
   "s~--sans: 'IBM Plex Sans', system-ui~--sans: system-ui~g" \
   '--sans: system-ui' \
   src/styles/tokens.test.ts 'leads every stack in tokens.css with a bundled family, and bundles no family that leads none' runner=vitest
+
+case_ "tokens.css: a bundled family that leads no stack" \
+  ui/src/styles/tokens.css \
+  "s~--serif: 'Spectral',~--serif: 'IBM Plex Sans',~g" \
+  "--serif: 'IBM Plex Sans'," \
+  src/styles/tokens.test.ts 'leads every stack in tokens.css with a bundled family, and bundles no family that leads none' runner=vitest
+
+case_ "tokens.css: the stacks must be the same in every theme block" \
+  ui/src/styles/tokens.css \
+  's~(:root\[data-theme="dark"\] \{[^}]*?)  --serif: '"'"'Spectral'"'"', ~$1  --serif: ~' \
+  "--serif: Georgia, 'Times New Roman', serif;" \
+  src/styles/tokens.test.ts 'keeps the theme-invariant font stacks identical in every block' runner=vitest
 
 case_ "fonts.css: every face must cover the Ukrainian alphabet" \
   ui/src/styles/fonts.css \
@@ -61,9 +82,15 @@ case_ "fonts.css: font-display must be block, not swap" \
   'font-display: swap;' \
   src/styles/tokens.test.ts 'declares font-display: block and format woff2 on every face' runner=vitest
 
+case_ "fonts.css: the format must be woff2, not a stray TTF under a woff2 name" \
+  ui/src/styles/fonts.css \
+  "s~format\('woff2'\)~format('truetype')~g" \
+  "format('truetype')" \
+  src/styles/tokens.test.ts 'declares font-display: block and format woff2 on every face' runner=vitest
+
 case_ "vite.config.ts: the inline limit must be zero, not the default" \
   ui/vite.config.ts \
   's~    assetsInlineLimit: 0,\n~~' \
-  '    // under the 4096-byte default and would vanish into the fallback family.
+  '    // family. A font subset can weigh less than the 4096-byte default.
     target: process.env.TAURI_ENV_PLATFORM' \
   src/styles/tokens.test.ts 'keeps vite from inlining any asset as a data: URI' runner=vitest

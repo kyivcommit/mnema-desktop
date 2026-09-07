@@ -5,9 +5,10 @@
 # that names them. The app's CSP is `default-src 'self'`, so the faces have to
 # travel inside the bundle; this script is the only writer of
 # `ui/src/styles/fonts/` and of `ui/src/styles/fonts.css`, and both are
-# committed. Re-running it against the pinned versions must leave
-# `git status --porcelain ui/src/styles` empty — that is how a reviewer checks
-# the committed bytes are the ones the pins describe.
+# committed. Re-running it against the pinned versions — the font files' API
+# version segment and the licence texts' google/fonts commit, both below —
+# must leave `git status --porcelain ui/src/styles` empty; that is how a
+# reviewer checks the committed bytes are the ones the pins describe.
 #
 # Source: the Google Fonts CSS API, which serves per-script woff2 subsets with a
 # `unicode-range` each, so a Latin-only page never downloads Cyrillic glyphs and
@@ -43,7 +44,11 @@ dest="${styles}/fonts"
 sheet="${styles}/fonts.css"
 
 API="https://fonts.googleapis.com/css2"
-OFL_BASE="https://raw.githubusercontent.com/google/fonts/main/ofl"
+# The licence texts come from google/fonts at one pinned commit, for the same
+# reason the font URLs carry a pinned version: a moving branch would let a
+# re-run rewrite OFL.txt and call the tree "unchanged" only by luck.
+OFL_COMMIT="5e35378e6bda803962ee6fd257e444a7d459660d" # google/fonts main, 2026-09-04
+OFL_BASE="https://raw.githubusercontent.com/google/fonts/${OFL_COMMIT}/ofl"
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
 SUBSETS="latin latin-ext cyrillic cyrillic-ext"
 

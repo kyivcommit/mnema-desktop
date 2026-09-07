@@ -576,8 +576,9 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
 
   // Vite inlines any asset under `build.assetsInlineLimit` (4096 bytes by
   // default) as a data: URI — and the app's CSP, `default-src 'self'`,
-  // refuses data: fonts without a word in the console. Three of the
-  // bundled subsets are under that size. This reads the config as text
+  // refuses a data: font. The only trace is a devtools console line, which
+  // a shipped app never shows; the text falls back to the next family. A
+  // subset can weigh less than that default. This reads the config as text
   // rather than importing it: the config uses `__dirname`, which is not
   // reliably present when a test module imports it under ESM. The build
   // itself is the proof that the phrase means what it says —
