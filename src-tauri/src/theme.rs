@@ -69,14 +69,25 @@ pub fn forced(choice: ThemeChoice) -> Option<Theme> {
 /// Applies a choice to every window's native chrome, then tells every webview.
 ///
 /// Per window and not `AppHandle::set_theme`, although both exist: on macOS and
-/// Linux the theme is app-wide whichever is called (`window/mod.rs:1896`), on
+/// Linux the theme is app-wide whichever is called (`window/mod.rs:1897`), on
 /// Windows each window is told separately either way, and only the per-window
 /// call is implemented by Tauri's mock runtime — `AppHandle::set_theme` there is
-/// `unimplemented!()` (`tauri-2.11.5/src/test/mock_runtime.rs:257`), which
-/// would take the IPC test in `tests/commands.rs` down with it. Best-effort
-/// (`let _ =`) like every relabel in `locale::apply_locale`: a window that
-/// refuses is a stale frame, and the file is already written.
-pub fn apply_to_windows<R: Runtime>(app: &AppHandle<R>, choice: ThemeChoice) {
+/// `unimplemented!()` (`tauri-2.11.5/src/test/mock_runtime.rs:257`). The
+/// integration test in `tests/commands.rs` pins reachability, the persist/apply
+/// round trip, and the `theme-changed` broadcast, and it would panic if this
+/// loop were replaced by `AppHandle::set_theme`, which is the `unimplemented!()`
+/// path under the mock.
+///
+/// ⚠️ **No headless test distinguishes this loop running from this loop
+/// deleted, and that is a property of the runtime rather than a gap somebody
+/// left.** The mock runtime's per-window `set_theme` dispatcher returns
+/// `Ok(())` and records nothing (`mock_runtime.rs:1118`), and its `theme()`
+/// getter answers a constant regardless of what was set — the same limit
+/// `prefs::set_hotkey`'s tray relabel runs into. Best-effort (`let _ =`) like
+/// every relabel in `locale::apply_locale`: a window that refuses is a stale
+/// frame, and the file is already written. Verified by running the
+/// application and watching each window's chrome change, not by this suite.
+fn apply_to_windows<R: Runtime>(app: &AppHandle<R>, choice: ThemeChoice) {
     let theme = forced(choice);
     for window in app.webview_windows().values() {
         let _ = window.set_theme(theme);
@@ -89,7 +100,8 @@ pub fn apply_to_windows<R: Runtime>(app: &AppHandle<R>, choice: ThemeChoice) {
 /// frame following the OS while its document follows `data-theme` — two
 /// answers to one question. Runs in `.setup` after `manage_state`, because it
 /// reads the data dir from `AppState`. No webview is listening yet, so the
-/// emit reaches nobody; each window asks `get_theme` itself when it boots.
+/// emit reaches nobody; each window is expected to ask `get_theme` itself when
+/// it boots (PR 10b's UI half).
 pub fn apply_persisted<R: Runtime>(app: &AppHandle<R>) {
     let choice = read_choice(app.state::<crate::state::AppState>().data_dir());
     apply_to_windows(app, choice);
@@ -102,6 +114,12 @@ pub struct ThemeReply {
     pub choice: String,
 }
 
+/// Reads the choice back for a window that has just booted.
+///
+/// Unlike locale, `AppState` carries no cached field for this: `set_theme`
+/// writes the file and nothing else, so `state` here exists only to reach
+/// `data_dir()` and this command re-reads `read_choice` fresh on every call,
+/// the same source `apply_persisted` reads once at boot.
 #[tauri::command(async)]
 pub fn get_theme(state: tauri::State<'_, crate::state::AppState>) -> ThemeReply {
     ThemeReply {
