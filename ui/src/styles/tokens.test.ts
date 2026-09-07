@@ -210,36 +210,66 @@ function loadThemes() {
 
 const sortedNames = (m: Map<string, string>) => [...m.keys()].sort();
 
-// The two rules a stylesheet's own text must obey, because this project
-// composes stylesheets only in the two main.ts entry points (tokens.css,
-// then base.css, then a window-specific file): no url(...) that resolves
-// outside the app — an explicit http(s) target, or a scheme-relative (`//`)
-// one, which fetches under this app's own origin exactly like an explicit
-// https: target would (data: URIs and relative paths are fine) — and no
-// @import at all, of any shape, local or remote, since a CSS @import would
-// be a second, unaudited composition path. Returns which rule a line
-// breaks, or null if it breaks neither.
-function forbiddenInStylesheet(line: string): string | null {
-  if (/url\(\s*['"]?(?:https?:)?\/\//i.test(line)) return 'a url() reaching outside the app';
-  if (/@import\b/i.test(line)) return 'a CSS @import';
-  return null;
+// 1-indexed line number of the character at `offset` into `text`, and that
+// line's own text (trimmed) — both computed from the character offset, not
+// from a line already split out by the caller. A construct that spans
+// multiple lines is reported at its FIRST line this way, which is also the
+// line a regex match's `.index` always points at.
+function locate(text: string, offset: number): { line: number; text: string } {
+  const before = text.slice(0, offset);
+  const line = before.split('\n').length;
+  const lineStart = before.lastIndexOf('\n') + 1;
+  const lineEnd = text.indexOf('\n', offset);
+  return { line, text: text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd).trim() };
 }
 
-// The two HTML entry points may not link a stylesheet or a preconnect hint
-// from the network either — the same "reaches outside the app" rule above,
-// expressed as a <link> tag instead of CSS. Deliberately narrow: only
-// rel="stylesheet" and rel="preconnect" are checked, because those are the
-// two forms the mockups' heads actually contain and the ones a transcriber
-// would paste; other rels that also fetch (icon, preload, prefetch,
-// dns-prefetch, …) are not scanned.
-function forbiddenInHtml(line: string): string | null {
-  const tags = line.match(/<link\b[^>]*>/gi) ?? [];
-  for (const tag of tags) {
-    const isStylesheetOrPreconnect = /\brel=["'](?:stylesheet|preconnect)["']/i.test(tag);
-    const hrefIsExternal = /\bhref=["'](?:https?:)?\/\//i.test(tag);
-    if (isStylesheetOrPreconnect && hrefIsExternal) return 'a <link> reaching outside the app';
+// Finds every place `text` breaks the two rules a stylesheet's own text
+// must obey, because this project composes stylesheets only in the two
+// main.ts entry points (tokens.css, then base.css, then a window-specific
+// file): no url(...) that resolves outside the app — an explicit http(s)
+// target, or a scheme-relative (`//`) one, which fetches under this app's
+// own origin exactly like an explicit https: target would (data: URIs and
+// relative paths are fine) — and no @import at all, of any shape, local or
+// remote, since a CSS @import would be a second, unaudited composition
+// path. Scans the WHOLE text at once, never line by line: ordinary
+// multi-line formatting can put `url(` on one line and its quoted address
+// on the next, and a line-by-line regex would miss the construct entirely.
+// Returns each hit's character offset into `text` — `locate` above turns
+// that into a line number and the line's own text.
+function findForbiddenInStylesheet(text: string): { offset: number; reason: string }[] {
+  const hits: { offset: number; reason: string }[] = [];
+  for (const m of text.matchAll(/url\(\s*['"]?\s*(?:https?:|\/\/)/gi)) {
+    hits.push({ offset: m.index, reason: 'a url() reaching outside the app' });
   }
-  return null;
+  for (const m of text.matchAll(/@import\b/gi)) {
+    hits.push({ offset: m.index, reason: 'a CSS @import' });
+  }
+  return hits;
+}
+
+// Finds every <link> tag in `text` that is a rel="stylesheet" or
+// rel="preconnect" whose href reaches outside the app — the same "reaches
+// outside the app" rule above, expressed as a <link> tag instead of CSS.
+// Deliberately narrow: only rel="stylesheet" and rel="preconnect" are
+// checked, because those are the two forms the mockups' heads actually
+// contain and the ones a transcriber would paste; other rels that also
+// fetch (icon, preload, prefetch, dns-prefetch, …) are not scanned. The tag
+// itself may span multiple lines (one attribute per line is ordinary
+// formatting) and `rel`/`href` may be quoted, unquoted, or in either
+// order — both are read from the whole matched tag, not from a single line
+// of it. Returns each hit's character offset into `text`, same as above.
+function findForbiddenInHtml(text: string): { offset: number; reason: string }[] {
+  const hits: { offset: number; reason: string }[] = [];
+  const relIsStylesheetOrPreconnect =
+    /\brel\s*=\s*(?:"(?:stylesheet|preconnect)"|'(?:stylesheet|preconnect)'|(?:stylesheet|preconnect)\b)/i;
+  const hrefIsExternal = /\bhref\s*=\s*(?:"\s*(?:https?:|\/\/)|'\s*(?:https?:|\/\/)|(?:https?:|\/\/))/i;
+  for (const m of text.matchAll(/<link\b[\s\S]*?>/gi)) {
+    const tag = m[0];
+    if (relIsStylesheetOrPreconnect.test(tag) && hrefIsExternal.test(tag)) {
+      hits.push({ offset: m.index, reason: 'a <link> reaching outside the app' });
+    }
+  }
+  return hits;
 }
 
 describe('tokens.css holds its two themes to each other', () => {
@@ -299,9 +329,13 @@ describe('tokens.css holds its two themes to each other', () => {
 
 describe('the stylesheets stay inside the app', () => {
   it('forbids a url() outside the app and any @import, in every stylesheet, svelte style block, and HTML entry point', () => {
-    // Both predicates are checked against their own small table first, so a
+    // Both scanners are checked against their own small table first, so a
     // change that breaks a known shape is caught right here rather than
-    // only if some future file happens to contain that exact shape.
+    // only if some future file happens to contain that exact shape. Two
+    // rows in each table are deliberately multi-line — the shape ordinary
+    // formatting produces — so the fix cannot regress to "any multi-line
+    // text is an offender": one multi-line row is a real offender, the
+    // other is a multi-line LOCAL construct that must still be allowed.
     const table: [string, boolean][] = [
       ['url(https://x)', true],
       ['url( "//x" )', true],
@@ -310,20 +344,24 @@ describe('the stylesheets stay inside the app', () => {
       ["@import 'http://x'", true],
       ['@import url("./launcher.css")', true],
       ["@import './a.css'", true],
+      ['.review-probe {\n  background-image: url(\n    "https://example.invalid/review.png"\n  );\n}', true],
       ['url(data:font/woff2;base64,AA)', false],
       ['url(./fonts/a.woff2)', false],
+      ['url(\n  "./fonts/a.woff2"\n)', false],
     ];
-    for (const [line, expected] of table) {
-      expect(forbiddenInStylesheet(line) !== null, line).toBe(expected);
+    for (const [text, expected] of table) {
+      expect(findForbiddenInStylesheet(text).length > 0, text).toBe(expected);
     }
 
     const htmlTable: [string, boolean][] = [
       ['<link rel="stylesheet" href="https://fonts.googleapis.com/css2">', true],
       ['<link rel="preconnect" href="https://fonts.gstatic.com">', true],
+      ['<link\n  rel="stylesheet"\n  href="https://example.invalid/review.css"\n>', true],
       ['<link rel="stylesheet" href="/src/x.css">', false],
+      ['<link rel="stylesheet"\n href="/src/x.css">', false],
     ];
-    for (const [line, expected] of htmlTable) {
-      expect(forbiddenInHtml(line) !== null, line).toBe(expected);
+    for (const [text, expected] of htmlTable) {
+      expect(findForbiddenInHtml(text).length > 0, text).toBe(expected);
     }
 
     // A guard that walks zero files of a kind is satisfied by nothing to
@@ -339,36 +377,36 @@ describe('the stylesheets stay inside the app', () => {
     const offenders: string[] = [];
 
     for (const file of cssFiles) {
-      const css = blankComments(readFileSync(file, 'utf8'));
-      css.split('\n').forEach((line, idx) => {
-        const reason = forbiddenInStylesheet(line);
-        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
-      });
+      const text = blankComments(readFileSync(file, 'utf8'));
+      for (const { offset, reason } of findForbiddenInStylesheet(text)) {
+        const { line, text: lineText } = locate(text, offset);
+        offenders.push(`${file}:${line}: ${reason}: ${lineText}`);
+      }
     }
 
     for (const file of svelteFiles) {
-      const styleOnly = blankComments(styleBlocksOnly(readFileSync(file, 'utf8')));
-      styleOnly.split('\n').forEach((line, idx) => {
-        const reason = forbiddenInStylesheet(line);
-        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
-      });
+      const text = blankComments(styleBlocksOnly(readFileSync(file, 'utf8')));
+      for (const { offset, reason } of findForbiddenInStylesheet(text)) {
+        const { line, text: lineText } = locate(text, offset);
+        offenders.push(`${file}:${line}: ${reason}: ${lineText}`);
+      }
     }
 
     for (const file of htmlFiles) {
       const raw = readFileSync(file, 'utf8');
-      raw.split('\n').forEach((line, idx) => {
-        const reason = forbiddenInHtml(line);
-        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
-      });
+      for (const { offset, reason } of findForbiddenInHtml(raw)) {
+        const { line, text: lineText } = locate(raw, offset);
+        offenders.push(`${file}:${line}: ${reason}: ${lineText}`);
+      }
       // The mockups this project transcribes from are HTML with an inline
       // <style> block as well as a <link>, so the HTML entries get the same
       // CSS-content scan as a .svelte file's <style> block, not only the
       // <link>-tag check above.
       const styleOnly = blankComments(styleBlocksOnly(raw));
-      styleOnly.split('\n').forEach((line, idx) => {
-        const reason = forbiddenInStylesheet(line);
-        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
-      });
+      for (const { offset, reason } of findForbiddenInStylesheet(styleOnly)) {
+        const { line, text: lineText } = locate(styleOnly, offset);
+        offenders.push(`${file}:${line}: ${reason}: ${lineText}`);
+      }
     }
 
     expect(offenders).toEqual([]);
