@@ -3,10 +3,10 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    appPrefs, setHotkey, setAutostart, setTheme, type AppPrefs, type AutostartState, type ThemeChoice,
+    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type ThemeChoice,
   } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
-  import { theme } from '../theme';
+  import { theme, changeTheme } from '../theme';
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
@@ -404,8 +404,14 @@
   // lead-in, never branched on — the same shape as the two rejections above.
   let themeError = $state<string | null>(null);
   // The in-flight guard its two siblings have. Three buttons share it: a press
-  // on any of them while one call is out would send a second, and the store
-  // would be set from whichever reply resolved last.
+  // on any of them while one call is out would send a second call.
+  //
+  // It is an affordance of THIS instance and not the thing that decides what
+  // the store ends up holding. `Settings.svelte` destroys this section on
+  // navigation and builds a new one on the way back, and the new one starts
+  // with this `false` — so it says nothing about a call still out from the
+  // instance that was destroyed. What orders those two is `changeTheme`'s
+  // module-level generation (`../theme`), which the remount does not reset.
   let themeBusy = $state(false);
 
   async function chooseTheme(choice: ThemeChoice) {
@@ -416,14 +422,14 @@
     themeError = null;
     themeBusy = true;
     try {
-      await setTheme(choice);
-      // The reply is the truth: `Ok` means the file holds the choice and every
-      // window's frame was asked to follow. Rust also broadcasts
-      // `theme-changed`, which lands in this window's `bootTheme` listener
-      // with the same value — but
-      // that broadcast is best-effort (`let _ = emit`) and this window need not
-      // wait on its own echo. One store, one attribute writer, same value.
-      theme.set(choice);
+      // Persist and, unless a newer change has started meanwhile, move the
+      // store — both inside `changeTheme`. The reply is the truth: `Ok` means
+      // the file holds the choice and every window's frame was asked to
+      // follow. Rust also broadcasts `theme-changed`, which lands in this
+      // window's `bootTheme` listener with the same value — but that broadcast
+      // is best-effort (`let _ = emit`) and this window need not wait on its
+      // own echo. One store, one attribute writer, same value.
+      await changeTheme(choice);
     } catch (err) {
       // Nothing was written and nothing was applied (`set_theme` persists first
       // and returns on failure), so the store — and the pressed button — are

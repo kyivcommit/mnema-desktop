@@ -1,12 +1,17 @@
 import { writable } from 'svelte/store';
-import type { ThemeChoice } from './lib/ipc';
+import { setTheme, type ThemeChoice } from './lib/ipc';
 
-// The one writer of `data-theme` on this document. Two feeders live here —
-// the boot snapshot and the `theme-changed` event, which Rust broadcasts to
-// the asking window too; the settings section adds a third by setting the
-// store after a successful `set_theme` reply (PR 10b, Task 3). All three go
-// through this store, so there is one place the attribute is decided and one
-// subscription that writes it.
+// The one writer of `data-theme` on this document. Three feeders live here:
+// the boot snapshot, the `theme-changed` event (which Rust broadcasts to the
+// asking window too), and `changeTheme` below, which the settings section
+// calls. All three go through this store, so there is one place the attribute
+// is decided and one subscription that writes it.
+//
+// Two different orderings keep this store honest, and they are enforced in two
+// different places. That the event order equals the file order is Rust's doing
+// — `theme::change_theme` holds one lock across persist, apply and broadcast.
+// That an older reply cannot outrank a newer change is `changeSeq`'s doing,
+// below.
 export const theme = writable<ThemeChoice>('system');
 
 export function isThemeChoice(v: unknown): v is ThemeChoice {
@@ -23,6 +28,23 @@ export function applyTheme(choice: ThemeChoice) {
   else document.documentElement.dataset.theme = choice;
 }
 theme.subscribe(applyTheme);
+
+// Module-level, and not a field of the settings section: `Settings.svelte`
+// destroys and recreates that section on every navigation, so a per-component
+// counter would start again at zero and a continuation left behind by a
+// destroyed instance would still look current. The newest change owns the
+// store; an older reply that lands after it writes nothing.
+let changeSeq = 0;
+
+// Persists `choice` and, if no newer change has started since, moves the store.
+// Rejects with the backend's own sentence; nothing was written and nothing was
+// applied in that case (`set_theme` persists first), so the store is still
+// right and the caller re-reads nothing.
+export async function changeTheme(choice: ThemeChoice): Promise<void> {
+  const mine = ++changeSeq;
+  await setTheme(choice);
+  if (mine === changeSeq) theme.set(choice);
+}
 
 // Mirrors `bootLocale` (`i18n/index.ts`), ordering included: the listener goes
 // up BEFORE the snapshot is taken, and a live event that lands during boot is

@@ -23,6 +23,13 @@
 #                          never sends and the window would wait on its echo
 #   the busy guard        — one call per change, however many presses
 #   the sentence           — a refusal shows the backend's words
+#   the ordered change    — persist, apply and broadcast are one critical
+#                          section, so two overlapping changes cannot leave the
+#                          file saying one choice and every window the other
+#   the generation        — the newest change owns the store; a reply from a
+#                          section the navigation destroyed writes nothing,
+#                          asserted once in `theme.ts` and once through a real
+#                          remount of the section
 #
 # Not here, and why: `apply_to_windows` calling `set_theme` on each window is
 # invisible under the mock runtime (its `set_theme` is `Ok(())` and records
@@ -84,11 +91,11 @@ case_ "Application: the pressed button must follow the store, not its negation" 
   "aria-pressed={\$theme !== 'dark'} // mutant" \
   src/settings/Application.test.ts 'the theme segment presses the button for the choice the store holds, and no other' runner=vitest
 
-case_ "Application: a successful set_theme must move the store" \
-  ui/src/settings/Application.svelte \
-  "s~      theme\.set\(choice\);\n~~" \
-  "      // wait on its own echo. One store, one attribute writer, same value.
-    } catch (err) {" \
+case_ "theme.ts: a successful set_theme must move the store" \
+  ui/src/theme.ts \
+  "s~  if \(mine === changeSeq\) theme\.set\(choice\);\n~~" \
+  "  await setTheme(choice);
+}" \
   src/settings/Application.test.ts 'choosing a theme sends that choice once, and the pressed button and the document follow the reply' runner=vitest
 
 case_ "Application: the busy guard must hold, not just disable" \
@@ -103,3 +110,21 @@ case_ "Application: a refusal must show the backend sentence" \
   "s~      themeError = err instanceof Error \? err\.message : String\(err\);~      void err; // mutant: swallowed~" \
   "void err; // mutant: swallowed" \
   src/settings/Application.test.ts 'a refused theme change shows the backend sentence and leaves the pressed button where it was' runner=vitest
+
+case_ "theme: persist and apply must be one critical section, not two" \
+  src-tauri/src/theme.rs \
+  's~    let _one_at_a_time = THEME_LOCK\.lock\(\)\.unwrap_or_else\(\|e\| e\.into_inner\(\)\);\n    write_choice\(data_dir, choice\)\?;~    write_choice(data_dir, choice)?; // mutant: nothing orders two overlapping changes~' \
+  'write_choice(data_dir, choice)?; // mutant: nothing orders two overlapping changes' \
+  mnema-desktop 'theme::tests::a_change_parked_after_its_persist_keeps_the_next_one_out' --lib
+
+case_ "theme.ts: an older reply must not outrank a newer change" \
+  ui/src/theme.ts \
+  "s~  if \(mine === changeSeq\) theme\.set\(choice\);~  theme.set(choice); // mutant: the last reply wins~" \
+  "theme.set(choice); // mutant: the last reply wins" \
+  src/theme.test.ts 'an older change whose reply lands last does not outrank the newer one' runner=vitest
+
+case_ "theme.ts: an older reply must not outrank a newer change, across a remount" \
+  ui/src/theme.ts \
+  "s~  if \(mine === changeSeq\) theme\.set\(choice\);~  theme.set(choice); // mutant: the last reply wins~" \
+  "theme.set(choice); // mutant: the last reply wins" \
+  src/settings/Application.test.ts 'a reply to a choice made before the section was recreated does not overwrite the newer choice' runner=vitest

@@ -18,10 +18,14 @@ const h = vi.hoisted(() => {
   return { state, invoke, listen };
 });
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invoke }));
+// `Channel` too, and not because this file uses it: `theme.ts` now imports
+// `setTheme` from `./lib/ipc`, and that module imports `Channel` alongside
+// `invoke` at load time. A mock missing it makes the import throw before any
+// test runs.
+vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invoke, Channel: class {} }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: h.listen }));
 
-import { bootTheme, theme, applyTheme } from './theme';
+import { bootTheme, changeTheme, theme, applyTheme } from './theme';
 
 const attribute = () => document.documentElement.dataset.theme;
 
@@ -103,5 +107,41 @@ describe('the document attribute', () => {
     h.state.handler!({ payload: 'sepia' });
     expect(get(theme)).toBe('system');
     expect(attribute()).toBeUndefined();
+  });
+});
+
+describe('changeTheme', () => {
+  it('an older change whose reply lands last does not outrank the newer one', async () => {
+    // The owner's scenario for PR #38, in the module that owns the ordering:
+    // two changes overlap, the newer one settles first, and the older one's
+    // reply arrives after it. The generation is what makes the newer one the
+    // owner of the store — nothing here unsubscribes or cancels the older
+    // call, because a `set_theme` already sent cannot be taken back.
+    const pending: Array<(v: void) => void> = [];
+    h.invoke.mockImplementation((cmd: string) =>
+      cmd === 'set_theme'
+        ? new Promise<void>((res) => { pending.push(res); })
+        : Promise.resolve({ choice: 'system' }),
+    );
+    const first = changeTheme('dark');
+    const second = changeTheme('light');
+    pending[1]!();
+    await second;
+    expect(get(theme)).toBe('light');
+    pending[0]!();
+    await first;
+    expect(get(theme)).toBe('light'); // the stale reply wrote nothing
+    expect(attribute()).toBe('light');
+  });
+
+  it('a change with nothing newer behind it moves the store and the document', async () => {
+    // The other direction of the same guard: the generation must not turn
+    // `changeTheme` into a function that never writes. One change, no
+    // competitor, and the store follows the reply.
+    h.invoke.mockResolvedValue(undefined);
+    await changeTheme('dark');
+    expect(get(theme)).toBe('dark');
+    expect(attribute()).toBe('dark');
+    expect(h.invoke).toHaveBeenCalledWith('set_theme', { choice: 'dark' });
   });
 });

@@ -1172,6 +1172,38 @@ test('the theme segment is busy while a change is in flight, so a double press s
   expect(pressed('application-theme-dark')).toBe('true');
 });
 
+test('a reply to a choice made before the section was recreated does not overwrite the newer choice', async () => {
+  // The owner's scenario for PR #38: choose Dark, leave the section and come
+  // back before the reply lands, choose Light. The remount is driven here
+  // directly rather than through `Settings`'s navigation, which is what makes
+  // the second call possible at all — the new instance's `themeBusy` starts
+  // `false`, so it admits a change while the first is still in flight. What
+  // keeps the older reply from writing Dark into the store afterwards is
+  // `changeTheme`'s module-level generation, which the remount does not reset.
+  let resolveDark!: () => void;
+  setTheme.mockImplementationOnce(() => new Promise<void>((res) => { resolveDark = res; }));
+  setTheme.mockResolvedValueOnce(undefined);
+
+  const first = renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  first.unmount(); // navigate away, with the first change still out
+
+  renderSection(); // navigate back: a fresh, unbusy instance
+  await shown('application-theme-light');
+  await fireEvent.click(screen.getByTestId('application-theme-light'));
+  await waitFor(() => expect(pressed('application-theme-light')).toBe('true'));
+
+  resolveDark(); // the older reply lands last
+  await tick();
+  await tick();
+
+  expect(pressed('application-theme-light')).toBe('true');
+  expect(pressed('application-theme-dark')).toBe('false');
+  expect(document.documentElement.dataset.theme).toBe('light');
+  expect(setTheme).toHaveBeenCalledTimes(2);
+});
+
 test('a theme change announced from elsewhere moves the pressed button without a click', async () => {
   renderSection();
   await shown('application-theme-system');
