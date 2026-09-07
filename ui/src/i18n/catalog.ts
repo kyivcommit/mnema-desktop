@@ -114,6 +114,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_autostart_reason' | 'application_autostart_enable'
   | 'application_autostart_disable' | 'application_autostart_failed'
   | 'application_version' | 'application_load_failed'
+  | 'application_theme' | 'theme_light' | 'theme_dark' | 'theme_system'
+  | 'application_theme_failed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -957,6 +959,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // версія» — цього ніхто не перевіряв.
     application_version: 'Версія {version}',
     application_load_failed: 'Не вдалося прочитати налаштування застосунку.',
+    application_theme: 'Тема:',
+    theme_light: 'Світла',
+    theme_dark: 'Темна',
+    theme_system: 'Системна',
+    application_theme_failed: 'Вигляд не змінено. Ось що відповів застосунок:',
   },
   en: {
     pin: 'Pin',
@@ -1212,5 +1219,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_autostart_failed: 'The setting was not changed. This is what the application answered:',
     application_version: 'Version {version}',
     application_load_failed: 'The application settings could not be read.',
+    application_theme: 'Theme:',
+    theme_light: 'Light',
+    theme_dark: 'Dark',
+    theme_system: 'Match the system',
+    application_theme_failed: 'The appearance was not changed. This is what the application answered:',
   },
 };

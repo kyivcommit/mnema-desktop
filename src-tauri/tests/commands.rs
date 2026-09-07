@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, Channel, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, mock_builder, mock_context, noop_assets};
 use tauri::webview::InvokeRequest;
-use tauri::{Manager, State, WebviewWindow, WebviewWindowBuilder};
+use tauri::{Listener, Manager, State, WebviewWindow, WebviewWindowBuilder};
 
 /// An application whose provider is a real, local mock server rather than
 /// [`NO_PROVIDER`] — for the one test in this file that needs a model
@@ -11790,6 +11790,83 @@ fn an_unfinished_scan_leaves_a_mark_the_settings_screen_can_read() {
 
     // Wire shape, both directions, for the reason the file-count test gives.
     assert!(after["index"].get("scan_incomplete").is_none(), "{after}");
+}
+
+#[test]
+fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
+    // Reachability through the real `invoke_handler`, the persist and
+    // read-back round trip, and the `theme-changed` broadcast: the listener
+    // below fires once per `set_theme` call, with the choice it persisted —
+    // the value it was given, or the one it fell back to. The
+    // per-window `WebviewWindow::set_theme` loop inside `apply_to_windows`
+    // stays unobservable here — the mock runtime's per-window dispatcher
+    // returns `Ok(())` and records nothing, so this test cannot tell "the
+    // loop ran" from "the loop was deleted"; that is verified by the live
+    // run. What this test WOULD catch is the loop being replaced by
+    // `AppHandle::set_theme`, which is `unimplemented!()` under the mock and
+    // would panic here.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    assert!(
+        !app.webview_windows().is_empty(),
+        "the apply loop needs at least one window to walk"
+    );
+
+    let (tx, rx) = mpsc::channel::<String>();
+    app.listen("theme-changed", move |event| {
+        tx.send(event.payload().to_string()).unwrap();
+    });
+
+    let before = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(before["choice"], json!("system"), "no file yet: {before}");
+
+    call(&webview, "set_theme", json!({ "choice": "dark" })).expect("set_theme rejected");
+    assert_eq!(
+        rx.try_recv()
+            .expect("theme-changed did not fire for \"dark\""),
+        serde_json::to_string("dark").unwrap(),
+        "the broadcast payload must be the wire string"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "exactly one theme-changed per set_theme call"
+    );
+
+    let after = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(
+        after["choice"],
+        json!("dark"),
+        "the choice must come back: {after}"
+    );
+
+    let raw = std::fs::read_to_string(dir.path().join("prefs.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        parsed["theme"],
+        json!("dark"),
+        "the file is the truth: {raw}"
+    );
+
+    // An unknown value on the wire is not an error and not a fourth state.
+    call(&webview, "set_theme", json!({ "choice": "sepia" })).expect("set_theme rejected");
+    assert_eq!(
+        rx.try_recv()
+            .expect("theme-changed did not fire for the unknown value"),
+        serde_json::to_string("system").unwrap(),
+        "an unknown wire value still broadcasts the choice it fell back to"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "exactly one theme-changed per set_theme call"
+    );
+
+    let fallen = call(&webview, "get_theme", json!({})).expect("get_theme rejected");
+    assert_eq!(
+        fallen["choice"],
+        json!("system"),
+        "unknown → system: {fallen}"
+    );
 }
 
 #[cfg(unix)]

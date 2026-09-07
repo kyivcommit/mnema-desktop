@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import Application from './Application.svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
+import { theme } from '../theme';
 import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 
 // The typed wrappers, not the raw `invoke` — the shape `Scanning.test.ts` uses.
@@ -14,6 +15,7 @@ import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
 const appPrefs = vi.fn();
 const setHotkey = vi.fn();
 const setAutostart = vi.fn();
+const setTheme = vi.fn();
 const modelSettings = vi.fn();
 const providerModels = vi.fn();
 const listTree = vi.fn();
@@ -23,6 +25,7 @@ vi.mock('../lib/ipc', () => ({
   appPrefs: (...a: unknown[]) => appPrefs(...a),
   setHotkey: (...a: unknown[]) => setHotkey(...a),
   setAutostart: (...a: unknown[]) => setAutostart(...a),
+  setTheme: (...a: unknown[]) => setTheme(...a),
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   providerModels: (...a: unknown[]) => providerModels(...a),
   listTree: (...a: unknown[]) => listTree(...a),
@@ -87,6 +90,7 @@ beforeEach(() => {
   appPrefs.mockReset();
   setHotkey.mockReset();
   setAutostart.mockReset();
+  setTheme.mockReset();
   modelSettings.mockReset();
   providerModels.mockReset();
   listTree.mockReset();
@@ -99,11 +103,13 @@ beforeEach(() => {
   listMasks.mockResolvedValue([]);
   jobStatus.mockResolvedValue(IDLE_SCAN);
   setLocale('uk');
+  theme.set('system');
 });
 
 afterEach(() => {
   cleanup();
   setLocale('en');
+  theme.set('system');
 });
 
 // What a person reads, with the markup's own indentation collapsed the way a
@@ -849,6 +855,10 @@ test('a person who opens Application in the settings window reads the shortcut, 
     + ' Запуск під час входу в систему:'
     + ' Mnema не запускається під час входу в систему.'
     + ' Запускати під час входу'
+    + ' Тема:'
+    + ' Світла'
+    + ' Темна'
+    + ' Системна'
     + ' Версія 0.0.0',
   );
   // (review, Important 1) A `not.toContain` against `settings_section_not_ready`'s
@@ -1090,4 +1100,132 @@ test('a corrective read the stamp discarded does not get to choose the sentence'
   // And the read wrote no field either, so the shortcut is the one the live
   // read put there.
   expect(at('application-shortcut')).toBe('Alt+Space');
+});
+
+// ---------------------------------------------------------------------------
+// The theme (D146, PR 10b): three buttons, one pressed — the `theme` store,
+// which this section reads and never re-derives from `get_theme` itself.
+// ---------------------------------------------------------------------------
+
+const pressed = (id: string) => screen.getByTestId(id).getAttribute('aria-pressed');
+
+test('the theme segment presses the button for the choice the store holds, and no other', async () => {
+  theme.set('dark');
+  renderSection();
+  await shown('application-theme-dark');
+  expect(pressed('application-theme-dark')).toBe('true');
+  expect(pressed('application-theme-light')).toBe('false');
+  expect(pressed('application-theme-system')).toBe('false');
+});
+
+test('choosing a theme sends that choice once, and the pressed button and the document follow the reply', async () => {
+  setTheme.mockResolvedValue(undefined);
+  renderSection();
+  await shown('application-theme-light');
+  await fireEvent.click(screen.getByTestId('application-theme-light'));
+  await waitFor(() => expect(pressed('application-theme-light')).toBe('true'));
+  expect(setTheme).toHaveBeenCalledTimes(1);
+  expect(setTheme).toHaveBeenCalledWith('light');
+  expect(pressed('application-theme-system')).toBe('false');
+  expect(document.documentElement.dataset.theme).toBe('light');
+});
+
+test('a refused theme change shows the backend sentence and leaves the pressed button where it was', async () => {
+  setTheme.mockRejectedValue(new Error('could not write preferences: disk full'));
+  renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  expect(await shown('application-theme-error')).toBe('could not write preferences: disk full');
+  expect(at('application-theme-failed')).toBe('Вигляд не змінено. Ось що відповів застосунок:');
+  expect(pressed('application-theme-system')).toBe('true');
+  expect(pressed('application-theme-dark')).toBe('false');
+  expect(document.documentElement.dataset.theme).toBeUndefined();
+});
+
+test('a theme change that succeeds after a refused one takes the failure sentence away with it', async () => {
+  setTheme.mockRejectedValueOnce(new Error('nope')).mockResolvedValueOnce(undefined);
+  renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await shown('application-theme-error');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await waitFor(() => expect(screen.queryByTestId('application-theme-error')).toBeNull());
+  expect(screen.queryByTestId('application-theme-failed')).toBeNull();
+  expect(pressed('application-theme-dark')).toBe('true');
+});
+
+test('the theme segment is busy while a change is in flight, so a double press sends one call', async () => {
+  let release!: () => void;
+  setTheme.mockImplementationOnce(() => new Promise<void>((res) => { release = res; }));
+  renderSection();
+  await shown('application-theme-dark');
+  const dark = screen.getByTestId('application-theme-dark');
+  await fireEvent.click(dark);
+  await tick();
+  expect((dark as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByTestId('application-theme-light') as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(dark);
+  await fireEvent.click(screen.getByTestId('application-theme-light'));
+  expect(setTheme).toHaveBeenCalledTimes(1);
+  release();
+  await waitFor(() => expect((dark as HTMLButtonElement).disabled).toBe(false));
+  expect(pressed('application-theme-dark')).toBe('true');
+});
+
+test('a reply to a choice made before the section was recreated does not overwrite the newer choice', async () => {
+  // The owner's scenario for PR #38: choose Dark, leave the section and come
+  // back before the reply lands, choose Light. The remount is driven here
+  // directly rather than through `Settings`'s navigation, which is what makes
+  // the second call possible at all — the new instance's `themeBusy` starts
+  // `false`, so it admits a change while the first is still in flight. What
+  // keeps the older reply from writing Dark into the store afterwards is
+  // `changeTheme`'s module-level generation, which the remount does not reset.
+  let resolveDark!: () => void;
+  setTheme.mockImplementationOnce(() => new Promise<void>((res) => { resolveDark = res; }));
+  setTheme.mockResolvedValueOnce(undefined);
+
+  const first = renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  first.unmount(); // navigate away, with the first change still out
+
+  renderSection(); // navigate back: a fresh, unbusy instance
+  await shown('application-theme-light');
+  await fireEvent.click(screen.getByTestId('application-theme-light'));
+  await waitFor(() => expect(pressed('application-theme-light')).toBe('true'));
+
+  resolveDark(); // the older reply lands last
+  await tick();
+  await tick();
+
+  expect(pressed('application-theme-light')).toBe('true');
+  expect(pressed('application-theme-dark')).toBe('false');
+  expect(document.documentElement.dataset.theme).toBe('light');
+  expect(setTheme).toHaveBeenCalledTimes(2);
+});
+
+test('a theme change announced from elsewhere moves the pressed button without a click', async () => {
+  renderSection();
+  await shown('application-theme-system');
+  expect(pressed('application-theme-system')).toBe('true');
+  theme.set('light'); // what `bootTheme`'s listener does on `theme-changed`
+  await waitFor(() => expect(pressed('application-theme-light')).toBe('true'));
+  expect(pressed('application-theme-system')).toBe('false');
+  expect(setTheme).not.toHaveBeenCalled();
+});
+
+test('the theme segment speaks the window language, both directions', async () => {
+  renderSection();
+  await shown('application-theme-system');
+  expect(pageText()).toContain('Тема:');
+  expect(at('application-theme-light')).toBe('Світла');
+  expect(at('application-theme-dark')).toBe('Темна');
+  expect(at('application-theme-system')).toBe('Системна');
+  setLocale('en');
+  await waitFor(() => expect(at('application-theme-system')).toBe('Match the system'));
+  expect(pageText()).toContain('Theme:');
+  expect(at('application-theme-light')).toBe('Light');
+  expect(at('application-theme-dark')).toBe('Dark');
+  setLocale('uk');
+  await waitFor(() => expect(at('application-theme-system')).toBe('Системна'));
 });

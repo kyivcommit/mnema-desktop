@@ -18,6 +18,7 @@ pub mod scan_job;
 pub mod scan_state;
 pub mod shortcut;
 pub mod state;
+pub mod theme;
 pub mod tray;
 mod tree;
 pub mod walk_job;
@@ -81,6 +82,8 @@ pub fn invoke_handler<R: tauri::Runtime>()
         scan_job::start_scan_job,
         locale::get_locale,
         locale::set_locale,
+        theme::get_theme,
+        theme::set_theme,
         prefs::app_prefs,
         prefs::set_hotkey,
         prefs::set_autostart,
@@ -614,6 +617,9 @@ pub fn run() -> anyhow::Result<()> {
             // reads it back to label its menu (`tray::build_tray`).
             let st = locale::resolve_effective(app.handle());
             app.state::<state::AppState>().set_locale_state(st);
+            // D146 / PR 10b: the persisted theme, applied to the native chrome
+            // before either window shows. See `theme::apply_persisted`.
+            theme::apply_persisted(app.handle());
             // The first app menu was built during `build()` from the OS locale
             // alone (`boot_lang` — no path resolver yet to read prefs). Rebuild
             // it now from the resolved language so an explicit saved choice that

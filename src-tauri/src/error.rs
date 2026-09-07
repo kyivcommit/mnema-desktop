@@ -35,11 +35,14 @@ pub enum Error {
         path: String,
         source: std::io::Error,
     },
-    /// `locale::write_choice` failed — the prefs file could not be written
-    /// (permissions, a full disk, a data dir that vanished underneath it).
-    /// `#[from]`, unlike [`Error::DataDir`] above: there is no separate path
-    /// to attach here, since `write_choice` already names the file inside its
-    /// own `std::io::Error` context where one is available, and this is the
+    /// A write to the prefs file failed, whichever key was being written —
+    /// every persist goes through `prefs::write_key` (permissions, a full
+    /// disk, a data dir that vanished underneath it). Described by what it
+    /// means rather than by a list of callers: the list has been wrong twice.
+    /// `#[from]`, unlike [`Error::DataDir`] above: no path is attached, because
+    /// there is only ever one prefs file and `write_key` passes the raw
+    /// `std::io::Error` through unwrapped (the sentence that used to stand
+    /// here claimed the file was named inside it; it is not), and this is the
     /// first variant that needs `From<std::io::Error>` at all.
     #[error("could not write preferences: {0}")]
     Prefs(#[from] std::io::Error),
