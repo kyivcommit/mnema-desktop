@@ -469,7 +469,7 @@
 {#if prefs}
   <p>
     {shortcutLabelText}
-    <span data-testid="application-shortcut">{shortcutText}</span>
+    <span class="kbd" data-testid="application-shortcut">{shortcutText}</span>
   </p>
   <p data-testid="application-shortcut-status">{shortcutStatusText}</p>
   {#if unavailable}

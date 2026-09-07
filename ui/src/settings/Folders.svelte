@@ -1270,12 +1270,13 @@
     sentence: string;
     control: 'exclude' | 'include' | 'none';
     expandable: boolean;
+    excluded: boolean;
   } {
     switch (state.kind) {
       case 'open':
-        return { sentence: t('settings_subfolder_open'), control: 'exclude', expandable: true };
+        return { sentence: t('settings_subfolder_open'), control: 'exclude', expandable: true, excluded: false };
       case 'excluded':
-        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: true };
+        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: true, excluded: true };
       case 'excludedByAncestor':
         return {
           // The prefix the STATE carries, not this row's own path: they differ,
@@ -1283,13 +1284,14 @@
           sentence: t('settings_subfolder_excluded_by_ancestor', { prefix: state.prefix }),
           control: 'none',
           expandable: false,
+          excluded: true,
         };
       case 'builtIn':
-        return { sentence: t('settings_subfolder_built_in'), control: 'none', expandable: false };
+        return { sentence: t('settings_subfolder_built_in'), control: 'none', expandable: false, excluded: false };
       case 'symlink':
-        return { sentence: t('settings_subfolder_symlink'), control: 'none', expandable: false };
+        return { sentence: t('settings_subfolder_symlink'), control: 'none', expandable: false, excluded: false };
       case 'unusableName':
-        return { sentence: t('settings_subfolder_unusable_name'), control: 'none', expandable: false };
+        return { sentence: t('settings_subfolder_unusable_name'), control: 'none', expandable: false, excluded: false };
       // 🔴 A compile-time arm with a run-time consequence, and the two are
       // answered in different places on purpose.
       //
@@ -1327,6 +1329,7 @@
     controlAriaLabel: string | null;
     costLabel: string | null;
     expandable: boolean;
+    excluded: boolean;
     expandAriaLabel: string;
     open: boolean;
     children: Level | null;
@@ -1338,7 +1341,7 @@
   // reading of it is a second answer that can disagree.
   function buildLevel(node: SubTree, rules: StoredExclusion[] | null): Level {
     const rows = node.listing.entries.map((entry) => {
-      const { sentence, control, expandable } = describe(entry.state);
+      const { sentence, control, expandable, excluded } = describe(entry.state);
       const child = node.children[entry.relativePath];
       return {
         entry,
@@ -1368,6 +1371,7 @@
         // (`ruleCostLabel` below) and `confirmView`'s include arm — not here.
         costLabel: control === 'include' ? ruleCostLabel(rules, entry.relativePath) : null,
         expandable,
+        excluded,
         expandAriaLabel: t('settings_folders_expand_named', { path: entry.relativePath }),
         open: child !== undefined,
         children: child === undefined ? null : buildLevel(child, rules),
@@ -1557,7 +1561,7 @@
   {#if level.emptyLabel}<p>{level.emptyLabel}</p>{/if}
   <ul>
     {#each level.rows as row (row.entry.relativePath)}
-      <li data-testid={`subfolder-${rootId}-${row.entry.relativePath}`}>
+      <li class="sub" class:excl={row.excluded} data-testid={`subfolder-${rootId}-${row.entry.relativePath}`}>
         <span>{row.entry.name}</span>
         <span>{row.sentence}</span>
         {#if row.costLabel}<span>{row.costLabel}</span>{/if}
@@ -1603,8 +1607,8 @@
     <ul>
       {#each rows as { root, countLabel, removeAriaLabel, expandAriaLabel, expanded, panel, removeConfirm } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
-          <span>{root.absolutePath}</span>
-          <span>{countLabel}</span>
+          <span class="fp">{root.absolutePath}</span>
+          <span class="fc">{countLabel}</span>
           <!-- Task 9: while THIS row's removal is in flight the row says so in
                place of its buttons. Not beside them: there is nothing left to
                press here, and a button that does nothing reads as a button
@@ -1656,7 +1660,7 @@
             </div>
           {/if}
           {#if panel}
-            <div data-testid={`folder-panel-${root.rootId}`}>
+            <div class="fsubs" data-testid={`folder-panel-${root.rootId}`}>
               {#if panel.loadError}
                 <p>{panel.failedLabel}</p>
                 <p data-testid={`folder-subfolders-reason-${root.rootId}`}>{panel.loadError}</p>

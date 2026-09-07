@@ -676,6 +676,26 @@ test('an ancestor-held subfolder names the rule holding it and offers no control
   expect(row.queryAllByRole('button')).toHaveLength(0);
 });
 
+// The one visual difference between an indexed subfolder and one that is
+// not: the row's class. Both excluded states carry it — a person reads
+// "not indexed" in both, and the sentence beside the row says which — and
+// the open one does not. Held here, through the component, because the
+// stylesheet guard only sees a class it wrote itself.
+test('an excluded subfolder and one held from above are marked as excluded, an open one is not', async () => {
+  await expand(
+    [
+      sub('notes', { kind: 'open' }),
+      sub('Archive', { kind: 'excluded' }),
+      sub('secret', { kind: 'excludedByAncestor', prefix: 'Work' }, 'Work'),
+    ],
+    [{ prefix: 'Archive', existsOnDisk: true }, { prefix: 'Work', existsOnDisk: true }],
+  );
+  const marked = (id: string) => screen.getByTestId(id).classList.contains('excl');
+  expect(marked('subfolder-1-notes')).toBe(false);
+  expect(marked('subfolder-1-Archive')).toBe(true);
+  expect(marked('subfolder-1-Work/secret')).toBe(true);
+});
+
 test('a built-in subfolder says the application made the rule, and offers no control', async () => {
   await expand([sub('node_modules', { kind: 'builtIn' })]);
 
