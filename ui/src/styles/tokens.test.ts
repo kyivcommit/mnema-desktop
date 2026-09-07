@@ -12,7 +12,7 @@
 // win the cascade silently). It does NOT understand any other at-rule
 // (`@supports`, `@layer`, …) — those pass through unparsed, folded into
 // whichever rule's body text they happen to fall inside.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -21,6 +21,9 @@ const HERE = dirname(fileURLToPath(import.meta.url)); // ui/src/styles
 const SRC = join(HERE, '..'); // ui/src
 const UI_ROOT = join(SRC, '..'); // ui — the two HTML entry points live here, not under src
 const TOKENS_PATH = join(HERE, 'tokens.css');
+const FONTS_PATH = join(HERE, 'fonts.css');
+const FONTS_DIR = join(HERE, 'fonts');
+const VITE_CONFIG_PATH = join(UI_ROOT, 'vite.config.ts');
 
 // Tokens that are the SAME in both themes on purpose — enforced by the
 // "keeps the theme-invariant font stacks identical" test below. Anything
@@ -272,6 +275,71 @@ function findForbiddenInHtml(text: string): { offset: number; reason: string }[]
   return hits;
 }
 
+// One @font-face block of fonts.css, read as text the same way tokens.css
+// is. `ranges` is the parsed unicode-range: inclusive [from, to] code-point
+// pairs. Google's sheets use only `U+XXXX` and `U+XXXX-YYYY`; the wildcard
+// form (`U+4??`) is rejected rather than guessed at, since fonts.css is
+// generated from that source and a wildcard there would be a new shape.
+type Face = {
+  family: string;
+  weight: string;
+  style: string;
+  display: string | undefined;
+  format: string | undefined;
+  src: string;
+  ranges: [number, number][];
+};
+
+function parseUnicodeRange(value: string): [number, number][] {
+  return value.split(',').map((part) => {
+    const m = /^\s*U\+([0-9A-F]+)(?:-([0-9A-F]+))?\s*$/i.exec(part);
+    if (!m) throw new Error(`fonts.css: unicode-range token not understood: "${part.trim()}"`);
+    const lo = parseInt(m[1], 16);
+    return [lo, m[2] ? parseInt(m[2], 16) : lo];
+  });
+}
+
+function unquote(s: string): string {
+  return s.trim().replace(/^['"]|['"]$/g, '');
+}
+
+function loadFaces(): Face[] {
+  const rules = parseRules(stripComments(readFileSync(FONTS_PATH, 'utf8')));
+  const strays = rules.filter((r) => r.selector !== '@font-face');
+  if (strays.length > 0) {
+    throw new Error(
+      `fonts.css: only @font-face blocks belong here; found: ${strays.map((r) => r.selector).join(' | ')}`,
+    );
+  }
+  return rules.map((r) => {
+    const need = (name: string): string => {
+      const v = declaration(r.body, name);
+      if (v === undefined) throw new Error(`fonts.css: an @font-face block without ${name}: ${r.body.trim()}`);
+      return v;
+    };
+    const src = need('src');
+    const url = /url\(\s*['"]?([^'")]+?)['"]?\s*\)/.exec(src);
+    if (!url) throw new Error(`fonts.css: src without url(): ${src}`);
+    return {
+      family: unquote(need('font-family')),
+      weight: need('font-weight'),
+      style: need('font-style'),
+      display: declaration(r.body, 'font-display'),
+      format: /format\(\s*['"]?([^'")]+?)['"]?\s*\)/.exec(src)?.[1],
+      src: url[1],
+      ranges: parseUnicodeRange(need('unicode-range')),
+    };
+  });
+}
+
+const faceKey = (f: Face) => `${f.family} ${f.weight} ${f.style}`;
+
+// The first family of a `font-family` stack, unquoted. `'IBM Plex Sans',
+// system-ui, …` → `IBM Plex Sans`.
+function stackLeader(stack: string): string {
+  return unquote(stack.split(',')[0]);
+}
+
 describe('tokens.css holds its two themes to each other', () => {
   it('declares the same token names in the light block and in both dark blocks', () => {
     const { light, mediaDark, attrDark } = loadThemes();
@@ -427,5 +495,106 @@ describe('the stylesheets stay inside the app', () => {
       }
     }
     expect(undeclared).toEqual([]);
+  });
+});
+
+describe('fonts.css bundles the faces the stacks lead with', () => {
+  // Every face this sheet promises must be a file the bundle can ship, and
+  // every file under fonts/ must be a face the sheet promises: an unnamed
+  // file is dead weight nobody will notice, a named file that is missing is
+  // a face the browser silently replaces with the next family in the stack.
+  it('names a file that exists in every src url, and names every font file', () => {
+    const faces = loadFaces();
+    expect(faces.length, 'fonts.css declares no @font-face at all').toBeGreaterThan(0);
+    const files = walk(FONTS_DIR, ['.woff2']);
+    expect(files.length, `no .woff2 files under ${FONTS_DIR}`).toBeGreaterThan(0);
+
+    const referenced = faces.map((f) => join(HERE, f.src));
+    const missing = referenced.filter((p) => !existsSync(p));
+    expect(missing).toEqual([]);
+
+    const unnamed = files.filter((p) => !referenced.includes(p));
+    expect(unnamed).toEqual([]);
+  });
+
+  // The stacks in tokens.css are what the interface actually asks for; the
+  // sheet is what it can deliver. A family named in one and not the other —
+  // a typo, a rename, a face fetched and never wired — falls through to the
+  // system stack on every machine that does not happen to have it installed,
+  // which is the reason 10a kept the mockup families out of the stacks.
+  it('leads every stack in tokens.css with a bundled family, and bundles no family that leads none', () => {
+    const { light } = loadThemes();
+    const bundled = [...new Set(loadFaces().map((f) => f.family))].sort();
+    const leaders = [...THEME_INVARIANT].map((name) => {
+      const stack = light.get(name);
+      if (stack === undefined) throw new Error(`tokens.css: ${name} missing from :root`);
+      return stackLeader(stack);
+    });
+    for (const [i, name] of [...THEME_INVARIANT].entries()) {
+      expect(bundled, `${name} leads with "${leaders[i]}"`).toContain(leaders[i]);
+    }
+    expect([...new Set(leaders)].sort()).toEqual(bundled);
+  });
+
+  // "Latin and Cyrillic" as a property of each face, not as a list of
+  // subset names: a face whose ranges skip any of these code points would
+  // render that character in the fallback family, mid-word, with no error
+  // anywhere. `₴` is the one that lives in cyrillic-ext, not cyrillic; `ł`
+  // is latin-ext, the reason that subset is bundled at all.
+  it('covers the Ukrainian alphabet, the hryvnia sign and the typographic punctuation in every face', () => {
+    const probes = [...'AaЄєІіЇїҐґЯя₴№—…«»ł'];
+    const byFace = new Map<string, [number, number][]>();
+    for (const f of loadFaces()) {
+      byFace.set(faceKey(f), [...(byFace.get(faceKey(f)) ?? []), ...f.ranges]);
+    }
+    expect(byFace.size, 'no faces parsed').toBeGreaterThan(0);
+
+    const uncovered: string[] = [];
+    for (const [key, ranges] of byFace) {
+      for (const ch of probes) {
+        const cp = ch.codePointAt(0)!;
+        if (!ranges.some(([lo, hi]) => lo <= cp && cp <= hi)) {
+          uncovered.push(`${key}: '${ch}' U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+        }
+      }
+    }
+    expect(uncovered).toEqual([]);
+  });
+
+  // The files are local: `block` means the text waits the few milliseconds
+  // the file takes rather than painting once in the fallback family and
+  // once again in the right one. And the format is the one Vite was told
+  // to ship, so a stray TTF cannot slip in under a woff2 name.
+  it('declares font-display: block and format woff2 on every face', () => {
+    const faces = loadFaces();
+    expect(faces.length).toBeGreaterThan(0);
+    const wrong = faces
+      .filter((f) => f.display !== 'block' || f.format !== 'woff2')
+      .map((f) => `${faceKey(f)} (${f.src}): display=${f.display} format=${f.format}`);
+    expect(wrong).toEqual([]);
+  });
+
+  // Vite inlines any asset under `build.assetsInlineLimit` (4096 bytes by
+  // default) as a data: URI — and the app's CSP, `default-src 'self'`,
+  // refuses data: fonts without a word in the console. Three of the
+  // bundled subsets are under that size. This reads the config as text
+  // rather than importing it: the config uses `__dirname`, which is not
+  // reliably present when a test module imports it under ESM. The build
+  // itself is the proof that the phrase means what it says —
+  // `grep -c 'url(data:font' dist/assets/*.css` must print 0.
+  it('keeps vite from inlining any asset as a data: URI', () => {
+    // Not stripComments (above): that helper only understands CSS's
+    // /* ... */ and is fooled by this very file's glob strings —
+    // '**/src-tauri/**' and 'src/**/*.{test,spec}.ts' each contain a /*
+    // and a */ that don't open or close a real comment, so stripComments
+    // would eat everything between them, assetsInlineLimit included. A
+    // line stripper matching TS's actual // comment syntax has no such
+    // false pair to find.
+    const raw = readFileSync(VITE_CONFIG_PATH, 'utf8');
+    const text = raw
+      .split('\n')
+      .map((line) => (/^\s*\/\//.test(line) ? '' : line))
+      .join('\n');
+    expect(text, 'ui/vite.config.ts: build.assetsInlineLimit must be 0').toMatch(/assetsInlineLimit:\s*0\b/);
   });
 });

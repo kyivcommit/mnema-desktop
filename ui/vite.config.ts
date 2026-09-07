@@ -16,6 +16,10 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   build: {
+    // Never inline an asset as a data: URI: the app's CSP is default-src
+    // 'self', which refuses data: fonts silently. Three bundled subsets are
+    // under the 4096-byte default and would vanish into the fallback family.
+    assetsInlineLimit: 0,
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
     minify: process.env.TAURI_ENV_DEBUG ? false : 'esbuild',
     sourcemap: !!process.env.TAURI_ENV_DEBUG,

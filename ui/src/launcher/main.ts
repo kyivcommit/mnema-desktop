@@ -1,4 +1,5 @@
 import '../styles/tokens.css';
+import '../styles/fonts.css';
 import '../styles/base.css';
 import '../styles/launcher.css';
 import { mount } from 'svelte';
