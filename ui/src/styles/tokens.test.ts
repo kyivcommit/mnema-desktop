@@ -6,9 +6,12 @@
 // stylesheet as text and holds the two themes to each other.
 //
 // The parser below is deliberately tiny: it understands `selector { decls }`
-// with one level of nesting (the media query) and nothing else, which is all
-// tokens.css is allowed to contain. If tokens.css grows past that, this file
-// fails to find its blocks and says so, rather than reading past them.
+// with one level of nesting (the media query) and nothing else. `findRule`
+// throws if a selector it looks up is missing, or if more than one
+// top-level rule shares it (a duplicate `:root`, say, which would otherwise
+// win the cascade silently). It does NOT understand any other at-rule
+// (`@supports`, `@layer`, …) — those pass through unparsed, folded into
+// whichever rule's body text they happen to fall inside.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,10 +19,12 @@ import { describe, expect, it } from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // ui/src/styles
 const SRC = join(HERE, '..'); // ui/src
+const UI_ROOT = join(SRC, '..'); // ui — the two HTML entry points live here, not under src
 const TOKENS_PATH = join(HERE, 'tokens.css');
 
-// Tokens that are the SAME in both themes on purpose. Anything else that is
-// identical in light and dark is a colour somebody forgot to theme.
+// Tokens that are the SAME in both themes on purpose — enforced by the
+// "keeps the theme-invariant font stacks identical" test below. Anything
+// else identical in light and dark is a colour somebody forgot to theme.
 const THEME_INVARIANT = new Set(['--sans', '--serif', '--mono']);
 
 type Rule = { selector: string; body: string; children: Rule[] };
@@ -35,6 +40,33 @@ function stripComments(css: string): string {
 // plain stripComments.
 function blankComments(css: string): string {
   return css.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+}
+
+// Keeps only the text inside <style>...</style> tags of a .svelte file,
+// blanking everything else (markup, script) to spaces while preserving
+// newlines — so a line number reported below still points at the real
+// file, and script or markup text cannot trigger a CSS-shaped false
+// positive (a component that renders the word "@import", say).
+function styleBlocksOnly(text: string): string {
+  const blank = (s: string) => s.replace(/[^\n]/g, ' ');
+  let out = '';
+  let i = 0;
+  const openTag = /<style\b[^>]*>/gi;
+  for (;;) {
+    openTag.lastIndex = i;
+    const m = openTag.exec(text);
+    if (!m) {
+      out += blank(text.slice(i));
+      break;
+    }
+    out += blank(text.slice(i, m.index + m[0].length));
+    const bodyStart = m.index + m[0].length;
+    const closeIdx = text.indexOf('</style>', bodyStart);
+    const bodyEnd = closeIdx < 0 ? text.length : closeIdx;
+    out += text.slice(bodyStart, bodyEnd);
+    i = bodyEnd;
+  }
+  return out;
 }
 
 // Splits `css` into top-level rules by brace matching. A rule whose body
@@ -123,14 +155,23 @@ function declaration(body: string, name: string): string | undefined {
   return undefined;
 }
 
+// Exactly one top-level (or, for a nested lookup, one child) rule may carry
+// a given selector. Zero is a parse failure worth naming; more than one is
+// a duplicate that would win the cascade silently while every assertion
+// here keeps reading the first, so it is rejected rather than resolved.
 function findRule(rules: Rule[], selector: string): Rule {
-  const hit = rules.find((r) => r.selector === selector);
-  if (!hit) {
+  const hits = rules.filter((r) => r.selector === selector);
+  if (hits.length === 0) {
     throw new Error(
       `tokens.css: no block with selector "${selector}"; found: ${rules.map((r) => r.selector).join(' | ')}`,
     );
   }
-  return hit;
+  if (hits.length > 1) {
+    throw new Error(
+      `tokens.css: ${hits.length} blocks with selector "${selector}", expected exactly one — a duplicate wins the cascade silently`,
+    );
+  }
+  return hits[0];
 }
 
 function walk(dir: string, exts: string[]): string[] {
@@ -139,6 +180,15 @@ function walk(dir: string, exts: string[]): string[] {
     if (statSync(path).isDirectory()) return walk(path, exts);
     return exts.some((e) => name.endsWith(e)) ? [path] : [];
   });
+}
+
+// Non-recursive: only files directly inside `dir`. Used for `ui/`'s two HTML
+// entry points, so `node_modules/` and `dist/` are never descended into.
+function topLevelFiles(dir: string, exts: string[]): string[] {
+  return readdirSync(dir)
+    .filter((name) => exts.some((e) => name.endsWith(e)))
+    .map((name) => join(dir, name))
+    .filter((path) => !statSync(path).isDirectory());
 }
 
 function loadRules(): Rule[] {
@@ -159,16 +209,34 @@ function loadThemes() {
 
 const sortedNames = (m: Map<string, string>) => [...m.keys()].sort();
 
-// No `url(...)` may resolve outside the app: an explicit `http(s)` target,
-// or a scheme-relative (`//`) one, which fetches under this app's own
-// origin exactly like an explicit `https:` target would; `data:` URIs and
-// relative paths never match, on purpose. No `@import` at all, of any
-// shape, local or remote: this project composes stylesheets only in the two
-// `main.ts` entry points (tokens.css, then base.css, then a window-specific
-// file), so a CSS `@import` would be a second, unaudited composition path,
-// and a rule with no scheme to parse cannot narrow itself again.
-function reachesNetwork(line: string): boolean {
-  return /url\(\s*['"]?(?:https?:)?\/\//i.test(line) || /@import\b/i.test(line);
+// The two rules a stylesheet's own text must obey, because this project
+// composes stylesheets only in the two main.ts entry points (tokens.css,
+// then base.css, then a window-specific file): no url(...) that resolves
+// outside the app — an explicit http(s) target, or a scheme-relative (`//`)
+// one, which fetches under this app's own origin exactly like an explicit
+// https: target would (data: URIs and relative paths are fine) — and no
+// @import at all, of any shape, local or remote, since a CSS @import would
+// be a second, unaudited composition path. Returns which rule a line
+// breaks, or null if it breaks neither.
+function forbiddenInStylesheet(line: string): string | null {
+  if (/url\(\s*['"]?(?:https?:)?\/\//i.test(line)) return 'a url() reaching outside the app';
+  if (/@import\b/i.test(line)) return 'a CSS @import';
+  return null;
+}
+
+// The two HTML entry points may not link a stylesheet or a preconnect hint
+// from the network either — the same "reaches outside the app" rule above,
+// expressed as a <link> tag instead of CSS. Deliberately narrow: only
+// rel="stylesheet" and rel="preconnect" are checked, since those are the
+// tags that actually fetch.
+function forbiddenInHtml(line: string): string | null {
+  const tags = line.match(/<link\b[^>]*>/gi) ?? [];
+  for (const tag of tags) {
+    const isStylesheetOrPreconnect = /\brel=["'](?:stylesheet|preconnect)["']/i.test(tag);
+    const hrefIsExternal = /\bhref=["'](?:https?:)?\/\//i.test(tag);
+    if (isStylesheetOrPreconnect && hrefIsExternal) return 'a <link> reaching outside the app';
+  }
+  return null;
 }
 
 describe('tokens.css holds its two themes to each other', () => {
@@ -196,6 +264,19 @@ describe('tokens.css holds its two themes to each other', () => {
     expect(unthemed).toEqual([]);
   });
 
+  it('keeps the theme-invariant font stacks identical in every block', () => {
+    // THEME_INVARIANT excuses --sans/--serif/--mono from the "themes every
+    // colour token" check above, but exempting a token from "must differ"
+    // is not the same as requiring it to "stay the same" — an edit to one
+    // block only (the shape PR 10c's font-stack change takes) would pass
+    // both of the checks above unnoticed.
+    const { light, mediaDark, attrDark } = loadThemes();
+    for (const name of THEME_INVARIANT) {
+      expect(mediaDark.get(name), name).toBe(light.get(name));
+      expect(attrDark.get(name), name).toBe(light.get(name));
+    }
+  });
+
   it('keeps color-scheme in step with the theme blocks', () => {
     // customProperties deliberately ignores `color-scheme` (it is not a
     // custom property), which left the whole non-token half of the theme
@@ -214,7 +295,7 @@ describe('tokens.css holds its two themes to each other', () => {
 });
 
 describe('the stylesheets stay inside the app', () => {
-  it('reach no network resource from any CSS file under ui/src', () => {
+  it('forbids a url() outside the app and any @import, in every stylesheet, svelte style block, and HTML entry point', () => {
     // The predicate is checked against its own small table first, so a
     // change that breaks a known shape is caught right here rather than
     // only if some future file happens to contain that exact shape.
@@ -230,24 +311,46 @@ describe('the stylesheets stay inside the app', () => {
       ['url(./fonts/a.woff2)', false],
     ];
     for (const [line, expected] of table) {
-      expect(reachesNetwork(line), line).toBe(expected);
+      expect(forbiddenInStylesheet(line) !== null, line).toBe(expected);
     }
 
-    // A guard that walks zero files is satisfied by nothing to complain
-    // about — assert the walk actually found stylesheets before trusting
-    // the empty result below.
-    const files = walk(SRC, ['.css']);
-    expect(files.length, `no .css files found under ${SRC}`).toBeGreaterThan(0);
+    // A guard that walks zero files of a kind is satisfied by nothing to
+    // complain about — assert each walk actually found something before
+    // trusting an empty offenders list.
+    const cssFiles = walk(SRC, ['.css']);
+    expect(cssFiles.length, `no .css files found under ${SRC}`).toBeGreaterThan(0);
+    const svelteFiles = walk(SRC, ['.svelte']);
+    expect(svelteFiles.length, `no .svelte files found under ${SRC}`).toBeGreaterThan(0);
+    const htmlFiles = topLevelFiles(UI_ROOT, ['.html']);
+    expect(htmlFiles.length, `no .html files found directly under ${UI_ROOT}`).toBeGreaterThan(0);
 
     const offenders: string[] = [];
-    for (const file of files) {
+
+    for (const file of cssFiles) {
       const css = blankComments(readFileSync(file, 'utf8'));
       css.split('\n').forEach((line, idx) => {
-        if (reachesNetwork(line)) {
-          offenders.push(`${file}:${idx + 1}: ${line.trim()}`);
-        }
+        const reason = forbiddenInStylesheet(line);
+        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
       });
     }
+
+    for (const file of svelteFiles) {
+      const styleOnly = blankComments(styleBlocksOnly(readFileSync(file, 'utf8')));
+      styleOnly.split('\n').forEach((line, idx) => {
+        const reason = forbiddenInStylesheet(line);
+        if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
+      });
+    }
+
+    for (const file of htmlFiles) {
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .forEach((line, idx) => {
+          const reason = forbiddenInHtml(line);
+          if (reason) offenders.push(`${file}:${idx + 1}: ${reason}: ${line.trim()}`);
+        });
+    }
+
     expect(offenders).toEqual([]);
   });
 

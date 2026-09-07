@@ -1,8 +1,8 @@
 /* Design tokens — the one place both themes are written down.
  *
  * Copied from the two interface mockups (docs/private, 2026-08-21), which are
- * the source of truth for every value here. The scene-only tokens of those
- * mockups (--wall, --menubar: the drawn desktop and menu bar) are not
+ * the source of truth for every colour value here. The scene-only tokens of
+ * those mockups (--wall, --menubar: the drawn desktop and menu bar) are not
  * transferred; nothing in the app has a desktop to paint.
  *
  * Theme mechanism, complete in CSS:
@@ -11,13 +11,17 @@
  *                                          and no explicit light choice
  *   :root[data-theme=dark]                 the same dark values, for an
  *                                          explicit choice on any OS theme
+ *   :root[data-theme=light]                only forces color-scheme back to
+ *                                          light; the light values above
+ *                                          already apply otherwise
  * A later preference switch sets ONLY the data-theme attribute.
  *
- * Font stacks name no family the app does not ship: a bundled family lands
- * with its @font-face in a later change, and is prepended here then.
+ * Font stacks name no family the app does not ship: the mockups' families
+ * are not transferred; a bundled family lands with its @font-face in a
+ * later change, and is prepended here then.
  *
  * tokens.test.ts reads this file as text and holds the blocks to each other;
- * keep the three selectors above spelled exactly as they are.
+ * keep the four selectors above spelled exactly as they are.
  */
 :root {
   color-scheme: light dark;
