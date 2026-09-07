@@ -35,6 +35,13 @@
 #
 # Result: ui/src/styles/fonts/<slug>/<slug>-<weight>-<style>-<subset>.woff2,
 #         ui/src/styles/fonts/<slug>/OFL.txt, ui/src/styles/fonts.css
+#
+# The woff2 files reach the user compiled into the executable with the rest of
+# ui/dist; the OFL.txt files do not travel that way — each is named in
+# bundle.resources of src-tauri/tauri.conf.json, which lands it under
+# Contents/Resources/fonts/<slug>/ (tokens.test.ts holds the list to this
+# directory, scripts/verify-bundle.sh reads the built image). A new family here
+# needs its resources line, or it ships unlicensed.
 
 set -euo pipefail
 

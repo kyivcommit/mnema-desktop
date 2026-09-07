@@ -20,6 +20,8 @@
 #                       local file, for a file that is already on disk
 #   the format        — a file declared as anything but woff2 is not what
 #                       the build was told to ship
+#   the licence       — a family whose OFL.txt is not in bundle.resources
+#                       ships its glyphs and not its licence
 #   the inline limit  — without the limit Vite folds every subset under its
 #                       default 4096 bytes into a data: URI, which the CSP
 #                       refuses; and a value inside a comment is no value,
@@ -88,6 +90,13 @@ case_ "fonts.css: the format must be woff2, not a stray TTF under a woff2 name" 
   "s~format\('woff2'\)~format('truetype')~g" \
   "format('truetype')" \
   src/styles/tokens.test.ts 'declares font-display: block and format woff2 on every face' runner=vitest
+
+case_ "tauri.conf.json: a family whose licence is not a bundle resource ships unlicensed" \
+  src-tauri/tauri.conf.json \
+  's~      "\.\./ui/src/styles/fonts/spectral/OFL\.txt": "fonts/spectral/OFL\.txt",\n~~' \
+  '      "../vendor/pdfium/LICENSE": "pdfium/LICENSE",
+      "../ui/src/styles/fonts/ibm-plex-sans/OFL.txt": "fonts/ibm-plex-sans/OFL.txt",' \
+  src/styles/tokens.test.ts 'names every font family licence in tauri.conf.json bundle.resources' runner=vitest
 
 case_ "vite.config.ts: a commented-out inline limit is no limit" \
   ui/vite.config.ts \

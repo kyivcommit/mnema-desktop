@@ -25,6 +25,7 @@ const TOKENS_PATH = join(HERE, 'tokens.css');
 const FONTS_PATH = join(HERE, 'fonts.css');
 const FONTS_DIR = join(HERE, 'fonts');
 const VITE_CONFIG_PATH = join(UI_ROOT, 'vite.config.ts');
+const TAURI_CONF_PATH = join(UI_ROOT, '..', 'src-tauri', 'tauri.conf.json');
 
 // Tokens that are the SAME in both themes on purpose — enforced by the
 // "keeps the theme-invariant font stacks identical" test below. Anything
@@ -573,6 +574,34 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
       .filter((f) => f.display !== 'block' || f.format !== 'woff2')
       .map((f) => `${faceKey(f)} (${f.src}): display=${f.display} format=${f.format}`);
     expect(wrong).toEqual([]);
+  });
+
+  // The woff2 files reach the user inside the executable, and the OFL's
+  // condition 2 wants the licence text beside every distributed copy. Vite
+  // copies nothing it is not asked to import, so each family's OFL.txt has
+  // to be named in bundle.resources of tauri.conf.json — and a family added
+  // to fonts/ without that line ships unlicensed with every check green,
+  // which is the state PR 10c's first bundle was in. Both directions: every
+  // family on disk is named, and every fonts/ resource names a family on
+  // disk. scripts/verify-bundle.sh checks the built image; this checks the
+  // configuration that produces it, on every `npm test`.
+  it('names every font family licence in tauri.conf.json bundle.resources', () => {
+    const families = readdirSync(FONTS_DIR).filter((name) => statSync(join(FONTS_DIR, name)).isDirectory());
+    expect(families.length, `no family directory under ${FONTS_DIR}`).toBeGreaterThan(0);
+    for (const family of families) {
+      expect(existsSync(join(FONTS_DIR, family, 'OFL.txt')), `${family}/OFL.txt`).toBe(true);
+    }
+    const conf = JSON.parse(readFileSync(TAURI_CONF_PATH, 'utf8')) as {
+      bundle?: { resources?: Record<string, string> };
+    };
+    const resources = conf.bundle?.resources ?? {};
+    const expected = Object.fromEntries(
+      families.map((f) => [`../ui/src/styles/fonts/${f}/OFL.txt`, `fonts/${f}/OFL.txt`]),
+    );
+    const actual = Object.fromEntries(
+      Object.entries(resources).filter(([from]) => from.includes('/styles/fonts/')),
+    );
+    expect(actual).toEqual(expected);
   });
 
   // Vite inlines any asset under `build.assetsInlineLimit` (4096 bytes by

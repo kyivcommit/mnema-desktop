@@ -730,6 +730,22 @@ if must copy_app_out "${LAB}/no-entitlement" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-entitlement-img"
 fi
 
+echo "### 18. a font family ships without its licence"
+# Not an invented state either: the first bundle of PR 10c carried every woff2
+# (compiled into the executable) and not one OFL.txt, and every check above
+# passed on it — an independent review of the pull request found it by listing
+# ui/dist. Removing one family's file from a copy of the real bundle is the
+# smallest version of that state; the check has to name the family.
+if must copy_app_out "${LAB}/no-ofl" \
+  && must rm -f "${LAB}/no-ofl/Mnema.app/Contents/Resources/fonts/spectral/OFL.txt" \
+  && gone "${LAB}/no-ofl/Mnema.app/Contents/Resources/fonts/spectral/OFL.txt" \
+  && must codesign --sign - --force --deep "${LAB}/no-ofl/Mnema.app" \
+  && must image_from "${LAB}/no-ofl" "${LAB}/no-ofl-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no OFL.txt for spectral" \
+    "the Spectral files ship and the Spectral licence does not" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-ofl-img"
+fi
+
 echo
 echo "### and the real bundle, which must pass"
 if bash "${REPO}/scripts/verify-bundle.sh" >/dev/null 2>&1; then
