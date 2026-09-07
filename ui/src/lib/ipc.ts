@@ -874,3 +874,10 @@ export const setHotkey = (shortcut: string) => invoke<HotkeyState>('set_hotkey',
 // switch that moved while the machine stayed where it was.
 export const setAutostart = (enabled: boolean) =>
   invoke<AutostartState>('set_autostart', { enabled });
+
+// PR 10b. The three values the Rust side writes (`theme.rs`); anything else on
+// the wire is read as `system` at both ends, so the two cannot disagree.
+export type ThemeChoice = 'system' | 'light' | 'dark';
+// A rejection is `Error::Prefs`: the file was not written, nothing was applied,
+// and the window's own store is therefore still the truth — no re-read needed.
+export const setTheme = (choice: ThemeChoice) => invoke<void>('set_theme', { choice });
