@@ -389,9 +389,9 @@
   // the `theme` store — the same store `bootTheme` seeds from `get_theme` and
   // moves on `theme-changed`, and the same store whose subscription writes
   // `data-theme` on this document. This section never reads `get_theme`
-  // itself: `main.ts` starts `bootTheme()` before mounting, and until that
-  // snapshot lands the segment shows the store's default, `system`, then
-  // follows the store when it does.
+  // itself: `main.ts` starts `bootTheme()` before mounting, and the segment
+  // shows the store — which starts at `system` and is moved by whichever of
+  // the live `theme-changed` event or the `get_theme` snapshot lands first.
   // ---------------------------------------------------------------------------
 
   const themeLabelText = $derived.by(() => { void $locale; return t('application_theme'); });
@@ -418,8 +418,9 @@
     try {
       await setTheme(choice);
       // The reply is the truth: `Ok` means the file holds the choice and every
-      // window's frame was asked to follow. Rust also broadcasts `theme-changed`, which
-      // lands in this window's `bootTheme` listener with the same value — but
+      // window's frame was asked to follow. Rust also broadcasts
+      // `theme-changed`, which lands in this window's `bootTheme` listener
+      // with the same value — but
       // that broadcast is best-effort (`let _ = emit`) and this window need not
       // wait on its own echo. One store, one attribute writer, same value.
       theme.set(choice);
