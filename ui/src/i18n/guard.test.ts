@@ -2,53 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as ts from 'typescript';
 
 const CYRILLIC = /[Ѐ-ӿ]/;
 // Global on purpose. `latinOffenses` reports *every* run on a line: with a
 // single `exec` the second offender on a line was invisible, so an allowlist
 // entry written for the first one silently forgave its unrelated neighbour.
 const LATIN_RUN = /[A-Za-z]{2,}/g;
-
-// Blanks `.ts` comments (`//` and `/* */`) so the Cyrillic sweep can look past
-// a developer citation — `recency.ts:46` quotes a Ukrainian spec heading
-// verbatim in a doc comment — without excluding the whole file, which would
-// also hide a real Cyrillic literal added there later. String/template
-// content is walked and kept as-is (a `//` inside a string is consumed by the
-// quote jump below, never independently reached as a comment marker), so this
-// only ever removes developer prose, never code or string content. Not used
-// for `.svelte` files: a raw `//` in visible markup text (a URL typed with no
-// surrounding quotes) would be misread as a comment there, which `.ts` source
-// does not risk the same way.
-function stripJsComments(src: string): string {
-  const out: string[] = [];
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    if (c === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? src.length : nl;
-      i = end;
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      const close = src.indexOf('*/', i + 2);
-      const end = close === -1 ? src.length : close + 2;
-      i = end;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const q = c;
-      let j = i + 1;
-      while (j < src.length && src[j] !== q) { if (src[j] === '\\') j++; j++; }
-      out.push(src.slice(i, Math.min(j + 1, src.length)));
-      i = j + 1;
-      continue;
-    }
-    out.push(c);
-    i++;
-  }
-  return out.join('');
-}
 
 // Attribute names whose value is never prose. Every attribute NOT named here
 // has its string value scanned, which is the point: naming the readable ones
@@ -402,187 +362,185 @@ function latinOffenses(file: string, src: string, list: Allowlisted[] = LATIN_AL
 // tag — `shortcut.ts` is the concrete case: `Ctrl`, `Alt`, `Win`, the DOM key
 // names, none of it routed through `catalog.ts` — and no sweep looked at it
 // at all. `visibleTextOnly` cannot be reused as-is; it walks HTML/Svelte
-// markup and a `.ts` file has none. What follows is the same IDEA — reduce
-// the file to only the characters that could ever become something a person
-// reads, blank the rest — applied to plain TypeScript instead: keep only the
-// CONTENTS of string literals, and blank four things that are lexically
-// string literals but are never prose:
+// markup and a `.ts` file has none. What follows reduces a `.ts` file to only
+// the CONTENTS of its string and template literals, blanking four things
+// that are lexically string-shaped but are never prose:
 //
-//   - a comment, in either form — developer text, never shown to a user;
-//   - an import/export module specifier — an address, the same reason `href`
-//     is excluded from the attribute sweep above;
-//   - the whole argument list of a call to `t(...)` — the catalogue
-//     accessor, blanked WHOLE rather than just an immediate string, so a key
-//     hidden in a ternary (`t(cond ? 'a' : 'b')`) is not read as two
-//     hardcoded words — mirroring `{t('key')}` being blanked whole in markup.
-//     Known blind spot, NOT closed by this: the first argument is the
-//     catalogue KEY and an optional second is the interpolation VALUES
-//     object (`t('k', { count: n })`) — blanking the whole call also blanks
-//     any hardcoded string sitting in that second argument, so
-//     `t('k', { x: 'Zebra' })` is invisible to this sweep; `'Zebra'` would
-//     never be reported. Every real call site today builds that object from
-//     variables, never a literal, so this has cost nothing measured so far —
-//     closing it would need scanning the second argument on its own, which
-//     this sweep does not do;
-//   - a `case` label — a discriminant tag matched against a union type, the
-//     same "fixed vocabulary, not a sentence" class as `role`/`type` in the
-//     Svelte attribute sweep.
+//   - an import/export module specifier, including a dynamic `import(...)`
+//     — an address, the same reason `href` is excluded from the attribute
+//     sweep above;
+//   - the FIRST argument of a call to `t(...)`, the catalogue accessor — the
+//     key, whatever shape it is written in. A key picked by a ternary
+//     (`t(cond ? 'a' : 'b')`) is caught at ANY depth below that argument, not
+//     only when it is an immediate literal, mirroring `{t('key')}` being
+//     blanked whole in the markup sweep above. Every OTHER argument is
+//     scanned on its own terms: `t('k', { x: 'Zebra' })`'s `Zebra` was
+//     invisible on `main` because the whole call was blanked as one span —
+//     a booked blind spot, closed here, because only the first argument is
+//     ever the catalogue's own vocabulary;
+//   - a `case` label's own expression — a discriminant tag matched against a
+//     union type, the same "fixed vocabulary, not a sentence" class as
+//     `role`/`type` in the Svelte attribute sweep;
+//   - a string used as a PROPERTY NAME rather than a value — an object
+//     literal key, or a `type`/`interface` member name — and a string used
+//     as a TYPE rather than a value (`'mac'` in `Exclude<Platform, 'mac'>`,
+//     a type argument, never a runtime string).
 //
-// Nothing here parses TypeScript; it is the same left-to-right character walk
-// as `visibleTextOnly`, with the same failure mode — an unterminated
-// construct throws rather than silently blanking to end of file.
+// Unlike `visibleTextOnly`, this reduction is built on `typescript`'s own
+// parser (`ts.createSourceFile`) rather than a hand-rolled character walk.
+// Two independent hand-rolled scanners over this file — this one, in an
+// earlier revision, and the Cyrillic sweep's now-deleted `stripJsComments` —
+// separately reinvented "where does a comment end" and "where does a string
+// end", and got the same question wrong the same way (external review, P2):
+// neither recognised a REGEX literal, so a `//` sitting inside one
+// (`/\/\//`, never inside quotes) was read as a `//` comment, and everything
+// after it on the line — Latin or Cyrillic — silently vanished; and a nested
+// template literal's own inner backtick pair was read as closing the OUTER
+// one. A real parser has neither hole: a `RegularExpressionLiteral` is its
+// own node kind, never visited by the walk below, so a quote or a `//`
+// inside one is never even examined as string/comment syntax; and nested
+// template literals nest in the AST exactly as they nest in the source, so
+// the false branch's own template is visited on its own terms with no
+// special-casing needed. That is the reason to parse rather than
+// pattern-match, not a stylistic preference.
 // ---------------------------------------------------------------------------
 
-// Index just past the `)` matching the `(` at `src[start]`. String/template/
-// comment awareness mirrors `exprEnd`; the nesting tracked is parentheses
-// rather than braces, because this blanks a whole call's argument list.
-function parenEnd(src: string, start: number): number {
-  let depth = 1;
-  let i = start + 1;
-  while (i < src.length) {
-    const c = src[i];
-    if (c === '"' || c === "'") {
-      const q = c;
-      i++;
-      while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; }
-      i++;
-      continue;
-    }
-    if (c === '`') {
-      i++;
-      let tdepth = 0;
-      while (i < src.length) {
-        if (src[i] === '\\') { i += 2; continue; }
-        if (tdepth === 0 && src[i] === '`') { i++; break; }
-        if (src[i] === '$' && src[i + 1] === '{') { tdepth++; i += 2; continue; }
-        if (tdepth > 0 && src[i] === '}') { tdepth--; i++; continue; }
-        i++;
-      }
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i);
-      i = nl === -1 ? src.length : nl;
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      const close = src.indexOf('*/', i + 2);
-      i = close === -1 ? src.length : close + 2;
-      continue;
-    }
-    if (c === '(') { depth++; i++; continue; }
-    if (c === ')') { depth--; i++; if (depth === 0) return i; continue; }
-    i++;
+// Node kinds whose text is something a person could read on screen: a plain
+// string, and each piece of a template literal around its `${...}`
+// interpolations (which are visited separately, as their own expressions,
+// and so are never read as this literal's own text).
+const STRING_LIKE_KINDS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateHead,
+  ts.SyntaxKind.TemplateMiddle,
+  ts.SyntaxKind.TemplateTail,
+]);
+
+// The half-open span of `node`'s OWN text, its delimiters dropped: one quote
+// or backtick at the start for every kind, and — depending on which side(s)
+// still carry a backtick versus a `${`/`}` interpolation boundary — one or
+// two characters at the end.
+function contentSpan(sourceFile: ts.SourceFile, node: ts.Node): [number, number] {
+  const start = node.getStart(sourceFile) + 1;
+  switch (node.kind) {
+    case ts.SyntaxKind.TemplateHead: // `` `text${ `` — drop the backtick and the `${`
+    case ts.SyntaxKind.TemplateMiddle: // `` }text${ `` — drop the leading `}` and the `${`
+      return [start, node.end - 2];
+    default: // StringLiteral, NoSubstitutionTemplateLiteral, TemplateTail: one delimiter on each side
+      return [start, node.end - 1];
   }
-  return -1;
 }
 
-// Reads a template literal starting at the backtick `src[start]`. Literal
-// segments are kept — they are exactly the string's own text — and every
-// `${...}` is blanked whole via `exprEnd`, the same way a markup expression
-// is blanked whole above, so a nested call or a nested backtick inside it is
-// never read twice. Returns the kept/blanked text and the index just past
-// the closing backtick.
-function readTemplate(src: string, start: number): [string, number] {
-  const out: string[] = [blank('`')];
-  let i = start + 1;
-  let segStart = i;
-  while (i < src.length) {
-    const c = src[i];
-    if (c === '\\') { i += 2; continue; }
-    if (c === '`') {
-      out.push(src.slice(segStart, i));
-      out.push(blank('`'));
-      return [out.join(''), i + 1];
-    }
-    if (c === '$' && src[i + 1] === '{') {
-      out.push(src.slice(segStart, i));
-      const end = exprEnd(src, i + 1);
-      if (end === -1) throw new Error(`unterminated template expression at index ${i}`);
-      out.push(blank(src.slice(i, end)));
-      i = end;
-      segStart = i;
-      continue;
-    }
-    i++;
+// True when `node` sits inside the FIRST argument of a call to the bare
+// identifier `t`, at any depth — so a key picked by a ternary is caught the
+// same as a plain literal. Climbs one parent at a time rather than checking
+// only the immediate parent, because the catalogue key is not always an
+// immediate child of the call (`t(cond ? 'a' : 'b')`'s `'a'` is two levels
+// down, inside the `ConditionalExpression` that IS the first argument).
+function isCatalogueKey(node: ts.Node): boolean {
+  let current: ts.Node = node;
+  for (let parent = current.parent; parent; current = parent, parent = current.parent) {
+    if (
+      ts.isCallExpression(parent) &&
+      ts.isIdentifier(parent.expression) &&
+      parent.expression.text === 't' &&
+      parent.arguments[0] === current
+    ) return true;
   }
-  throw new Error(`unterminated template literal at index ${start}`);
+  return false;
+}
+
+// True when `node` is the module specifier of a static import/export
+// declaration, or the sole argument of a dynamic `import(...)`.
+function isModuleSpecifier(node: ts.Node): boolean {
+  const p = node.parent;
+  if (!p) return false;
+  if ((ts.isImportDeclaration(p) || ts.isExportDeclaration(p)) && p.moduleSpecifier === node) return true;
+  // `ts.isImportCall` exists at runtime but is not part of the package's
+  // public `.d.ts`, so a dynamic `import(...)` is recognised the same way
+  // that helper does internally: a call whose callee token is `import`.
+  if (ts.isCallExpression(p) && p.expression.kind === ts.SyntaxKind.ImportKeyword && p.arguments[0] === node) return true;
+  return false;
+}
+
+// True when `node` is a `case` clause's own discriminant expression.
+function isCaseLabel(node: ts.Node): boolean {
+  const p = node.parent;
+  return !!p && ts.isCaseClause(p) && p.expression === node;
+}
+
+// True when `node` stands in for a PROPERTY NAME rather than a value — an
+// object-literal key, or a type/interface/class/enum member name.
+function isKeyPosition(node: ts.Node): boolean {
+  const p = node.parent;
+  if (!p) return false;
+  return (
+    (ts.isPropertyAssignment(p) ||
+      ts.isPropertySignature(p) ||
+      ts.isPropertyDeclaration(p) ||
+      ts.isMethodDeclaration(p) ||
+      ts.isMethodSignature(p) ||
+      ts.isGetAccessorDeclaration(p) ||
+      ts.isSetAccessorDeclaration(p) ||
+      ts.isEnumMember(p)) &&
+    p.name === node
+  );
+}
+
+// True when `node` is a string literal TYPE (`'mac'` in
+// `Exclude<Platform, 'mac'>`) rather than a runtime value.
+function isTypePosition(node: ts.Node): boolean {
+  return !!node.parent && ts.isLiteralTypeNode(node.parent);
+}
+
+// `ts.createSourceFile`'s parser populates this while parsing, ahead of any
+// later type-check; it is not part of the public `.d.ts` (@internal), so the
+// cast is the price of asking the question this cheaply. A shape probing
+// hostile to that field simply comes back with `undefined`, which the
+// `?? []` below turns into "no diagnostics" rather than a crash — the loud
+// failure this function raises is for a source file the parser could not
+// read, not for a `typescript` release that stopped exposing the field.
+function parseDiagnosticsOf(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {
+  return (sourceFile as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
 }
 
 // The `.ts` analogue of `visibleTextOnly`: reduces a plain TypeScript source
-// file to only the contents of its string literals, minus the four machine
-// categories the block comment above names.
+// file to only the contents of its string/template literals, minus the four
+// machine categories the block comment above names — using `typescript`'s
+// own parser rather than a character walk. Malformed source fails loudly,
+// the same rule `visibleTextOnly` follows for markup: a syntax error must
+// not read as "nothing to report".
 function visibleStringLiteralsOnly(src: string): string {
-  const out: string[] = [];
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-
-    if (c === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? src.length : nl;
-      out.push(blank(src.slice(i, end)));
-      i = end;
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      const close = src.indexOf('*/', i + 2);
-      if (close === -1) throw new Error(`unterminated block comment at index ${i}`);
-      out.push(blank(src.slice(i, close + 2)));
-      i = close + 2;
-      continue;
-    }
-
-    // A call to `t(...)`, the catalogue accessor. `t` must stand alone (not
-    // the tail of a longer identifier like `format`), which the lookbehind
-    // enforces the same way `isMachineAttr`'s callers do above.
-    if (c === '(' && /(^|[^A-Za-z0-9_$])t$/.test(src.slice(0, i))) {
-      const end = parenEnd(src, i);
-      if (end === -1) throw new Error(`unterminated call at index ${i}`);
-      out.push(blank(src.slice(i, end)));
-      i = end;
-      continue;
-    }
-
-    if (c === '"' || c === "'" || c === '`') {
-      const before = src.slice(0, i).trimEnd();
-      const isMachineToken =
-        /(^|[^A-Za-z0-9_$])from$/.test(before) || // import/export module specifier
-        /(^|[^A-Za-z0-9_$])import\($/.test(before) || // dynamic import()
-        /(^|[^A-Za-z0-9_$])case$/.test(before); // switch/case discriminant tag
-      if (c === '`') {
-        const [content, end] = readTemplate(src, i);
-        out.push(isMachineToken ? blank(content) : content);
-        i = end;
-        continue;
-      }
-      const quote = c;
-      let j = i + 1;
-      while (j < src.length && src[j] !== quote) {
-        if (src[j] === '\\') { j += 2; continue; }
-        j++;
-      }
-      // This scanner does not recognise regex literals: a quote character
-      // sitting inside a `/regex/` (`/['"]/`, say) reads to it as an opening
-      // quote like any other, and then it hunts for a matching close that is
-      // never coming. The likeliest cause is named in the message rather than
-      // fixed here — loud is the point.
-      if (j >= src.length) {
-        throw new Error(
-          `unterminated string literal at index ${i} — likely cause: a regex literal ` +
-          'holding a quote character, which this scanner reads as an opening quote rather than as a regex',
-        );
-      }
-      out.push(blank(quote));
-      out.push(isMachineToken ? blank(src.slice(i + 1, j)) : src.slice(i + 1, j));
-      out.push(blank(quote));
-      i = j + 1;
-      continue;
-    }
-
-    out.push(blank(c));
-    i++;
+  const sourceFile = ts.createSourceFile('guarded.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const diagnostics = parseDiagnosticsOf(sourceFile);
+  if (diagnostics.length > 0) {
+    throw new Error(`invalid TypeScript source, cannot be scanned: ${ts.flattenDiagnosticMessageText(diagnostics[0].messageText, '\n')}`);
   }
+
+  // Split by UTF-16 code unit, not code point (`[...src]` would), because
+  // `ts.Node` positions are UTF-16 offsets — this file's own emoji markers
+  // (🔴, ⚠️) are surrogate pairs, and splitting by code point would shift
+  // every index after the first one out of alignment with the AST.
+  const chars = src.split('');
+  const out: string[] = chars.map((c) => (c === '\n' ? '\n' : ' ')); // blanked by default, newlines preserved
+
+  const visit = (node: ts.Node) => {
+    if (
+      STRING_LIKE_KINDS.has(node.kind) &&
+      !isCatalogueKey(node) &&
+      !isModuleSpecifier(node) &&
+      !isCaseLabel(node) &&
+      !isKeyPosition(node) &&
+      !isTypePosition(node)
+    ) {
+      const [from, to] = contentSpan(sourceFile, node);
+      for (let i = from; i < to; i++) out[i] = chars[i];
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
   return out.join('');
 }
 
@@ -603,20 +561,22 @@ describe('Svelte hardcode guard', () => {
   // excluded now; every other `.ts`/`.svelte` file in the tree, i18n
   // directory included, is scanned.
   //
-  // `.ts` files are scanned with comments stripped first (`stripJsComments`):
-  // `recency.ts:46`'s doc comment quotes a Ukrainian spec heading verbatim
-  // (§9.3, D-e) as a citation for whoever traces the function back to the
-  // requirement — never a string a person sees on screen, and there is
-  // nothing to "move to the catalogue" for a comment. Stripping the comment
-  // rather than excluding the file keeps this sweep able to catch a REAL
-  // Cyrillic literal added to `recency.ts`, or any other `.ts` module, later.
+  // Reads the RAW file text, unconditionally — no comment-stripping step of
+  // any kind. An earlier revision ran `.ts` files through a hand-written
+  // `stripJsComments` first, so a Ukrainian citation inside a doc comment
+  // (`recency.ts:46`, §9.3 D-e) would not have to exclude the whole file. That
+  // stripper read a `//` sitting inside a REGEX literal, or inside a nested
+  // template literal, as a comment start — external review, P2 — and
+  // silently dropped the Cyrillic (or Latin) text after it on the line, on
+  // every `.ts` file this sweep reads, not only the one the stripper was
+  // written for. `recency.ts` is now reworded to carry no Cyrillic at all
+  // (D144: the guard reads comments too), which removes the reason the
+  // stripper existed rather than papering over its two holes — this sweep is
+  // strictly stronger than the one on `main` that shipped before this PR.
   it('no Cyrillic literals outside the catalogue', () => {
     const offenders = walk(srcRoot)
       .filter((p) => /\.(ts|svelte)$/.test(p) && basename(p) !== 'catalog.ts' && !p.endsWith('.test.ts'))
-      .filter((p) => {
-        const src = readFileSync(p, 'utf8');
-        return CYRILLIC.test(p.endsWith('.ts') ? stripJsComments(src) : src);
-      });
+      .filter((p) => CYRILLIC.test(readFileSync(p, 'utf8')));
     expect(offenders).toEqual([]);
   });
 
@@ -864,15 +824,88 @@ describe('Svelte hardcode guard', () => {
     expect(offenders).toEqual([]);
   });
 
-  // Minor 6 (review): this scanner has no notion of a regex literal, so a
-  // quote character sitting inside one — `/['"]/`, the shape a "strip
-  // dangerous characters" helper would actually write — is read as an
-  // opening string quote and never finds a close. Asserted as the loud
-  // failure it is meant to be, not silently blanked to end of file, with the
-  // message naming the likely cause rather than leaving a bare index.
-  it('a quote inside a regex literal throws, naming the regex as the likely cause', () => {
-    expect(() => visibleStringLiteralsOnly("const RE = /['\"]/;\n"))
-      .toThrow(/unterminated string literal.*regex literal/s);
+  // External review, P2: this hand-written tokenizer has no notion of a regex
+  // literal EITHER, so `//` sitting inside one (`/\/\//`, not inside quotes) is
+  // read the same way a real `//` comment would be — everything after it on the
+  // line is silently blanked, Latin words included. `stripJsComments` (deleted
+  // below) had the identical hole for the Cyrillic sweep; this is its twin for
+  // the Latin one, and it is closed the same way: by no longer hand-rolling
+  // comment/string detection over raw characters at all.
+  it('a `//` inside a regex literal does not swallow the rest of the line', () => {
+    const fixture = "export function label(path: string) { return /\\/\\//.test(path) ? 'Yes' : 'No'; }\n";
+    expect(tsStringLiteralOffenses('f.ts', fixture)).toEqual(['1: Yes', '1: No']);
+  });
+
+  // Same review note: a nested template literal hides text behind an *inner*
+  // backtick pair the same way a nested string hides behind an inner quote pair
+  // — the outer template's own scan must not stop at the first backtick it
+  // meets. `Zebra` sits inside the FALSE branch's own template, one level down
+  // from the interpolation the outer template opens.
+  it('a nested template literal does not hide the text inside it', () => {
+    const fixture = 'export function label(ok: boolean) { return `${ok ? `//` : `Zebra`}`; }\n';
+    expect(tsStringLiteralOffenses('f.ts', fixture)).toEqual(['1: Zebra']);
+  });
+
+  // Booked blind spot (see the block comment above `visibleStringLiteralsOnly`
+  // on `main`): blanking a `t(...)` call's whole argument list hid a hardcoded
+  // word sitting in the SECOND argument, the interpolation-values object. Only
+  // the first argument — the catalogue key — is the part this sweep must never
+  // read as prose.
+  it('scans every argument of a `t(...)` call except the first', () => {
+    expect(tsStringLiteralOffenses('f.ts', "t('k');\n")).toEqual([]);
+    expect(tsStringLiteralOffenses('f.ts', "t('k', { x: 'Zebra' });\n")).toEqual(['1: Zebra']);
+  });
+
+  // A plain string that happens to contain `://` must not be confused with a
+  // regex, and must not swallow a real offender sitting in a later string on
+  // the same line. `http` is suppressed by a fixture-only allowlist entry so
+  // the assertion says only what this test is actually about.
+  it('a URL-shaped string literal does not hide the next literal on its line', () => {
+    const list = [{ file: 'f.ts', text: 'http', reason: 'test fixture, not a real allowlist entry' }];
+    expect(tsStringLiteralOffenses('f.ts', "const u = 'http://x'; const z = 'Zebra';\n", list))
+      .toEqual(['1: Zebra']);
+  });
+
+  // A module specifier is an address, not prose — same rule as `href` in the
+  // markup sweep above.
+  it('an import module specifier is not scanned', () => {
+    expect(tsStringLiteralOffenses('f.ts', "import x from 'zebra-lib';\n")).toEqual([]);
+  });
+
+  // A `case` label is a discriminant tag matched against a union, not a
+  // sentence — same rule as `role`/`type` in the markup sweep above.
+  it('a `case` label is not scanned', () => {
+    const fixture = "switch (x) {\n  case 'Zebra': break;\n}\n";
+    expect(tsStringLiteralOffenses('f.ts', fixture)).toEqual([]);
+  });
+
+  // The AST sees a `/['"]/` regex literal for exactly what it is — a
+  // `RegularExpressionLiteral` node this sweep never collects — so the quote
+  // inside it is never read as an opening string quote, and nothing after it
+  // is lost. An earlier revision asserted the opposite of this (a thrown
+  // "unterminated string literal", naming the regex as the likely cause): the
+  // failure mode that test pinned cannot occur once string/comment detection
+  // is no longer hand-rolled over raw characters, so the fact worth pinning
+  // now is the positive one.
+  it('a regex literal holding a quote is not an offense and hides nothing after it', () => {
+    expect(() => tsStringLiteralOffenses('f.ts', "const RE = /['\"]/; const z = 'Zebra';\n"))
+      .not.toThrow();
+    expect(tsStringLiteralOffenses('f.ts', "const RE = /['\"]/; const z = 'Zebra';\n")).toEqual(['1: Zebra']);
+  });
+
+  // The Cyrillic sweep used to run every `.ts` file through `stripJsComments`
+  // first so a citation inside a doc comment would not have to be excluded
+  // file-wide. That stripper read a `//` inside a regex literal, or inside a
+  // nested template, the same wrong way `visibleStringLiteralsOnly` did above —
+  // proven directly against the unstripped regex the sweep actually runs: it
+  // is exactly as eager to match this text as any other Cyrillic literal, with
+  // nothing standing between it and a real file.
+  it('the Cyrillic sweep would catch these same two shapes, unstripped', () => {
+    const cyrillicFixtures = [
+      "export function label(path: string) { return /\\/\\//.test(path) ? 'Так' : 'Ні'; }\n",
+      'export function label(ok: boolean) { return `${ok ? `//` : `Ні`}`; }\n',
+    ];
+    for (const source of cyrillicFixtures) expect(CYRILLIC.test(source)).toBe(true);
   });
 
   // The `.svelte` sweep above never looks at `.ts` files, so a `.ts` module
