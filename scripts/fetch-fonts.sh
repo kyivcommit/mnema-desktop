@@ -21,6 +21,15 @@
 # replacing the committed files. The API needs a browser User-Agent to answer
 # with woff2 and unicode-range at all — an unknown agent gets a single TTF.
 #
+# IBM Plex Sans is served as a VARIABLE font (one `wght` axis, 100–700), so it
+# is asked for as a weight range and comes back as one file per subset with
+# `font-weight: 400 600`. Asked for as `wght@400;500;600` instead, the API
+# answers three blocks per subset that all point at the SAME file — eight
+# byte-identical copies in the bundle, which is how this was first fetched.
+# Spectral and IBM Plex Mono are static families and are asked for by weight.
+# The check after each family's loop turns that shape into a hard failure: two
+# faces of one family sharing a file means the query should have been a range.
+#
 # Usage: scripts/fetch-fonts.sh
 #
 # Result: ui/src/styles/fonts/<slug>/<slug>-<weight>-<style>-<subset>.woff2,
@@ -41,7 +50,7 @@ SUBSETS="latin latin-ext cyrillic cyrillic-ext"
 # slug | google/fonts directory | pinned version segment | css2 family query
 FAMILIES=(
   "spectral|spectral|v15|Spectral:ital,wght@0,400;0,600;1,400"
-  "ibm-plex-sans|ibmplexsans|v23|IBM+Plex+Sans:wght@400;500;600"
+  "ibm-plex-sans|ibmplexsans|v23|IBM+Plex+Sans:wght@400..600"
   "ibm-plex-mono|ibmplexmono|v20|IBM+Plex+Mono:wght@400;500"
 )
 
@@ -85,11 +94,13 @@ while ($css =~ m{/\* (\S+) \*/\s*\@font-face \{(.*?)\}}sg) {
   next unless $keep{$subset};
   my ($family) = $body =~ /font-family:\s*'([^']+)'/ or die "$slug: no font-family in a block";
   my ($style)  = $body =~ /font-style:\s*(\w+)/      or die "$slug: no font-style";
-  my ($weight) = $body =~ /font-weight:\s*(\d+)/     or die "$slug: no font-weight";
+  # `400` for a static face, `400 600` for a variable one's range.
+  my ($weight) = $body =~ /font-weight:\s*(\d+(?: \d+)?);/ or die "$slug: no font-weight";
   my ($url)    = $body =~ /url\(([^)]+)\)/           or die "$slug: no url()";
   my ($range)  = $body =~ /unicode-range:\s*([^;]+);/ or die "$slug: no unicode-range";
   $url =~ m{/s/\Q$gfdir\E/\Q$version\E/} or die "$slug: $url is not $gfdir/$version — the pin moved";
-  my $name = "$slug-$weight-$style-$subset.woff2";
+  (my $weight_slug = $weight) =~ s/ /-/g;
+  my $name = "$slug-$weight_slug-$style-$subset.woff2";
   system('curl', '-fsSL', '-o', "$dir/$name", $url) == 0 or die "$slug: download of $name failed";
   print "/* $family $weight $style — $subset */\n";
   print "\@font-face {\n";
@@ -105,6 +116,16 @@ while ($css =~ m{/\* (\S+) \*/\s*\@font-face \{(.*?)\}}sg) {
 die "$slug: no \@font-face block matched — the API answered without woff2 subsets?" unless $n;
 print STDERR "   $n faces\n";
 PERL
+
+  # Two faces of one family must not share a file. When they do, the API is
+  # serving a variable font instanced by nothing — the query has to be a
+  # weight range (see the header), and the sheet has to say so.
+  total=$(ls "${dest}/${slug}"/*.woff2 | wc -l | tr -d ' ')
+  distinct=$(shasum -a 256 "${dest}/${slug}"/*.woff2 | cut -d' ' -f1 | sort -u | wc -l | tr -d ' ')
+  if [ "$total" != "$distinct" ]; then
+    echo "${slug}: ${total} files but only ${distinct} distinct — faces share a file; ask for a weight range" >&2
+    exit 1
+  fi
 done
 
 echo "== size"
