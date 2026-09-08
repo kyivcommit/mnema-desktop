@@ -2,8 +2,8 @@
  * carries. One global file on purpose: tokens.test.ts reads every var() in
  * one place, and the mockup stays the single source. Selectors lean on
  * attributes first (aria-pressed, aria-current, role, disabled), on elements
- * under main (text and controls — the job strip sits outside .scols and must
- * get them too) or .spane (headings, lists) second, and on the mockup's
+ * under main (text, lists and controls — the job strip sits outside .scols
+ * and must get them too) or .spane (headings) second, and on the mockup's
  * class names only where the markup has no attribute to stand on.
  * data-testid is never a selector.
  *

@@ -709,7 +709,9 @@ function styledRules(): { file: string; rule: Rule }[] {
   // Same scope as the url()/@import guard above: every .css/.svelte under
   // SRC, plus the two HTML entry points' own <style> blocks, so a font rule
   // written into a mockup transcription is held to the same grammar.
-  const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...topLevelFiles(UI_ROOT, ['.html'])];
+  const htmlFiles = topLevelFiles(UI_ROOT, ['.html']);
+  expect(htmlFiles.length, `no .html files found directly under ${UI_ROOT}`).toBeGreaterThan(0);
+  const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...htmlFiles];
   for (const file of files) {
     if (file === TOKENS_PATH || file === FONTS_PATH) continue;
     const raw = readFileSync(file, 'utf8');
@@ -867,7 +869,7 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     </ul></div></main>`);
     const [plain, current] = document.querySelectorAll('.spane button');
     differ(current, plain, 'background');
-    differ(current, plain, 'border-color');
+    differ(current, plain, 'color');
   });
 
   it('dims an excluded folder', () => {

@@ -31,6 +31,12 @@
 #                         mounts through main.ts, so only this one sees it
 #   the layout class    — a row without `sub` keeps `excl` and loses the
 #                         rule that dims it
+#   the current model   — the fourth DOM-only state; the nav item and the
+#                         excluded folder each had a mutant, this one did not
+#   the important family — `!important` on font-family would let it win over
+#                         a rule that sets all three, silently
+#   the open row        — the `open` arm of `describe` marked as excluded
+#                         too, which nothing but the negative half catches
 
 case_ "settings.css: a declared token that no stylesheet reads" \
   ui/src/styles/settings.css \
@@ -113,4 +119,22 @@ case_ "Folders.svelte: the row loses its layout class" \
   ui/src/settings/Folders.svelte \
   's~<li class="sub" class:excl~<li class:excl~' \
   '<li class:excl={row.excluded}' \
+  src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
+
+case_ "settings.css: the current model looks like every other button" \
+  ui/src/styles/settings.css \
+  's~main button\[aria-current="true"\] \{~main button[aria-current="never"] {~' \
+  'main button[aria-current="never"]' \
+  src/styles/tokens.test.ts 'marks the current model' runner=vitest
+
+case_ "settings.css: !important on a font property that already sets the triple" \
+  ui/src/styles/settings.css \
+  's~(\.spane h2 \{\n  margin: 0;\n  font-family: var\(--serif\));~$1 !important;~' \
+  'var(--serif) !important;' \
+  src/styles/tokens.test.ts 'sets the font family, weight and style together, and only as faces the bundle has' runner=vitest
+
+case_ "Folders.svelte: the open arm marks itself excluded" \
+  ui/src/settings/Folders.svelte \
+  's~(control: '"'"'exclude'"'"', expandable: true, excluded: )false~${1}true~' \
+  "control: 'exclude', expandable: true, excluded: true" \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
