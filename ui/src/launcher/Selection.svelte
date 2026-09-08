@@ -83,7 +83,7 @@
   const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 
-<section data-testid="card-centre" aria-label={centreLabel}>
+<section class="float results" data-testid="card-centre" aria-label={centreLabel}>
   {#if generatedAnswer !== null}
     <Answer answer={generatedAnswer} {query} onSelect={(citation) => (selected = citation)} />
   {:else if passagesAnswer !== null}
@@ -98,7 +98,7 @@
        `siblings` is the whole citation list: `Source` drops the clicked one and
        everything in another document itself (Decision 4, Ruling U), and that
        rule stays in one place. -->
-  <section data-testid="card-source" aria-label={sourceLabel}>
+  <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
     <Source {selected} siblings={answer.citations} />
   </section>
 {/if}
