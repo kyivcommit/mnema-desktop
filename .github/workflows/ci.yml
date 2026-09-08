@@ -506,6 +506,7 @@ jobs:
           - pr9b-scan
           - pr10b-theme
           - pr10c-fonts
+          - pr10e-settings
         include:
           - file: pr8-ui-folders
             node: true
@@ -520,6 +521,8 @@ jobs:
           - file: pr10b-theme
             node: true
           - file: pr10c-fonts
+            node: true
+          - file: pr10e-settings
             node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
