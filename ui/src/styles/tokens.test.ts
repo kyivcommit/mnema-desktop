@@ -2,8 +2,9 @@
 // thing that can silently go wrong is the two themes drifting apart: a token
 // added to the light block and forgotten in a dark one renders as `initial`
 // in dark mode — invisible text on a dark ground — and no component test can
-// see it, because vitest never computes styles. This file reads the
-// stylesheet as text and holds the two themes to each other.
+// see it, because jsdom hands a var() back as unresolved text, so even a
+// computed style cannot see a token resolve to `initial`. This file reads
+// the stylesheet as text and holds the two themes to each other.
 //
 // The parser below is deliberately tiny: it understands `selector { decls }`
 // with one level of nesting (the media query) and nothing else. `findRule`
@@ -26,6 +27,29 @@ const FONTS_PATH = join(HERE, 'fonts.css');
 const FONTS_DIR = join(HERE, 'fonts');
 const VITE_CONFIG_PATH = join(UI_ROOT, 'vite.config.ts');
 const TAURI_CONF_PATH = join(UI_ROOT, '..', 'src-tauri', 'tauri.conf.json');
+const SETTINGS_PATH = join(HERE, 'settings.css');
+const SETTINGS_MAIN_PATH = join(SRC, 'settings', 'main.ts');
+const LAUNCHER_MAIN_PATH = join(SRC, 'launcher', 'main.ts');
+
+// Tokens the settings window does not use and the launcher (10d) will — or
+// 10d strikes them from tokens.css. Held in both directions below: a token
+// here that a stylesheet uses is a line to delete from this list; a token
+// missing from tokens.css is a line to delete too. Ordered 10e → 10d by the
+// owner on 2026-09-07; the list is meant to reach zero.
+const OWED_TO_10D = new Set([
+  '--ground', '--glow', '--panel',
+  '--add', '--add-line', '--add-wash',
+  '--ok', '--ok-wash', '--err', '--err-wash',
+]);
+
+// The stylesheets each window imports, in the order the cascade needs them:
+// tokens before anything that reads them, fonts before the stacks are used,
+// base before a window's own sheet overrides it. No test mounts through
+// main.ts, so a dropped or reordered import is invisible to every other suite.
+const WINDOW_STYLESHEETS: [path: string, imports: string[]][] = [
+  [SETTINGS_MAIN_PATH, ['../styles/tokens.css', '../styles/fonts.css', '../styles/base.css', '../styles/settings.css']],
+  [LAUNCHER_MAIN_PATH, ['../styles/tokens.css', '../styles/fonts.css', '../styles/base.css', '../styles/launcher.css']],
+];
 
 // Tokens that are the SAME in both themes on purpose — enforced by the
 // "keeps the theme-invariant font stacks identical" test below. Anything
@@ -150,15 +174,12 @@ function customProperties(body: string): Map<string, string> {
 }
 
 // The value of one plain (non-custom-property) declaration in a block body,
-// e.g. `color-scheme`. undefined if the block does not declare it.
+// e.g. `color-scheme`. undefined if the block does not declare it. The
+// first occurrence, same as `declarations` below returns them in order —
+// see that function for why a caller checking for a duplicate wants every
+// occurrence instead.
 function declaration(body: string, name: string): string | undefined {
-  for (const decl of splitDeclarations(body)) {
-    const colon = decl.indexOf(':');
-    if (colon < 0) continue;
-    if (decl.slice(0, colon).trim() !== name) continue;
-    return decl.slice(colon + 1).trim().replace(/\s+/g, ' ');
-  }
-  return undefined;
+  return declarations(body, name)[0];
 }
 
 // Exactly one top-level (or, for a nested lookup, one child) rule may carry
@@ -648,5 +669,289 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
     visit(source);
     expect(limit, 'ui/vite.config.ts: build.assetsInlineLimit must be declared').toBeDefined();
     expect(limit, 'ui/vite.config.ts: build.assetsInlineLimit must be 0').toBe('0');
+  });
+});
+
+describe('the stylesheets use what tokens.css declares', () => {
+  // The other direction of `use only tokens that tokens.css declares`: a
+  // token nobody reads is a value that can drift in one theme and never be
+  // seen — the mockup's --ok, say, retinted in dark and used by no rule. Any
+  // token not used yet is named in OWED_TO_10D with its owner; the list is
+  // held so it can only shrink.
+  it('uses every token it declares, except the ones 10d owes', () => {
+    const { light } = loadThemes();
+    const files = walk(SRC, ['.css', '.svelte']).filter((f) => f !== TOKENS_PATH && f !== FONTS_PATH);
+    expect(files.length, `no .css/.svelte files under ${SRC}`).toBeGreaterThan(0);
+
+    const used = new Set<string>();
+    for (const file of files) {
+      const text = stripComments(readFileSync(file, 'utf8'));
+      for (const m of text.matchAll(/var\(\s*(--[\w-]+)/g)) used.add(m[1]);
+    }
+
+    const unused = [...light.keys()].filter((n) => !used.has(n) && !OWED_TO_10D.has(n)).sort();
+    expect(unused, 'declared in tokens.css, read by no stylesheet, and not owed to 10d').toEqual([]);
+
+    const owedButUsed = [...OWED_TO_10D].filter((n) => used.has(n)).sort();
+    expect(owedButUsed, 'now used — strike it from OWED_TO_10D').toEqual([]);
+
+    const owedButGone = [...OWED_TO_10D].filter((n) => !light.has(n)).sort();
+    expect(owedButGone, 'no longer in tokens.css — strike it from OWED_TO_10D').toEqual([]);
+  });
+});
+
+// Every rule in `css`, media-query children included — but a rule whose
+// selector starts with `@` is skipped, for two different reasons. A
+// grouping at-rule (`@media`, `@supports`, `@layer { … }`, `@container`)
+// holds rules, not declarations: its body is nested rule text, so handing
+// it to `fontTriple` would read ".x { font-family" as a property name — the
+// container is skipped and its children are checked on their own selectors
+// instead. An `@font-face` block is skipped too, but on purpose and for an
+// unrelated reason: it declares a face, not a style rule, and fonts.css is
+// the only place faces belong (`loadFaces` reads them straight off
+// fonts.css, and rejects any other top-level selector there) — one stray in
+// a non-fonts sheet is meant to fall through here unchecked, not rejected.
+// This is NOT "skip every rule that has children" — CSS nesting can put
+// declarations directly on a parent that also has nested children, and that
+// parent must still be checked itself.
+function fontProblems(
+  css: string,
+  where: string,
+  light: Map<string, string>,
+  faces: Face[],
+): { problems: string[]; checked: number } {
+  const flatten = (rules: Rule[]): Rule[] => rules.flatMap((r) => [r, ...flatten(r.children)]);
+  const problems: string[] = [];
+  let checked = 0;
+  for (const rule of flatten(parseRules(stripComments(css)))) {
+    if (rule.selector.startsWith('@')) continue;
+    const loc = `${where}: ${rule.selector}`;
+    const triple = fontTriple(rule.body);
+    if (triple === null) continue;
+    if (typeof triple === 'string') {
+      problems.push(`${loc}: ${triple}`);
+      continue;
+    }
+    checked += 1;
+    const token = /^var\(\s*(--[\w-]+)\s*\)$/.exec(triple.family);
+    if (!token || !THEME_INVARIANT.has(token[1])) {
+      problems.push(`${loc}: font-family "${triple.family}" is not one of var(--sans|--serif|--mono)`);
+      continue;
+    }
+    const stack = light.get(token[1]);
+    if (stack === undefined) throw new Error(`tokens.css: ${token[1]} missing from :root`);
+    const leader = stackLeader(stack);
+    let weight: number;
+    try {
+      weight = weightOf(triple.weight);
+    } catch (e) {
+      problems.push(`${loc}: ${(e as Error).message}`);
+      continue;
+    }
+    if (!faces.some((f) => f.family === leader && faceCovers(f, weight, triple.style))) {
+      problems.push(`${loc}: ${leader} ${weight} ${triple.style} is not a bundled face`);
+    }
+  }
+  return { problems, checked };
+}
+
+// All values of one property in a block body — `declaration` returns the
+// first and the browser takes the last, which is exactly the gap a duplicate
+// would hide in, so a caller sees every occurrence and rejects two.
+function declarations(body: string, name: string): string[] {
+  const out: string[] = [];
+  for (const decl of splitDeclarations(body)) {
+    const colon = decl.indexOf(':');
+    if (colon < 0) continue;
+    if (decl.slice(0, colon).trim() !== name) continue;
+    out.push(decl.slice(colon + 1).trim().replace(/\s+/g, ' '));
+  }
+  return out;
+}
+
+function weightOf(value: string): number {
+  const words: Record<string, number> = { normal: 400, bold: 700 };
+  if (/^[1-9]00$/.test(value)) return Number(value);
+  if (value in words) return words[value];
+  throw new Error(`font-weight "${value}" is not a number or normal/bold`);
+}
+
+// `400` or `400 600` (a variable font's range) — inclusive on both ends.
+function faceCovers(face: Face, weight: number, style: string): boolean {
+  if (face.style !== style) return false;
+  const [lo, hi = lo] = face.weight.trim().split(/\s+/).map(Number);
+  return weight >= lo && weight <= hi;
+}
+
+// The grammar a rule's font declarations must fit, and the triple it yields.
+// `null` means the rule sets no font of its own and inherits; a string is a
+// problem. Closed on purpose: under "all three or none, no duplicates, no
+// !important, `font:` only as `inherit` or `<size> var(--stack)`" the winning
+// family, weight and style of ANY element come from ONE rule (the cascade
+// ranks rules, not properties) or are inherited from an element for which
+// the same holds — so there is nothing to resolve.
+function fontTriple(body: string): { family: string; weight: string; style: string } | null | string {
+  const names = ['font', 'font-family', 'font-weight', 'font-style'] as const;
+  const found = Object.fromEntries(names.map((n) => [n, declarations(body, n)])) as Record<(typeof names)[number], string[]>;
+  for (const n of names) {
+    if (found[n].length > 1) return `declares ${n} ${found[n].length} times — the browser takes the last, the guard would read the first`;
+    if (found[n].some((v) => /!important/.test(v))) return `${n} carries !important, which would let it win over a rule that sets all three`;
+  }
+  const [shorthand] = found.font;
+  const longhands = [found['font-family'][0], found['font-weight'][0], found['font-style'][0]];
+  const set = longhands.filter((v) => v !== undefined).length;
+
+  if (shorthand !== undefined) {
+    if (shorthand === 'inherit') {
+      if (set === 0) return null;
+      if (set !== 3) return 'font: inherit with some of font-family/font-weight/font-style — set all three or none';
+    } else {
+      const sized = /^\d+(?:\.\d+)?px(?:\/\d+(?:\.\d+)?)? (var\(\s*--[\w-]+\s*\))$/.exec(shorthand);
+      if (!sized) return `font shorthand "${shorthand}" — only \`inherit\` or \`<size>px[/<line-height>] var(--stack)\` is allowed; write the longhands`;
+      if (set !== 0) return 'a sized font shorthand beside a font longhand — the shorthand already sets all three';
+      return { family: sized[1], weight: '400', style: 'normal' };
+    }
+  } else if (set === 0) {
+    return null;
+  } else if (set !== 3) {
+    return `sets ${set} of font-family/font-weight/font-style — set all three, so the rule's triple is the element's`;
+  }
+  return { family: longhands[0]!, weight: longhands[1]!, style: longhands[2]! };
+}
+
+describe('the stylesheets ask only for faces the bundle has', () => {
+  // A weight the bundle has no face for is not an error anywhere: the
+  // browser synthesises bold from 400 (or slants upright glyphs) and moves
+  // on. Held as a closed grammar (see fontTriple) rather than by resolving
+  // the cascade, which would be a second CSS engine in a test file.
+  it('sets the font family, weight and style together, and only as faces the bundle has', () => {
+    const { light } = loadThemes();
+    const faces = loadFaces();
+    const problems: string[] = [];
+    let checked = 0;
+
+    // Same scope as the url()/@import guard above: every .css/.svelte under
+    // SRC, plus the two HTML entry points' own <style> blocks, so a font rule
+    // written into a mockup transcription is held to the same grammar.
+    // tokens.css declares no fonts and fonts.css IS the declaration, so both
+    // stay out.
+    const htmlFiles = topLevelFiles(UI_ROOT, ['.html']);
+    expect(htmlFiles.length, `no .html files found directly under ${UI_ROOT}`).toBeGreaterThan(0);
+    const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...htmlFiles];
+    for (const file of files) {
+      if (file === TOKENS_PATH || file === FONTS_PATH) continue;
+      const raw = readFileSync(file, 'utf8');
+      const css = file.endsWith('.css') ? raw : styleBlocksOnly(raw);
+      const result = fontProblems(css, file, light, faces);
+      problems.push(...result.problems);
+      checked += result.checked;
+    }
+
+    expect(checked, 'no rule sets a font at all — nothing to hold').toBeGreaterThan(0);
+    expect(problems).toEqual([]);
+  });
+
+  it('accepts a valid triple inside a media query', () => {
+    const { light } = loadThemes();
+    const faces = loadFaces();
+    const css = `@media (min-width: 0px) { .probe { font-family: var(--sans); font-weight: 400; font-style: normal; } }`;
+    const { problems, checked } = fontProblems(css, 'inline', light, faces);
+    expect(problems).toEqual([]);
+    expect(checked).toBe(1);
+  });
+
+  it('rejects a face the bundle lacks inside a media query', () => {
+    const { light } = loadThemes();
+    const faces = loadFaces();
+    const css = `@media (min-width: 0px) { .probe { font-family: var(--mono); font-weight: 600; font-style: normal; } }`;
+    const { problems } = fontProblems(css, 'inline', light, faces);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('IBM Plex Mono 600 normal is not a bundled face');
+    // The location is "inline: .probe", never "inline: @media (...)" — the
+    // whole point of the fix is that the at-rule container is skipped and
+    // its child rule is blamed instead.
+    expect(problems[0].startsWith('inline: .probe:')).toBe(true);
+  });
+});
+
+describe('settings.css gives the DOM-only states a visual form', () => {
+  // jsdom applies stylesheet rules to getComputedStyle, attribute selectors
+  // included, and hands a var() back as text — enough to tell an element in
+  // a state from its neighbour without one, which is all these hold. They
+  // do not say what the state LOOKS like (the owner's screenshot against the
+  // mockup does), and they cannot see whether a COMPONENT puts the class on:
+  // Folders.test.ts holds that, and the import guard below holds that the
+  // sheet reaches the window at all.
+  function mount(html: string): void {
+    document.head.querySelectorAll('style[data-guard]').forEach((s) => s.remove());
+    const style = document.createElement('style');
+    style.dataset.guard = '';
+    style.textContent = readFileSync(SETTINGS_PATH, 'utf8');
+    document.head.append(style);
+    document.body.innerHTML = html;
+  }
+  function differ(inState: Element, without: Element, property: string): void {
+    const a = getComputedStyle(inState).getPropertyValue(property);
+    const b = getComputedStyle(without).getPropertyValue(property);
+    expect(a, `${property}: "${a}" in the state, "${b}" without — no visual difference`).not.toBe(b);
+  }
+
+  it('marks the active section in the navigation', () => {
+    mount(`<main><div class="scols"><nav class="snav">
+      <button class="item" aria-pressed="false">a</button>
+      <button class="item" aria-pressed="true">b</button>
+    </nav></div></main>`);
+    const [off, on] = document.querySelectorAll('.snav .item');
+    differ(on, off, 'background');
+    differ(on, off, 'font-weight');
+  });
+
+  it('marks the current model', () => {
+    mount(`<main><div class="spane"><ul>
+      <li><button type="button">a</button></li>
+      <li><button type="button" aria-current="true">b</button></li>
+    </ul></div></main>`);
+    const [plain, current] = document.querySelectorAll('.spane button');
+    differ(current, plain, 'background');
+    differ(current, plain, 'color');
+  });
+
+  it('dims an excluded folder', () => {
+    mount(`<main><div class="spane"><div class="folders"><ul><li><div class="fsubs"><ul>
+      <li class="sub">a</li>
+      <li class="sub excl">b</li>
+    </ul></div></li></ul></div></div></main>`);
+    const [open, excluded] = document.querySelectorAll('.sub');
+    differ(excluded, open, 'color');
+  });
+
+  it('marks the chosen theme', () => {
+    mount(`<main><div class="spane"><div role="group">
+      <button type="button" aria-pressed="false">a</button>
+      <button type="button" aria-pressed="true">b</button>
+    </div></div></main>`);
+    const [off, on] = document.querySelectorAll('[role="group"] button');
+    differ(on, off, 'background');
+    differ(on, off, 'font-weight');
+  });
+});
+
+describe('each window imports its stylesheets', () => {
+  // Read as a syntax tree, not as text: a commented-out import is not an
+  // import, and the order is the cascade's order. The window-specific sheet
+  // is last so it overrides base.css; a window that forgets its own sheet
+  // renders unstyled HTML with no error anywhere.
+  it('imports the stylesheets each window needs, in order', () => {
+    expect(WINDOW_STYLESHEETS.length, 'no window listed').toBeGreaterThan(0);
+    for (const [path, expected] of WINDOW_STYLESHEETS) {
+      const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+      const imports: string[] = [];
+      for (const s of source.statements) {
+        if (ts.isImportDeclaration(s) && ts.isStringLiteral(s.moduleSpecifier) && s.moduleSpecifier.text.endsWith('.css')) {
+          imports.push(s.moduleSpecifier.text);
+        }
+      }
+      expect(imports, path).toEqual(expected);
+    }
   });
 });

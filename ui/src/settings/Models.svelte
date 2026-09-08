@@ -654,7 +654,7 @@
 </script>
 
 {#if settings}
-  <div class="field">
+  <div class="row">
     <label for="model-provider">{providerLabel}</label>
     <select id="model-provider" disabled>
       <option selected>{providerName}</option>
@@ -694,7 +694,7 @@
          subjects is the fault Step 5 was opened to fix. -->
     {#if settings.platform === 'mac'}<p data-testid="model-mac-note">{macNote}</p>{/if}
     {#if showInput}
-      <div class="field">
+      <div class="row">
         <input id="model-key-input" type="password" bind:value={draftKey} />
         <button type="button" onclick={saveKey}>{saveLabel}</button>
         {#if settings.key.kind === 'present'}
@@ -705,7 +705,7 @@
       <!-- Unreadable offers nothing to press: the store would not say whether a
            key exists at all, so add/change/forget would be a claim this build
            cannot back. -->
-      <div class="field">
+      <div class="row">
         <button type="button" onclick={startEditing}>{changeLabel}</button>
         <button type="button" onclick={doForget}>{forgetLabel}</button>
       </div>
@@ -819,7 +819,7 @@
          Global Constraint this task is measured against: what a person loses by
          picking a different embedding model, said BEFORE it happens. -->
     <p data-testid="model-embedding-confirm-loss">{confirmLabels.loss}</p>
-    <div class="field">
+    <div class="row">
       <!-- One act and one refusal, and no `Keep` between them. The index will
            not honour `Keep` here: `refuse_unless_every_other_space_is_empty`
            enumerates every space but the requested one — which is `None` for a
@@ -872,7 +872,7 @@
      inherited was this sentence sitting unlabelled between two other
      subjects. -->
 {#if indexFailure}
-  <div class="field" data-testid="model-index-group">
+  <div class="row" data-testid="model-index-group">
     <span class="fl" data-testid="model-index-label">{indexLabel}</span>
     <p data-testid="model-index-failure">{indexFailure}</p>
     <!-- `readFailed` only. The sentence above calls this a defect worth

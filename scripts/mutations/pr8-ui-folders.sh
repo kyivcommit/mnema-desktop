@@ -150,8 +150,8 @@ case_ "a write into a panel that is gone must be dropped, not turned into a new 
 # `Unable to find an element by: [data-testid="subfolder-expand-1-Archive"]`.
 case_ "an excluded folder must still open, or nothing inside it can be looked at" \
   ui/src/settings/Folders.svelte \
-  "s{      case 'excluded':\n        return \{ sentence: t\('settings_subfolder_excluded'\), control: 'include', expandable: true \};}{      case 'excluded':\n        return \{ sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false \};}" \
-  "        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false };" \
+  "s{      case 'excluded':\n        return \{ sentence: t\('settings_subfolder_excluded'\), control: 'include', expandable: true, excluded: true \};}{      case 'excluded':\n        return \{ sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true \};}" \
+  "        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true };" \
   src/settings/Folders.test.ts 'an excluded folder opens, and what is inside it names the rule and offers nothing' runner=vitest
 
 # Task 7. These two labels are read inside a `$derived.by` whose only reference
