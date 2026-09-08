@@ -700,14 +700,20 @@ describe('the stylesheets use what tokens.css declares', () => {
   });
 });
 
-// Every rule in `css`, media-query children included — but a grouping
-// at-rule itself (`@media (...) { .x { ... } }`) is skipped: its body is
-// nested rule text, not a declaration list, so handing it to `fontTriple`
-// reads ".x { font-family" as a property name. Its children are still
-// checked, on their own selectors. This is NOT "skip every rule that has
-// children" — CSS nesting can put declarations directly on a parent that
-// also has nested children, and that parent must still be checked itself;
-// only a selector starting with `@` carries no declarations of its own.
+// Every rule in `css`, media-query children included — but a rule whose
+// selector starts with `@` is skipped, for two different reasons. A
+// grouping at-rule (`@media`, `@supports`, `@layer { … }`, `@container`)
+// holds rules, not declarations: its body is nested rule text, so handing
+// it to `fontTriple` would read ".x { font-family" as a property name — the
+// container is skipped and its children are checked on their own selectors
+// instead. An `@font-face` block is skipped too, but on purpose and for an
+// unrelated reason: it declares a face, not a style rule, and fonts.css is
+// the only place faces belong (`loadFaces` reads them straight off
+// fonts.css, and rejects any other top-level selector there) — one stray in
+// a non-fonts sheet is meant to fall through here unchecked, not rejected.
+// This is NOT "skip every rule that has children" — CSS nesting can put
+// declarations directly on a parent that also has nested children, and that
+// parent must still be checked itself.
 function fontProblems(
   css: string,
   where: string,
