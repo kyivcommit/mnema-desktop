@@ -700,25 +700,53 @@ describe('the stylesheets use what tokens.css declares', () => {
   });
 });
 
-// Every rule in every stylesheet (and every <style> block, should one ever
-// appear), media-query children included. tokens.css declares no fonts and
-// fonts.css IS the declaration, so both stay out.
-function styledRules(): { file: string; rule: Rule }[] {
+// Every rule in `css`, media-query children included — but a grouping
+// at-rule itself (`@media (...) { .x { ... } }`) is skipped: its body is
+// nested rule text, not a declaration list, so handing it to `fontTriple`
+// reads ".x { font-family" as a property name. Its children are still
+// checked, on their own selectors. This is NOT "skip every rule that has
+// children" — CSS nesting can put declarations directly on a parent that
+// also has nested children, and that parent must still be checked itself;
+// only a selector starting with `@` carries no declarations of its own.
+function fontProblems(
+  css: string,
+  where: string,
+  light: Map<string, string>,
+  faces: Face[],
+): { problems: string[]; checked: number } {
   const flatten = (rules: Rule[]): Rule[] => rules.flatMap((r) => [r, ...flatten(r.children)]);
-  const out: { file: string; rule: Rule }[] = [];
-  // Same scope as the url()/@import guard above: every .css/.svelte under
-  // SRC, plus the two HTML entry points' own <style> blocks, so a font rule
-  // written into a mockup transcription is held to the same grammar.
-  const htmlFiles = topLevelFiles(UI_ROOT, ['.html']);
-  expect(htmlFiles.length, `no .html files found directly under ${UI_ROOT}`).toBeGreaterThan(0);
-  const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...htmlFiles];
-  for (const file of files) {
-    if (file === TOKENS_PATH || file === FONTS_PATH) continue;
-    const raw = readFileSync(file, 'utf8');
-    const css = file.endsWith('.css') ? raw : styleBlocksOnly(raw);
-    for (const rule of flatten(parseRules(stripComments(css)))) out.push({ file, rule });
+  const problems: string[] = [];
+  let checked = 0;
+  for (const rule of flatten(parseRules(stripComments(css)))) {
+    if (rule.selector.startsWith('@')) continue;
+    const loc = `${where}: ${rule.selector}`;
+    const triple = fontTriple(rule.body);
+    if (triple === null) continue;
+    if (typeof triple === 'string') {
+      problems.push(`${loc}: ${triple}`);
+      continue;
+    }
+    checked += 1;
+    const token = /^var\(\s*(--[\w-]+)\s*\)$/.exec(triple.family);
+    if (!token || !THEME_INVARIANT.has(token[1])) {
+      problems.push(`${loc}: font-family "${triple.family}" is not one of var(--sans|--serif|--mono)`);
+      continue;
+    }
+    const stack = light.get(token[1]);
+    if (stack === undefined) throw new Error(`tokens.css: ${token[1]} missing from :root`);
+    const leader = stackLeader(stack);
+    let weight: number;
+    try {
+      weight = weightOf(triple.weight);
+    } catch (e) {
+      problems.push(`${loc}: ${(e as Error).message}`);
+      continue;
+    }
+    if (!faces.some((f) => f.family === leader && faceCovers(f, weight, triple.style))) {
+      problems.push(`${loc}: ${leader} ${weight} ${triple.style} is not a bundled face`);
+    }
   }
-  return out;
+  return { problems, checked };
 }
 
 // All values of one property in a block body — `declaration` returns the
@@ -796,37 +824,47 @@ describe('the stylesheets ask only for faces the bundle has', () => {
     const problems: string[] = [];
     let checked = 0;
 
-    for (const { file, rule } of styledRules()) {
-      const where = `${file}: ${rule.selector}`;
-      const triple = fontTriple(rule.body);
-      if (triple === null) continue;
-      if (typeof triple === 'string') {
-        problems.push(`${where}: ${triple}`);
-        continue;
-      }
-      checked += 1;
-      const token = /^var\(\s*(--[\w-]+)\s*\)$/.exec(triple.family);
-      if (!token || !THEME_INVARIANT.has(token[1])) {
-        problems.push(`${where}: font-family "${triple.family}" is not one of var(--sans|--serif|--mono)`);
-        continue;
-      }
-      const stack = light.get(token[1]);
-      if (stack === undefined) throw new Error(`tokens.css: ${token[1]} missing from :root`);
-      const leader = stackLeader(stack);
-      let weight: number;
-      try {
-        weight = weightOf(triple.weight);
-      } catch (e) {
-        problems.push(`${where}: ${(e as Error).message}`);
-        continue;
-      }
-      if (!faces.some((f) => f.family === leader && faceCovers(f, weight, triple.style))) {
-        problems.push(`${where}: ${leader} ${weight} ${triple.style} is not a bundled face`);
-      }
+    // Same scope as the url()/@import guard above: every .css/.svelte under
+    // SRC, plus the two HTML entry points' own <style> blocks, so a font rule
+    // written into a mockup transcription is held to the same grammar.
+    // tokens.css declares no fonts and fonts.css IS the declaration, so both
+    // stay out.
+    const htmlFiles = topLevelFiles(UI_ROOT, ['.html']);
+    expect(htmlFiles.length, `no .html files found directly under ${UI_ROOT}`).toBeGreaterThan(0);
+    const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...htmlFiles];
+    for (const file of files) {
+      if (file === TOKENS_PATH || file === FONTS_PATH) continue;
+      const raw = readFileSync(file, 'utf8');
+      const css = file.endsWith('.css') ? raw : styleBlocksOnly(raw);
+      const result = fontProblems(css, file, light, faces);
+      problems.push(...result.problems);
+      checked += result.checked;
     }
 
     expect(checked, 'no rule sets a font at all — nothing to hold').toBeGreaterThan(0);
     expect(problems).toEqual([]);
+  });
+
+  it('accepts a valid triple inside a media query', () => {
+    const { light } = loadThemes();
+    const faces = loadFaces();
+    const css = `@media (min-width: 0px) { .probe { font-family: var(--sans); font-weight: 400; font-style: normal; } }`;
+    const { problems, checked } = fontProblems(css, 'inline', light, faces);
+    expect(problems).toEqual([]);
+    expect(checked).toBe(1);
+  });
+
+  it('rejects a face the bundle lacks inside a media query', () => {
+    const { light } = loadThemes();
+    const faces = loadFaces();
+    const css = `@media (min-width: 0px) { .probe { font-family: var(--mono); font-weight: 600; font-style: normal; } }`;
+    const { problems } = fontProblems(css, 'inline', light, faces);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('IBM Plex Mono 600 normal is not a bundled face');
+    // The location is "inline: .probe", never "inline: @media (...)" — the
+    // whole point of the fix is that the at-rule container is skipped and
+    // its child rule is blamed instead.
+    expect(problems[0].startsWith('inline: .probe:')).toBe(true);
   });
 });
 

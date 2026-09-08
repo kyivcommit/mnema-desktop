@@ -37,6 +37,9 @@
 #                         a rule that sets all three, silently
 #   the open row        — the `open` arm of `describe` marked as excluded
 #                         too, which nothing but the negative half catches
+#   the at-rule container — a @media block handed to the declaration parser
+#                         reads its child rule as a property name and rejects
+#                         valid CSS
 
 case_ "settings.css: a declared token that no stylesheet reads" \
   ui/src/styles/settings.css \
@@ -138,3 +141,10 @@ case_ "Folders.svelte: the open arm marks itself excluded" \
   's~(control: '"'"'exclude'"'"', expandable: true, excluded: )false~${1}true~' \
   "control: 'exclude', expandable: true, excluded: true" \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
+
+case_ "tokens.test.ts: the font guard stops skipping the at-rule container" \
+  ui/src/styles/tokens.test.ts \
+  "s~    if \(rule\.selector\.startsWith\('\@'\)\) continue;\n~~" \
+  'stripComments(css)))) {
+    const loc = ' \
+  src/styles/tokens.test.ts 'accepts a valid triple inside a media query' runner=vitest
