@@ -8,10 +8,11 @@
  * data-testid is never a selector.
  *
  * Fonts: a rule that touches font-family, font-weight or font-style sets all
- * three, and `font:` is only ever `inherit`. tokens.test.ts holds that
- * grammar, so that every element's family/weight/style is one rule's triple
- * and that triple is a face the bundle ships — a weight the bundle lacks is
- * synthesised by the browser without a message.
+ * three, and `font:` is only ever `inherit` or `<size>px[/<line-height>]
+ * var(--stack)` (base.css's body rule is the latter). tokens.test.ts holds
+ * that grammar, so that every element's family/weight/style is one rule's
+ * triple and that triple is a face the bundle ships — a weight the bundle
+ * lacks is synthesised by the browser without a message.
  */
 
 main {

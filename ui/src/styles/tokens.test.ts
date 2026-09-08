@@ -2,8 +2,9 @@
 // thing that can silently go wrong is the two themes drifting apart: a token
 // added to the light block and forgotten in a dark one renders as `initial`
 // in dark mode — invisible text on a dark ground — and no component test can
-// see it, because vitest never computes styles. This file reads the
-// stylesheet as text and holds the two themes to each other.
+// see it, because jsdom hands a var() back as unresolved text, so even a
+// computed style cannot see a token resolve to `initial`. This file reads
+// the stylesheet as text and holds the two themes to each other.
 //
 // The parser below is deliberately tiny: it understands `selector { decls }`
 // with one level of nesting (the media query) and nothing else. `findRule`
@@ -173,15 +174,12 @@ function customProperties(body: string): Map<string, string> {
 }
 
 // The value of one plain (non-custom-property) declaration in a block body,
-// e.g. `color-scheme`. undefined if the block does not declare it.
+// e.g. `color-scheme`. undefined if the block does not declare it. The
+// first occurrence, same as `declarations` below returns them in order —
+// see that function for why a caller checking for a duplicate wants every
+// occurrence instead.
 function declaration(body: string, name: string): string | undefined {
-  for (const decl of splitDeclarations(body)) {
-    const colon = decl.indexOf(':');
-    if (colon < 0) continue;
-    if (decl.slice(0, colon).trim() !== name) continue;
-    return decl.slice(colon + 1).trim().replace(/\s+/g, ' ');
-  }
-  return undefined;
+  return declarations(body, name)[0];
 }
 
 // Exactly one top-level (or, for a nested lookup, one child) rule may carry
@@ -708,10 +706,14 @@ describe('the stylesheets use what tokens.css declares', () => {
 function styledRules(): { file: string; rule: Rule }[] {
   const flatten = (rules: Rule[]): Rule[] => rules.flatMap((r) => [r, ...flatten(r.children)]);
   const out: { file: string; rule: Rule }[] = [];
-  for (const file of walk(SRC, ['.css', '.svelte'])) {
+  // Same scope as the url()/@import guard above: every .css/.svelte under
+  // SRC, plus the two HTML entry points' own <style> blocks, so a font rule
+  // written into a mockup transcription is held to the same grammar.
+  const files: string[] = [...walk(SRC, ['.css', '.svelte']), ...topLevelFiles(UI_ROOT, ['.html'])];
+  for (const file of files) {
     if (file === TOKENS_PATH || file === FONTS_PATH) continue;
     const raw = readFileSync(file, 'utf8');
-    const css = file.endsWith('.svelte') ? styleBlocksOnly(raw) : raw;
+    const css = file.endsWith('.css') ? raw : styleBlocksOnly(raw);
     for (const rule of flatten(parseRules(stripComments(css)))) out.push({ file, rule });
   }
   return out;
@@ -894,6 +896,7 @@ describe('each window imports its stylesheets', () => {
   // is last so it overrides base.css; a window that forgets its own sheet
   // renders unstyled HTML with no error anywhere.
   it('imports the stylesheets each window needs, in order', () => {
+    expect(WINDOW_STYLESHEETS.length, 'no window listed').toBeGreaterThan(0);
     for (const [path, expected] of WINDOW_STYLESHEETS) {
       const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
       const imports: string[] = [];
