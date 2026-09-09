@@ -8,8 +8,8 @@
 #
 #   the unused token    — a token tokens.css declares and no stylesheet reads
 #                         is a value that can drift in one theme unseen
-#   the owed token      — a token OWED_TO_10D names that a stylesheet now
-#                         uses is a line the list must lose, or the list rots
+#   the undeclared token — a stylesheet reading a token tokens.css never
+#                         declares leaves the browser to discard the value
 #   the second weight   — two font-weights in one rule: the browser takes the
 #                         last, a guard reading the first would pass it
 #   the shorthand       — `font:` with a weight in it, in base.css where the
@@ -41,17 +41,17 @@
 #                         reads its child rule as a property name and rejects
 #                         valid CSS
 
-case_ "settings.css: a declared token that no stylesheet reads" \
-  ui/src/styles/settings.css \
-  's~var\(--cite-wash\)~var(--cite-line)~' \
-  'background: var(--cite-line)' \
-  src/styles/tokens.test.ts 'uses every token it declares, except the ones 10d owes' runner=vitest
+case_ "tokens.css: a declared token that no stylesheet reads" \
+  ui/src/styles/tokens.css \
+  's~(--glow: ([^;]+);)~$1\n  --unused-probe: $2;~g' \
+  '--unused-probe:' \
+  src/styles/tokens.test.ts 'uses every token it declares' runner=vitest
 
-case_ "settings.css: a token owed to 10d used before the list lost it" \
+case_ "settings.css: a style reads an undeclared token" \
   ui/src/styles/settings.css \
-  's~(border-right: 1px solid var\(--line\);\n  background: )var\(--surface-2\)~${1}var(--ground)~' \
-  'var(--ground)' \
-  src/styles/tokens.test.ts 'uses every token it declares, except the ones 10d owes' runner=vitest
+  's~(border-right: 1px solid var\(--line\);\n  background: )var\(--surface-2\)~${1}var(--missing-probe)~' \
+  'var(--missing-probe)' \
+  src/styles/tokens.test.ts 'use only tokens that tokens.css declares' runner=vitest
 
 case_ "settings.css: a second font-weight in the same rule" \
   ui/src/styles/settings.css \
