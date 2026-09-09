@@ -44,6 +44,9 @@
   --cite-wash: #FBEBC8;
   --cite-line: #E6CE93;
 
+  --ok: #2C7A57;
+  --err: #C2453B;
+
   --shadow: rgba(30, 40, 70, .20);
   --glow: rgba(59, 73, 168, .22);
 
@@ -71,6 +74,9 @@
     --cite: #E6BC66;
     --cite-wash: #3A3320;
     --cite-line: #59492A;
+
+    --ok: #62C398;
+    --err: #E8877C;
 
     --shadow: rgba(0, 0, 0, .55);
     --glow: rgba(147, 160, 238, .25);
@@ -101,6 +107,9 @@
   --cite: #E6BC66;
   --cite-wash: #3A3320;
   --cite-line: #59492A;
+
+  --ok: #62C398;
+  --err: #E8877C;
 
   --shadow: rgba(0, 0, 0, .55);
   --glow: rgba(147, 160, 238, .25);

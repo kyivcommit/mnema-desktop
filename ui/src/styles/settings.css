@@ -1,7 +1,7 @@
 /* Settings window — the mockup's rules over the attributes the markup already
  * carries. One global file on purpose: tokens.test.ts reads every var() in
  * one place, and the mockup stays the single source. Selectors lean on
- * attributes first (aria-pressed, aria-current, role, disabled), on elements
+ * attributes first (aria-pressed, data-configured, role, disabled), on elements
  * under main (text, lists and controls — the job strip sits outside .scols
  * and must get them too) or .spane (headings) second, and on the mockup's
  * class names only where the markup has no attribute to stand on.
@@ -67,13 +67,6 @@ main button[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--ink);
-}
-
-/* the current one (mockup .tree .row.sel) — cite tokens, as the spec says for "current" */
-main button[aria-current="true"] {
-  border-color: var(--cite-line);
-  background: var(--cite-wash);
-  color: var(--cite);
 }
 
 main input,
@@ -222,7 +215,39 @@ main select:focus-visible {
 
 .mtabs {
   display: flex;
+  align-items: center;
   gap: 10px;
+}
+
+/* the per-role configured dot (Task 4, review P2-1): the small mark carries
+ * the colour, the text beside it stays the ordinary readable ink — an
+ * accent colour on the TEXT itself is not held to the same AA pair this
+ * file already checks for `--ink`/`--ink-soft`, so the word carries the
+ * accessible name and the mark alone carries the colour. */
+.mdot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--sans);
+  font-weight: 500;
+  font-style: normal;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.mdot-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+
+.mdot[data-configured="true"] .mdot-mark {
+  background: var(--ok);
+}
+
+.mdot[data-configured="false"] .mdot-mark {
+  background: var(--err);
 }
 
 /* a watched folder (mockup .fitem + .frow) */

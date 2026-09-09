@@ -913,14 +913,20 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     differ(on, off, 'font-weight');
   });
 
-  it('marks the current model', () => {
-    mount(`<main><div class="spane"><ul>
-      <li><button type="button">a</button></li>
-      <li><button type="button" aria-current="true">b</button></li>
-    </ul></div></main>`);
-    const [plain, current] = document.querySelectorAll('.spane button');
-    differ(current, plain, 'background');
-    differ(current, plain, 'color');
+  // Task 4: the model list's "current" button is gone (a native `<select>`
+  // replaces it); what marks a role configured or not now is the small dot
+  // beside each tab, and it is the MARK that carries the colour — the label
+  // beside it stays the ordinary readable ink, held to the same AA pair as
+  // `--ink`/`--ink-soft` elsewhere in this file. Which model is actually
+  // current is a fact `Models.test.ts` checks against the real component;
+  // this only holds that the two dot states are told apart visually.
+  it('marks a configuration dot by role', () => {
+    mount(`<main><div class="spane">
+      <span class="mdot" data-configured="true"><span class="mdot-mark"></span>a</span>
+      <span class="mdot" data-configured="false"><span class="mdot-mark"></span>b</span>
+    </div></main>`);
+    const [ok, err] = document.querySelectorAll('.mdot-mark');
+    differ(ok, err, 'background');
   });
 
   it('dims an excluded folder', () => {

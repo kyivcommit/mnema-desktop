@@ -7,7 +7,7 @@
     setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
     type ModelEntry, type ModelRefusal, type UnreadableRecord,
-    type ExistingVectors, type RetiredSpace,
+    type ExistingVectors, type RetiredSpace, type ModelRole,
   } from '../lib/ipc';
   import type { JobController } from './jobs';
   import type { ScanSnapshot } from '../lib/ipc';
@@ -109,6 +109,12 @@
       if (seq !== settingsSeq) return; // superseded before this reply arrived
       settings = s;
       loadError = null;
+      // Task 4: ANY read that succeeds is the newer, more authoritative word
+      // — mount's own, a scan-ended re-read, or a mutation's own — so it
+      // always reconciles the visible model back onto `settings` and takes
+      // a stale `writeOutcome` away with it, not only the read a command
+      // itself triggered.
+      writeOutcome = null;
     } catch (e) {
       // A superseded read's rejection says nothing about the CURRENT state —
       // a newer read already settled, resolved or refused, and that answer is
@@ -203,7 +209,6 @@
   const forgetLabel = $derived.by(() => { void $locale; return t('models_key_forget'); });
   const saveLabel = $derived.by(() => { void $locale; return t('models_key_save'); });
   const cancelLabel = $derived.by(() => { void $locale; return t('models_key_cancel'); });
-  const macNote = $derived.by(() => { void $locale; return t('models_mac_keychain_note'); });
   const loadFailureLabel = $derived.by(() => { void $locale; return t('models_load_failed'); });
   const indexLabel = $derived.by(() => { void $locale; return t('models_index_label'); });
 
@@ -301,12 +306,29 @@
 
   async function chooseChatModel(model: string) {
     actionError = null;
+    changeBusy = true;
+    // Command and refresh get their OWN try/catch (review P2-1/umbrella):
+    // a command that SUCCEEDS and is followed by a refresh that THROWS is
+    // not a rejected choice, and must not be reported as one. No manual
+    // `settingsSeq` bump here: it is set, synchronously, on `refresh()`'s
+    // own first line right below — with no `await` between this function
+    // trusting its own result and that bump, no read already in flight can
+    // land in the gap and be mistaken for the newer word.
     try {
       await setChatModel(model);
-      await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
+      writeOutcome = { kind: 'unknown', role: 'chat' };
+      // `refresh()` already reported this through `loadError`, and — on
+      // success — already reconciled `writeOutcome` away with the fresh
+      // answer; nothing here needs to inspect which happened.
+      await refresh().catch(() => {});
+      changeBusy = false;
+      return;
     }
+    writeOutcome = { kind: 'acknowledged', role: 'chat', model };
+    await refresh().catch(() => {});
+    changeBusy = false;
   }
 
   // The index's own answer, or `null` when it had none to give — one binding
@@ -322,6 +344,78 @@
   // "not stated by this fixture" and "the index says no chat model" read the
   // same way here — neither marks anything as chosen.
   const currentChatModel = $derived(indexRead ? (indexRead.chatModel ?? null) : null);
+
+  // Task 4 — after an IPC round the sources of truth are its OWN confirmed
+  // result and the next read, never a value this component cached before
+  // either happened (§10, and the umbrella's "an error does not mean a model
+  // rollback"). `acknowledged` is what a successful `set_*_model` reply just
+  // confirmed — shown even while the read that follows it has not landed, or
+  // has failed outright — and `unknown` is what a REJECTED command leaves:
+  // the old model is not assumed to have survived a failed adoption either
+  // (`set_embedding_model`'s own doc names the state a failed one can leave
+  // behind), so nothing is shown as current until a read says so.
+  //
+  // Cleared the moment a read SUCCEEDS, whichever branch set it: a
+  // successful `model_settings` is always the newer, more authoritative
+  // answer (`settingsSeq` below still drops a stale one), so from that
+  // point on the visible model is `settings`' own again, not a memory of
+  // what a command claimed.
+  type WriteOutcome =
+    | null
+    | { kind: 'acknowledged'; role: ModelRole; model: string }
+    | { kind: 'unknown'; role: ModelRole };
+  let writeOutcome = $state<WriteOutcome>(null);
+  // True from the moment a model choice starts its command until the read
+  // that reconciles it (or fails to) has settled — the select stays
+  // `disabled` for that whole stretch, so a second choice cannot start while
+  // the first is still an open question the backend has not answered.
+  let changeBusy = $state(false);
+
+  function visibleModelFor(role: Tab): string | null {
+    if (writeOutcome && writeOutcome.role === role) {
+      return writeOutcome.kind === 'acknowledged' ? writeOutcome.model : null;
+    }
+    return role === 'chat' ? currentChatModel : currentEmbeddingModel;
+  }
+  const visibleEmbeddingModel = $derived(visibleModelFor('embedding'));
+  const visibleChatModel = $derived(visibleModelFor('chat'));
+  const visibleActiveModel = $derived(activeTab === 'chat' ? visibleChatModel : visibleEmbeddingModel);
+
+  // Whether an index READ actually said "no role model" (`notChosen`) or
+  // this build cannot currently say either way (`unknown` — no read has
+  // landed, the index is unreadable, or the last command's own outcome is
+  // itself unknown). The select's placeholder option reads one of the two;
+  // conflating them would claim "nothing is set" about a state this build
+  // cannot see into at all.
+  function statusFor(role: Tab): 'notChosen' | 'unknown' {
+    if (writeOutcome && writeOutcome.role === role && writeOutcome.kind === 'unknown') return 'unknown';
+    if (!settings || settings.index.kind !== 'read') return 'unknown';
+    return 'notChosen';
+  }
+
+  // The per-role configured dot (P2-1's "configuration_dots_use_their_own_role"):
+  // green needs a present key, a READ index, and THIS role's own model — read
+  // straight off `visibleModelFor`, not off a shared "ready" boolean, so a
+  // dot never answers for a role it was not drawn for. `loadError` and a
+  // post-mutation `unknown` both fail it safe rather than green: neither is
+  // grounds to claim a role is configured.
+  function dotState(role: Tab): 'true' | 'false' | 'unknown' {
+    if (writeOutcome && writeOutcome.role === role && writeOutcome.kind === 'unknown') return 'unknown';
+    if (!settings || loadError) return 'unknown';
+    if (settings.key.kind !== 'present') return 'false';
+    if (settings.index.kind !== 'read') return 'unknown';
+    return visibleModelFor(role) !== null ? 'true' : 'false';
+  }
+  const embeddingDotState = $derived(dotState('embedding'));
+  const chatDotState = $derived(dotState('chat'));
+
+  function dotLabel(state: 'true' | 'false' | 'unknown'): string {
+    if (state === 'true') return t('models_dot_configured');
+    if (state === 'false') return t('models_dot_not_configured');
+    return t('models_dot_unknown');
+  }
+  const embeddingDotLabel = $derived.by(() => { void $locale; return dotLabel(embeddingDotState); });
+  const chatDotLabel = $derived.by(() => { void $locale; return dotLabel(chatDotState); });
 
   const ready = $derived(!!settings && providerReady(settings));
   const readyLabel = $derived.by(() => { void $locale; return t('models_status_ready'); });
@@ -487,30 +581,98 @@
     pendingEmbedding = model;
   }
 
+  // The change handler for the native `<select>` — the SAME mechanism
+  // `Application.svelte`'s `onLanguageSelect` uses, and for the same reason
+  // (read that handler's own comment): Svelte's `value={selectValue}`
+  // compiles to a dirty check against the LAST value Svelte itself wrote, not
+  // against what the DOM currently shows, so a pick this build does not
+  // confirm (Cancel, a rejection, an unreadable read) would otherwise leave
+  // the user's own click showing on screen forever — and a SECOND pick of
+  // that same candidate would then fire no `change` event at all, since the
+  // DOM element's `.value` is already equal to it (review P2-2). Reading the
+  // candidate and writing `currentTarget.value` back to the CONFIRMED value
+  // immediately, before either model function is even called, keeps the DOM
+  // in sync on every change regardless of what Svelte thinks moved; the
+  // candidate itself lives only in `pendingEmbedding` (or is handed straight
+  // to `chooseChatModel`) until an IPC round says otherwise.
+  function onModelSelect(e: Event) {
+    const select = e.currentTarget as HTMLSelectElement;
+    const candidate = select.value;
+    select.value = selectValue;
+    // `disabled` is the ordinary guard a person meets; it does not stop a
+    // script-dispatched `change` (disabled only withholds events the BROWSER
+    // would generate from a real interaction). Checked here too, so a second
+    // write genuinely cannot start while the first command is still an open
+    // question the backend has not answered — including across a section
+    // switch, since this component now survives one (review P2-1).
+    if (changeBusy) return;
+    if (activeTab === 'chat') {
+      void chooseChatModel(candidate);
+    } else {
+      chooseEmbeddingModel(candidate);
+    }
+  }
+
+  const selectValue = $derived(visibleActiveModel ?? '');
+  const selectionLabel = $derived.by(() => { void $locale; return t('models_selection_label'); });
+
+  // The placeholder option this select needs whenever its own catalogue
+  // entries cannot stand for the current state on their own — never a
+  // fallback onto the first `<option>`, which is the native element's own
+  // default and would silently claim that entry chosen
+  // (`unknown_model_is_not_the_first_option`). Two different situations
+  // reach it, and they are not the same claim: no confirmed id at all (its
+  // own label distinguishes "the index read says none" from "this build
+  // cannot currently tell"), or a confirmed id the active catalogue does not
+  // list — a stale pointer at a model this provider stopped naming, which
+  // still deserves its OWN id on screen rather than vanishing into the same
+  // blank placeholder as "nothing chosen".
+  const selectPlaceholder = $derived.by(() => {
+    void $locale;
+    const model = visibleActiveModel;
+    if (model === null) {
+      const status = statusFor(activeTab);
+      return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
+    }
+    if (activeEntries.some(({ entry }) => entry.id === model)) return null;
+    return { value: model, label: t('models_selection_absent', { id: model }) };
+  });
+
   async function commitEmbedding(model: string, existingVectors: ExistingVectors) {
     pendingEmbedding = null;
     changeError = null;
+    changeBusy = true;
+    // Command and refresh get their OWN try/catch: a command that SUCCEEDS
+    // and is followed by a refresh that THROWS is not a rejected write, and
+    // `writeOutcome` must go on showing the model it just acknowledged, not
+    // fall back to whatever `settings` held before it (review P2-1,
+    // `successful_write_with_failed_refresh_keeps_acknowledged_model`).
     try {
       const adopted = await setEmbeddingModel(model, existingVectors);
       retiredReport = adopted.retired;
       jobRunning = false;
-      await refresh();
+      writeOutcome = { kind: 'acknowledged', role: 'embedding', model };
+      await refresh().catch(() => {});
     } catch (e) {
       changeError = e instanceof Error ? e.message : String(e);
+      // A rejected adoption does not restore the model this build cached
+      // from before it either (`failed_adoption_does_not_restore_cached_model`):
+      // `set_embedding_model`'s own doc names a state a failed adoption can
+      // leave behind where the old space is already gone, so nothing is
+      // shown as current until the read below says what actually is.
+      writeOutcome = { kind: 'unknown', role: 'embedding' };
       // §10: a rejection arrives as a sentence, not as a kind. What the screen
       // says next is decided by re-reading the state — `model_settings` for
       // what the index is in, `job_status` for whether a job is still going —
-      // and never by matching on the message text.
-      //
-      // The catch here is empty for the same reason as `onMount`'s: `refresh()`
-      // already reported this rejection through `loadError` (unless a newer
-      // read has since superseded it); this only stops the rethrow from
-      // surfacing as an unhandled promise rejection.
+      // and never by matching on the message text. `refresh()` already
+      // reported the rejection through `loadError`, and — on success —
+      // already reconciled `writeOutcome` away with the fresh answer.
       await refresh().catch(() => {});
       jobRunning = await jobStatus()
         .then((s) => s.snapshot.kind === 'running')
         .catch(() => false);
     }
+    changeBusy = false;
   }
 
   // 🔴 Through the controller, not through `startScanJob` directly. The scan
@@ -692,7 +854,6 @@
          Settled; do not add a `key` condition here. It sits inside this group
          because it is a sentence ABOUT the key, and a sentence loose between two
          subjects is the fault Step 5 was opened to fix. -->
-    {#if settings.platform === 'mac'}<p data-testid="model-mac-note">{macNote}</p>{/if}
     {#if showInput}
       <div class="row">
         <input id="model-key-input" type="password" bind:value={draftKey} />
@@ -731,11 +892,19 @@
     data-testid="model-tab-embedding"
     aria-pressed={activeTab === 'embedding'}
     onclick={() => selectTab('embedding')}>{embeddingTabLabel}</button>
+  <!-- The per-role configured dot (review P2-1): its own predicate, read off
+       `visibleModelFor('embedding')` alone, never off the combined `ready`
+       boolean below — that boolean answers for the ACTIVE role only and is
+       drawn once regardless of which tab is open, which is exactly the "two
+       truths, one message" class this project pays for whenever a second
+       reader of the same fact is left to disagree with the first. -->
+  <span class="mdot" data-testid="model-dot-embedding" data-configured={embeddingDotState}><span class="mdot-mark" aria-hidden="true"></span>{embeddingDotLabel}</span>
   <button
     type="button"
     data-testid="model-tab-chat"
     aria-pressed={activeTab === 'chat'}
     onclick={() => selectTab('chat')}>{chatTabLabel}</button>
+  <span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span>{chatDotLabel}</span>
 </div>
 
 {#if activeCatalogueError}
@@ -748,51 +917,34 @@
   {#if emptyCatalogueSentence}
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
   {:else if activeEntries.length > 0}
-    <ul data-testid="model-entry-list">
-      <!-- Unkeyed on purpose, the same ruling Task 8 made for the frozen list and
-           for the same kind of measured reason. `catalogue.rs` preserves every
-           readable record and enforces no uniqueness over `id`: it is copied off
-           the raw record verbatim, once per record, so a provider that lists one
-           id twice sends two entries carrying equal ids — pinned by
-           `two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed`
-           in the provider crate's own tests rather than assumed here. Keyed by
-           that field Svelte throws `each_key_duplicate`, and it does not degrade
-           the row: it takes the WHOLE section down, so a person loses the
-           provider row, the key controls and the dot along with the list. The
-           rows carry no state of their own, so there is nothing a key would
-           keep. Nor are the duplicates rejected — a rejection this section
-           made silently would subtract from what the provider actually said. -->
-      {#each activeEntries as { entry, reason, separator }}
-        <li>
-          {#if entry.refusal}
-            <!-- `None` means selectable; anything else is shown, greyed, with
-                 its reason (catalogue.rs:66-69) — a model the provider lists
-                 and this build hides sends a person looking for a fault here
-                 instead. Not a button: there is nothing this click could do. -->
-            <span data-testid={`model-entry-${entry.id}`} class="unavailable">{entry.name}</span>
-            <span data-testid={`model-entry-separator-${entry.id}`}>{separator}</span>
-            <span data-testid={`model-entry-reason-${entry.id}`}>{reason}</span>
-          {:else if activeTab === 'chat'}
-            <button
-              type="button"
-              data-testid={`model-entry-${entry.id}`}
-              aria-pressed={entry.id === currentChatModel}
-              onclick={() => chooseChatModel(entry.id)}>{entry.name}</button>
-          {:else}
-            <!-- `aria-current` and not `aria-pressed`, which the chat tab uses:
-                 this marks the one model the INDEX is on, a fact about a set,
-                 while the chat rows are a choice being toggled. Keeping them
-                 different is also what stops one shared "is this the chosen
-                 one" test from answering for both roles. -->
-            <button
-              type="button"
-              data-testid={`model-entry-${entry.id}`}
-              aria-current={entry.id === currentEmbeddingModel ? 'true' : undefined}
-              onclick={() => chooseEmbeddingModel(entry.id)}>{entry.name}</button>
-          {/if}
-        </li>
-      {/each}
-    </ul>
+    <div class="row">
+      <label class="fl" for="model-selection" data-testid="model-selection-label">{selectionLabel}</label>
+      <!-- One native `<select>` for the active role (Task 4, review P1/P2-1/
+           P2-2) rather than the frozen list's row of buttons: every readable
+           entry is an `<option>`, refused ones `disabled` with their reason
+           folded into the label text (an `<option>` cannot hold child
+           elements, so the name/separator/reason spans below collapse into
+           one string here), and duplicates are preserved exactly as the old
+           list preserved them — unkeyed, for the same reason Task 8 made the
+           frozen list unkeyed: `catalogue.rs` enforces no uniqueness over
+           `id`, and a keyed `{#each}` throws on a repeat (`each_key_duplicate`),
+           taking the whole section down with it. `option.value` is the model
+           id; the backend's own `set_*_model` still validates the choice. -->
+      <select
+        id="model-selection"
+        data-testid="model-selection"
+        disabled={changeBusy}
+        value={selectValue}
+        onchange={onModelSelect}
+      >
+        {#if selectPlaceholder}
+          <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
+        {/if}
+        {#each activeEntries as { entry, reason, separator }}
+          <option value={entry.id} disabled={!!entry.refusal}>{entry.refusal ? `${entry.name} ${separator} ${reason}` : entry.name}</option>
+        {/each}
+      </select>
+    </div>
   {/if}
 {/if}
 

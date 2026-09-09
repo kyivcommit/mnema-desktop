@@ -328,26 +328,10 @@ for (const loc of ['en', 'uk'] as const) {
 }
 
 // ---------------------------------------------------------------------------
-// Claim 3: the mac keychain note is platform-specific — present only there,
-// absent on the other two, asserted in both directions.
+// Claim 3 (the mac keychain note) is gone along with the note itself (Task 4):
+// `models_mac_keychain_note` is removed from the catalogue and the markup, so
+// there is nothing left here for a platform to gate.
 // ---------------------------------------------------------------------------
-
-const MAC_NOTE = 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.';
-
-test('platform mac renders the keychain note', async () => {
-  await renderWith(settings({ platform: 'mac' }));
-  expect(screen.getByText(MAC_NOTE)).toBeTruthy();
-});
-
-test('platform windows does not render the keychain note', async () => {
-  await renderWith(settings({ platform: 'windows' }));
-  expect(screen.queryByText(MAC_NOTE)).toBeNull();
-});
-
-test('platform linux does not render the keychain note', async () => {
-  await renderWith(settings({ platform: 'linux' }));
-  expect(screen.queryByText(MAC_NOTE)).toBeNull();
-});
 
 // ---------------------------------------------------------------------------
 // Claim 4: Forget calls forget_key and re-reads model_settings; Removed and
@@ -480,7 +464,6 @@ const UK = {
   save: 'Зберегти',
   cancel: 'Скасувати',
   removed: 'Ключ видалено.',
-  macNote: 'Кожне оновлення застосунку робить його чужим для збереженого ключа: система один раз попросить пароль від зв’язки ключів для входу.',
   indexNotOpen: 'Індекс ще не відкрито.',
   loadFailed: 'Не вдалося прочитати налаштування моделей.',
 } as const;
@@ -518,27 +501,23 @@ for (const cause of KEY_CAUSES) {
   });
 }
 
-test('mounted in Ukrainian, the mac note and the index sentence are Ukrainian too', async () => {
+test('mounted in Ukrainian, the index sentence is Ukrainian too', async () => {
   const { container } = await renderInUk(settings({
     key: { kind: 'present' },
     index: { kind: 'unreadable', cause: 'notOpen', reason: 'LEAK-TOKEN-UK' },
-    platform: 'mac',
   }));
   const text = container.textContent ?? '';
-  expect(text).toContain(UK.macNote);
   expect(text).toContain(UK.indexNotOpen);
   expect(text).toContain(UK.provider);
   expect(text).toContain(UK.saved);
-  expect(text).not.toContain(MAC_NOTE);
   expect(text).not.toContain('The index is not open yet.');
   expect(text).not.toContain('LEAK-TOKEN-UK');
 });
 
-test('a language switch after mount reaches the provider row, the saved-key line and the mac note', async () => {
+test('a language switch after mount reaches the provider row and the saved-key line', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'present' },
     index: { kind: 'unreadable', cause: 'notOpen', reason: 'r' },
-    platform: 'mac',
   }));
   // Read every one of them under 'en' first — see the note above.
   const before = container.textContent ?? '';
@@ -546,7 +525,6 @@ test('a language switch after mount reaches the provider row, the saved-key line
   expect(before).toContain('A key is saved.');
   expect(before).toContain('Change');
   expect(before).toContain('Forget');
-  expect(before).toContain(MAC_NOTE);
   expect(before).toContain('The index is not open yet.');
 
   await switchTo('uk');
@@ -556,14 +534,12 @@ test('a language switch after mount reaches the provider row, the saved-key line
   expect(after).toContain(UK.saved);
   expect(after).toContain(UK.change);
   expect(after).toContain(UK.forget);
-  expect(after).toContain(UK.macNote);
   expect(after).toContain(UK.indexNotOpen);
   // The provider NAME is the one string that is deliberately the same in both
   // locales — a brand, not a translation — so it is asserted to survive the
   // switch rather than to change with it.
   expect(after).toContain('OpenRouter');
   expect(after).not.toContain('A key is saved.');
-  expect(after).not.toContain(MAC_NOTE);
 });
 
 test('a language switch after mount reaches the add-a-key hint and the Save control', async () => {
@@ -820,7 +796,28 @@ function mockCatalogues(byRole: Partial<Record<ModelRole, Catalogue>>) {
   providerModels.mockImplementation((role: ModelRole) => Promise.resolve(byRole[role] ?? emptyCatalogue()));
 }
 
-test('two named tabs; switching changes the model list and the tabs own pressed state, both asserted positively', async () => {
+// Task 4 — the catalogue list is now one native `<select>` rather than a row
+// of buttons; these small helpers stand in for the `model-entry-*` testids
+// the old markup gave each row of its own. `option[value=...]` rather than a
+// testid because an `<option>` carries none — the same reason the old list
+// gave each row a testid keyed by `entry.id` is why these helpers key on the
+// select's own `value` attribute instead.
+function modelSelect(): HTMLSelectElement {
+  return screen.getByTestId('model-selection') as HTMLSelectElement;
+}
+function optionsFor(value: string): HTMLOptionElement[] {
+  return [...modelSelect().querySelectorAll(`option[value="${value}"]`)] as HTMLOptionElement[];
+}
+function optionFor(value: string): HTMLOptionElement {
+  const [opt] = optionsFor(value);
+  if (!opt) throw new Error(`no <option value="${value}"> in the select`);
+  return opt;
+}
+async function pickModel(value: string) {
+  await fireEvent.change(modelSelect(), { target: { value } });
+}
+
+test('two named tabs; switching changes the select`s own options, both asserted positively', async () => {
   mockCatalogues({
     embedding: catalogueOf([entry('emb-1', { name: 'Embedding One' })]),
     chat: catalogueOf([entry('chat-1', { name: 'Chat One' })]),
@@ -829,26 +826,26 @@ test('two named tabs; switching changes the model list and the tabs own pressed 
 
   expect(screen.getByTestId('model-tab-embedding').textContent).toBe('Embedding');
   expect(screen.getByTestId('model-tab-chat').textContent).toBe('Chat');
-  await waitFor(() => expect(screen.getByTestId('model-entry-emb-1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('false');
-  expect(screen.queryByTestId('model-entry-chat-1')).toBeNull();
+  expect(optionsFor('chat-1').length).toBe(0);
   // Review P2-11: the fixture gives every entry a name that differs from its
   // id and then the old test threw that away, asserting only testids and
   // `aria-pressed`. `{entry.name}` → `{entry.id}` survived the whole suite —
   // the named class from the last PR, a card showing an identifier where a
-  // person came for content. The row reads as the model's name.
-  expect(screen.getByTestId('model-entry-emb-1').textContent).toBe('Embedding One');
+  // person came for content. The option reads as the model's name.
+  expect(optionFor('emb-1').textContent).toBe('Embedding One');
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
 
-  await waitFor(() => expect(screen.getByTestId('model-entry-chat-1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('chat-1').length).toBe(1));
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('false');
-  expect(screen.queryByTestId('model-entry-emb-1')).toBeNull();
-  // The chat arm is a different branch of the same `{#each}` — a button, not a
-  // span — so it needs its own assertion.
-  expect(screen.getByTestId('model-entry-chat-1').textContent).toBe('Chat One');
+  expect(optionsFor('emb-1').length).toBe(0);
+  // The chat catalogue is a different tab's own read — it needs its own
+  // assertion.
+  expect(optionFor('chat-1').textContent).toBe('Chat One');
 });
 
 test('the same model id in both catalogues does not leak a selection across tabs', async () => {
@@ -864,31 +861,30 @@ test('the same model id in both catalogues does not leak a selection across tabs
     },
   }));
 
-  await waitFor(() => expect(screen.getByTestId('model-entry-shared-model').getAttribute('aria-current')).toBe('true'));
+  await waitFor(() => expect(modelSelect().value).toBe('shared-model'));
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
-  await waitFor(() => expect(screen.getByTestId('model-entry-other-model')).toBeTruthy());
-  // A per-role selection kept in one shared variable would mark
+  await waitFor(() => expect(optionsFor('other-model').length).toBe(1));
+  // A per-role selection kept in one shared variable would show
   // `shared-model` chosen on the chat tab too, because it is the same string
-  // the embedding tab just marked current. It must not.
-  expect(screen.getByTestId('model-entry-shared-model').getAttribute('aria-pressed')).toBe('false');
-  expect(screen.getByTestId('model-entry-other-model').getAttribute('aria-pressed')).toBe('true');
+  // the embedding tab just showed current. It must not.
+  expect(modelSelect().value).toBe('other-model');
 });
 
 // 🔴 PR 25 review, P2-4. The list was keyed by `entry.id`, and the parser
 // enforces no uniqueness over that field: `catalogue.rs` copies it off the raw
 // record verbatim, once per record, so a provider that lists one id twice sends
-// two entries with equal ids. Svelte answers a duplicate key by THROWING
-// (`each_key_duplicate`), which does not degrade the row — it takes the whole
-// section down. Task 8 had already made the frozen list unkeyed for exactly
-// this reason and the lesson was not carried here.
+// two entries with equal ids. Task 4's select renders them unkeyed for the
+// same reason the old list did: a keyed `{#each}` throws on a repeat
+// (`each_key_duplicate`), which does not degrade the option — it takes the
+// whole section down.
 //
 // The fixture is the state the code branches on and nothing else: two entries,
 // one id, two different names. `two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed`
 // (crates/mnema-provider/tests/catalogue.rs) is the other half — it pins that
 // the parser really does hand this shape over, so this fixture is a measured
 // state rather than one invented here.
-test('two provider records sharing one id render two rows and leave the section standing', async () => {
+test('two provider records sharing one id render two options and leave the section standing', async () => {
   mockCatalogues({
     embedding: catalogueOf([
       entry('vendor/twin', { name: 'First listing' }),
@@ -897,16 +893,16 @@ test('two provider records sharing one id render two rows and leave the section 
   });
   await renderWith(settings({ key: { kind: 'present' } }));
 
-  // The list itself: two rows, and they are the two records rather than one
-  // record drawn twice — the names differ, and both are on screen.
-  await waitFor(() => expect(screen.getAllByTestId('model-entry-vendor/twin').length).toBe(2));
-  const rows = screen.getAllByTestId('model-entry-vendor/twin');
-  expect(rows.map((r) => r.textContent)).toEqual(['First listing', 'Second listing']);
+  // The list itself: two options, and they are the two records rather than
+  // one record drawn twice — the names differ, and both are on screen.
+  await waitFor(() => expect(optionsFor('vendor/twin').length).toBe(2));
+  expect(optionsFor('vendor/twin').map((o) => o.textContent)).toEqual(['First listing', 'Second listing']);
 
-  // And the rest of the section is still there. This is the half the row count
-  // cannot say: `each_key_duplicate` is thrown during render, so what it costs
-  // is everything AROUND the list — read here as the visible text a person came
-  // to this window for, not as a testid that could be present on a broken page.
+  // And the rest of the section is still there. This is the half the option
+  // count cannot say: `each_key_duplicate` is thrown during render, so what
+  // it costs is everything AROUND the list — read here as the visible text a
+  // person came to this window for, not as a testid that could be present on
+  // a broken page.
   expect(screen.getByTestId('model-key-label').textContent).toBe('Key:');
   expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
   expect(screen.getByTestId('model-status-dot').textContent).toBe(
@@ -970,7 +966,7 @@ test('unreadable > 0 renders a sentence naming how many entries could not be rea
 test('unreadable: 0 renders no such sentence', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('e1')], 0) });
   await renderWith(settings());
-  await waitFor(() => expect(screen.getByTestId('model-entry-e1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('e1').length).toBe(1));
   expect(screen.queryByTestId('model-catalogue-unreadable')).toBeNull();
 });
 
@@ -1016,13 +1012,12 @@ test('the shown selection does not change until set_chat_model AND its re-read b
 
   renderModels();
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
+  await waitFor(() => expect(modelSelect().value).toBe('gpt-a'));
 
-  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await pickModel('gpt-b');
   await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
-  // set_chat_model has not resolved yet — the click alone must not repaint.
-  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('false');
-  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true');
+  // set_chat_model has not resolved yet — the pick alone must not repaint.
+  expect(modelSelect().value).toBe('gpt-a');
 
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
@@ -1030,8 +1025,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   }));
   setChatModelCall.resolve();
 
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
-  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
 });
 
 test('an older in-flight model_settings does not repaint the model a set_chat_model round just chose', async () => {
@@ -1041,9 +1035,9 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
 
   renderModels(); // issues the mount's own call — call #0, deferred
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('gpt-b').length).toBe(1));
 
-  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await pickModel('gpt-b');
   await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
   await waitFor(() => expect(queue.length).toBe(2)); // mount's call, then the choice's own refresh
 
@@ -1052,7 +1046,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
     key: { kind: 'present' },
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
+  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
 
   // The mount's OLDER call settles late, with the old model. It must lose.
   queue[0].resolve(settings({
@@ -1067,8 +1061,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   await tick();
   await tick();
   await tick();
-  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true');
-  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+  expect(modelSelect().value).toBe('gpt-b');
 });
 
 // Reviewer's probe (Critical 1): `reportLoadFailure` carried no `settingsSeq`
@@ -1109,9 +1102,9 @@ test('a model_settings reply landing while set_chat_model is still pending does 
 
   renderModels(); // call #0, mount
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('gpt-b').length).toBe(1));
 
-  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await pickModel('gpt-b');
   await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
   // The choice's own refresh runs AFTER set_chat_model resolves, sequentially
   // — it has not been issued yet, so only the mount's call exists so far.
@@ -1123,7 +1116,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
     key: { kind: 'present' },
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true'));
+  await waitFor(() => expect(modelSelect().value).toBe('gpt-a'));
 
   // set_chat_model resolves next; its own refresh issues call #1.
   setChatModelCall.resolve();
@@ -1133,8 +1126,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
 
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('true'));
-  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('false');
+  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
 });
 
 // ---------------------------------------------------------------------------
@@ -1171,15 +1163,15 @@ test('an older in-flight provider_models does not overwrite the catalogue a late
 
   // The newer read settles first.
   queue.embedding[1].resolve(catalogueOf([entry('fresh-model', { name: 'Fresh' })]));
-  await waitFor(() => expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('fresh-model').length).toBe(1));
 
   // The mount's OLDER read settles late, with a different list. It must lose.
   queue.embedding[0].resolve(catalogueOf([entry('stale-model', { name: 'Stale' })]));
   await tick();
   await tick();
   await tick();
-  expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy();
-  expect(screen.queryByTestId('model-entry-stale-model')).toBeNull();
+  expect(optionsFor('fresh-model').length).toBe(1);
+  expect(optionsFor('stale-model').length).toBe(0);
 });
 
 // The same guard on the rejection path — a separate `if` on a separate line,
@@ -1195,14 +1187,14 @@ test('an older in-flight provider_models that fails late does not replace the ca
   await waitFor(() => expect(queue.embedding.length).toBe(2));
 
   queue.embedding[1].resolve(catalogueOf([entry('fresh-model', { name: 'Fresh' })]));
-  await waitFor(() => expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('fresh-model').length).toBe(1));
 
   queue.embedding[0].reject(new Error('a read nobody is waiting for any more'));
   await tick();
   await tick();
   await tick();
   expect(screen.queryByTestId('model-catalogue-failure')).toBeNull();
-  expect(screen.getByTestId('model-entry-fresh-model')).toBeTruthy();
+  expect(optionsFor('fresh-model').length).toBe(1);
 });
 
 // P2-6: the rejection branch itself. The only mention of this testid was a
@@ -1216,9 +1208,10 @@ test('a rejected provider_models says so in the backends own words, and claims n
 
   await waitFor(() => expect(screen.getByTestId('model-catalogue-failure')).toBeTruthy());
   expect(screen.getByTestId('model-catalogue-failure').textContent).toBe('the provider did not answer');
-  // Both directions: no list, and — the claim that matters — NOT the sentence
-  // saying the provider lists no models, which this build has no grounds for.
-  expect(screen.queryByTestId('model-entry-list')).toBeNull();
+  // Both directions: no select, and — the claim that matters — NOT the
+  // sentence saying the provider lists no models, which this build has no
+  // grounds for.
+  expect(screen.queryByTestId('model-selection')).toBeNull();
   expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
   expect(container.textContent ?? '').not.toContain('The provider does not currently list any models');
 });
@@ -1238,16 +1231,15 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
   }));
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
-  await waitFor(() => expect(screen.getByTestId('model-entry-gpt-b')).toBeTruthy());
-  await fireEvent.click(screen.getByTestId('model-entry-gpt-b'));
+  await waitFor(() => expect(optionsFor('gpt-b').length).toBe(1));
+  await pickModel('gpt-b');
 
   await waitFor(() => expect(screen.getByTestId('model-action-error')).toBeTruthy());
   expect(screen.getByTestId('model-action-error').textContent)
     .toBe('the provider will not serve this model to this key');
   // The refused choice is not shown as taken: the selection still follows the
   // backend's state, which never changed.
-  expect(screen.getByTestId('model-entry-gpt-a').getAttribute('aria-pressed')).toBe('true');
-  expect(screen.getByTestId('model-entry-gpt-b').getAttribute('aria-pressed')).toBe('false');
+  expect(modelSelect().value).toBe('gpt-a');
 });
 
 // P2-9: the dot's fail-safe on a state this window does not know. On a
@@ -1419,6 +1411,12 @@ function expected<T>(table: Record<string, T>, kind: string, what: string): T {
   return value;
 }
 
+// The em dash `models_entry_reason_separator` resolves to, in both locales —
+// the same character either way, so a refused option's combined label is
+// always `<name> — <reason>` and this constant is what splits the two back
+// apart for the assertions below.
+const REASON_SEPARATOR = '—';
+
 for (const loc of ['en', 'uk'] as const) {
   test(`every Refusal variant catalogue.rs defines renders its own, correct reason (${loc})`, async () => {
     const kinds = rustEnumVariants(CATALOGUE_RS, 'Refusal').map(camelOf);
@@ -1429,13 +1427,19 @@ for (const loc of ['en', 'uk'] as const) {
     const { container } = await renderInLocale(loc, settings());
     const texts: string[] = [];
     for (let i = 0; i < kinds.length; i++) {
-      const el = await screen.findByTestId(`model-entry-reason-refusal-${i}`);
-      texts.push(el.textContent ?? '');
+      await waitFor(() => expect(optionsFor(`refusal-${i}`).length).toBe(1));
+      const combined = optionFor(`refusal-${i}`).textContent ?? '';
+      // P2-11: a refused option still shows the model's NAME, not its id —
+      // an `<option>` cannot hold the name and the reason as two separate
+      // elements the way the old list's spans did, so the prefix is checked
+      // directly on the one string the option has.
+      const prefix = `Named ${kinds[i]} ${REASON_SEPARATOR} `;
+      expect(combined.startsWith(prefix)).toBe(true);
+      const reason = combined.slice(prefix.length);
+      texts.push(reason);
       // P1-1: each variant pinned to ITS OWN sentence, not merely to a
       // sentence no other variant happens to use.
-      expect(texts[i]).toBe(expected(REFUSAL_SENTENCES[loc], kinds[i], 'Refusal'));
-      // P2-11: a refused row still shows the model's NAME, not its id.
-      expect(screen.getByTestId(`model-entry-refusal-${i}`).textContent).toBe(`Named ${kinds[i]}`);
+      expect(reason).toBe(expected(REFUSAL_SENTENCES[loc], kinds[i], 'Refusal'));
     }
     // Both directions: as many sentences as variants, none collapsed onto a
     // neighbour — kept alongside the table, because the table alone would
@@ -1489,45 +1493,40 @@ for (const loc of ['en', 'uk'] as const) {
 // Review P1-4: the old oracle's last condition was `keySentencePos < tabPos`
 // — "the tabs follow the key sentence" — which is not the requirement, and the
 // reviewer proved the oracle was pointed at the wrong proposition: a layout
-// that SATISFIES the requirement (Key group lifted above Index, mac note moved
-// down) made it FAIL, and a worse one (the mac note above the provider,
-// belonging to no subject at all) made it PASS. An oracle that rejects the
-// compliant layout and accepts the worse one is not measuring the requirement.
+// that SATISFIES the requirement (Key group lifted above Index) made it FAIL,
+// and a worse one (an unrelated sentence above the provider, belonging to no
+// subject at all) made it PASS. An oracle that rejects the compliant layout
+// and accepts the worse one is not measuring the requirement.
 //
 // Owner's ruling on the layout itself, so it is not guessed: provider row,
-// then the Key group (its label, the key-state sentence, the macOS keychain
-// note — a sentence about the key — and the key controls), then the tabs and
-// the connected summary, then the Index group last. The one sentence a person
-// can act on comes before the ones they cannot; every sentence sits under the
-// subject it is about; the index failure is a defect report they cannot act
-// on, so it goes last.
+// then the Key group (its label, the key-state sentence, and the key
+// controls), then the tabs and the connected summary, then the Index group
+// last. The one sentence a person can act on comes before the ones they
+// cannot; every sentence sits under the subject it is about; the index
+// failure is a defect report they cannot act on, so it goes last.
 test('the worst screen groups every sentence under its own subject, and nothing a person cannot act on comes first', async () => {
   const { container } = await renderWith(settings({
     key: { kind: 'unreadable', cause: 'locked', reason: 'r' },
     index: { kind: 'unreadable', cause: 'notOpen', reason: 'r2' },
-    platform: 'mac',
   }));
   const text = container.textContent ?? '';
 
   const providerPos = text.indexOf('OpenRouter');
   const keyLabelPos = text.indexOf('Key');
   const keySentencePos = text.indexOf(KEY_FAILURE_SENTENCES.locked);
-  const macNotePos = text.indexOf(MAC_NOTE);
   const indexLabelPos = text.indexOf('Index');
   const indexSentencePos = text.indexOf('The index is not open yet.');
 
-  for (const pos of [providerPos, keyLabelPos, keySentencePos, macNotePos, indexLabelPos, indexSentencePos]) {
+  for (const pos of [providerPos, keyLabelPos, keySentencePos, indexLabelPos, indexSentencePos]) {
     expect(pos).toBeGreaterThanOrEqual(0);
   }
 
   // Grouped by subject: the key group follows the provider it belongs to, and
-  // BOTH of its sentences — the key state and the keychain note, which is a
-  // sentence about the key — sit under the Key label and before the next
-  // subject starts.
+  // its own sentence sits under the Key label and before the next subject
+  // starts.
   expect(providerPos).toBeLessThan(keyLabelPos);
   expect(keyLabelPos).toBeLessThan(keySentencePos);
-  expect(keySentencePos).toBeLessThan(macNotePos);
-  expect(macNotePos).toBeLessThan(indexLabelPos);
+  expect(keySentencePos).toBeLessThan(indexLabelPos);
   expect(indexLabelPos).toBeLessThan(indexSentencePos);
 
   // The requirement itself, stated directly rather than inferred from the
@@ -1536,10 +1535,10 @@ test('the worst screen groups every sentence under its own subject, and nothing 
   expect(keySentencePos).toBeLessThan(indexSentencePos);
 
   // And its general form: NOTHING a person cannot act on is placed ahead of
-  // the instruction that is theirs to follow. Named as a list, so a fourth
+  // the instruction that is theirs to follow. Named as a list, so a second
   // sentence added above the key group fails here rather than slipping
   // between two pairwise comparisons.
-  const nothingToActOn = [MAC_NOTE, 'The index is not open yet.'];
+  const nothingToActOn = ['The index is not open yet.'];
   expect(nothingToActOn.filter((s) => text.indexOf(s) < keySentencePos)).toEqual([]);
 });
 
@@ -1553,7 +1552,7 @@ test('the worst screen groups every sentence under its own subject, and nothing 
 test('a language switch after mount reaches the model tab labels', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('e1')]) });
   const { container } = await renderWith(settings());
-  await waitFor(() => expect(screen.getByTestId('model-entry-e1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('e1').length).toBe(1));
   expect((container.textContent ?? '')).toContain('Embedding');
   expect((container.textContent ?? '')).toContain('Chat');
 
@@ -1631,7 +1630,7 @@ test('a language switch after mount reaches the unreadable-count sentence', asyn
 test('a language switch after mount reaches a refusal reason', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('r1', { refusal: { kind: 'noStatedLimit' } })]) });
   const { container } = await renderWith(settings());
-  await waitFor(() => expect(screen.getByTestId('model-entry-reason-r1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('r1').length).toBe(1));
   expect((container.textContent ?? '')).toContain('The provider does not state an input limit for this model.');
 
   await switchTo('uk');
@@ -1705,14 +1704,14 @@ async function renderOnModel(s = onModel(7)) {
     embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
   });
   const result = await renderWith(s);
-  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
   return result;
 }
 
 test('choosing a DIFFERENT embedding model asks before it calls anything', async () => {
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
   expect(setEmbeddingModel).not.toHaveBeenCalled();
@@ -1721,13 +1720,13 @@ test('choosing a DIFFERENT embedding model asks before it calls anything', async
 test('choosing the model the index is ALREADY on asks nothing and calls nothing', async () => {
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-1'));
+  await pickModel('emb-1');
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
   expect(setEmbeddingModel).not.toHaveBeenCalled();
-  // And the row still says which model the index is on, so "nothing happened"
-  // is not the same as "the press unmarked it".
-  expect(screen.getByTestId('model-entry-emb-1').getAttribute('aria-current')).toBe('true');
+  // And the select still shows which model the index is on, so "nothing
+  // happened" is not the same as "the pick unmarked it".
+  expect(modelSelect().value).toBe('emb-1');
 });
 
 // The two counts are DIFFERENT here on purpose. `embeddedChunks` counts the
@@ -1737,7 +1736,7 @@ test('choosing the model the index is ALREADY on asks nothing and calls nothing'
 test('the confirmation states the number as an estimate and names what it counts', async () => {
   await renderOnModel(onModel(7, 3));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   expect(screen.getByTestId('model-embedding-estimate').textContent).toBe(
     'The index holds 7 embeddings across all its vector spaces right now. That is an estimate ' +
@@ -1747,15 +1746,15 @@ test('the confirmation states the number as an estimate and names what it counts
 
 test('Cancel takes the question away and still calls nothing', async () => {
   await renderOnModel();
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   await fireEvent.click(screen.getByTestId('model-embedding-cancel'));
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
   expect(setEmbeddingModel).not.toHaveBeenCalled();
-  // The list is still there to press again: cancelling a question must not
+  // The option is still there to pick again: cancelling a question must not
   // take the choice away with it.
-  expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy();
+  expect(optionsFor('emb-2').length).toBe(1);
 });
 
 // 🔴 The confirmation used to offer three answers and one of them was never an
@@ -1769,7 +1768,7 @@ test('Cancel takes the question away and still calls nothing', async () => {
 test('the confirmation offers no Keep, because the index would refuse it in exactly this state', async () => {
   await renderOnModel(onModel(7));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   // Positively, on visible text: these two answers, in this order, and no
   // third. A `queryByTestId(...)` alone would pass against a button whose
@@ -1788,7 +1787,7 @@ test('Discard sends its own value, and nothing supplies one by default', async (
   });
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'discard');
@@ -1805,7 +1804,7 @@ test('an index holding nothing anywhere asks nothing and sends the value that re
   });
   await renderOnModel(onModel(0, 0));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
   await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
@@ -1818,7 +1817,7 @@ test('an index holding nothing anywhere asks nothing and sends the value that re
 test('the question is asked from what the whole index holds, not from the active space alone', async () => {
   await renderOnModel(onModel(7, 0));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
   expect(setEmbeddingModel).not.toHaveBeenCalled();
@@ -1831,7 +1830,7 @@ test('the question is asked from what the whole index holds, not from the active
 test('the confirmation names the loss before it happens, above the button that causes it', async () => {
   await renderOnModel(onModel(7));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   expect(screen.getByTestId('model-embedding-confirm-loss').textContent).toBe(CONFIRM_LOSS);
   const said = screen.getByTestId('model-embedding-confirm').textContent ?? '';
@@ -1851,7 +1850,7 @@ test('the sentence after the act reports what the index destroyed, not the estim
   });
   await renderOnModel(onModel(7));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
@@ -1868,7 +1867,7 @@ test('a change that retired nothing says so rather than saying nothing', async (
   await renderOnModel(onModel(0));
 
   // Nothing to lose, so nothing is asked — the press goes straight through.
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
   expect(screen.getByTestId('model-embedding-retired').textContent).toBe(
@@ -1892,7 +1891,7 @@ test('after a successful change the section says search by meaning is dark and o
   // full is not degraded, and a flag alone could not tell the two apart.
   modelSettings.mockResolvedValue(onModel(0, 0));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
@@ -1929,7 +1928,7 @@ async function reembedding(after: ModelSettings) {
   const rendered = await renderOnModel(onModel(7));
   modelSettings.mockResolvedValue(onModel(0, 0));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
 
@@ -2060,7 +2059,7 @@ test('a change that leaves the new space full says nothing about a search going 
   await renderOnModel(onModel(5, 5));
   modelSettings.mockResolvedValue(onModel(5, 5));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
@@ -2171,9 +2170,9 @@ test('a rejection shows the backend sentence verbatim and branches from a re-rea
     embedding: catalogueOf([entry('emb-1', { name: 'Embedder One' }), entry('emb-2', { name: 'Embedder Two' })]),
   });
   renderModels();
-  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
@@ -2194,7 +2193,7 @@ test('a rejection because a job is running leaves that job drawn as running', as
   jobStatus.mockResolvedValue(runningScan());
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
@@ -2217,7 +2216,7 @@ test('a job that IS running is drawn, even when the rejection never mentions one
   jobStatus.mockResolvedValue(runningScan());
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
@@ -2230,7 +2229,7 @@ test('a job that is NOT running is not drawn as one, whatever the rejection said
   jobStatus.mockResolvedValue(IDLE_SCAN);
   await renderOnModel();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
   await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
@@ -2252,11 +2251,11 @@ test('ReadFailed offers choosing a model again as the recovering act, and presse
     key: { kind: 'present' },
     index: { kind: 'unreadable', cause: 'readFailed', reason: 'r' },
   }));
-  await waitFor(() => expect(screen.getByTestId('model-entry-emb-2')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
 
   expect(screen.getByTestId('model-index-recover').textContent).toBe(RECOVER);
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
 
   // No estimate can be stated about an index that will not answer, so nothing
   // is asked — and `keep` is the value that refuses rather than destroys.
@@ -2269,7 +2268,7 @@ test('a healthy index is offered no recovering act, and its presses ask first', 
 
   expect(screen.queryByTestId('model-index-recover')).toBeNull();
 
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   expect(screen.getByTestId('model-embedding-confirm-title').textContent).toBe(CONFIRM_TITLE);
   expect(setEmbeddingModel).not.toHaveBeenCalled();
 });
@@ -2285,7 +2284,7 @@ test('an index that was never opened is offered no recovering act either', async
 
 test('switching tabs takes a pending question with it', async () => {
   await renderOnModel();
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
@@ -2304,7 +2303,7 @@ test('switching tabs takes the report of what was discarded with it', async () =
     index: onModel(0).index,
   });
   await renderOnModel(onModel(7, 7));
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
 
@@ -2317,7 +2316,7 @@ test('switching tabs takes a rejection with it', async () => {
   setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
   jobStatus.mockResolvedValue(runningScan());
   await renderOnModel(onModel(7, 7));
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
 
@@ -2332,7 +2331,7 @@ test('switching tabs takes a rejection with it', async () => {
 
 test('a language switch after mount reaches the confirmation', async () => {
   const { container } = await renderOnModel(onModel(7));
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   expect((container.textContent ?? '')).toContain(CONFIRM_TITLE);
 
   await switchTo('uk');
@@ -2352,7 +2351,7 @@ test('a language switch after mount reaches the sentence about what was discarde
     index: onModel(0).index,
   });
   const { container } = await renderOnModel(onModel(7));
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
   expect((container.textContent ?? '')).toContain('The change discarded 4 embeddings');
@@ -2369,7 +2368,7 @@ test('a language switch after mount reaches the degraded notice and its button',
     index: onModel(0).index,
   });
   const { container } = await renderOnModel(onModel(0));
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await waitFor(() => expect(screen.getByTestId('model-embedding-degraded-note')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('model-embedding-reembed'));
   // The sentence follows the snapshot, so the pass has to be under way as far
@@ -2401,7 +2400,7 @@ test('a language switch after mount reaches the ended-pass sentence', async () =
 test('a language switch after mount reaches the lead-in above a rejection', async () => {
   setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
   const { container } = await renderOnModel();
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-embedding-failed')).toBeTruthy());
   expect((container.textContent ?? '')).toContain(CHANGE_FAILED);
@@ -2419,7 +2418,7 @@ test('a language switch after mount reaches the running-job line', async () => {
   setEmbeddingModel.mockRejectedValue(new Error('a job is already running'));
   jobStatus.mockResolvedValue(runningScan());
   const { container } = await renderOnModel();
-  await fireEvent.click(screen.getByTestId('model-entry-emb-2'));
+  await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-job-running')).toBeTruthy());
   expect((container.textContent ?? '')).toContain(JOB_RUNNING);
@@ -2500,15 +2499,16 @@ test('the index label and its sentence read as two things too', async () => {
   expect(uk).not.toContain('Індекс Індекс ще не відкрито.');
 });
 
-// And one row lower again, on the branch a provider listing a model this build
-// refuses would reach: the model's name and the sentence saying why it cannot
-// be chosen are two inline spans of their own.
+// And one row lower again, on the branch a provider listing a model this
+// build refuses would reach: the model's name and the sentence saying why it
+// cannot be chosen are folded into one option label (Task 4), and the two
+// still read as two things rather than one run-together phrase.
 test('a refused model`s name and its reason read as two things', async () => {
   mockCatalogues({
     embedding: catalogueOf([entry('r1', { name: 'Tiny One', refusal: { kind: 'noStatedLimit' } })]),
   });
   const { container } = await renderWith(settings());
-  await waitFor(() => expect(screen.getByTestId('model-entry-reason-r1')).toBeTruthy());
+  await waitFor(() => expect(optionsFor('r1').length).toBe(1));
   const text = visible(container);
 
   expect(text).toContain('Tiny One — The provider does not state an input limit for this model.');
@@ -2519,4 +2519,237 @@ test('a refused model`s name and its reason read as two things', async () => {
   // that only happens to look right in one locale.
   await switchTo('uk');
   expect(visible(container)).toContain('Tiny One — Постачальник не вказує ліміт входу цієї моделі.');
+});
+
+// ---------------------------------------------------------------------------
+// Task 4 (Task 4 brief, plan review P1/P2-1/P2-2) — the select replaces the
+// old row of buttons, and these are the behaviours that mechanism owes on
+// top of what the row already gave: a command's own confirmed result and the
+// following read are two DISTINCT sources of truth, neither is assumed from
+// the other, and the DOM value the person actually sees is put back in sync
+// on every change regardless of what Svelte's own dirty check thinks moved.
+// ---------------------------------------------------------------------------
+
+// The task's own P1 counter-example, verbatim: an index on a model WITH
+// vectors, a rejected adoption, and a re-read that comes back unreadable.
+// Neither the model the index was on nor the one just picked may be shown as
+// current without a read that actually says so — the failure is reported,
+// the recovery catalogue stays, and the private diagnostic never reaches the
+// screen.
+test('failed_adoption_does_not_restore_cached_model', async () => {
+  setEmbeddingModel.mockRejectedValue(new Error('Embeddings were removed; adoption failed.'));
+  modelSettings.mockResolvedValueOnce(onModel(7)).mockResolvedValue(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'readFailed', reason: 'PRIVATE-DIAGNOSTIC' },
+  }));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  renderModels();
+  const select = await screen.findByTestId('model-selection');
+  await fireEvent.change(select, { target: { value: 'emb-2' } });
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+  await waitFor(() => expect(screen.getByTestId('model-index-failure')).toBeTruthy());
+  expect((screen.getByTestId('model-selection') as HTMLSelectElement).value).toBe('');
+  expect(screen.getByTestId('model-embedding-error').textContent).toContain('Embeddings were removed');
+  expect(screen.queryByText(/PRIVATE-DIAGNOSTIC/)).toBeNull();
+});
+
+// The other half of the same rule: a command that SUCCEEDS must not be
+// reported as a rejection just because the read that follows it fails
+// outright (a plain IPC rejection, not an `Unreadable` index) — command and
+// refresh are two separate try/catch blocks, on purpose.
+test('successful_write_with_failed_refresh_keeps_acknowledged_model', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  modelSettings.mockResolvedValueOnce(onModel(7)).mockRejectedValue(new Error('model_settings unreachable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
+
+  await pickModel('emb-2');
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+
+  // The command succeeded — shown immediately, without waiting for (or being
+  // undone by) the read that follows it.
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  expect(screen.queryByTestId('model-embedding-failed')).toBeNull();
+  expect(screen.queryByTestId('model-embedding-error')).toBeNull();
+  // The read's own failure is still reported — through the ordinary
+  // `loadError` banner, not as a rejected write.
+  expect(screen.getByTestId('model-load-failure')).toBeTruthy();
+});
+
+// The same scenario, the other thing it owes: the retirement report a
+// successful command already handed back must not be erased by the failed
+// read that follows it — `retiredReport` is set from the command's own
+// reply, not from a read that never confirmed it.
+test('failed_read_does_not_erase_retirement_report', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  modelSettings.mockResolvedValueOnce(onModel(7)).mockRejectedValue(new Error('model_settings unreachable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
+
+  await pickModel('emb-2');
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-retired')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-retired').textContent).toBe(
+    'The change discarded 4 embeddings from 1 vector space.',
+  );
+});
+
+// An unreadable index has nothing to estimate, so a choice made from it asks
+// nothing and sends `keep` — and the select owes two things across that
+// round: the placeholder before the pick (never the first catalogue entry),
+// and the acknowledged model shown right after, without waiting on the
+// recovery re-read this index cannot currently answer either.
+test('unreadable_recovery_uses_keep', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [],
+    index: onModel(0).index,
+  });
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: { kind: 'unreadable', cause: 'readFailed', reason: 'r' },
+  }));
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
+  expect(modelSelect().value).toBe('');
+
+  // The recovery re-read this adoption triggers finally answers — the index
+  // is open again, on the model just chosen.
+  modelSettings.mockResolvedValue(settings({
+    key: { kind: 'present' },
+    index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'emb-2', chatModel: null, searchTextArm: true, searchContentArm: true },
+  }));
+  await pickModel('emb-2');
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+});
+
+// A native `<select>` with no option explicitly selected defaults to the
+// FIRST one — the browser's own rule, not this build's claim. An index that
+// read successfully and simply has no role model chosen must not be shown as
+// though it had picked whichever entry the catalogue happens to list first.
+test('unknown_model_is_not_the_first_option', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  await renderWith(settings()); // base fixture: index read, embeddingModel: null
+  await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
+
+  expect(modelSelect().value).toBe('');
+  expect(modelSelect().value).not.toBe('emb-1');
+});
+
+// A confirmed id the active catalogue does NOT list — a provider that
+// retired a model this index still points at. It gets its OWN disabled
+// option, carrying that id, rather than collapsing into either the blank
+// "nothing chosen" placeholder or (worse) one of the entries this build
+// still happens to offer.
+test('a confirmed model absent from the catalogue gets its own placeholder option, not the first entry', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+      embeddedChunks: 7, embeddedChunksEverywhere: 7, totalChunks: 12, embeddingModel: 'retired-model', chatModel: null,
+      searchTextArm: true, searchContentArm: true,
+    },
+  }));
+  await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
+
+  expect(modelSelect().value).toBe('retired-model');
+  const placeholder = optionFor('retired-model');
+  expect(placeholder.disabled).toBe(true);
+  expect(placeholder.textContent).toContain('retired-model');
+  // Neither catalogue entry silently absorbed the selection.
+  expect(optionFor('emb-1').selected).toBe(false);
+});
+
+// The per-role dot (review P2-1): its own predicate, not a shared boolean.
+// Embedding is fully configured; chat is not, from the very same `settings`
+// — a fixture that moved both at once could not tell which field either dot
+// actually reads.
+test('configuration_dots_use_their_own_role', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1')]),
+    chat: catalogueOf([entry('chat-1')]),
+  });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+      embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+      embeddingModel: 'emb-1', chatModel: null, searchTextArm: true, searchContentArm: true,
+    },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-dot-embedding')).toBeTruthy());
+
+  expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe('true');
+  expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured')).toBe('false');
+  expect(screen.getByTestId('model-dot-embedding').textContent).toBe('Configured');
+  expect(screen.getByTestId('model-dot-chat').textContent).toBe('Not configured');
+});
+
+// Review P2-2's own mechanism, on the embedding tab: the confirm question
+// names the CANDIDATE in prose, but the select itself keeps showing the
+// CONFIRMED model throughout — during the question and after Cancel. Without
+// the handler's synchronous reset, `fireEvent.change` has already written
+// 'emb-2' onto the element's own `.value`, and nothing else would ever move
+// it back: `selectValue` never actually changes across this whole exchange
+// (the index stays on 'emb-1' throughout), so Svelte's own compiled dirty
+// check has nothing to trip on.
+test('cancel_returns_the_select_to_the_current_model', async () => {
+  await renderOnModel(onModel(7)); // embeddingModel: 'emb-1'
+
+  await pickModel('emb-2');
+  expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
+  expect(modelSelect().value).toBe('emb-1');
+
+  await fireEvent.click(screen.getByTestId('model-embedding-cancel'));
+
+  expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
+  expect(modelSelect().value).toBe('emb-1');
+
+  // Picking the SAME candidate again after Cancel must still ask — a DOM
+  // left stuck on 'emb-2' would fire no `change` at all for this second
+  // identical pick, and the question would never come back.
+  await pickModel('emb-2');
+  expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+// The same mechanism on the rejection path: a refused command must not leave
+// the DOM showing the candidate it never adopted, and picking that same
+// candidate again must still be answerable — the confirmation reopens,
+// which it could not if the element's own `.value` had been left equal to
+// it.
+test('rejected_command_returns_the_select_and_reselecting_asks_again', async () => {
+  setEmbeddingModel.mockRejectedValueOnce(new Error('the provider refused this model'));
+  await renderOnModel(onModel(7)); // embeddingModel: 'emb-1', settings() re-read returns the same fixture
+
+  await pickModel('emb-2');
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
+  // The rejection did not move the model — the re-read still says emb-1 —
+  // and the DOM was put back the instant the pick fired, not only once the
+  // rejection was known.
+  expect(modelSelect().value).toBe('emb-1');
+  // The round is not fully settled until `changeBusy` clears (its own
+  // `job_status` check still runs after the error is already on screen);
+  // picking again before then would be blocked by the busy guard rather than
+  // by anything this test is about.
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+
+  await pickModel('emb-2');
+  expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
 });

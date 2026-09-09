@@ -8,10 +8,13 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_key_removed' | 'models_key_nothing_to_remove'
   | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
   | 'models_index_not_open' | 'models_index_read_failed'
-  | 'models_mac_keychain_note' | 'models_load_failed'
+  | 'models_load_failed'
   | 'models_index_label'
   | 'models_tab_embedding' | 'models_tab_chat'
   | 'models_status_ready' | 'models_status_not_ready'
+  | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
+  | 'models_selection_absent'
+  | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
   | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
@@ -225,18 +228,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // show, so this is the one sentence the section renders on that branch.
     models_index_not_open: 'Індекс ще не відкрито.',
     models_index_read_failed: 'Не вдалося прочитати індекс — це вада цієї збірки.',
-    // Platform note (models.rs:606-627) — macOS only; Windows and Linux show
-    // nothing here, because the same sentence would be noise on them.
-    models_mac_keychain_note: 'Кожне оновлення застосунку робить його чужим для збереженого ключа: система один раз попросить пароль від зв’язки ключів для входу.',
     // The lead-in for a rejected read of `model_settings`. The rejection's own
     // sentence is shown verbatim beside it and never branched on (§10): a
     // rejection arrives as text, so this names what failed and the backend says
     // why.
     models_load_failed: 'Не вдалося прочитати налаштування моделей.',
     // Task 5 — the subject header the index sentence lacked: Task 4's review
-    // found "Провайдер / [index sentence] / [mac note] / [key sentence]"
-    // unreadable as a person, because nothing said the second line was about
-    // the index. Shown only alongside that sentence, never on its own.
+    // found "Провайдер / [index sentence] / [key sentence]" unreadable as a
+    // person, because nothing said the second line was about the index.
+    // Shown only alongside that sentence, never on its own.
     models_index_label: 'Індекс:',
     models_tab_embedding: 'Ембединг',
     models_tab_chat: 'Чат',
@@ -246,6 +246,22 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces the same thing a sighted person reads.
     models_status_ready: 'Підключено — OpenRouter, ключ і обрана модель embedding готові.',
     models_status_not_ready: 'Ще не підключено — додайте ключ і оберіть модель embedding, щоб увімкнути пошук за змістом.',
+    // Task 4 — the native model select. A label over the control (the same
+    // pattern `models_provider_label`/`models_key_label` already use), and
+    // the placeholder option's own text for the three states a confirmed
+    // model id cannot stand for on its own: a read that said nothing is
+    // chosen, a build that currently cannot say either way, and a confirmed
+    // id the active catalogue no longer lists.
+    models_selection_label: 'Модель:',
+    models_selection_not_chosen: 'Модель ще не обрано.',
+    models_selection_unknown: 'Поточна модель невідома.',
+    models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
+    // The per-role configured dot (review P2-1) — its accessible name IS one
+    // of these three words; the colour is a visual reinforcement of the same
+    // fact, not a second source of it.
+    models_dot_configured: 'Налаштовано',
+    models_dot_not_configured: 'Не налаштовано',
+    models_dot_unknown: 'Невідомо',
     // An empty-but-well-formed catalogue (`models.rs:186-190`) is a stated
     // fact about the provider, not a failure of this build — said once, so a
     // person does not read a blank tab as a bug.
@@ -1035,13 +1051,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_key_defect: 'This is a defect in this build, not a state of your system. Please report it to the developers.',
     models_index_not_open: 'The index is not open yet.',
     models_index_read_failed: 'The index could not be read — this is a defect in this build.',
-    models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
     models_load_failed: 'The model settings could not be read.',
     models_index_label: 'Index:',
     models_tab_embedding: 'Embedding',
     models_tab_chat: 'Chat',
     models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
     models_status_not_ready: 'Not connected yet — add a key and choose an embedding model to enable content search.',
+    models_selection_label: 'Model:',
+    models_selection_not_chosen: 'No model chosen yet.',
+    models_selection_unknown: 'The current model is unknown.',
+    models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
+    models_dot_configured: 'Configured',
+    models_dot_not_configured: 'Not configured',
+    models_dot_unknown: 'Unknown',
     models_catalogue_empty: 'The provider does not currently list any models for this role.',
     models_catalogue_unreadable: '{count, plural, one {# record could not be read} other {# records could not be read}}.',
     models_refusal_input_too_small: 'This model states an input limit of {limit} tokens, under the {floor} this application requires.',

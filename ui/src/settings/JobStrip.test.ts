@@ -1156,7 +1156,10 @@ test('the scanning section re-reads what the index holds when a scan ends', asyn
 
   await emit(ended());
 
-  await waitFor(() => expect(calls('model_settings').length).toBe(before + 1));
+  // Two calls, not one: `Settings.svelte`'s own re-read and `Models.svelte`'s
+  // (Task 4, review P2-1 — mounted-hidden for the window's life now, so its
+  // `jobs.state` subscription stays live on every other section too).
+  await waitFor(() => expect(calls('model_settings').length).toBe(before + 2));
 });
 
 // ---------------------------------------------------------------------------
