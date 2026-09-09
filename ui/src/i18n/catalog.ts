@@ -116,6 +116,16 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_version' | 'application_load_failed'
   | 'application_theme' | 'theme_light' | 'theme_dark' | 'theme_system'
   | 'application_theme_failed'
+  // Task 3 (PR 10f): the language choice, moved out of the tray's temporary
+  // submenu into this section. `application_language_uk`/`_en` are endonyms —
+  // a language's own name for itself — so, like `locale.rs`'s `endonym`, they
+  // read the SAME in both catalogue blocks below; only `_auto` and every
+  // other key here translates.
+  | 'application_language_label' | 'application_language_auto'
+  | 'application_language_uk' | 'application_language_en'
+  | 'application_language_partial' | 'application_language_unknown'
+  | 'application_language_retry_apply' | 'application_language_retry_read'
+  | 'application_language_failed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -964,6 +974,20 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Темна',
     theme_system: 'Системна',
     application_theme_failed: 'Вигляд не змінено. Ось що відповів застосунок:',
+    // Task 3 (PR 10f). `_uk`/`_en` are endonyms — a language's own name for
+    // itself — and read the same in the `en` block below; `endonym` in
+    // `locale.rs` gives the identical two strings for the tray submenu this
+    // replaces.
+    application_language_label: 'Мова:',
+    application_language_auto: 'Авто (система)',
+    application_language_uk: 'Українська',
+    application_language_en: 'English',
+    // Exact string, pinned by `Application.test.ts` against the brief.
+    application_language_partial: 'Мову збережено, але застосовано не всюди',
+    application_language_unknown: 'Застосування мови не підтверджено.',
+    application_language_retry_apply: 'Повторити застосування',
+    application_language_retry_read: 'Повторити читання',
+    application_language_failed: 'Не вдалося прочитати мову. Ось що відповів застосунок:',
   },
   en: {
     pin: 'Pin',
@@ -1224,5 +1248,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Dark',
     theme_system: 'Match the system',
     application_theme_failed: 'The appearance was not changed. This is what the application answered:',
+    application_language_label: 'Language:',
+    application_language_auto: 'Auto (system)',
+    application_language_uk: 'Українська',
+    application_language_en: 'English',
+    // Exact string, pinned by `Application.test.ts` against the brief.
+    application_language_partial: 'Language saved, but not applied everywhere',
+    application_language_unknown: 'Whether the language applied everywhere could not be confirmed.',
+    application_language_retry_apply: 'Retry applying',
+    application_language_retry_read: 'Retry reading',
+    application_language_failed: 'The language could not be read. This is what the application answered:',
   },
 };

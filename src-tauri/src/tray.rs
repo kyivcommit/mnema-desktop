@@ -23,7 +23,7 @@
 use tauri::Manager as _;
 use tauri::{
     Runtime,
-    menu::{CheckMenuItem, IconMenuItem, IsMenuItem, Menu, PredefinedMenuItem, Submenu},
+    menu::{IconMenuItem, IsMenuItem, Menu, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
 
@@ -37,10 +37,10 @@ use crate::tray_icons::{self, MenuIcon};
 /// dispatcher arm spelled `"resume_scan"` against a menu item built as
 /// `"resume"` is an item that silently does nothing when pressed.
 ///
-/// Only these two. The other ids (`show_search`, `open_settings`, `quit`, the
-/// language items) are left as the bare literals they have always been:
-/// widening this to all of them is a rename, not a fix, and the review that
-/// asked for these two asked for exactly these two.
+/// Only these two. The other ids (`show_search`, `open_settings`, `quit`) are
+/// left as the bare literals they have always been: widening this to all of
+/// them is a rename, not a fix, and the review that asked for these two asked
+/// for exactly these two.
 ///
 /// `TRAY_ITEM_IDS` is built from them, and so is [`tray_label`]'s match — but
 /// `tray_item_ids_match_spec_order` deliberately keeps its literals, because a
@@ -48,6 +48,14 @@ use crate::tray_icons::{self, MenuIcon};
 /// against itself.
 pub const STOP_ID: &str = "stop_indexing";
 pub const RESUME_ID: &str = "resume";
+
+/// The tray icon's own id, spelled in this file and in `locale.rs` (which
+/// looks it up with [`tauri::Manager::tray_by_id`] to tell "the tray itself
+/// is gone" apart from every other reason a language apply step can fail).
+/// Deferred from Task 2: the same literal duplicated at three call sites with
+/// nothing tying them together is the identical hazard [`STOP_ID`]'s own doc
+/// names for a dispatcher arm and a menu id.
+pub const TRAY_ID: &str = "mnema-tray";
 
 /// Composes one tray item's label from the catalog (§D129) — text only from
 /// Task 1: the picture beside it is a fixed [`MenuIcon`] on the `IconMenuItem`
@@ -124,34 +132,6 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     RESUME_ID,
     "quit",
 ];
-
-/// The «Мова» submenu's three items as pure `(id, label, checked)` data —
-/// the only part of the submenu that carries a decision (which language is
-/// currently selected). Kept separate from `CheckMenuItem` construction so a
-/// headless test can catch a wrong-variant mapping (e.g. `lang_en` compared
-/// against `LocaleChoice::Uk`) or an all-checked/all-unchecked slip — neither
-/// of which any other test here would catch, and the built `Menu` itself is
-/// macOS main-thread-only (see `TRAY_ITEM_IDS`), so this is the only headless
-/// path to it.
-fn lang_menu_items(lang: Lang, choice: LocaleChoice) -> [(&'static str, String, bool); 3] {
-    [
-        (
-            "lang_auto",
-            locale::t(lang, Key::LangAuto).to_string(),
-            choice == LocaleChoice::Auto,
-        ),
-        (
-            "lang_uk",
-            locale::endonym(LocaleChoice::Uk).to_string(),
-            choice == LocaleChoice::Uk,
-        ),
-        (
-            "lang_en",
-            locale::endonym(LocaleChoice::En).to_string(),
-            choice == LocaleChoice::En,
-        ),
-    ]
-}
 
 /// Composes the tray's status line from the current [`ScanState`] — the ONE
 /// place that picks which of the five phase sentences to draw. Pure: nothing
@@ -411,13 +391,13 @@ fn install_then_publish<M, H, E>(
 }
 
 /// Assembles the tray menu for a resolved language, the persisted choice
-/// behind it, and the scan the moment this is called — §8, plus the «Мова»
-/// submenu (§D129) that lets the user pin a language or return to Auto
-/// (`lang_auto`/`lang_uk`/`lang_en`, checked to match `choice`). Like
-/// `build_tray`, this needs the main thread on macOS (see `TRAY_ITEM_IDS`) and
-/// so is exercised only by the live run, not a headless test; from Task 6, it
-/// is also what a language change calls to relabel the live menu via
-/// `set_menu`.
+/// behind it, and the scan the moment this is called — §8. The temporary
+/// «Мова» submenu (§D129) that used to sit here is gone as of Task 3: the
+/// language choice lives in the settings window's Application section now
+/// (`locale-choice.ts`), and `choice` stays a parameter only because
+/// [`MenuKey`] still carries it (see that type's own doc). Like `build_tray`,
+/// this needs the main thread on macOS (see `TRAY_ITEM_IDS`) and so is
+/// exercised only by the live run, not a headless test.
 ///
 /// Hands back the candidate alongside the menu it belongs to — a candidate,
 /// not yet a live [`TrayItems`], since Task 1 that becomes current only after
@@ -462,28 +442,6 @@ pub fn build_tray_menu<R: Runtime>(
         None::<&str>,
     )?;
 
-    // «Мова»: Auto plus the two supported languages, in their own endonyms.
-    // The (id, label, checked) triples come from `lang_menu_items` — pure
-    // data, headlessly tested — rather than being computed inline here.
-    // Bare `CheckMenuItem`s, unlike the six above — the submenu itself is
-    // removed in Task 3, so it is not worth an icon of its own here.
-    let [
-        (auto_id, auto_label, auto_checked),
-        (uk_id, uk_label, uk_checked),
-        (en_id, en_label, en_checked),
-    ] = lang_menu_items(lang, choice);
-    let lang_auto =
-        CheckMenuItem::with_id(app, auto_id, auto_label, true, auto_checked, None::<&str>)?;
-    let lang_uk = CheckMenuItem::with_id(app, uk_id, uk_label, true, uk_checked, None::<&str>)?;
-    let lang_en = CheckMenuItem::with_id(app, en_id, en_label, true, en_checked, None::<&str>)?;
-    let language_menu = Submenu::with_id_and_items(
-        app,
-        "lang_menu",
-        locale::t(lang, Key::MenuLanguage),
-        true,
-        &[&lang_auto, &lang_uk, &lang_en],
-    )?;
-
     let action = tray_action(scan);
     // The one action item this menu carries, or none — built ENABLED
     // unconditionally where it exists: `tray_action` already asked
@@ -520,16 +478,11 @@ pub fn build_tray_menu<R: Runtime>(
     let top_separator = PredefinedMenuItem::separator(app)?;
     let action_separator = PredefinedMenuItem::separator(app)?;
     let bottom_separator = PredefinedMenuItem::separator(app)?;
-    let mut rows: Vec<&dyn IsMenuItem<R>> = vec![
-        &status,
-        &top_separator,
-        &show_search,
-        &open_settings,
-        &language_menu,
-    ];
+    let mut rows: Vec<&dyn IsMenuItem<R>> =
+        vec![&status, &top_separator, &show_search, &open_settings];
     // No empty separator group when there is nothing to separate — an
     // action-less scan (idle, a non-cancellable job, an `Ended` report with
-    // no resume) draws straight from the language submenu to the bottom
+    // no resume) draws straight from «Відкрити налаштування» to the bottom
     // separator and «Вийти».
     if let Some(item) = action_item.as_ref() {
         rows.push(&action_separator);
@@ -693,7 +646,7 @@ fn install_tray_menu<R: Runtime>(
     hotkey: &HotkeyState,
     scan: &crate::scan_state::ScanState,
 ) -> Result<(), String> {
-    let Some(tray) = app.tray_by_id("mnema-tray") else {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
     };
     let Some(slot) = app.try_state::<std::sync::Mutex<TrayItems<R>>>() else {
@@ -808,7 +761,7 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
         &scan,
     )?;
 
-    TrayIconBuilder::with_id("mnema-tray")
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(
             app.default_window_icon()
                 .expect("a default window icon")
@@ -1002,9 +955,6 @@ mod tests {
     /// 5, it would panic on `"status"` and never reach the other four ids.
     #[test]
     fn every_tray_id_has_a_non_empty_label_in_both_languages() {
-        // lang_auto/lang_uk/lang_en are not `tray_label` ids — they come from
-        // `locale::t`/`locale::endonym` directly in `build_tray_menu` — and
-        // are covered by locale.rs's own `every_key_has_both_languages...`.
         for &id in TRAY_ITEM_IDS.iter().filter(|&&id| id != "status") {
             for state in [registered("Alt+Space"), unavailable("Alt+Space")] {
                 assert!(
@@ -1048,38 +998,6 @@ mod tests {
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_the_deleted_update_check() {
         tray_label(Lang::En, "check_updates", &registered("Alt+Space"));
-    }
-
-    #[test]
-    fn exactly_one_language_item_is_checked_and_it_matches_choice() {
-        use LocaleChoice::*;
-        for (choice, checked_id) in [(Auto, "lang_auto"), (Uk, "lang_uk"), (En, "lang_en")] {
-            let items = lang_menu_items(Lang::En, choice);
-            for (id, _label, checked) in &items {
-                // The item matching `choice` is checked, and — same assertion,
-                // both directions at once — the other two are not.
-                assert_eq!(
-                    *checked,
-                    *id == checked_id,
-                    "wrong checked state: {id} @ {choice:?}"
-                );
-            }
-            // Belt against an all-checked or all-unchecked slip, which the
-            // per-item comparison above would not catch on its own.
-            assert_eq!(items.iter().filter(|(_, _, c)| *c).count(), 1);
-        }
-    }
-
-    #[test]
-    fn language_items_are_wired_to_the_catalog() {
-        let it = lang_menu_items(Lang::En, LocaleChoice::Auto);
-        assert_eq!(
-            [it[0].0, it[1].0, it[2].0],
-            ["lang_auto", "lang_uk", "lang_en"]
-        );
-        assert_eq!(it[0].1, locale::t(Lang::En, Key::LangAuto));
-        assert_eq!(it[1].1, locale::endonym(LocaleChoice::Uk));
-        assert_eq!(it[2].1, locale::endonym(LocaleChoice::En));
     }
 
     // ── `status_label` / `stop_enabled` (Task 5) ──────────────────────────

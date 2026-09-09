@@ -465,14 +465,14 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Vec<LocaleApplyEr
         //
         // `swap_tray_menu` is itself `None`-safe for a missing MANAGED STATE
         // (`Ok(())`, by its own contract, for a headless run) but treats a
-        // vanished TRAY the same way (`tray.rs`'s `tray_by_id("mnema-tray")`
+        // vanished TRAY the same way (`tray.rs`'s `tray_by_id(tray::TRAY_ID)`
         // check). Review round 1, Important 1: left as-is, that reads as
         // "applied successfully" for a tray that disappeared at runtime,
         // while the tray keeps showing the old language. Checked here instead
         // — `swap_tray_menu`'s own contract for the other `None` cases is
         // untouched.
         LocaleSurface::Tray => {
-            if app.tray_by_id("mnema-tray").is_none() {
+            if app.tray_by_id(crate::tray::TRAY_ID).is_none() {
                 Err("the tray is not installed".to_string())
             } else {
                 crate::tray::swap_tray_menu(app, lang, choice)

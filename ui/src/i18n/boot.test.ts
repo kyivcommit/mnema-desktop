@@ -63,4 +63,23 @@ describe('bootLocale ordering (reviewer F1)', () => {
     await bootLocale();
     expect(get(locale)).toBe('uk');
   });
+
+  // Task 3 (PR 10f). `liveEventSeen` alone only guards against a `locale-changed`
+  // EVENT landing during boot; it says nothing about a direct `setLocale` call —
+  // the one `locale-choice.ts`'s `changeLocaleChoice` makes from a confirmed
+  // `set_locale` reply, with no event required. Without a revision bumped by
+  // every `setLocale` and compared before the read and after the reply, this
+  // direct call is exactly as invisible to `bootLocale` as the old code left a
+  // switch that arrived with no listener yet — the stale snapshot would still
+  // win and silently revert a change nobody call an "event" ever announced.
+  it('a direct change wins over an older boot snapshot without an event', async () => {
+    let finish!: (value: { choice: string; effective: 'en' }) => void;
+    h.invoke.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const boot = bootLocale();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    setLocale('uk');
+    finish({ choice: 'auto', effective: 'en' });
+    await boot;
+    expect(get(locale)).toBe('uk');
+  });
 });

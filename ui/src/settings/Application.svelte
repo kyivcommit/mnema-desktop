@@ -3,10 +3,13 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type ThemeChoice,
+    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type LocaleChoice, type ThemeChoice,
   } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
   import { theme, changeTheme } from '../theme';
+  import {
+    localeChoiceState, loadLocaleChoice, changeLocaleChoice, retryLocaleApplication,
+  } from '../locale-choice';
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
@@ -105,7 +108,14 @@
     }
   }
 
-  onMount(() => { void refresh(); });
+  onMount(() => {
+    void refresh();
+    // `localeChoiceState` is module-level (`../locale-choice`), not reset on
+    // destroy: `Settings.svelte` destroys and recreates this component on
+    // every section switch, and busy/warning/snapshot must survive that. This
+    // mount only asks for a fresh read; it never clears the store first.
+    void loadLocaleChoice();
+  });
 
   // ---------------------------------------------------------------------------
   // The shortcut, as the operating system reports it (D-b).
@@ -444,6 +454,42 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Language (Task 3, PR 10f): moved out of the tray's temporary language
+  // submenu (Task 1/2) into this section. The store lives in
+  // `../locale-choice`, a module-level singleton like `../theme` — this
+  // component only reads it and calls its three writers; it holds no busy or
+  // choice field of its own, and `Settings.svelte`'s remount (`{#if section
+  // === 'application'}`) is exactly why: a per-component field would restart
+  // at every navigation, and a change or warning left in flight would look
+  // gone.
+  // ---------------------------------------------------------------------------
+
+  // Native `<select>`, per the mockup — not three buttons like the theme
+  // group above: three languages read fine in one control, and a person only
+  // ever wants one of them at a time in exactly the way a `<select>` states.
+  const languageReady = $derived($localeChoiceState.snapshot !== null);
+  const languageChoice: LocaleChoice = $derived($localeChoiceState.snapshot?.choice ?? 'auto');
+  const languageBusy = $derived($localeChoiceState.busy);
+  const languageApplication = $derived($localeChoiceState.application);
+  const languageReadError = $derived($localeChoiceState.error);
+
+  const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
+  const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
+  const languageUkLabel = $derived.by(() => { void $locale; return t('application_language_uk'); });
+  const languageEnLabel = $derived.by(() => { void $locale; return t('application_language_en'); });
+  const languagePartialLabel = $derived.by(() => { void $locale; return t('application_language_partial'); });
+  const languageUnknownLabel = $derived.by(() => { void $locale; return t('application_language_unknown'); });
+  const languageRetryApplyLabel = $derived.by(() => { void $locale; return t('application_language_retry_apply'); });
+  const languageRetryReadLabel = $derived.by(() => { void $locale; return t('application_language_retry_read'); });
+  const languageFailedLabel = $derived.by(() => { void $locale; return t('application_language_failed'); });
+
+  // The select's own change, not a per-option handler: one native control, one
+  // event, the value it reports is already the `LocaleChoice` the wire wants.
+  function onLanguageSelect(e: Event) {
+    void changeLocaleChoice((e.currentTarget as HTMLSelectElement).value as LocaleChoice);
+  }
+
+  // ---------------------------------------------------------------------------
   // The version (D-h): shown as it is, with no "up to date" claim beside it.
   // ---------------------------------------------------------------------------
 
@@ -561,6 +607,63 @@
       onclick={() => chooseTheme('system')}
     >{themeSystemLabel}</button>
   </div>
+
+  <p id="application-language-label">{languageLabelText}</p>
+  <select
+    id="application-language-select"
+    data-testid="application-language-select"
+    aria-labelledby="application-language-label"
+    value={languageChoice}
+    disabled={languageBusy || !languageReady}
+    onchange={onLanguageSelect}
+  >
+    <!-- `value={'auto'}`, not a bare `value="auto"`: the hardcode guard
+         (`i18n/guard.test.ts`) scans every bare attribute string not in its
+         own machine-attribute list, and `value` is not on it — reasonably,
+         since a `<button value="Submit">` IS prose. These three are wire
+         values (`LocaleChoice`), never shown, so they take the guard's own
+         documented escape hatch: an attribute written as an expression is
+         never scanned, whatever its name. -->
+    <option value={'auto'}>{languageAutoLabel}</option>
+    <option value={'uk'}>{languageUkLabel}</option>
+    <option value={'en'}>{languageEnLabel}</option>
+  </select>
+  {#if languageApplication.kind === 'partial'}
+    <!-- Confirmed choice/effective, some surfaces did not pick it up — never a
+         rejection: `set_locale` resolved, and this is what it resolved with. -->
+    <p role="alert" data-testid="application-language-partial">{languagePartialLabel}</p>
+    <ul data-testid="application-language-partial-errors">
+      {#each languageApplication.errors as err (err.surface)}
+        <!-- `err.message` is the backend's own English sentence, shown as
+             text — never as HTML, never parsed for a discriminant of its own;
+             `surface` already is one. -->
+        <li>{err.surface}: {err.message}</li>
+      {/each}
+    </ul>
+    <button
+      type="button"
+      data-testid="application-language-retry-apply"
+      disabled={languageBusy}
+      onclick={() => retryLocaleApplication()}
+    >{languageRetryApplyLabel}</button>
+  {:else if languageApplication.kind === 'unknown' && languageReadError === null}
+    <!-- `unknown` with no pending error is a REJECTED change whose automatic
+         recovery read then succeeded: the choice is confirmed again, but
+         whether it applied everywhere is not. `unknown` WITH an error is the
+         read-failure half of the same story and gets the more specific
+         message and retry control below instead — never both at once. -->
+    <p data-testid="application-language-unknown">{languageUnknownLabel}</p>
+  {/if}
+  {#if languageReadError !== null}
+    <p data-testid="application-language-failed">{languageFailedLabel}</p>
+    <p data-testid="application-language-error">{languageReadError}</p>
+    <button
+      type="button"
+      data-testid="application-language-retry-read"
+      disabled={languageBusy}
+      onclick={() => loadLocaleChoice()}
+    >{languageRetryReadLabel}</button>
+  {/if}
 
   <p data-testid="application-version">{versionText}</p>
 {/if}

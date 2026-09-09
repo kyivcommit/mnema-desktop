@@ -557,55 +557,14 @@ pub fn run() -> anyhow::Result<()> {
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
             // the ExitRequested guard lets through.
             "quit" => app.exit(0),
-            // §D129: pin a language or return to Auto. Both this callback and
-            // the `set_locale` command go through `apply_choice` (persist →
-            // update state → `apply_locale`), the one path. A tray callback has
-            // no UI channel of its own (§6), so on a persist failure we log the
-            // error and rebuild the tray menu from the UNCHANGED LocaleState:
-            // macOS has already flipped the clicked CheckMenuItem, and because
-            // `apply_choice` fails at the persist step before it touches state
-            // (locale.rs `write_choice(...)?`), this returns the checkmark to the
-            // still-current choice ("старий вибір лишається", spec §5.8). The
-            // `set_locale` command returns the same error to its caller for PR 9's
-            // in-UI channel.
-            "lang_auto" | "lang_uk" | "lang_en" => {
-                use crate::locale::LocaleChoice;
-                let choice = match event.id().as_ref() {
-                    "lang_uk" => LocaleChoice::Uk,
-                    "lang_en" => LocaleChoice::En,
-                    _ => LocaleChoice::Auto,
-                };
-                let state = app.state::<state::AppState>();
-                match crate::locale::apply_choice(app, &state, choice) {
-                    // Task 2: a persisted choice is never rolled back for an
-                    // apply failure — every failed surface is logged, since
-                    // this callback has no UI channel of its own (§6). The
-                    // temporary language submenu itself goes away in Task 3.
-                    Ok(reply) => {
-                        for err in &reply.apply_errors {
-                            eprintln!(
-                                "mnema: locale surface {:?} failed to apply: {}",
-                                err.surface, err.message
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("mnema: language change failed to persist: {e}");
-                        // Restore the checkmark: the OS toggled it on click, but the
-                        // choice never changed, so rebuild from the current state.
-                        let current = state.locale();
-                        // Task 1: `swap_tray_menu` now reports a failed install
-                        // rather than swallowing it (`install_then_publish`); this
-                        // restore path is itself best-effort like the rest of §6,
-                        // so the error is logged and not otherwise acted on here.
-                        if let Err(e) =
-                            crate::tray::swap_tray_menu(app, current.effective, current.choice)
-                        {
-                            eprintln!("mnema: tray menu restore failed: {e}");
-                        }
-                    }
-                }
-            }
+            // §D129's temporary tray language submenu (`lang_auto`/`lang_uk`/
+            // `lang_en`) is gone as of Task 3 (PR 10f): the language choice
+            // lives in the settings window's Application section now
+            // (`locale-choice.ts`), which calls the `set_locale` command —
+            // `locale::set_locale` — directly. `locale::apply_choice` (persist
+            // → update state → `apply_locale`) stays the one shared path
+            // behind that command; nothing in this match arm needs it any
+            // more.
             _ => {}
         })
         .on_window_event(|window, event| {
