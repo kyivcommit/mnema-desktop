@@ -679,8 +679,11 @@ describe('the stylesheets use what tokens.css declares', () => {
     const launcher = readFileSync(join(HERE, 'launcher.css'), 'utf8');
     expect(launcher).not.toMatch(/var\(\s*--ink-faint\s*\)/);
     for (const [theme, tokens] of [['light', light], ['dark', mediaDark]] as const) {
-      for (const text of ['--ink', '--ink-soft']) {
-        expect(contrast(tokens.get(text)!, tokens.get('--surface')!), `${theme}: ${text}`).toBeGreaterThanOrEqual(4.5);
+      for (const [text, background] of [
+        ['--ink', '--surface'], ['--ink-soft', '--surface'], ['--cite', '--cite-wash'],
+      ]) {
+        expect(contrast(tokens.get(text)!, tokens.get(background)!), `${theme}: ${text} on ${background}`)
+          .toBeGreaterThanOrEqual(4.5);
       }
     }
   });

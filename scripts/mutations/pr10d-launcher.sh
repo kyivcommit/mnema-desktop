@@ -57,3 +57,9 @@ case_ "launcher: transparent window regains the native shadow" \
   's~"shadow": false~"shadow": true~' \
   '"shadow": true' \
   src/launcher/styles.test.ts 'transparent launcher disables the native window shadow' runner=vitest
+
+case_ "launcher: light citation pair loses AA contrast" \
+  ui/src/styles/tokens.css \
+  's~--cite: #8F5D05;~--cite: #9A6708;~' \
+  '--cite: #9A6708;' \
+  src/styles/tokens.test.ts 'uses AA text colours on launcher surfaces' runner=vitest
