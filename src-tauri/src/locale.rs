@@ -421,9 +421,12 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
 /// language switch. Making this one `(async)` means giving it the same hop.
 ///
 /// ⚠️ **No headless test can tell this from the version that panics**, which is
-/// the same limit `set_hotkey`'s own note records: `swap_tray_menu` returns at
-/// its first line when there is no tray, and `mock_builder()` builds none. The
-/// defence is therefore a source-reading one —
+/// the same limit `set_hotkey`'s own note records: `swap_tray_menu` returns
+/// `Ok(())` at whichever `None`-safe check it reaches first (its own
+/// `AppState` lookup, or the tray lookup inside `install_tray_menu` it calls
+/// into), and `mock_builder()` builds neither, so it bails before reaching a
+/// `Menu::with_items` either way. The defence is therefore a source-reading
+/// one —
 /// `tests::the_locale_command_is_not_async_because_it_rebuilds_the_menu_inline`
 /// below — plus the live run that switches language with the tray up.
 #[tauri::command]
@@ -448,12 +451,15 @@ mod tests {
     /// `muda::Menu::new` panics off the main thread on macOS. It is on the main
     /// thread because the command is NOT `(async)` — an attribute, not a line
     /// of code, so no runtime assertion can reach it. And no headless test can
-    /// distinguish the two: `swap_tray_menu` returns at its first line when
-    /// there is no tray, and `mock_builder()` builds none, so under the mock a
-    /// worker-thread rebuild and a main-thread one are observationally
-    /// identical. That is the same limit `prefs::set_hotkey`'s own note
-    /// records, and it is why this is a source guard in the family of the two
-    /// in `lib.rs` rather than a fixture.
+    /// distinguish the two: `swap_tray_menu` returns `Ok(())` at whichever
+    /// `None`-safe check it reaches first (its own `AppState` lookup, or the
+    /// tray lookup inside the `install_tray_menu` it calls into), and
+    /// `mock_builder()` builds neither, so under the mock a worker-thread
+    /// rebuild and a main-thread one are observationally identical — both
+    /// bail before either could reach `Menu::with_items`. That is the same
+    /// limit `prefs::set_hotkey`'s own note records, and it is why this is a
+    /// source guard in the family of the two in `lib.rs` rather than a
+    /// fixture.
     ///
     /// The PRODUCTION half only, for those guards' own reason: this test's
     /// needles are string literals in the module below `#[cfg(test)]`, and a

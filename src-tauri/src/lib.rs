@@ -585,7 +585,9 @@ pub fn run() -> anyhow::Result<()> {
                     // rather than swallowing it (`install_then_publish`); this
                     // restore path is itself best-effort like the rest of §6,
                     // so the error is logged and not otherwise acted on here.
-                    if let Err(e) = crate::tray::swap_tray_menu(app, current.effective, current.choice) {
+                    if let Err(e) =
+                        crate::tray::swap_tray_menu(app, current.effective, current.choice)
+                    {
                         eprintln!("mnema: tray menu restore failed: {e}");
                     }
                 }

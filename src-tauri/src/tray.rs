@@ -99,15 +99,23 @@ pub fn tray_label(lang: Lang, id: &str, hotkey: &HotkeyState) -> String {
     }
 }
 
-/// The tray's action-item ids in display order — §8. Pure data, ids only (no
-/// labels: those are locale-dependent, via `tray_label`), so a headless test
-/// can guard against spec drift without constructing a native menu. On macOS,
-/// `muda` requires the main thread to build even a plain `Menu` — not only
-/// the tray *icon* — and `cfg!(test)` inside `muda` only bypasses that check
-/// when `muda` itself is compiled for test, not when a dependent crate is;
-/// see `muda-0.19.3/src/platform_impl/macos/mod.rs:132,328`. So
-/// `build_tray_menu`, like `build_tray`, is exercised only by the live run —
-/// this array is what stays headlessly testable.
+/// Every id [`tray_label`] must answer for, as one fixed list — NOT a live
+/// menu's display order. It reads that way because it once was one (§8), but
+/// Task 1's `tray_action` means `STOP_ID` and `RESUME_ID` are never both on
+/// screen at the same time (`build_tray_menu` draws at most one), so a list
+/// naming both back to back is no longer a row-for-row picture of any menu a
+/// person could actually see. What it still is: the ids
+/// `every_tray_id_has_a_non_empty_label_in_both_languages` walks to check
+/// `tray_label`'s coverage, and the ids `tray_item_ids_match_spec_order` pins
+/// against spec drift. Pure data, ids only (no labels: those are
+/// locale-dependent, via `tray_label`), so a headless test can guard against
+/// that drift without constructing a native menu. On macOS, `muda` requires
+/// the main thread to build even a plain `Menu` — not only the tray *icon* —
+/// and `cfg!(test)` inside `muda` only bypasses that check when `muda` itself
+/// is compiled for test, not when a dependent crate is; see
+/// `muda-0.19.3/src/platform_impl/macos/mod.rs:132,328`. So `build_tray_menu`,
+/// like `build_tray`, is exercised only by the live run — this array is what
+/// stays headlessly testable.
 pub const TRAY_ITEM_IDS: &[&str] = &[
     "status",
     "show_search",
@@ -367,13 +375,11 @@ impl Installed {
     }
 
     /// A full swap landed: `key` is now what is on screen, and nothing is
-    /// owed anymore. Production never calls this directly — a successful
-    /// [`install_then_publish`] replaces the whole [`TrayItems`] with a fresh
-    /// candidate whose own `installed` was already built with `retry: false`
-    /// (`build_tray_menu`) — so this exists for
-    /// `failed_refresh_retries_without_mode_change` to drive the same
-    /// transition purely, without needing a live menu to rebuild.
-    #[cfg(test)]
+    /// owed anymore. [`install_tray_menu`]'s publish closure calls this on
+    /// the live `TrayItems` (rather than replacing the struct whole) so that
+    /// `failed_refresh_retries_without_mode_change` drives the SAME function
+    /// production does, and can fail from a production bug in it rather than
+    /// only from a bug in a test-only mirror of it.
     fn record_success(&mut self, key: MenuKey) {
         self.key = key;
         self.retry = false;
@@ -702,9 +708,15 @@ fn install_tray_menu<R: Runtime>(
         candidate,
         |menu| tray.set_menu(Some(menu)).map_err(|e| e.to_string()),
         |candidate| {
-            *slot
+            let mut guard = slot
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = candidate;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.status = candidate.status;
+            // Through `Installed::record_success`, the same transition
+            // `failed_refresh_retries_without_mode_change` drives purely —
+            // production and the pure test share one function rather than
+            // production quietly taking a different path to the same state.
+            guard.installed.record_success(candidate.installed.key);
         },
     );
 
@@ -1416,7 +1428,10 @@ mod tests {
             (other(OtherJob::ModelAdoption, false), None),
             (other(OtherJob::Probe, true), Some(TrayAction::Stop)),
             (ended_resuming(None), None),
-            (ended_resuming(Some(Entry::EmbedOnly)), Some(TrayAction::Resume)),
+            (
+                ended_resuming(Some(Entry::EmbedOnly)),
+                Some(TrayAction::Resume),
+            ),
         ];
         for (state, want) in &rows {
             assert_eq!(
@@ -1435,7 +1450,8 @@ mod tests {
     #[test]
     fn failed_install_does_not_publish_candidate() {
         let live = std::cell::Cell::new(1);
-        let result = install_then_publish(2, 2, |_| Err::<(), _>("install failed"), |h| live.set(h));
+        let result =
+            install_then_publish(2, 2, |_| Err::<(), _>("install failed"), |h| live.set(h));
         assert_eq!(result, Err("install failed"));
         assert_eq!(live.get(), 1);
         install_then_publish(3, 3, |_| Ok::<(), &str>(()), |h| live.set(h)).unwrap();
