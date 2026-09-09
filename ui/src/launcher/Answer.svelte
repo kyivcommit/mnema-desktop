@@ -44,7 +44,7 @@
 </script>
 
 <div class="answer-card">
-  <div data-testid="query-echo">{query}</div>
+  <div class="umsg" data-testid="query-echo">{query}</div>
 
   <h3>{answerHeading}</h3>
   <p data-testid="answer-body">{#each segments as segment}{#if segment.kind === 'text'}{segment.text}{:else}<button type="button" onclick={() => onSelect(citationFor(segment.n))}>[{segment.n}]</button>{/if}{/each}</p>
@@ -55,6 +55,7 @@
       <li>
         <button
           type="button"
+          class="prev"
           data-testid={`preview-${citation.anchor}`}
           onclick={() => onSelect(citation)}
         >
@@ -76,9 +77,9 @@
                namespace holds one id per citation and nothing else`,
                `Answer.test.ts` — and by nothing else; the same rule
                `Passages.svelte` follows for its own row. -->
-          <span data-testid="citation-anchor">[{citation.anchor}]</span>
-          <span data-testid="citation-text">{citation.text}</span>
-          <span data-testid="citation-label">{label}</span>
+          <span class="tag" data-testid="citation-anchor">[{citation.anchor}]</span>
+          <span class="q" data-testid="citation-text">{citation.text}</span>
+          <span class="path" data-testid="citation-label">{label}</span>
         </button>
       </li>
     {/each}

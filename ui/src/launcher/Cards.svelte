@@ -96,7 +96,7 @@
      and this is the card whose whole purpose is browsing the cited file's folder
      neighbours (§7). -->
 {#if showTree}
-  <section data-testid="card-tree" aria-label={treeLabel}>
+  <section class="float col-side" data-testid="card-tree" aria-label={treeLabel}>
     <Tree {selected} />
   </section>
 {/if}

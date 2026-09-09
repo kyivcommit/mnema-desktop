@@ -67,23 +67,25 @@
 
 <svelte:window onkeydown={onKeydown} onblur={onBlur} />
 
-<main>
-  <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
-  <Arms bind:textOn bind:contentOn {provider} />
-
+<main class="panels">
+  <div class="searchbar">
+    <div class="sb-row">
+      <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+      <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
+           aria-label to prove the locale switch reached the DOM. It used to find the
+           button as "the first element with any aria-label", which was true only
+           while no labelled card rendered — and the cards are now labelled in five
+           of six states. The accessible name cannot be the selector when it is the
+           thing under test. -->
+      <button
+        class="pin"
+        data-testid="pin"
+        class:active={pinned}
+        aria-pressed={pinned}
+        aria-label={pinLabel}
+        onclick={() => (pinned = !pinned)}>📌</button>
+    </div>
+    <Arms bind:textOn bind:contentOn {provider} />
+  </div>
   <Cards state={launcherState} query={echo} />
-
-  <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
-       aria-label to prove the locale switch reached the DOM. It used to find the
-       button as "the first element with any aria-label", which was true only
-       while no labelled card rendered — and the cards are now labelled in five
-       of six states. The accessible name cannot be the selector when it is the
-       thing under test. -->
-  <button
-    class="pin"
-    data-testid="pin"
-    class:active={pinned}
-    aria-pressed={pinned}
-    aria-label={pinLabel}
-    onclick={() => (pinned = !pinned)}>📌</button>
 </main>

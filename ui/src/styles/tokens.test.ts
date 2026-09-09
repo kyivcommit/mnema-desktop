@@ -31,17 +31,6 @@ const SETTINGS_PATH = join(HERE, 'settings.css');
 const SETTINGS_MAIN_PATH = join(SRC, 'settings', 'main.ts');
 const LAUNCHER_MAIN_PATH = join(SRC, 'launcher', 'main.ts');
 
-// Tokens the settings window does not use and the launcher (10d) will — or
-// 10d strikes them from tokens.css. Held in both directions below: a token
-// here that a stylesheet uses is a line to delete from this list; a token
-// missing from tokens.css is a line to delete too. Ordered 10e → 10d by the
-// owner on 2026-09-07; the list is meant to reach zero.
-const OWED_TO_10D = new Set([
-  '--ground', '--glow', '--panel',
-  '--add', '--add-line', '--add-wash',
-  '--ok', '--ok-wash', '--err', '--err-wash',
-]);
-
 // The stylesheets each window imports, in the order the cascade needs them:
 // tokens before anything that reads them, fonts before the stacks are used,
 // base before a window's own sheet overrides it. No test mounts through
@@ -235,6 +224,18 @@ function loadThemes() {
 }
 
 const sortedNames = (m: Map<string, string>) => [...m.keys()].sort();
+
+function contrast(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const match = /^#([\da-f]{6})$/i.exec(hex);
+    if (!match) throw new Error(`expected #RRGGBB, got ${hex}`);
+    return [0, 2, 4].map((offset) => parseInt(match[1].slice(offset, offset + 2), 16) / 255)
+      .map((value) => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+  };
+  const [a, b] = [luminance(foreground), luminance(background)];
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
 
 // 1-indexed line number of the character at `offset` into `text`, and that
 // line's own text (trimmed) — both computed from the character offset, not
@@ -673,12 +674,24 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
 });
 
 describe('the stylesheets use what tokens.css declares', () => {
+  it('uses AA text colours on launcher surfaces', () => {
+    const { light, mediaDark } = loadThemes();
+    const launcher = readFileSync(join(HERE, 'launcher.css'), 'utf8');
+    expect(launcher).not.toMatch(/var\(\s*--ink-faint\s*\)/);
+    for (const [theme, tokens] of [['light', light], ['dark', mediaDark]] as const) {
+      for (const [text, background] of [
+        ['--ink', '--surface'], ['--ink-soft', '--surface'], ['--cite', '--cite-wash'],
+      ]) {
+        expect(contrast(tokens.get(text)!, tokens.get(background)!), `${theme}: ${text} on ${background}`)
+          .toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   // The other direction of `use only tokens that tokens.css declares`: a
   // token nobody reads is a value that can drift in one theme and never be
-  // seen — the mockup's --ok, say, retinted in dark and used by no rule. Any
-  // token not used yet is named in OWED_TO_10D with its owner; the list is
-  // held so it can only shrink.
-  it('uses every token it declares, except the ones 10d owes', () => {
+  // seen.
+  it('uses every token it declares', () => {
     const { light } = loadThemes();
     const files = walk(SRC, ['.css', '.svelte']).filter((f) => f !== TOKENS_PATH && f !== FONTS_PATH);
     expect(files.length, `no .css/.svelte files under ${SRC}`).toBeGreaterThan(0);
@@ -689,14 +702,8 @@ describe('the stylesheets use what tokens.css declares', () => {
       for (const m of text.matchAll(/var\(\s*(--[\w-]+)/g)) used.add(m[1]);
     }
 
-    const unused = [...light.keys()].filter((n) => !used.has(n) && !OWED_TO_10D.has(n)).sort();
-    expect(unused, 'declared in tokens.css, read by no stylesheet, and not owed to 10d').toEqual([]);
-
-    const owedButUsed = [...OWED_TO_10D].filter((n) => used.has(n)).sort();
-    expect(owedButUsed, 'now used — strike it from OWED_TO_10D').toEqual([]);
-
-    const owedButGone = [...OWED_TO_10D].filter((n) => !light.has(n)).sort();
-    expect(owedButGone, 'no longer in tokens.css — strike it from OWED_TO_10D').toEqual([]);
+    const unused = [...light.keys()].filter((n) => !used.has(n)).sort();
+    expect(unused, 'declared in tokens.css, read by no stylesheet').toEqual([]);
   });
 });
 

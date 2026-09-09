@@ -78,7 +78,7 @@
     <ul>
       {#each ranks as { passage, rank, label } (rank)}
         <li>
-          <button type="button" data-testid={`rank-${rank}`} onclick={() => onSelect(passage)}>
+          <button class="prev" type="button" data-testid={`rank-${rank}`} onclick={() => onSelect(passage)}>
             <!-- 🔴 Owner review on PR #24, P1. This row used to render the label
                  ALONE, so state E — the state whose whole content is the
                  passages — showed a list of file paths and discarded the only
@@ -95,9 +95,9 @@
                  the rank testids are queried as a namespace
                  (`getAllByTestId(/^rank-/)`) and a second id in it would be
                  counted as a row. -->
-            <span data-testid="passage-rank">{rank}</span>
-            <span data-testid="passage-text">{passage.text}</span>
-            <span data-testid="passage-label">{label}</span>
+            <span class="tag rank" data-testid="passage-rank">{rank}</span>
+            <span class="q" data-testid="passage-text">{passage.text}</span>
+            <span class="path" data-testid="passage-label">{label}</span>
           </button>
         </li>
       {/each}
