@@ -344,6 +344,87 @@ pub fn get_locale(state: tauri::State<'_, crate::state::AppState>) -> LocaleRepl
     }
 }
 
+/// One surface [`apply_locale`] touches, and the discriminant on the wire in
+/// [`LocaleApplyError`] — `#[serde(rename_all = "camelCase")]` here (not
+/// inherited from [`LocaleApplyReply`], which carries its own) so the four
+/// variants cross as `"tray"`/`"settingsTitle"`/`"appMenu"`/`"localeEvent"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LocaleSurface {
+    Tray,
+    SettingsTitle,
+    AppMenu,
+    LocaleEvent,
+}
+
+/// One surface's failure to pick up a language change. `message` is English
+/// and is shown by the UI as a backend message — never matched on, only
+/// displayed (its text is not a discriminant; `surface` is).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LocaleApplyError {
+    pub(crate) surface: LocaleSurface,
+    pub(crate) message: String,
+}
+
+/// What [`set_locale`] and the tray's language callback both return: the
+/// choice that was PERSISTED (never rolled back for an apply failure — only a
+/// failed persist becomes `Err`), and every surface that did not pick it up.
+/// `apply_errors` is always present on the wire, even empty, so the caller
+/// never has to distinguish "no errors" from "field omitted".
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleApplyReply {
+    pub choice: String,
+    pub effective: String,
+    pub(crate) apply_errors: Vec<LocaleApplyError>,
+}
+
+/// Runs `run` once for each surface, in the fixed order `apply_locale` always
+/// used — Tray, SettingsTitle, AppMenu, LocaleEvent — continuing past a
+/// failure so every surface is attempted regardless of an earlier one's
+/// outcome, and collects the failures as [`LocaleApplyError`]s naming which
+/// surface produced each message.
+fn apply_surfaces(
+    mut run: impl FnMut(LocaleSurface) -> Result<(), String>,
+) -> Vec<LocaleApplyError> {
+    use LocaleSurface::*;
+    let mut errors = Vec::new();
+    for surface in [Tray, SettingsTitle, AppMenu, LocaleEvent] {
+        if let Err(message) = run(surface) {
+            errors.push(LocaleApplyError { surface, message });
+        }
+    }
+    errors
+}
+
+/// The seam behind [`apply_choice`]: persist → commit → apply, with the two
+/// side-effecting steps taken out as closures so tests can pin the order and
+/// the failure handling without a real `AppHandle`. `commit_state` and
+/// `apply` never run when `write_choice` fails — a failed persist is the ONLY
+/// path that returns `Err`, and nothing about the running app is touched when
+/// it does.
+fn apply_choice_with(
+    data_dir: &Path,
+    choice: LocaleChoice,
+    os: Option<&str>,
+    commit_state: impl FnOnce(LocaleState),
+    apply: impl FnOnce(Lang) -> Vec<LocaleApplyError>,
+) -> Result<LocaleApplyReply, crate::error::Error> {
+    write_choice(data_dir, choice)?; // a write failure surfaces (spec §6)
+    let saved = LocaleState {
+        choice,
+        effective: resolve(choice, os),
+    };
+    commit_state(saved);
+    let apply_errors = apply(saved.effective);
+    Ok(LocaleApplyReply {
+        choice: choice_to_str(saved.choice).into(),
+        effective: lang_tag(saved.effective).into(),
+        apply_errors,
+    })
+}
+
 /// The shared path for a language change, used by BOTH the `set_locale`
 /// command and the tray callback (Task 6): persist → update state → apply
 /// natively. Writes to the data dir `AppState` resolved at startup
@@ -352,52 +433,64 @@ pub fn apply_choice<R: Runtime>(
     app: &AppHandle<R>,
     state: &crate::state::AppState,
     choice: LocaleChoice,
-) -> Result<(), crate::error::Error> {
-    write_choice(state.data_dir(), choice)?; // a write failure surfaces (spec §6)
-    let effective = resolve(choice, sys_locale::get_locale().as_deref());
-    state.set_locale_state(LocaleState { choice, effective });
-    apply_locale(app, effective); // Task 6 fills apply_locale
-    Ok(())
+) -> Result<LocaleApplyReply, crate::error::Error> {
+    apply_choice_with(
+        state.data_dir(),
+        choice,
+        sys_locale::get_locale().as_deref(),
+        |saved| state.set_locale_state(saved),
+        |lang| apply_locale(app, lang),
+    )
 }
 
 /// Applies a resolved language to everything already on screen: the tray menu
 /// (labels + the «Мова» checkmarks), the settings window's native title, and
 /// the macOS app menu — then broadcasts the change so the webview can follow.
+/// Returns every surface that did not pick up the change; the caller decides
+/// what to do with that (`set_locale` hands it to the webview, the tray
+/// callback logs it — §6, no UI channel of its own there).
 ///
 /// Reads the persisted choice back from `AppState`, which `apply_choice` has
 /// already updated before calling here, so the checkmarks land on the NEW
-/// choice rather than the old one. Every step is best-effort (`let _ =`): a
-/// language change relabels as much as it can even if one surface refuses, and
-/// this runs from a tray callback with no error channel of its own (§6).
-fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
+/// choice rather than the old one. Every step is attempted regardless of an
+/// earlier one's outcome, through [`apply_surfaces`].
+fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Vec<LocaleApplyError> {
     let choice = app.state::<crate::state::AppState>().locale().choice;
-    // The tray menu is rebuilt whole and swapped in via `set_menu`; the tray
-    // icon and its `on_tray_icon_event` (the positioner) are left in place.
-    // The rebuild also replaces the status/Stop items a job may be about to
-    // redraw, which is why the swap is `tray::swap_tray_menu` and not a
-    // `set_menu` here — see `tray::TrayItems`.
-    //
-    // Task 1 (PR 10f): `swap_tray_menu` now reports a failed install via
-    // `Result<(), String>` instead of swallowing it (`install_then_publish`
-    // in `tray.rs`). This call site only discards it for now — best-effort,
-    // like every other step in this function — because surfacing it as a
-    // sentence a person can read is Task 2's own job.
-    let _ = crate::tray::swap_tray_menu(app, lang, choice);
-    // The settings window's native OS title, re-set whether or not it is
-    // visible so an already-open or merely-hidden window is right next time.
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.set_title(&format!("Mnema — {}", t(lang, Key::SettingsTitle)));
-    }
-    // The macOS app menu, rebuilt always — not only while settings is visible
-    // (§5.7) — so a change made from the tray with the menu bar hidden is
-    // already applied when it next shows. Off macOS this is the default menu
-    // and the rebuild is a harmless no-op.
-    if let Ok(menu) = crate::build_app_menu(app, lang) {
-        let _ = app.set_menu(menu);
-    }
-    // Broadcast the new language so any open webview can re-render its own
-    // strings; the native chrome above is already relabelled.
-    let _ = app.emit("locale-changed", lang_tag(lang));
+    apply_surfaces(|surface| match surface {
+        // The tray menu is rebuilt whole and swapped in via `set_menu`; the
+        // tray icon and its `on_tray_icon_event` (the positioner) are left in
+        // place. The rebuild also replaces the status/Stop items a job may be
+        // about to redraw, which is why the swap is `tray::swap_tray_menu`
+        // and not a `set_menu` here — see `tray::TrayItems`. `swap_tray_menu`
+        // is itself `None`-safe (no tray, or no managed state, is `Ok(())`):
+        // a headless run reports nothing here for that reason, not because
+        // this call site swallows anything.
+        LocaleSurface::Tray => crate::tray::swap_tray_menu(app, lang, choice),
+        // The settings window's native OS title, re-set whether or not it is
+        // visible so an already-open or merely-hidden window is right next
+        // time. A missing window is this surface's own failure — by the time
+        // a language change can run, the settings window has already been
+        // created once (`lib.rs` setup) and stays alive, hidden, until quit.
+        LocaleSurface::SettingsTitle => match app.get_webview_window("settings") {
+            Some(w) => w
+                .set_title(&format!("Mnema — {}", t(lang, Key::SettingsTitle)))
+                .map_err(|e| e.to_string()),
+            None => Err("the settings window is not open".to_string()),
+        },
+        // The macOS app menu, rebuilt always — not only while settings is
+        // visible (§5.7) — so a change made from the tray with the menu bar
+        // hidden is already applied when it next shows. Off macOS this is the
+        // default menu and the rebuild is a harmless, always-`Ok` no-op —
+        // never counted as a failure.
+        LocaleSurface::AppMenu => crate::build_app_menu(app, lang)
+            .and_then(|menu| app.set_menu(menu).map(|_| ()))
+            .map_err(|e| e.to_string()),
+        // Broadcasts the new language so any open webview can re-render its
+        // own strings; the native chrome above is already relabelled.
+        LocaleSurface::LocaleEvent => app
+            .emit("locale-changed", lang_tag(lang))
+            .map_err(|e| e.to_string()),
+    })
 }
 
 /// 🔴 **`#[tauri::command]` with no `(async)`, and that is load-bearing rather
@@ -434,7 +527,7 @@ pub fn set_locale<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, crate::state::AppState>,
     choice: String,
-) -> Result<(), crate::error::Error> {
+) -> Result<LocaleApplyReply, crate::error::Error> {
     apply_choice(&app, &state, choice_from_str(&choice))
 }
 
@@ -734,5 +827,195 @@ mod tests {
         // — no AppHandle, no `app.path()` — is the regression guard for the
         // start-up panic a menu-closure `resolve_effective` once caused.
         assert!(matches!(boot_lang(), Lang::Uk | Lang::En));
+    }
+
+    // --- Task 2: `apply_choice_with` / `apply_surfaces` ---------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_failure_does_not_apply() {
+        // A failed persist is the ONLY path that returns `Err` (spec §6) — and
+        // when it does, neither the in-memory state nor any surface must be
+        // touched, so a caller never sees a change that never made it to disk.
+        use std::cell::Cell;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let committed = Cell::new(false);
+        let applied = Cell::new(false);
+        let result = apply_choice_with(
+            dir.path(),
+            LocaleChoice::Uk,
+            Some("en-US"),
+            |_saved| committed.set(true),
+            |_lang| {
+                applied.set(true);
+                Vec::new()
+            },
+        );
+
+        // Restore perms first, so the tempdir cleans up whatever the asserts do.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "a persist failure must surface as Err");
+        assert!(
+            !committed.get(),
+            "state must not be committed when persist fails"
+        );
+        assert!(!applied.get(), "apply must not run when persist fails");
+    }
+
+    #[test]
+    fn saved_locale_survives_apply_failure() {
+        // An apply failure is reported, never turned into an `Err` that would
+        // read as a rollback: the persisted choice, and the committed state,
+        // must both stand even when every surface refused it.
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let committed: Cell<Option<LocaleState>> = Cell::new(None);
+
+        let result = apply_choice_with(
+            dir.path(),
+            LocaleChoice::En,
+            Some("uk-UA"),
+            |saved| committed.set(Some(saved)),
+            |_lang| {
+                vec![LocaleApplyError {
+                    surface: LocaleSurface::Tray,
+                    message: "no tray in this run".into(),
+                }]
+            },
+        )
+        .expect("an apply failure must not turn a persisted choice into an Err");
+
+        assert_eq!(result.choice, "en");
+        assert_eq!(result.effective, "en");
+        assert_eq!(result.apply_errors.len(), 1);
+        assert_eq!(result.apply_errors[0].surface, LocaleSurface::Tray);
+        assert_eq!(
+            read_choice(dir.path()),
+            LocaleChoice::En,
+            "the persisted choice must survive an apply failure"
+        );
+        assert_eq!(
+            committed
+                .get()
+                .expect("commit_state must run even when apply fails")
+                .choice,
+            LocaleChoice::En
+        );
+    }
+
+    #[test]
+    fn apply_attempts_every_surface() {
+        // Each of the four surfaces takes a turn failing; the other three are
+        // still attempted — no early return on the first refusal.
+        use std::cell::RefCell;
+        let all = [
+            LocaleSurface::Tray,
+            LocaleSurface::SettingsTitle,
+            LocaleSurface::AppMenu,
+            LocaleSurface::LocaleEvent,
+        ];
+        for &failing in &all {
+            let seen = RefCell::new(Vec::new());
+            let errors = apply_surfaces(|surface| {
+                seen.borrow_mut().push(surface);
+                if surface == failing {
+                    Err(format!("{surface:?} refused"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(
+                *seen.borrow(),
+                all,
+                "every surface must be attempted regardless of an earlier failure (forced: {failing:?})"
+            );
+            assert_eq!(
+                errors.len(),
+                1,
+                "only the forced failure should be reported, for {failing:?}: {errors:?}"
+            );
+            assert_eq!(errors[0].surface, failing);
+        }
+    }
+
+    #[test]
+    fn same_choice_retries_application() {
+        // Repeating the same choice performs all apply steps (and the emit)
+        // again — this is the retry path the settings UI relies on: no early
+        // return just because the persisted choice did not change.
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        write_choice(dir.path(), LocaleChoice::Uk).unwrap();
+        let apply_calls = Cell::new(0);
+
+        for _ in 0..2 {
+            apply_choice_with(
+                dir.path(),
+                LocaleChoice::Uk,
+                Some("en-US"),
+                |_saved| {},
+                |_lang| {
+                    apply_calls.set(apply_calls.get() + 1);
+                    Vec::new()
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            apply_calls.get(),
+            2,
+            "repeating the same choice must still run apply, not short-circuit on equality"
+        );
+    }
+
+    #[test]
+    fn wire_shape_uses_camel_case_and_always_carries_apply_errors() {
+        // `#[serde(rename_all = "camelCase")]` sits on `LocaleApplyReply`
+        // itself — a neighbouring type's attribute would not reach it, and
+        // `invoke::<LocaleApplyReply>` on the UI side renames nothing at
+        // runtime, so this pins the exact JSON the frontend reads.
+        let empty = LocaleApplyReply {
+            choice: "uk".into(),
+            effective: "uk".into(),
+            apply_errors: Vec::new(),
+        };
+        let value = serde_json::to_value(&empty).unwrap();
+        assert_eq!(value["choice"], "uk");
+        assert_eq!(value["effective"], "uk");
+        assert!(
+            value.get("applyErrors").is_some(),
+            "applyErrors must be present even for an empty list: {value}"
+        );
+        assert_eq!(value["applyErrors"], serde_json::json!([]));
+        assert!(
+            value.get("apply_errors").is_none(),
+            "the snake_case key must not leak onto the wire: {value}"
+        );
+
+        let with_error = LocaleApplyReply {
+            choice: "en".into(),
+            effective: "en".into(),
+            apply_errors: vec![LocaleApplyError {
+                surface: LocaleSurface::SettingsTitle,
+                message: "boom".into(),
+            }],
+        };
+        let value = serde_json::to_value(&with_error).unwrap();
+        assert_eq!(value["applyErrors"][0]["surface"], "settingsTitle");
+        assert_eq!(value["applyErrors"][0]["message"], "boom");
+
+        for (surface, expected) in [
+            (LocaleSurface::Tray, "tray"),
+            (LocaleSurface::SettingsTitle, "settingsTitle"),
+            (LocaleSurface::AppMenu, "appMenu"),
+            (LocaleSurface::LocaleEvent, "localeEvent"),
+        ] {
+            assert_eq!(serde_json::to_value(surface).unwrap(), expected);
+        }
     }
 }

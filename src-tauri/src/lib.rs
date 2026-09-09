@@ -576,19 +576,33 @@ pub fn run() -> anyhow::Result<()> {
                     _ => LocaleChoice::Auto,
                 };
                 let state = app.state::<state::AppState>();
-                if let Err(e) = crate::locale::apply_choice(app, &state, choice) {
-                    eprintln!("mnema: language change failed to persist: {e}");
-                    // Restore the checkmark: the OS toggled it on click, but the
-                    // choice never changed, so rebuild from the current state.
-                    let current = state.locale();
-                    // Task 1: `swap_tray_menu` now reports a failed install
-                    // rather than swallowing it (`install_then_publish`); this
-                    // restore path is itself best-effort like the rest of §6,
-                    // so the error is logged and not otherwise acted on here.
-                    if let Err(e) =
-                        crate::tray::swap_tray_menu(app, current.effective, current.choice)
-                    {
-                        eprintln!("mnema: tray menu restore failed: {e}");
+                match crate::locale::apply_choice(app, &state, choice) {
+                    // Task 2: a persisted choice is never rolled back for an
+                    // apply failure — every failed surface is logged, since
+                    // this callback has no UI channel of its own (§6). The
+                    // temporary language submenu itself goes away in Task 3.
+                    Ok(reply) => {
+                        for err in &reply.apply_errors {
+                            eprintln!(
+                                "mnema: locale surface {:?} failed to apply: {}",
+                                err.surface, err.message
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("mnema: language change failed to persist: {e}");
+                        // Restore the checkmark: the OS toggled it on click, but the
+                        // choice never changed, so rebuild from the current state.
+                        let current = state.locale();
+                        // Task 1: `swap_tray_menu` now reports a failed install
+                        // rather than swallowing it (`install_then_publish`); this
+                        // restore path is itself best-effort like the rest of §6,
+                        // so the error is logged and not otherwise acted on here.
+                        if let Err(e) =
+                            crate::tray::swap_tray_menu(app, current.effective, current.choice)
+                        {
+                            eprintln!("mnema: tray menu restore failed: {e}");
+                        }
                     }
                 }
             }
