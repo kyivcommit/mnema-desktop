@@ -1307,7 +1307,7 @@ test('a rejected change whose recovery read confirms the SAME choice as before s
   setLocaleChoice.mockRejectedValueOnce(new Error('still refused'));
   getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' }); // unchanged — same choice as before
   await fireEvent.change(languageSelect(), { target: { value: 'en' } });
-  await waitFor(() => expect(screen.getByTestId('application-language-change-failed')).toBeTruthy());
+  await waitFor(() => expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy());
   expect(languageSelect().value).toBe('auto');
 
   // Not stuck: picking the very same option again still fires a fresh
@@ -1424,27 +1424,91 @@ test('a failed read shows the backend message and a retry-read control that reco
   expect(languageSelect().disabled).toBe(false);
 });
 
-test('a rejected change shows its own message and re-reads, rather than a partial warning', async () => {
+test('a rejected change shows its own message and re-reads, alongside the unconfirmed-state sentence', async () => {
   setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
   renderSection();
   await shown('application-language-select');
 
   getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' }); // the rejection's own recovery read
   await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
-  // Review round 1, Minor 3: the CHANGE's own rejection message, under its
-  // own heading — not the generic "unconfirmed" sentence, and not mislabelled
-  // as a failed READ (the recovery read here succeeds).
-  await waitFor(() => expect(screen.getByTestId('application-language-change-failed')).toBeTruthy());
+  // Review round 2, Important A: the generic "unconfirmed" sentence is shown
+  // for EVERY `unknown` outcome, not suppressed by a pending command message
+  // — the two are never mutually exclusive (persist-vs-transport genuinely
+  // is not knowable, so "unconfirmed" is always true here; the command's own
+  // message adds detail beside it, never replaces it). Review round 1,
+  // Minor 3: the CHANGE's own rejection message is under its own heading,
+  // not mislabelled as a failed READ (the recovery read here succeeds).
+  await waitFor(() => expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy());
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
   expect(at('application-language-change-error')).toBe('IPC closed');
   expect(screen.queryByTestId('application-language-partial')).toBeNull();
-  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
   // The recovery read succeeded, so there is no READ message left to retry.
   expect(screen.queryByTestId('application-language-failed')).toBeNull();
 
   // A fresh, successful change clears the earlier rejection's own message.
   setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
   await fireEvent.change(languageSelect(), { target: { value: 'en' } });
-  await waitFor(() => expect(screen.queryByTestId('application-language-change-failed')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('application-language-change-unconfirmed')).toBeNull());
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
+});
+
+// Review round 2, Important A. `application.kind === 'unknown'` means
+// persist-vs-transport could not be told apart from the message alone
+// (`locale-choice.ts`'s own comment on `changeError`) — reachable even when
+// the change DID apply: the reply is lost in transport, and the recovery
+// read then confirms the NEW choice, not the old one. Asserting "the
+// language was not changed" in that state is a fact the code has no basis to
+// state; this is exactly that scenario, proven by the recovery read
+// confirming 'en' where the store held 'auto' before.
+test('a rejected change whose recovery read confirms a NEW choice never claims the language was not changed', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the REJECTION's recovery read — confirms the NEW choice
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(languageSelect().value).toBe('en'));
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
+  expect(pageText()).not.toMatch(/not changed|не змінено/i);
+});
+
+// Review round 2, Minor C. `changeError` has no exit path except a FRESH
+// change/retry attempt — a plain read (successful or not) never touches it,
+// by the same rule `application` itself follows (a read has no `applyErrors`
+// to confirm one way or the other). This proves that rule end to end: the
+// command's own message outlives a failed-then-successful "Retry reading",
+// and only a later command clears it.
+test('a rejected change\'s own message outlives a failed-then-successful read, and only a fresh command clears it', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockRejectedValueOnce(new Error('disk unreadable')); // the REJECTION's own recovery read, and it fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  // Waited on the READ's own signal, not the change's: `changeLocaleChoice`
+  // awaits its own recovery `loadLocaleChoice()` before its promise settles,
+  // so the read failing is the LATER of the two and implies the change's own
+  // message already landed.
+  await waitFor(() => expect(screen.getByTestId('application-language-failed')).toBeTruthy());
+  expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy();
+  expect(at('application-language-change-error')).toBe('IPC closed');
+
+  // A later, independent "Retry reading" succeeds: it clears the READ's own
+  // error and reveals the unknown sentence (it was suppressed by nothing —
+  // `error !== null` just drew its own block instead), but the CHANGE's own
+  // message is not a read's to clear.
+  getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' });
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-failed')).toBeNull());
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
+  expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy();
+  expect(at('application-language-change-error')).toBe('IPC closed');
+
+  // Only a fresh, successful command clears it.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.queryByTestId('application-language-change-unconfirmed')).toBeNull());
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
 });
 
 test('the language segment speaks the window language, both directions', async () => {

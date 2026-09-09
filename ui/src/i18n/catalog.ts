@@ -128,7 +128,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_language_uk' | 'application_language_en'
   | 'application_language_partial' | 'application_language_unknown'
   | 'application_language_retry_apply' | 'application_language_retry_read'
-  | 'application_language_failed' | 'application_language_change_failed'
+  | 'application_language_failed' | 'application_language_change_unconfirmed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -997,7 +997,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // headings (review round 1, Minor 3), the same way `application_shortcut_
     // failed`/`application_autostart_failed`/`application_theme_failed` each
     // name their own control rather than sharing one sentence.
-    application_language_change_failed: 'Мову не змінено. Ось що відповів застосунок:',
+    //
+    // NEVER "не змінено" / "was not changed" (review round 2, Important A):
+    // `application.kind === 'unknown'` means persist-vs-transport could not
+    // be told apart from the message alone — the change may well have
+    // applied and only its REPLY got lost. "Не підтверджено" states only
+    // what is actually known.
+    application_language_change_unconfirmed: 'Зміну мови не підтверджено. Ось що відповів застосунок:',
   },
   en: {
     pin: 'Pin',
@@ -1268,6 +1274,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_language_retry_apply: 'Retry applying',
     application_language_retry_read: 'Retry reading',
     application_language_failed: 'The language could not be read. This is what the application answered:',
-    application_language_change_failed: 'The language was not changed. This is what the application answered:',
+    application_language_change_unconfirmed: 'The language change could not be confirmed. This is what the application answered:',
   },
 };

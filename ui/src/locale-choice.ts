@@ -43,7 +43,18 @@ export type LocaleChoiceState = {
   // actually about the CHANGE). One field cannot answer "which operation said
   // this" once a second operation touches it; two fields need no answer.
   error: string | null; // the last loadLocaleChoice()'s own rejection message
-  changeError: string | null; // the last changeLocaleChoice/retryLocaleApplication's own rejection message
+  // The last changeLocaleChoice/retryLocaleApplication's own rejection
+  // message. Review round 2, Minor C — its exit rule, stated once here
+  // rather than left implicit: cleared only by a SUBSEQUENT
+  // changeLocaleChoice/retryLocaleApplication call, at that call's own
+  // START (regardless of how it turns out) and again, redundantly, on that
+  // call's SUCCESS. `loadLocaleChoice` never clears it, successful or not —
+  // the same reason it never touches `application` either: a read has no
+  // `applyErrors` to confirm this message resolved one way or the other, so
+  // it is not entitled to an opinion about it. It can therefore outlive a
+  // successful "Retry reading" indefinitely, which is correct: nothing about
+  // that read answered whether the EARLIER change applied everywhere.
+  changeError: string | null;
   application: LocaleApplicationState;
 };
 

@@ -483,7 +483,7 @@
   const languageRetryApplyLabel = $derived.by(() => { void $locale; return t('application_language_retry_apply'); });
   const languageRetryReadLabel = $derived.by(() => { void $locale; return t('application_language_retry_read'); });
   const languageFailedLabel = $derived.by(() => { void $locale; return t('application_language_failed'); });
-  const languageChangeFailedLabel = $derived.by(() => { void $locale; return t('application_language_change_failed'); });
+  const languageChangeUnconfirmedLabel = $derived.by(() => { void $locale; return t('application_language_change_unconfirmed'); });
 
   // 🔴 Review round 1, Critical. The select's `value={languageChoice}` binding
   // compiles to a dirty check against the LAST value Svelte itself wrote
@@ -667,24 +667,28 @@
       disabled={languageBusy}
       onclick={() => retryLocaleApplication()}
     >{languageRetryApplyLabel}</button>
-  {:else if languageApplication.kind === 'unknown' && languageReadError === null && languageChangeError === null}
-    <!-- `unknown` with neither message pending: a rejected change whose own
-         message a NEWER attempt already cleared (review round 1, Minor 3 —
-         `changeError` resets to null at the START of the next
-         `changeLocaleChoice`/`retryLocaleApplication`, before that attempt's
-         own outcome is known), or the tail of a remount that has not yet
-         re-read. Either specific message below is always the more useful
-         thing to show once one exists — never both that and this at once. -->
+  {:else if languageApplication.kind === 'unknown'}
+    <!-- Shown for EVERY `unknown` outcome, unconditionally (review round 2,
+         Important A) — never suppressed by a pending command/read message.
+         "Unconfirmed" is true whichever of those is also showing (or
+         neither, once a later attempt has cleared them): persist-vs-
+         transport genuinely cannot be told apart from a message alone, so
+         this sentence never states more than that, and the messages below
+         only ever ADD detail beside it. -->
     <p data-testid="application-language-unknown">{languageUnknownLabel}</p>
   {/if}
   {#if languageChangeError !== null}
     <!-- The CHANGE's own rejection (review round 1, Minor 3) — distinct from
-         a failed READ below: `set_locale` itself was refused, never applied,
-         and the automatic recovery read that followed is what confirmed
-         `languageChoice` above, whichever way it went. No retry control of
-         its own: picking the select again is the retry, the same as every
-         other rejection in this section (shortcut/autostart/theme). -->
-    <p data-testid="application-language-change-failed">{languageChangeFailedLabel}</p>
+         a failed READ below: `set_locale` was refused OR its reply was lost
+         in transport after it actually applied (`locale-choice.ts`'s own
+         comment on `changeError`), and the automatic recovery read that
+         followed is what confirmed `languageChoice` above, whichever it
+         turned out to be. Worded "not confirmed", never "not changed"
+         (review round 2, Important A): the language may well have changed,
+         only the OUTCOME of this call could not be. No retry control of its
+         own: picking the select again is the retry, the same as every other
+         rejection in this section (shortcut/autostart/theme). -->
+    <p data-testid="application-language-change-unconfirmed">{languageChangeUnconfirmedLabel}</p>
     <p data-testid="application-language-change-error">{languageChangeError}</p>
   {/if}
   {#if languageReadError !== null}

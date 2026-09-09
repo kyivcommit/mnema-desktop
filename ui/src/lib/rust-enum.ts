@@ -29,8 +29,10 @@
 // Neither half closes the gap alone: the pair does.
 
 // The variant names of `pub enum <enumName>` (or `pub(crate) enum`, `pub(in
-// path::to) enum`, … — any visibility) in `rawSource`, in source order and in
-// Rust's own spelling — `camelOf` turns one into its wire name.
+// path::to) enum`, … — `pub` or a restricted `pub(...)`, never a private
+// enum with no `pub` at all — review round 2, Nit D) in `rawSource`, in
+// source order and in Rust's own spelling — `camelOf` turns one into its
+// wire name.
 //
 // Throws rather than answering when it cannot answer: an enum it cannot find,
 // a body it runs off the end of, a variant it cannot parse a name out of, or
