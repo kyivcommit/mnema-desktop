@@ -376,7 +376,13 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) {
     // The rebuild also replaces the status/Stop items a job may be about to
     // redraw, which is why the swap is `tray::swap_tray_menu` and not a
     // `set_menu` here — see `tray::TrayItems`.
-    crate::tray::swap_tray_menu(app, lang, choice);
+    //
+    // Task 1 (PR 10f): `swap_tray_menu` now reports a failed install via
+    // `Result<(), String>` instead of swallowing it (`install_then_publish`
+    // in `tray.rs`). This call site only discards it for now — best-effort,
+    // like every other step in this function — because surfacing it as a
+    // sentence a person can read is Task 2's own job.
+    let _ = crate::tray::swap_tray_menu(app, lang, choice);
     // The settings window's native OS title, re-set whether or not it is
     // visible so an already-open or merely-hidden window is right next time.
     if let Some(w) = app.get_webview_window("settings") {

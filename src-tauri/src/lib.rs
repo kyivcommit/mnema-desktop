@@ -20,6 +20,7 @@ pub mod shortcut;
 pub mod state;
 pub mod theme;
 pub mod tray;
+mod tray_icons;
 mod tree;
 pub mod walk_job;
 
@@ -580,7 +581,13 @@ pub fn run() -> anyhow::Result<()> {
                     // Restore the checkmark: the OS toggled it on click, but the
                     // choice never changed, so rebuild from the current state.
                     let current = state.locale();
-                    crate::tray::swap_tray_menu(app, current.effective, current.choice);
+                    // Task 1: `swap_tray_menu` now reports a failed install
+                    // rather than swallowing it (`install_then_publish`); this
+                    // restore path is itself best-effort like the rest of §6,
+                    // so the error is logged and not otherwise acted on here.
+                    if let Err(e) = crate::tray::swap_tray_menu(app, current.effective, current.choice) {
+                        eprintln!("mnema: tray menu restore failed: {e}");
+                    }
                 }
             }
             _ => {}
