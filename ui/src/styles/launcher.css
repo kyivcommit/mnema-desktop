@@ -47,7 +47,7 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
   width: 100%; min-width: 0; border: 0; background: transparent;
   padding: 2px 0; font-size: 15.5px;
 }
-.search-line input::placeholder { color: var(--ink-faint); }
+.search-line input::placeholder { color: var(--ink-soft); }
 .pin {
   flex: none; width: 26px; height: 26px; padding: 0;
   border: 0; border-radius: 7px; background: transparent;
@@ -56,7 +56,7 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
 .arms { display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-soft); font-size: 12.5px; }
 .arms label { display: inline-flex; align-items: center; gap: 6px; }
 .arms input { accent-color: var(--accent); }
-.arms .unavailable { color: var(--ink-faint); }
+.arms .unavailable { color: var(--ink-soft); }
 .search-line :is(.guard, .refusal, .phases) {
   margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px;
 }
@@ -64,7 +64,7 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
 .search-line .refusal { color: var(--ink-soft); }
 .phases {
   font-family: var(--mono); font-weight: 400; font-style: normal;
-  color: var(--ink-faint);
+  color: var(--ink-soft);
 }
 .spinner {
   display: inline-block; width: 15px; height: 15px; margin-top: 8px;
@@ -93,7 +93,7 @@ main > .doc { grid-column: 3; grid-row: 1 / 3; }
 .tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
 .tree li > button[aria-expanded="true"]::before { content: '▾'; }
 .tree li > span > span { display: block; }
-.tree li > span > span + span { font-size: 11px; color: var(--ink-faint); }
+.tree li > span > span + span { font-size: 11px; color: var(--ink-soft); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
 .tree h4 {
   margin: 10px 0 4px; overflow-wrap: anywhere;
@@ -116,7 +116,7 @@ main > .doc { grid-column: 3; grid-row: 1 / 3; }
 }
 .answer-card h3 {
   margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
-  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint);
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
 }
 .answer-card > p { margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
 .answer-card > p button, .prev .tag {

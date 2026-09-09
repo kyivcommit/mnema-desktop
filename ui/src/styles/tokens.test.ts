@@ -225,6 +225,18 @@ function loadThemes() {
 
 const sortedNames = (m: Map<string, string>) => [...m.keys()].sort();
 
+function contrast(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const match = /^#([\da-f]{6})$/i.exec(hex);
+    if (!match) throw new Error(`expected #RRGGBB, got ${hex}`);
+    return [0, 2, 4].map((offset) => parseInt(match[1].slice(offset, offset + 2), 16) / 255)
+      .map((value) => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+  };
+  const [a, b] = [luminance(foreground), luminance(background)];
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 // 1-indexed line number of the character at `offset` into `text`, and that
 // line's own text (trimmed) — both computed from the character offset, not
 // from a line already split out by the caller. A construct that spans
@@ -662,6 +674,17 @@ describe('fonts.css bundles the faces the stacks lead with', () => {
 });
 
 describe('the stylesheets use what tokens.css declares', () => {
+  it('uses AA text colours on launcher surfaces', () => {
+    const { light, mediaDark } = loadThemes();
+    const launcher = readFileSync(join(HERE, 'launcher.css'), 'utf8');
+    expect(launcher).not.toMatch(/var\(\s*--ink-faint\s*\)/);
+    for (const [theme, tokens] of [['light', light], ['dark', mediaDark]] as const) {
+      for (const text of ['--ink', '--ink-soft']) {
+        expect(contrast(tokens.get(text)!, tokens.get('--surface')!), `${theme}: ${text}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   // The other direction of `use only tokens that tokens.css declares`: a
   // token nobody reads is a value that can drift in one theme and never be
   // seen.
