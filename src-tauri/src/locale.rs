@@ -461,11 +461,23 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Vec<LocaleApplyEr
         // tray icon and its `on_tray_icon_event` (the positioner) are left in
         // place. The rebuild also replaces the status/Stop items a job may be
         // about to redraw, which is why the swap is `tray::swap_tray_menu`
-        // and not a `set_menu` here — see `tray::TrayItems`. `swap_tray_menu`
-        // is itself `None`-safe (no tray, or no managed state, is `Ok(())`):
-        // a headless run reports nothing here for that reason, not because
-        // this call site swallows anything.
-        LocaleSurface::Tray => crate::tray::swap_tray_menu(app, lang, choice),
+        // and not a `set_menu` here — see `tray::TrayItems`.
+        //
+        // `swap_tray_menu` is itself `None`-safe for a missing MANAGED STATE
+        // (`Ok(())`, by its own contract, for a headless run) but treats a
+        // vanished TRAY the same way (`tray.rs`'s `tray_by_id("mnema-tray")`
+        // check). Review round 1, Important 1: left as-is, that reads as
+        // "applied successfully" for a tray that disappeared at runtime,
+        // while the tray keeps showing the old language. Checked here instead
+        // — `swap_tray_menu`'s own contract for the other `None` cases is
+        // untouched.
+        LocaleSurface::Tray => {
+            if app.tray_by_id("mnema-tray").is_none() {
+                Err("the tray is not installed".to_string())
+            } else {
+                crate::tray::swap_tray_menu(app, lang, choice)
+            }
+        }
         // The settings window's native OS title, re-set whether or not it is
         // visible so an already-open or merely-hidden window is right next
         // time. A missing window is this surface's own failure — by the time
@@ -870,17 +882,30 @@ mod tests {
     fn saved_locale_survives_apply_failure() {
         // An apply failure is reported, never turned into an `Err` that would
         // read as a rollback: the persisted choice, and the committed state,
-        // must both stand even when every surface refused it.
-        use std::cell::Cell;
+        // must both stand even when every surface refused it. `order` also
+        // pins that `commit_state` runs BEFORE `apply` — review round 1,
+        // Important 2: `apply_locale` reads `AppState`'s committed choice
+        // back to place the tray checkmarks (`locale.rs`'s `apply_locale`),
+        // so an apply-before-commit swap would put the checkmark on the OLD
+        // choice. A mutant swapping the two calls in `apply_choice_with`
+        // survives every other assertion here (both still run exactly once),
+        // which is why this needs its own check rather than reusing
+        // `committed`'s presence.
+        use std::cell::RefCell;
         let dir = tempfile::tempdir().unwrap();
-        let committed: Cell<Option<LocaleState>> = Cell::new(None);
+        let committed: RefCell<Option<LocaleState>> = RefCell::new(None);
+        let order: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
 
         let result = apply_choice_with(
             dir.path(),
             LocaleChoice::En,
             Some("uk-UA"),
-            |saved| committed.set(Some(saved)),
+            |saved| {
+                order.borrow_mut().push("commit");
+                *committed.borrow_mut() = Some(saved);
+            },
             |_lang| {
+                order.borrow_mut().push("apply");
                 vec![LocaleApplyError {
                     surface: LocaleSurface::Tray,
                     message: "no tray in this run".into(),
@@ -899,11 +924,16 @@ mod tests {
             "the persisted choice must survive an apply failure"
         );
         assert_eq!(
-            committed
-                .get()
+            (*committed.borrow())
                 .expect("commit_state must run even when apply fails")
                 .choice,
             LocaleChoice::En
+        );
+        assert_eq!(
+            *order.borrow(),
+            vec!["commit", "apply"],
+            "commit_state must run before apply: apply_locale reads AppState's committed \
+             choice back to place the tray checkmarks, so the order is load-bearing"
         );
     }
 
@@ -995,6 +1025,17 @@ mod tests {
         assert!(
             value.get("apply_errors").is_none(),
             "the snake_case key must not leak onto the wire: {value}"
+        );
+        // Review round 1, Minor 3: the checks above pin named keys and the
+        // absence of `apply_errors`, but not the WHOLE object — a future
+        // extra field would cross unnoticed. This pins the exact shape.
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "choice": "uk",
+                "effective": "uk",
+                "applyErrors": [],
+            })
         );
 
         let with_error = LocaleApplyReply {
