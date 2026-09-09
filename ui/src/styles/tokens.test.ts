@@ -926,7 +926,25 @@ describe('settings.css gives the DOM-only states a visual form', () => {
       <span class="mdot" data-configured="false"><span class="mdot-mark"></span>b</span>
     </div></main>`);
     const [ok, err] = document.querySelectorAll('.mdot-mark');
+    // jsdom's `getComputedStyle` does not resolve `var(...)` — cssstyle hands
+    // back the declared text verbatim, so this only proves the two states
+    // are wired to DIFFERENT custom properties (`var(--ok)` vs `var(--err)`
+    // are different strings regardless of what either token resolves to). A
+    // mutant setting `--ok` and `--err` to the same colour would still pass
+    // it, which is why the actual values are pinned separately below, parsed
+    // straight from the declarations rather than through jsdom's style
+    // engine, in every theme block this file holds to each other elsewhere.
     differ(ok, err, 'background');
+
+    const { light, mediaDark, attrDark } = loadThemes();
+    for (const [name, tokens] of [
+      ['light', light], ['media dark', mediaDark], ['attribute dark', attrDark],
+    ] as const) {
+      expect(tokens.get('--ok'), `${name}: --ok declared`).toBeTruthy();
+      expect(tokens.get('--err'), `${name}: --err declared`).toBeTruthy();
+      expect(tokens.get('--ok'), `${name}: --ok must resolve to a different colour than --err`)
+        .not.toBe(tokens.get('--err'));
+    }
   });
 
   it('dims an excluded folder', () => {

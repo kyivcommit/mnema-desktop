@@ -144,8 +144,12 @@
     //
     // Compared by snapshot IDENTITY, not by kind: the controller replaces the
     // whole state on every change, so a progress tick changes the object
-    // without ever being an ending. Seeded with what the store already holds,
-    // so a section switch back does not re-read on the same mount.
+    // without ever being an ending. Seeded with what the store already
+    // holds — this component mounts once for the window's whole life (Task
+    // 4, review P2-1: mounted-hidden, the same as Folders), so the seed's
+    // only job is to keep the FIRST snapshot this subscription is handed —
+    // whatever a scan already in progress happens to be at — from reading as
+    // a change from nothing and firing a re-read nobody asked for.
     let seen: ScanSnapshot = get(jobs.state).scan.snapshot;
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;
@@ -553,14 +557,23 @@
   const embedPassEnded = $derived(snapshot.kind === 'ended' && snapshot.report.endedIn === 'embedding');
 
   function chooseEmbeddingModel(model: string) {
+    // The model the SELECT is currently showing is not a change — compared
+    // against `visibleEmbeddingModel`, not `currentEmbeddingModel` (review,
+    // Important 1). The latter is only the LAST READ: after an acknowledged
+    // adoption whose own re-read then failed, `settings` still names the OLD
+    // model while the select (rightly) shows the new one, so comparing
+    // against `settings` would treat a pick of the OLD model as "no change"
+    // and silently swallow it — and after a rejection whose own re-read also
+    // failed, the select shows blank while `settings` still names whatever it
+    // last confirmed, so comparing against `settings` would treat a pick of
+    // THAT model as a no-op too, when this build does not actually know the
+    // select agrees. Checked BEFORE anything is cleared, for the same
+    // reason: a pick that turns out to be a real no-op must leave the
+    // previous round's own report and error exactly as they were, not wipe
+    // them first and decide afterwards that nothing needed to happen.
+    if (model === visibleEmbeddingModel) return;
     changeError = null;
     retiredReport = null;
-    // The model the index is already on is not a change. It asks nothing and
-    // calls nothing: `set_embedding_model` would find the space rather than
-    // mint one and retire nothing, and a confirmation offering to discard
-    // embeddings for a press that moves nothing is a question with no honest
-    // answer.
-    if (model === currentEmbeddingModel) return;
     // With no readable index there is no estimate to state, so there is
     // nothing to confirm — and `Keep` is the value that refuses rather than
     // destroys, so pressing cannot cost anything. This is the recovering act
@@ -846,14 +859,6 @@
     {:else if settings.key.kind === 'present' && !editingKey}
       <span data-testid="model-key-saved">{savedLabel}</span>
     {/if}
-    <!-- Owner's ruling, 2026-08-28: the note is shown in EVERY key state, `absent`
-         included, and carries no condition on `key`. A review read it as claiming
-         a key exists ("its own key") where none has been entered; it does not —
-         it explains a system prompt the person is about to meet the first time
-         they save one, and forward-looking information is not a false claim.
-         Settled; do not add a `key` condition here. It sits inside this group
-         because it is a sentence ABOUT the key, and a sentence loose between two
-         subjects is the fault Step 5 was opened to fix. -->
     {#if showInput}
       <div class="row">
         <input id="model-key-input" type="password" bind:value={draftKey} />

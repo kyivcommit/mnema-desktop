@@ -2605,6 +2605,62 @@ test('failed_read_does_not_erase_retirement_report', async () => {
   );
 });
 
+// Review round 1, Important 1. The same "acknowledged B, its own re-read
+// failed" state as the pair above, but this time picking a DIFFERENT model —
+// specifically the one `settings` (the last successful read, now stale)
+// still names, `emb-1`. Comparing the pick against `currentEmbeddingModel`
+// (the stale read) rather than against what the select actually shows would
+// treat this as "no change" and silently swallow a pick that is a real one:
+// the select is showing `emb-2`, and the person is deliberately moving it
+// back.
+test('picking the model a stale settings read still names, while the select shows an acknowledged different one, is not swallowed', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  modelSettings.mockResolvedValueOnce(onModel(7)).mockRejectedValue(new Error('model_settings unreachable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
+
+  await pickModel('emb-2');
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2')); // acknowledged, shown at once
+
+  // Picking `emb-1` now: it equals the stale `settings` read (still 'emb-1',
+  // since the confirming re-read rejected), but NOT what the select shows.
+  // A real question about a real change, not a no-op.
+  await pickModel('emb-1');
+  expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
+});
+
+// Review round 1, Important 1, the other half: picking the SAME model the
+// select already shows (a genuine no-op) must not have already cleared the
+// previous round's own report on its way to deciding that — the clearing and
+// the no-op check must not run in the wrong order.
+test('picking the model the select already shows is a real no-op, and does not erase the previous rounds report', async () => {
+  setEmbeddingModel.mockResolvedValue({
+    model: 'emb-2', dim: 1024, spaceId: 2, created: true,
+    retired: [{ spaceId: 1, embeddedChunks: 4 }],
+    index: onModel(0).index,
+  });
+  modelSettings.mockResolvedValueOnce(onModel(7)).mockRejectedValue(new Error('model_settings unreachable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
+
+  await pickModel('emb-2');
+  await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  const retiredText = screen.getByTestId('model-embedding-retired').textContent;
+
+  await pickModel('emb-2'); // the very model already shown — a real no-op
+
+  expect(setEmbeddingModel).toHaveBeenCalledTimes(1); // no second command
+  expect(screen.getByTestId('model-embedding-retired').textContent).toBe(retiredText);
+});
+
 // An unreadable index has nothing to estimate, so a choice made from it asks
 // nothing and sends `keep` — and the select owes two things across that
 // round: the placeholder before the pick (never the first catalogue entry),
