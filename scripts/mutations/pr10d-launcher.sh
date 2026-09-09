@@ -51,3 +51,9 @@ case_ "launcher: entry omits its stylesheet" \
   "import '../styles/base.css';
 import { mount }" \
   src/styles/tokens.test.ts 'imports the stylesheets each window needs, in order' runner=vitest
+
+case_ "launcher: transparent window regains the native shadow" \
+  src-tauri/tauri.conf.json \
+  's~"shadow": false~"shadow": true~' \
+  '"shadow": true' \
+  src/launcher/styles.test.ts 'transparent launcher disables the native window shadow' runner=vitest

@@ -36,6 +36,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); sheets.forEach((s) => s.remove()); sheets = []; });
 
+test('transparent launcher disables the native window shadow', () => {
+  const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
+    app: { windows: Array<{ label: string; transparent?: boolean; shadow?: boolean }> };
+  };
+  const launcher = conf.app.windows.find((window) => window.label === 'launcher');
+  expect(launcher).toMatchObject({ transparent: true, shadow: false });
+});
+
 test('real launcher places all cards and keeps the document transparent', async () => {
   const { container } = render(Launcher);
   const main = container.querySelector('main')!;
