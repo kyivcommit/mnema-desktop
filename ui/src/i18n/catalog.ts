@@ -81,6 +81,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
   | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
+  | 'indexing_probe_running' | 'indexing_model_adoption_running' | 'indexing_summary_fallback'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
@@ -723,6 +724,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // cancellable (`bridge.rs` fixes it at `false`), so this is the whole of
     // what the strip has to say while it runs.
     indexing_removing: 'Видаляємо теку {rootPath}…',
+    // Task 5 — the two jobs nobody asked to start (`scan_state::OtherJob`) get
+    // their own name now, so the bottom disclosure has something to say in
+    // its summary while either holds the slot, rather than a bare Stop button
+    // with no sentence beside it.
+    indexing_probe_running: 'Триває перевірка з’єднання…',
+    indexing_model_adoption_running: 'Триває заміна моделі вбудовування…',
+    // The disclosure's summary always needs a line — see `jobs.ts`'s own
+    // priority order — and every real state above already earns one of its
+    // own. This is the floor under all of them, never expected to render in
+    // practice.
+    indexing_summary_fallback: 'Стан індексації',
     indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
@@ -1203,6 +1215,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_removing: 'Removing the folder {rootPath}…',
+    indexing_probe_running: 'Checking the connection…',
+    indexing_model_adoption_running: 'Switching the embedding model…',
+    indexing_summary_fallback: 'Indexing status',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',

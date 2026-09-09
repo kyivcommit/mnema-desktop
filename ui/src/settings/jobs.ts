@@ -23,8 +23,9 @@
 import { get, writable, type Readable } from 'svelte/store';
 import {
   cancelJob, jobStatus, listenScanProgress, startScanJob,
-  type Counts, type Entry, type IndexRead, type ScanState,
+  type Counts, type Entry, type IndexRead, type OtherJob, type Phase, type ScanState,
 } from '../lib/ipc';
+import type { Key } from '../i18n/catalog';
 
 /// The state a window holds before anything has told it otherwise, and the
 /// exact shape `ScanState::default()` serialises to: idle, nothing counted,
@@ -61,6 +62,43 @@ export type ProgressShape =
 export function progressShape(counts: Counts): ProgressShape {
   if (counts.total === 0) return { kind: 'countingUp', done: counts.done };
   return { kind: 'ratio', done: counts.done, total: counts.total };
+}
+
+/// What a running phase is called, decided once here so `ScanProgress.svelte`
+/// (the `<progress>` and its own visible line) and `JobStrip.svelte`'s
+/// disclosure summary — two readers of the SAME `phase` — cannot each answer
+/// it differently (`jobs.ts` already keeps `continueAction` this way for the
+/// strip and the section). The key alone, not the rendered string: this file
+/// has no `t()` and does not track `$locale`, so the caller formats it.
+///
+/// Task 5. `other` used to have no words at all (`scan_state::OtherJob`
+/// covers the probe and a model adoption, and nobody asked to start either) —
+/// but a disclosure needs a summary line even while one of those holds the
+/// slot, so both now get their own sentence rather than an empty clickable
+/// row.
+export type PhaseLabel = { key: Key; params?: Record<string, unknown> };
+
+const OTHER_JOB_LABEL: Record<OtherJob, Key> = {
+  probe: 'indexing_probe_running',
+  modelAdoption: 'indexing_model_adoption_running',
+};
+
+export function phaseLabel(phase: Phase): PhaseLabel {
+  switch (phase.kind) {
+    case 'reading':
+      // One-based on the wire (`scan_job.rs`: "3 of 7" is what a person
+      // reads), so nothing here adds or subtracts one.
+      return {
+        key: 'indexing_reading_root',
+        params: { rootIndex: phase.rootIndex, rootCount: phase.rootCount, rootPath: phase.rootPath },
+      };
+    case 'embedding':
+      return { key: 'indexing_embed_running' };
+    case 'removing':
+      return { key: 'indexing_removing', params: { rootPath: phase.rootPath } };
+    case 'other':
+      return { key: OTHER_JOB_LABEL[phase.job] };
+  }
 }
 
 /// The scan as this window holds it, plus whatever the last command said back.

@@ -19,6 +19,17 @@
 
   let section = $state<SectionId>('models');
 
+  // Task 5 — where the bottom disclosure's focus goes when the whole panel
+  // disappears out from under it (the job ended with nothing left to say).
+  // Scoped to this window's own `.snav`, not a bare `document.querySelector`:
+  // a Tauri window is its own document, so nothing outside this one could
+  // ever match, but a ref is what says so to a reader instead of asking them
+  // to know that about the runtime.
+  let navEl: HTMLElement | undefined = $state();
+  function focusActiveNav() {
+    navEl?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+  }
+
   // 🔴 ONE controller, here, above every section — not inside the one that
   // starts the job. A controller living in a SECTION dies with that section:
   // `mount` opens a `scan-progress` subscription and `destroy` closes it, so
@@ -243,22 +254,23 @@
 </script>
 
 <main>
-  <!-- Live run, finding 3, and it is a correction to this plan's own ruling.
-       Task 8 put the strip OUTSIDE the section conditional so a job survives
-       Folders -> Models -> Folders with its counters and its Cancel; that half
-       is right and is untouched here. What it did not weigh is WHERE outside:
-       rendered last, the strip sat under whatever the panel ended with, so a
-       person standing on a section read that section's closing line and,
-       immediately below it, the full indexing report.
-       The strip is the WINDOW's status line, not a section's content, so it is
-       drawn before the nav and the panel both. Nothing about the controller
-       moved: it is still created above every section, and `cancel_job` still
-       needs no channel.
-       ⚠️ Two components sit outside the conditional below, and for reasons
-       that are not the same one. This one, `<JobStrip>`, is outside because it
-       is the WINDOW's status line — it must be readable and stoppable from
-       every section, and it is drawn once, here, above the pair of columns.
-       The folders panel — `<Folders>` and the `<Masks>` editor beside it — is
+  <!-- Live run, finding 3 — and Task 5 corrects WHERE outside the section
+       conditional actually means. Task 8 read it as "above the pair of
+       columns", so a person standing on a section read that section's own
+       closing line and, immediately below it, the full indexing report — no
+       better than under it, just moved. The strip is the WINDOW's status line,
+       not a section's content, and Task 5 turned it into a bottom disclosure —
+       one line always on screen, in every section, opened on purpose rather
+       than a card permanently taking the window's height — so it is drawn
+       AFTER `.scols`, at the bottom, the same place a running job's own Stop
+       has to stay reachable from. Nothing about the controller moved: it is
+       still created above every section, and `cancel_job` still needs no
+       channel.
+       ⚠️ Two components sit outside the `{#if}` chain below, and for reasons
+       that are not the same one. `<JobStrip>` is outside because it is the
+       WINDOW's status line — it must be readable and stoppable from every
+       section, and it is drawn once, here, after the pair of columns. The
+       folders panel — `<Folders>` and the `<Masks>` editor beside it — is
        outside because of F10: both keep state a person built by hand, so the
        panel stays mounted and is merely `hidden` while another section is
        shown (see it below). Neither is a precedent for the other: a
@@ -274,12 +286,11 @@
        here beside `<JobStrip>` would cost something else now: it would show the
        §9.3 numbers over every other section's own content, which nobody asked
        for.
-       `.scols` exists so the CSS that lands later cannot make this a THIRD
-       column beside the nav and the panel: the pair is the row, the status line
-       is not part of it. -->
-  <JobStrip {jobs} {read} />
+       `.scols` exists so the CSS cannot make this a THIRD column beside the
+       nav and the panel: the pair is the row, the bottom disclosure is not
+       part of it — it is flex-none, under both, the full width of `main`. -->
   <div class="scols">
-    <nav class="snav">
+    <nav class="snav" bind:this={navEl}>
       {#each SECTIONS as id (id)}
         <button
           type="button"
@@ -399,4 +410,5 @@
       {/if}
     </div>
   </div>
+  <JobStrip {jobs} {read} {section} focusFallback={focusActiveNav} />
 </main>

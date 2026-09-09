@@ -1,4 +1,4 @@
-import { render, cleanup } from '@testing-library/svelte';
+import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { expect, test, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
@@ -113,4 +113,54 @@ test('the window\'s own subscription to jobs.state is torn down on unmount, not 
   await tick();
 
   expect(modelSettings.mock.calls.length).toBe(baseline);
+});
+
+// Task 5 — the bottom disclosure sits after `.scols` (never a third column
+// beside it), there is exactly one of it, and a nav click does not open a
+// second subscription to `jobs.state`: the counting technique the test above
+// already uses, spying on the mocked store's own `subscribe`.
+test('the job strip is one disclosure after the two columns, and a section switch subscribes to jobs.state only once', async () => {
+  modelSettings.mockResolvedValue({
+    key: { kind: 'absent' },
+    index: {
+      kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+      failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+      embeddingModel: null, searchTextArm: true, searchContentArm: false,
+    },
+    platform: 'linux',
+  });
+  const subscribeSpy = vi.spyOn(jobState, 'subscribe');
+
+  const { container } = render(Settings);
+  await tick();
+  // `anything` (`JobStrip.svelte`) is false over the fixture's own idle
+  // default, and the disclosure draws nothing then — a running phase is what
+  // gives it something to say.
+  jobState.set({
+    scan: {
+      revision: 1, files: 0, readSeq: 0, jobsDone: 0, lastReading: null,
+      snapshot: { kind: 'running', cancellable: true, phase: { kind: 'embedding', counts: {
+        done: 1, total: 4, skipped: 0, refused: 0, contended: 0, secondsLeft: null,
+      } } },
+    },
+    note: null,
+  });
+  await tick();
+
+  const disclosures = container.querySelectorAll('.job-disclosure');
+  expect(disclosures).toHaveLength(1);
+  // The strip is a sibling of `.scols` under `<main>`, not a third column
+  // beside it — asked as their shared parent's own child order.
+  const main = container.querySelector('main')!;
+  const children = Array.from(main.children);
+  expect(children.indexOf(container.querySelector('.scols')!)).toBeLessThan(
+    children.indexOf(disclosures[0]),
+  );
+
+  const before = subscribeSpy.mock.calls.length;
+  await fireEvent.click(screen.getByRole('button', { name: /Folders|Теки/ }));
+  await tick();
+
+  expect(subscribeSpy.mock.calls.length).toBe(before);
+  expect(container.querySelectorAll('.job-disclosure')).toHaveLength(1);
 });

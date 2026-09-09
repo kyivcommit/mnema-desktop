@@ -4,6 +4,7 @@
   import { formatIndexedAt, formatIndexedDate } from '../i18n/recency';
   import type { ModelSettings, UnreadableCause } from '../lib/ipc';
   import { continueAction, type JobController } from './jobs';
+  import ScanProgress from './ScanProgress.svelte';
 
   // §9.3 — the Scanning SECTION: what the index HOLDS, when it last grew, the
   // ONE Scan control, and the continue row `continueAction` (`jobs.ts`)
@@ -161,6 +162,12 @@
   const showScanButton = $derived($jobState.scan.snapshot.kind !== 'running');
   const scanButtonLabel = $derived.by(() => { void $locale; return t('scanning_scan'); });
 
+  // Task 5 — the same running-phase projection the bottom disclosure draws,
+  // from the SAME `jobs.state` snapshot this section already reads for
+  // `showScanButton` above: one component, not two readers of the phase free
+  // to disagree about what it says.
+  const phase = $derived($jobState.scan.snapshot.kind === 'running' ? $jobState.scan.snapshot.phase : null);
+
   // D-m's table (`jobs.ts`), decided once so the strip and this section cannot
   // answer it differently. Rendered here only when it names THIS section —
   // `where: 'strip'` is `JobStrip.svelte`'s own offer, drawn from a report that
@@ -205,6 +212,7 @@
      sentence sits over the numbers it could not confirm, which is the whole of
      what it is for. Do not turn this into a gate: blanking the panel would take
      away a count that was true a moment ago and probably still is. -->
+{#if phase}<ScanProgress {phase} />{/if}
 {#if loadError}
   <p data-testid="indexing-index-load-failed">{loadFailedLabel}</p>
   <p data-testid="indexing-index-load-error">{loadError}</p>

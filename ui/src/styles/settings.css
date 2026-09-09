@@ -16,7 +16,11 @@
  */
 
 main {
-  min-height: 100vh;
+  /* Task 5: bounded, not merely floored — a bottom disclosure whose own
+   * popup is `position: absolute; bottom: 100%` needs an ancestor that does
+   * not grow past the viewport, or the popup's own anchor drifts with it. */
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -96,16 +100,79 @@ main select:focus-visible {
   outline-offset: 1px;
 }
 
-/* the window's status line (mockup .statcard) — drawn before the two columns */
-.indexing {
-  margin: 12px 24px 0;
+/* screen-reader only — the live region beside the bottom disclosure below
+ * needs a place to live that a browser's own `<details>` collapse cannot
+ * hide (it hides every child but `<summary>`), so it is not IN one. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* the window's status line (mockup .statcard), now a bottom disclosure (Task
+ * 5): one line always on screen, in every section, with the full report
+ * behind it — a `<details>` a person opens on purpose rather than a card
+ * permanently taking the window's height. `position: relative` anchors its
+ * own popup below. */
+.job-disclosure {
+  position: relative;
+  flex: none;
+  margin: 12px 24px;
+}
+
+.job-disclosure > summary {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  list-style: none;
+}
+
+.job-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.job-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* the report, popped ABOVE the summary rather than pushing the window's own
+ * height around under it — `bottom: 100%` anchors it to the summary's own
+ * top edge, and `main`'s bounded height (Task 5) is what keeps that anchor
+ * from drifting off screen. */
+.job-details {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  max-height: 60vh;
+  overflow: auto;
   padding: 14px 18px;
   border: 1px solid var(--line);
   border-radius: 11px;
   background: var(--surface);
+  box-shadow: 0 -4px 14px -4px var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* the phase progress bar (mockup carries none of its own — new to Task 5) */
+.job-details progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
 }
 
 /* navigation | pane (mockup .sbody) */
