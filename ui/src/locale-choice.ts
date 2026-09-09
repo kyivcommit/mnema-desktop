@@ -33,12 +33,22 @@ export type LocaleApplicationState =
 export type LocaleChoiceState = {
   snapshot: LocaleReply | null;
   busy: boolean;
-  error: string | null;
+  // `error` and `changeError` are two DIFFERENT operations' own rejection
+  // messages, kept in two fields on purpose (review round 1, Minor 3). A
+  // rejected `changeLocaleChoice` used to write its message into `error` and
+  // then immediately call `loadLocaleChoice()`, which either cleared it
+  // (recovery read succeeds — the change's own message vanishes with nothing
+  // ever having shown it) or overwrote it with the READ's message (recovery
+  // read fails — now labelled "could not be read" under a heading that is
+  // actually about the CHANGE). One field cannot answer "which operation said
+  // this" once a second operation touches it; two fields need no answer.
+  error: string | null; // the last loadLocaleChoice()'s own rejection message
+  changeError: string | null; // the last changeLocaleChoice/retryLocaleApplication's own rejection message
   application: LocaleApplicationState;
 };
 
 const INITIAL: LocaleChoiceState = {
-  snapshot: null, busy: false, error: null, application: { kind: 'initial' },
+  snapshot: null, busy: false, error: null, changeError: null, application: { kind: 'initial' },
 };
 
 const state = writable<LocaleChoiceState>({ ...INITIAL });
@@ -80,11 +90,20 @@ export async function loadLocaleChoice(): Promise<void> {
 // would send two commands the operating system could resolve in either order.
 export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
   if (get(state).busy) return;
-  const mine = ++opSeq;
-  state.update((s) => ({ ...s, busy: true }));
+  // Bumped (not captured into a compared variable here, unlike
+  // `loadLocaleChoice`'s `mine`) so a read already in flight becomes stale
+  // the moment this change starts — see that function's own check. This
+  // function needs no matching self-comparison later: the `busy` guard above
+  // fully serialises writes, so nothing else can start, and therefore nothing
+  // else can bump `opSeq` again, between here and either exit below. Review
+  // round 1, Minor 4 — an earlier draft carried a stale-`mine` check on the
+  // success path anyway; being unreachable, it was never exercised, and it
+  // left `busy` set forever on the one path that could have reached it, which
+  // is a latent deadlock rather than a guard.
+  opSeq++;
+  state.update((s) => ({ ...s, busy: true, changeError: null }));
   try {
     const reply = await setLocaleChoice(choice);
-    if (mine !== opSeq) return;
     // The confirmed reply is the truth, applied through the SAME setter
     // `bootLocale` uses — never guessed from `choice`, the request this
     // window sent, which is not necessarily what a persist step wrote.
@@ -93,17 +112,20 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
       snapshot: { choice: reply.choice, effective: reply.effective },
       busy: false,
       error: null,
+      changeError: null,
       application: reply.applyErrors.length > 0
         ? { kind: 'partial', errors: reply.applyErrors }
         : { kind: 'applied' },
     });
   } catch (e) {
-    if (mine !== opSeq) return;
     // A rejected `set_locale` is `Error::Prefs`: the choice was never
     // persisted. But persist-vs-transport is not recoverable from the
     // message alone, so this never guesses which — it marks the apply
-    // outcome unknown and re-reads the confirmed choice instead.
-    state.update((s) => ({ ...s, busy: false, error: errorMessage(e), application: { kind: 'unknown' } }));
+    // outcome unknown and re-reads the confirmed choice instead. The message
+    // itself is kept in `changeError`, never in `error`: `loadLocaleChoice`
+    // below only ever touches `error`, so this one survives the recovery
+    // read whichever way that read goes.
+    state.update((s) => ({ ...s, busy: false, changeError: errorMessage(e), application: { kind: 'unknown' } }));
     await loadLocaleChoice();
   }
 }

@@ -1288,6 +1288,36 @@ test('choosing a language sends that choice once, and the select follows the con
   expect(pageText()).toContain('Language:');
 });
 
+// Review round 1, Critical. `<select value={languageChoice}>` compiles to a
+// dirty check against the LAST value Svelte itself wrote
+// (`if (value !== (value = languageChoice)) select.value = value`), not
+// against what the DOM currently shows. A rejected change whose recovery
+// read confirms the SAME choice the user already had never trips that check
+// — `languageChoice` never actually changes value — so nothing tells the
+// browser's own selection (moved by the click itself, not by Svelte) to
+// revert. Every OTHER rejection test in this file confirms a DIFFERENT value
+// than the one picked, which the ordinary reactive write handles fine even
+// with this bug present; this is the one case that needs the same choice
+// back.
+test('a rejected change whose recovery read confirms the SAME choice as before still shows that choice, and the control is not left stuck', async () => {
+  renderSection();
+  await shown('application-language-select');
+  expect(languageSelect().value).toBe('auto'); // the default beforeEach snapshot
+
+  setLocaleChoice.mockRejectedValueOnce(new Error('still refused'));
+  getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' }); // unchanged — same choice as before
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-change-failed')).toBeTruthy());
+  expect(languageSelect().value).toBe('auto');
+
+  // Not stuck: picking the very same option again still fires a fresh
+  // `change` and reaches `set_locale` a second time.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(languageSelect().value).toBe('en'));
+  expect(setLocaleChoice).toHaveBeenCalledTimes(2);
+});
+
 test('a partial reply keeps the select on the confirmed choice and lists the surfaces that did not pick it up', async () => {
   setLocaleChoice.mockResolvedValue(localeReply({
     choice: 'en',
@@ -1335,14 +1365,19 @@ test('busy survives unmount and remount, so a remounted select stays disabled un
   first.unmount();
 
   // The remount's own mount-time `loadLocaleChoice()` must not start a
-  // concurrent read while the store is busy — nothing here queues a value
-  // for a second `getLocale` call, so one landing would leave it unresolved
-  // forever and this test would time out rather than pass by accident.
-  // `shown` (not a bare `tick`) waits out the remounted instance's own
-  // `appPrefs()` read, the way the theme segment's own remount test does.
+  // concurrent read while the store is busy. `getLocale` resolves an
+  // ORDINARY value on every call here (`beforeEach`'s own
+  // `mockResolvedValue`, not a one-shot `mockResolvedValueOnce`) — a stray
+  // second call would not hang, it would quietly succeed, so a bare "this
+  // test finished" proves nothing (review round 1, Minor 5: an earlier
+  // comment here claimed the opposite). The call COUNT is the only thing
+  // that can catch a broken busy-guard. `shown` (not a bare `tick`) waits out
+  // the remounted instance's own `appPrefs()` read, the way the theme
+  // segment's own remount test does.
   renderSection();
   await shown('application-language-select');
   expect(languageSelect().disabled).toBe(true);
+  expect(getLocale).toHaveBeenCalledTimes(1); // only the FIRST instance's own mount-time read
 
   resolveChange(localeReply({ choice: 'en', effective: 'en' }));
   await waitFor(() => expect(languageSelect().disabled).toBe(false));
@@ -1389,17 +1424,27 @@ test('a failed read shows the backend message and a retry-read control that reco
   expect(languageSelect().disabled).toBe(false);
 });
 
-test('a rejected change re-reads and explains the unconfirmed state rather than showing a partial warning', async () => {
+test('a rejected change shows its own message and re-reads, rather than a partial warning', async () => {
   setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
   renderSection();
   await shown('application-language-select');
 
   getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' }); // the rejection's own recovery read
   await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
-  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+  // Review round 1, Minor 3: the CHANGE's own rejection message, under its
+  // own heading — not the generic "unconfirmed" sentence, and not mislabelled
+  // as a failed READ (the recovery read here succeeds).
+  await waitFor(() => expect(screen.getByTestId('application-language-change-failed')).toBeTruthy());
+  expect(at('application-language-change-error')).toBe('IPC closed');
   expect(screen.queryByTestId('application-language-partial')).toBeNull();
-  // The recovery read succeeded, so there is no message left to retry.
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
+  // The recovery read succeeded, so there is no READ message left to retry.
   expect(screen.queryByTestId('application-language-failed')).toBeNull();
+
+  // A fresh, successful change clears the earlier rejection's own message.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.queryByTestId('application-language-change-failed')).toBeNull());
 });
 
 test('the language segment speaks the window language, both directions', async () => {

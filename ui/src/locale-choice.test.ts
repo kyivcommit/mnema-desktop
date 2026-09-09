@@ -115,7 +115,19 @@ describe('changeLocaleChoice', () => {
     expect(s.snapshot).toEqual({ choice: 'uk', effective: 'uk' });
     expect(s.busy).toBe(false);
     expect(s.error).toBeNull();
+    expect(s.changeError).toBeNull();
     expect(get(locale)).toBe('uk'); // applied through the confirmed reply, not guessed from the request
+  });
+
+  it('a change that succeeds after one that was rejected clears the earlier changeError', async () => {
+    setLocaleChoice.mockRejectedValueOnce(new Error('still refused'));
+    getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'en' }); // the rejection's own recovery read
+    await changeLocaleChoice('uk');
+    expect(get(localeChoiceState).changeError).toBe('still refused');
+
+    setLocaleChoice.mockResolvedValueOnce({ choice: 'uk', effective: 'uk', applyErrors: [] });
+    await changeLocaleChoice('uk');
+    expect(get(localeChoiceState).changeError).toBeNull();
   });
 
   // "partial reply з En": a reply carrying applyErrors is not a rejection —
@@ -148,17 +160,28 @@ describe('changeLocaleChoice', () => {
     expect(s.snapshot).toEqual({ choice: 'uk', effective: 'uk' }); // from the re-read, not guessed
     expect(s.busy).toBe(false);
     expect(getLocale).toHaveBeenCalledTimes(1);
+    // Review round 1, Minor 3: the command's own rejection survives a
+    // SUCCESSFUL recovery read — `error` is that read's own field, and a
+    // successful read clears it, but `changeError` is a different field the
+    // read never touches.
+    expect(s.changeError).toBe('IPC closed');
+    expect(s.error).toBeNull();
   });
 
   // "невідомий command result + failed read": the recovery read can itself
-  // fail; the error left behind is the READ's, and application stays unknown.
-  it('a rejected change whose recovery read also fails leaves an error and unknown', async () => {
+  // fail; each message is labelled under its own field, and application stays
+  // unknown.
+  it('a rejected change whose recovery read also fails leaves both messages, correctly labelled', async () => {
     setLocaleChoice.mockRejectedValue(new Error('IPC closed'));
     getLocale.mockRejectedValue(new Error('disk unreadable'));
     await changeLocaleChoice('uk');
     const s = get(localeChoiceState);
     expect(s.application).toEqual({ kind: 'unknown' });
+    // Two DIFFERENT operations' own messages, both visible: the read's
+    // failure must not be read as if it explained the change, or vice versa
+    // (review round 1, Minor 3 — the two used to share one field).
     expect(s.error).toBe('disk unreadable');
+    expect(s.changeError).toBe('IPC closed');
     expect(s.busy).toBe(false);
   });
 

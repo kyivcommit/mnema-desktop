@@ -839,33 +839,20 @@ test('setLocaleChoice invokes set_locale with the choice', async () => {
   expect(invoke).toHaveBeenCalledWith('set_locale', { choice: 'uk' });
 });
 
-// `rustEnumVariants` only parses `pub enum` — `LocaleSurface` is declared
-// `pub(crate) enum` (locale.rs, kept crate-private because nothing outside
-// the crate constructs one), a shape that shared reader does not handle (its
-// own header names two other known blind spots and says a silent third would
-// be a defect; this one throws instead of guessing). A narrow sibling for
-// this one enum, same source-then-derive shape, kept here rather than taught
-// to `rust-enum.ts` because nothing else in this codebase needs a `pub(crate)`
-// enum's variants.
-function localeSurfaceVariants(rawSource: string): string[] {
-  const m = /pub\(crate\)\s+enum\s+LocaleSurface\s*\{([^}]*)\}/.exec(rawSource);
-  if (!m) {
-    throw new Error(
-      'LocaleSurface not found as `pub(crate) enum` in locale.rs — has it moved, been renamed, '
-      + 'or changed visibility?',
-    );
-  }
-  return m[1].split(',').map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-// The TS union has no runtime representation to hand to a variant reader, so
+// The TS union has no runtime representation to hand to `rustEnumVariants`, so
 // the four members are listed here as data and compared against the Rust
 // enum's own variants — the same shape `OtherJob is exactly what scan_state.rs
 // defines` above pins for a real runtime array. A surface added on either side
 // without the other fails here rather than reaching the window as `undefined`.
+//
+// `LocaleSurface` is declared `pub(crate) enum` (locale.rs, kept
+// crate-private because nothing outside the crate constructs one) —
+// `rustEnumVariants` reads a restricted-visibility enum the same as a bare
+// `pub` one (review round 1, Minor 7: an earlier draft hand-rolled a second,
+// narrower parser here instead of teaching this shape to the shared one).
 test('LocaleApplyError surface lists exactly the four Rust LocaleSurface variants', () => {
   const surfaces: Array<LocaleApplyError['surface']> = ['tray', 'settingsTitle', 'appMenu', 'localeEvent'];
   expect(surfaces.slice().sort()).toEqual(
-    localeSurfaceVariants(LOCALE_RS).map(camelOf).sort(),
+    rustEnumVariants(LOCALE_RS, 'LocaleSurface').map(camelOf).sort(),
   );
 });

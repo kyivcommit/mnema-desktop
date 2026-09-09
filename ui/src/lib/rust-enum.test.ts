@@ -52,6 +52,23 @@ test('an enum it cannot find is a throw, not an answer drawn from a neighbour', 
   expect(rustEnumVariants(fixture, 'SampleTwo')).toEqual(['Only']);
 });
 
+// Review round 1 (PR 10f, Task 3), Minor 7: a restricted visibility used to
+// mean no match at all, one enum `ipc.test.ts` needed to pin
+// (`locale.rs`'s `pub(crate) enum LocaleSurface`) had a second, hand-rolled
+// parser written for it instead of teaching this one the shape — a real
+// hazard, since that second parser had no comment-stripping, no
+// struct-variant handling and no rename guard of its own. `pub(crate)`,
+// `pub(super)` and `pub(in a::b::c)` all still name the SAME enum a bare
+// `pub` does; only the parenthetical, never the variants, differs.
+test('a restricted-visibility enum is read the same as a bare `pub` one', () => {
+  const crateVisible = 'pub(crate) enum Sample {\n    First,\n    Second,\n}\n';
+  const superVisible = 'pub(super) enum Sample {\n    First,\n    Second,\n}\n';
+  const pathVisible = 'pub(in crate::locale) enum Sample {\n    First,\n    Second,\n}\n';
+  expect(rustEnumVariants(crateVisible, 'Sample')).toEqual(['First', 'Second']);
+  expect(rustEnumVariants(superVisible, 'Sample')).toEqual(['First', 'Second']);
+  expect(rustEnumVariants(pathVisible, 'Sample')).toEqual(['First', 'Second']);
+});
+
 // The blind spot it CAN see: a variant-level rename it has no way to express.
 // `rename_all` on the enum is the rule this reader already assumes, and must
 // not be mistaken for one — both directions, because a guard that fired on

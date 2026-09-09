@@ -118,14 +118,17 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_theme_failed'
   // Task 3 (PR 10f): the language choice, moved out of the tray's temporary
   // submenu into this section. `application_language_uk`/`_en` are endonyms —
-  // a language's own name for itself — so, like `locale.rs`'s `endonym`, they
-  // read the SAME in both catalogue blocks below; only `_auto` and every
-  // other key here translates.
+  // a language's own name for itself — so they read the SAME in both
+  // catalogue blocks below; only `_auto` and every other key here translates.
+  // (Review round 1, Minor 6: `locale.rs`'s own `endonym`/`Key::LangAuto`/
+  // `Key::MenuLanguage`, which drew the now-deleted tray submenu, are gone —
+  // this catalogue's two endonym keys are the only place these strings live
+  // now.)
   | 'application_language_label' | 'application_language_auto'
   | 'application_language_uk' | 'application_language_en'
   | 'application_language_partial' | 'application_language_unknown'
   | 'application_language_retry_apply' | 'application_language_retry_read'
-  | 'application_language_failed'
+  | 'application_language_failed' | 'application_language_change_failed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -975,9 +978,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_system: 'Системна',
     application_theme_failed: 'Вигляд не змінено. Ось що відповів застосунок:',
     // Task 3 (PR 10f). `_uk`/`_en` are endonyms — a language's own name for
-    // itself — and read the same in the `en` block below; `endonym` in
-    // `locale.rs` gives the identical two strings for the tray submenu this
-    // replaces.
+    // itself — and read the same in the `en` block below. `locale.rs`'s own
+    // `endonym`, which gave these same two strings to the tray submenu this
+    // replaces, is deleted (review round 1, Minor 6): this catalogue is the
+    // only place they live now.
     application_language_label: 'Мова:',
     application_language_auto: 'Авто (система)',
     application_language_uk: 'Українська',
@@ -988,6 +992,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_language_retry_apply: 'Повторити застосування',
     application_language_retry_read: 'Повторити читання',
     application_language_failed: 'Не вдалося прочитати мову. Ось що відповів застосунок:',
+    // Distinct from `_failed` above: that one is a failed READ, this one a
+    // rejected CHANGE — two different operations, shown under two different
+    // headings (review round 1, Minor 3), the same way `application_shortcut_
+    // failed`/`application_autostart_failed`/`application_theme_failed` each
+    // name their own control rather than sharing one sentence.
+    application_language_change_failed: 'Мову не змінено. Ось що відповів застосунок:',
   },
   en: {
     pin: 'Pin',
@@ -1258,5 +1268,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_language_retry_apply: 'Retry applying',
     application_language_retry_read: 'Retry reading',
     application_language_failed: 'The language could not be read. This is what the application answered:',
+    application_language_change_failed: 'The language was not changed. This is what the application answered:',
   },
 };

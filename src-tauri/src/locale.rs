@@ -46,8 +46,7 @@ pub fn resolve(choice: LocaleChoice, os: Option<&str>) -> Lang {
 /// resolve in both languages — the `match` in `t` is exhaustive over `(Lang,
 /// Key)`, so a new variant without both arms fails to compile; the completeness
 /// test below is the belt to that compiler-enforced brace. Translatable TEXT
-/// only: no emoji, no shortcut hints, no endonyms — those are composed at the
-/// call site or, for endonyms, live in `endonym` below.
+/// only: no emoji, no shortcut hints — those are composed at the call site.
 ///
 /// The shortcut hint is the one worth naming, because it is no longer a
 /// literal anywhere: `tray.rs`'s `tray_label` derives `(⌥Space)` and every
@@ -79,8 +78,6 @@ pub enum Key {
     // to carry one on — the resume button lived only in the settings window.
     TrayResumeScanning, // "Продовжити сканування" / "Continue scanning"
     TrayQuit,           // "Вийти" / "Quit"
-    MenuLanguage,       // submenu title "Мова" / "Language"
-    LangAuto,           // "Авто (система)" / "Auto (system)"
     SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
     CloseSettings,      // "Закрити налаштування" / "Close Settings"
     MenuEdit,           // "Редагувати" / "Edit"
@@ -110,8 +107,6 @@ pub const ALL_KEYS: &[Key] = &[
     Key::TrayStopIndexing,
     Key::TrayResumeScanning,
     Key::TrayQuit,
-    Key::MenuLanguage,
-    Key::LangAuto,
     Key::SettingsTitle,
     Key::CloseSettings,
     Key::MenuEdit,
@@ -147,10 +142,6 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayResumeScanning) => "Continue scanning",
         (Lang::Uk, TrayQuit) => "Вийти",
         (Lang::En, TrayQuit) => "Quit",
-        (Lang::Uk, MenuLanguage) => "Мова",
-        (Lang::En, MenuLanguage) => "Language",
-        (Lang::Uk, LangAuto) => "Авто (система)",
-        (Lang::En, LangAuto) => "Auto (system)",
         (Lang::Uk, SettingsTitle) => "Налаштування",
         (Lang::En, SettingsTitle) => "Settings",
         (Lang::Uk, CloseSettings) => "Закрити налаштування",
@@ -215,17 +206,6 @@ pub fn files_word(lang: Lang, n: i64) -> &'static str {
                 "файлів"
             }
         }
-    }
-}
-
-/// Language names shown in their own language (endonyms) for the selector. These
-/// live here (not in `tray.rs`) so the hardcode guard stays green — a Cyrillic
-/// endonym in `tray.rs` would trip it (P1-3). `Auto`'s label is `Key::LangAuto`.
-pub fn endonym(choice: LocaleChoice) -> &'static str {
-    match choice {
-        LocaleChoice::Uk => "Українська",
-        LocaleChoice::En => "English",
-        LocaleChoice::Auto => "", // Auto uses t(lang, Key::LangAuto) instead
     }
 }
 

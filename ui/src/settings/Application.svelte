@@ -472,6 +472,7 @@
   const languageBusy = $derived($localeChoiceState.busy);
   const languageApplication = $derived($localeChoiceState.application);
   const languageReadError = $derived($localeChoiceState.error);
+  const languageChangeError = $derived($localeChoiceState.changeError);
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -482,11 +483,31 @@
   const languageRetryApplyLabel = $derived.by(() => { void $locale; return t('application_language_retry_apply'); });
   const languageRetryReadLabel = $derived.by(() => { void $locale; return t('application_language_retry_read'); });
   const languageFailedLabel = $derived.by(() => { void $locale; return t('application_language_failed'); });
+  const languageChangeFailedLabel = $derived.by(() => { void $locale; return t('application_language_change_failed'); });
 
-  // The select's own change, not a per-option handler: one native control, one
-  // event, the value it reports is already the `LocaleChoice` the wire wants.
+  // 🔴 Review round 1, Critical. The select's `value={languageChoice}` binding
+  // compiles to a dirty check against the LAST value Svelte itself wrote
+  // (`svelte/compiler` 5.56.10: `if (value !== (value = languageChoice))
+  // select.value = value`) — it does not compare against what the DOM
+  // currently shows. A user pick that the store's re-read then reports
+  // UNCHANGED (persist rejected, the recovery read confirms the same old
+  // choice) leaves `languageChoice` equal to what it already was, so that
+  // check never fires and the browser's own selection — moved by the user's
+  // own click, not by Svelte — is left showing the rejected pick forever.
+  // Picking that same option again fires no `change` event at all, so the
+  // normal recovery path is dead until the section is torn down and rebuilt.
+  //
+  // Reading the candidate and writing `currentTarget.value` back to the
+  // CONFIRMED choice immediately, before `changeLocaleChoice` is even called,
+  // sidesteps the compiled check entirely: the DOM is put back in sync with
+  // the store synchronously, on every change regardless of what Svelte
+  // thinks moved, and a later successful reply then moves it again through
+  // the ordinary reactive write once `languageChoice` actually changes value.
   function onLanguageSelect(e: Event) {
-    void changeLocaleChoice((e.currentTarget as HTMLSelectElement).value as LocaleChoice);
+    const select = e.currentTarget as HTMLSelectElement;
+    const candidate = select.value as LocaleChoice;
+    select.value = languageChoice;
+    void changeLocaleChoice(candidate);
   }
 
   // ---------------------------------------------------------------------------
@@ -646,13 +667,25 @@
       disabled={languageBusy}
       onclick={() => retryLocaleApplication()}
     >{languageRetryApplyLabel}</button>
-  {:else if languageApplication.kind === 'unknown' && languageReadError === null}
-    <!-- `unknown` with no pending error is a REJECTED change whose automatic
-         recovery read then succeeded: the choice is confirmed again, but
-         whether it applied everywhere is not. `unknown` WITH an error is the
-         read-failure half of the same story and gets the more specific
-         message and retry control below instead — never both at once. -->
+  {:else if languageApplication.kind === 'unknown' && languageReadError === null && languageChangeError === null}
+    <!-- `unknown` with neither message pending: a rejected change whose own
+         message a NEWER attempt already cleared (review round 1, Minor 3 —
+         `changeError` resets to null at the START of the next
+         `changeLocaleChoice`/`retryLocaleApplication`, before that attempt's
+         own outcome is known), or the tail of a remount that has not yet
+         re-read. Either specific message below is always the more useful
+         thing to show once one exists — never both that and this at once. -->
     <p data-testid="application-language-unknown">{languageUnknownLabel}</p>
+  {/if}
+  {#if languageChangeError !== null}
+    <!-- The CHANGE's own rejection (review round 1, Minor 3) — distinct from
+         a failed READ below: `set_locale` itself was refused, never applied,
+         and the automatic recovery read that followed is what confirmed
+         `languageChoice` above, whichever way it went. No retry control of
+         its own: picking the select again is the retry, the same as every
+         other rejection in this section (shortcut/autostart/theme). -->
+    <p data-testid="application-language-change-failed">{languageChangeFailedLabel}</p>
+    <p data-testid="application-language-change-error">{languageChangeError}</p>
   {/if}
   {#if languageReadError !== null}
     <p data-testid="application-language-failed">{languageFailedLabel}</p>
