@@ -124,11 +124,16 @@ case_ "Folders.svelte: the row loses its layout class" \
   '<li class:excl={row.excluded}' \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
 
-case_ "settings.css: the current model looks like every other button" \
-  ui/src/styles/settings.css \
-  's~main button\[aria-current="true"\] \{~main button[aria-current="never"] {~' \
-  'main button[aria-current="never"]' \
-  src/styles/tokens.test.ts 'marks the current model' runner=vitest
+# PR 10f staleness sweep (task-7-report.md): "the current model looks like
+# every other button" is gone, not merely moved. Task 4 replaced the row of
+# buttons this case mutated with a native `<select>` (`Models.svelte`); a
+# browser draws its own selected-option state, so there is no
+# `aria-current`/CSS highlight left to break and no test left asserting
+# one — `grep -n aria-current ui/src/styles/settings.css` and `grep -n
+# "current model" ui/src/styles/tokens.test.ts` both come back empty.
+# Rebinding would need inventing a rule the product no longer has, which is
+# the false-positive shape `model-config.sh`'s own header warns about, not
+# a fix. Removed rather than left broken.
 
 case_ "settings.css: !important on a font property that already sets the triple" \
   ui/src/styles/settings.css \

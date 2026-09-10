@@ -1340,7 +1340,7 @@ test('a partial reply keeps the select on the confirmed choice and lists the sur
   expect(screen.queryByTestId('application-language-failed')).toBeNull(); // this is not a rejection
 });
 
-test('a partial-apply warning survives unmount and remount, not just the mount-time read', async () => {
+test('loading_locale_keeps_partial_application_warning', async () => {
   setLocaleChoice.mockResolvedValue(localeReply({
     choice: 'en',
     effective: 'en',
