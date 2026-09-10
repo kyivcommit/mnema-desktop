@@ -330,9 +330,30 @@ main select:focus-visible {
   gap: 11px;
 }
 
-/* the trailing remove control (mockup .frow .x): never squeezed by a long
- * path, which is what `.fp`'s own `flex: 1 1 auto` would otherwise do to it. */
-.folders .row > .x {
+/* the top line (mockup .frow): 11px, not the generic `.row`'s 9px — the
+ * mockup's own value for this specific row (line 139 of the mockup). */
+.folders .row {
+  gap: 11px;
+}
+
+/* the trailing remove control (mockup .frow .rm): a small icon, never a
+ * bordered `main button` — every property that rule sets differently is
+ * overridden here. `flex: none` keeps it from being squeezed by `.fp`'s own
+ * `flex: 1 1 auto`. */
+.folders .row > .rm {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  font-family: var(--sans);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-faint);
   flex: none;
 }
 
@@ -455,6 +476,42 @@ main select:focus-visible {
   font-weight: 600;
   font-style: normal;
   box-shadow: 0 1px 2px -1px var(--shadow);
+}
+
+/* the index's own numbers (mockup .statcard, .stat1, .stat1 .v/.k, lines
+ * 148-151). The wrapping `<div>` around each `dt`/`dd` pair plays `.stat1`'s
+ * role; `.stat1 .k` sets no font of its own in the mockup (it inherits the
+ * window's ambient sans/400), so `dt` here does neither. */
+.statcard {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.statcard > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statcard dt {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+.statcard dd {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 21px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 /* the shortcut (mockup .kbd) */

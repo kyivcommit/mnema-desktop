@@ -566,12 +566,13 @@
 {/if}
 
 {#if prefs}
-  <!-- Task 6: the mockup's four groups (mockup .tabpane/.gh, `.group`/
-       `.spane h3` above). Each control keeps its own handler and guard
-       verbatim — only the labelled `role="group"` wrapper around it is new,
-       and each error text is linked to its control by `aria-describedby` now
-       that the markup around it is changing anyway. -->
-  <div class="group" role="group" aria-labelledby="application-group-shortcut">
+  <!-- Task 6: the mockup's four groups (mockup .grp — a bare block, no CSS
+       rule of its own; `.spane`'s own 16px gap separates them, `.gh`/
+       `.spane h3` above is the only styling). Each control keeps its own
+       handler and guard verbatim — only the labelled `role="group"` wrapper
+       around it is new, and each error text is linked to its control by
+       `aria-describedby` now that the markup around it is changing anyway. -->
+  <div role="group" aria-labelledby="application-group-shortcut">
     <h3 id="application-group-shortcut">{groupShortcutLabel}</h3>
     <p>
       {shortcutLabelText}
@@ -604,7 +605,7 @@
     {/if}
   </div>
 
-  <div class="group" role="group" aria-labelledby="application-group-appearance">
+  <div role="group" aria-labelledby="application-group-appearance">
     <h3 id="application-group-appearance">{groupAppearanceLabel}</h3>
     <p id="application-theme-label">{themeLabelText}</p>
     {#if themeError !== null}
@@ -720,7 +721,7 @@
     {/if}
   </div>
 
-  <div class="group" role="group" aria-labelledby="application-group-startup">
+  <div role="group" aria-labelledby="application-group-startup">
     <h3 id="application-group-startup">{groupStartupLabel}</h3>
     <p>{autostartLabelText}</p>
     <p data-testid="application-autostart-status">{autostartStatusText}</p>
@@ -760,7 +761,7 @@
     {/if}
   </div>
 
-  <div class="group" role="group" aria-labelledby="application-group-version">
+  <div role="group" aria-labelledby="application-group-version">
     <h3 id="application-group-version">{groupVersionLabel}</h3>
     <p data-testid="application-version">{versionText}</p>
   </div>

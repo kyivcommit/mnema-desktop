@@ -1208,7 +1208,6 @@
 
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_folders_empty'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_folders_add'); });
-  const removeLabel = $derived.by(() => { void $locale; return t('settings_folders_remove'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_folders_load_failed'); });
   // §9.2, Task 8. Built the same way every other sentence on this screen is —
   // inside the `void $locale` rebuild — so a language switch while it is
@@ -1227,8 +1226,8 @@
   // forever, not transiently — this key names the INDEX as the subject
   // ("Indexed: 0 documents") instead. `removeAriaLabel` carries the same
   // row's path so two "Remove" buttons in a two-folder list stay
-  // distinguishable to a screen reader (P2-5); the visible button text
-  // stays the plain `removeLabel` above.
+  // distinguishable to a screen reader (P2-5); the visible button text is the
+  // mockup's own trailing ✕ glyph (Task 6), never a word to keep in step.
   // 🔴 ONE classifier over `SubfolderState`, and no default arm. Every fact a
   // row shows about a state — its sentence, which control it offers, whether it
   // can be opened — is decided here and nowhere else, so no two of them can
@@ -1640,16 +1639,18 @@
                    holds the slot — the backend refuses in the second case,
                    and would race the re-read in the first.
 
-                   Task 6: drawn as the mockup's trailing ✕ rather than the
-                   word — the aria-label is what still carries the path
-                   (`removeAriaLabel`), exactly as before, so a screen reader
-                   hears the same name it always did and `removeButton()` in
-                   the test file keeps finding it by that name. `.x` is what
-                   gives it `flex: none` beside `.fp`'s own `flex: 1 1 auto`,
-                   so the icon cannot be squeezed by a long path. -->
+                   Task 6: drawn as the mockup's own trailing ✕ (`.frow .rm`)
+                   rather than the word — the aria-label is what still
+                   carries the path (`removeAriaLabel`), exactly as before,
+                   so a screen reader hears the same name it always did and
+                   `removeButton()` in the test file keeps finding it by that
+                   name. `.rm` is what gives it the mockup's 24×24 icon
+                   shape and `flex: none` beside `.fp`'s own
+                   `flex: 1 1 auto`, so it cannot be squeezed by a long
+                   path. -->
               <button
                 type="button"
-                class="x"
+                class="rm"
                 aria-label={removeAriaLabel}
                 disabled={removing !== null || scanRunning}
                 onclick={() => askRemove(root)}>✕</button>

@@ -253,7 +253,10 @@
 {#if filesLine}<p data-testid="indexing-index-files">{filesLine}</p>{/if}
 {#if dateLine}<p data-testid="indexing-index-date">{dateLine}</p>{/if}
 {#if agoLine}<p data-testid="indexing-index-ago">{agoLine}</p>{/if}
-{#if neverLine}<p data-testid="indexing-index-never">{neverLine}</p>{/if}
+<!-- Controller ruling (Task 6, review round 1): no standalone paragraph here
+     any more — `neverLine` and the statcard's "updated" cell (`lastUpdateText`
+     above) are the SAME string whenever this would have shown, and a
+     sentence must not appear twice. The statcard already carries it. -->
 {#if failedChunksLine}<p data-testid="indexing-index-failed-chunks">{failedChunksLine}</p>{/if}
 {#if refusedRunLine}<p data-testid="indexing-index-refused-run">{refusedRunLine}</p>{/if}
 {#if sectionAction}

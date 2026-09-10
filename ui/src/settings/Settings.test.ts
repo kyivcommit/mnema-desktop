@@ -373,7 +373,7 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
   expect(panel()?.textContent?.replace(/\s+/g, ' ').trim())
-    .toBe('Scanning Documents0 Last updateNothing has been indexed yet. The index holds 0 files. Nothing has been indexed yet. Scan');
+    .toBe('Scanning Documents0 Last updateNothing has been indexed yet. The index holds 0 files. Scan');
 });
 
 // M2 (review): the Застосунок branch was once rendered by no test — a person
@@ -436,19 +436,20 @@ test('labels stay correct across a language switch after mount', async () => {
   // Ukrainian assertion below and the English one still resolves.
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByText('The index holds 0 files.')).toBeTruthy());
-  // Task 6: the statcard reuses this same never-sentence in its own cell
-  // (`Scanning.svelte`'s `lastUpdateText`), so the sentence now renders TWICE
-  // — the paragraph above and the statcard beside it — both following the
-  // language switch below.
-  expect(screen.getAllByText('Nothing has been indexed yet.')).toHaveLength(2);
+  // Task 6, review round 1: the standalone never-paragraph is gone (a
+  // sentence must not appear twice) — the statcard's own "updated" cell
+  // (`Scanning.svelte`'s `lastUpdateText`) is the one place it renders now,
+  // and it follows the language switch below exactly as the paragraph it
+  // replaced did.
+  expect(screen.getAllByText('Nothing has been indexed yet.')).toHaveLength(1);
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('В індексі 0 файлів.')).toBeTruthy());
-  expect(screen.getAllByText('Ще нічого не проіндексовано.')).toHaveLength(2);
+  expect(screen.getAllByText('Ще нічого не проіндексовано.')).toHaveLength(1);
   // Both directions: the English strings are gone from the same mount, not
   // merely joined by Ukrainian ones.
   expect(screen.queryByText('The index holds 0 files.')).toBeNull();
-  expect(screen.queryAllByText('Nothing has been indexed yet.')).toHaveLength(0);
+  expect(screen.queryByText('Nothing has been indexed yet.')).toBeNull();
 
   const nav = screen.getByRole('navigation');
   expect(nav.textContent).toBe(['Моделі', 'Теки', 'Сканування', 'Застосунок'].join(''));

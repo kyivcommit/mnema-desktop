@@ -969,6 +969,31 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     differ(on, off, 'background');
     differ(on, off, 'font-weight');
   });
+
+  // Task 6, review round 1: nothing here asked for the `.statcard` rule
+  // itself, only for its markup — so it went missing for a whole review
+  // round with every other test still green. A bare `<dl>` against one
+  // carrying the class is what a missing rule turns back into one element.
+  it('gives the statcard a bordered card, not a bare list', () => {
+    mount(`<main><div class="spane">
+      <dl><div><dt>a</dt><dd>b</dd></div></dl>
+      <dl class="statcard"><div><dt>a</dt><dd>b</dd></div></dl>
+    </div></main>`);
+    const [plain, card] = document.querySelectorAll('dl');
+    differ(card, plain, 'border');
+    differ(card, plain, 'padding-top');
+  });
+
+  // The mockup's `.frow .rm`: a 24×24 icon, never a bordered `main button`.
+  it('draws the folder remove control as a small icon, not a bordered button', () => {
+    mount(`<main><div class="folders"><ul><li><div class="row">
+      <button type="button">plain</button>
+      <button type="button" class="rm">✕</button>
+    </div></li></ul></div></main>`);
+    const [plain, rm] = document.querySelectorAll('.row button');
+    differ(rm, plain, 'border-top-width');
+    differ(rm, plain, 'width');
+  });
 });
 
 describe('each window imports its stylesheets', () => {

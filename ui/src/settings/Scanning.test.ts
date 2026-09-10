@@ -176,7 +176,9 @@ test('a filled index says how many files it holds, the date it last grew, and ho
   expect(visible(screen.getByTestId('indexing-index-date')))
     .toBe(`Останнє оновлення: ${dateIn('uk', at)}.`);
   expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('Це було 1 годину тому.');
-  expect(screen.queryByTestId('indexing-index-never')).toBeNull();
+  // The statcard's own "updated" cell states the date too, never the
+  // never-sentence, once there is one to state.
+  expect(screen.queryByText('Ще нічого не проіндексовано.')).toBeNull();
 });
 
 test('the date follows the language, not the machine', async () => {
@@ -199,8 +201,11 @@ test('the date follows the language, not the machine', async () => {
 test('an index nothing has ever finished indexing says so, and draws no time at all', async () => {
   renderSection(read({ indexedFiles: 0, lastIndexedAt: null }));
 
-  await waitFor(() => expect(screen.getByTestId('indexing-index-never')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-index-never'))).toBe('Ще нічого не проіндексовано.');
+  // Task 6, review round 1: the standalone paragraph is gone — the
+  // statcard's own "updated" cell is the one and only place this sentence
+  // renders now, so a duplicate would be the regression this line guards.
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(screen.getAllByText('Ще нічого не проіндексовано.')).toHaveLength(1);
   expect(screen.queryByTestId('indexing-index-date')).toBeNull();
   expect(screen.queryByTestId('indexing-index-ago')).toBeNull();
   const text = pageText();
@@ -277,7 +282,7 @@ test('an index that is not open says so, and shows the backend reason verbatim',
   expect(pageText()).not.toContain('спроба читання не вдалася');
   expect(screen.queryByTestId('indexing-index-files')).toBeNull();
   expect(screen.queryByTestId('indexing-index-date')).toBeNull();
-  expect(screen.queryByTestId('indexing-index-never')).toBeNull();
+  expect(screen.queryByTestId('indexing-statcard')).toBeNull();
   expect(pageText()).not.toContain('undefined');
 });
 
