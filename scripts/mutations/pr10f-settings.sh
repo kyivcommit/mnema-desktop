@@ -49,9 +49,12 @@ case_ "i18n/index.ts: bootLocale drops the revision check" \
   '  initLocale(reply.effective);' \
   src/i18n/boot.test.ts 'a direct change wins over an older boot snapshot without an event' runner=vitest
 
+# Rebound, PR44 P2-2 (Task 11): the success line this mutates now also sets
+# `snapshotConfirmed: true`, so the marker (and the mutant's own inserted
+# text) carry that field too.
 case_ "locale-choice.ts: loading the locale clears a partial-apply warning" \
   ui/src/locale-choice.ts \
-  "s~    state\.update\(\(s\) => \(\{ \.\.\.s, snapshot: reply, error: null \}\)\);~    state.update((s) => ({ ...s, snapshot: reply, error: null, application: { kind: 'initial' } }));~" \
+  "s~    state\.update\(\(s\) => \(\{ \.\.\.s, snapshot: reply, error: null, snapshotConfirmed: true \}\)\);~    state.update((s) => ({ ...s, snapshot: reply, error: null, snapshotConfirmed: true, application: { kind: 'initial' } }));~" \
   "application: { kind: 'initial' } }));" \
   src/settings/Application.test.ts 'loading_locale_keeps_partial_application_warning' runner=vitest
 

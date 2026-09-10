@@ -231,4 +231,52 @@ describe('retryLocaleApplication', () => {
     finish({ choice: 'uk', effective: 'uk', applyErrors: [] });
     await first;
   });
+
+  // Independent review of PR #44 (2026-09-10), P2-2, confirmed on this head
+  // by this ported probe before the fix: a snapshot confirmed BEFORE a
+  // change starts survives that change's own rejection, and a rejected
+  // recovery read after it, completely untouched — a following retry then
+  // repeats that stale PRE-write choice, rolling back a change the backend
+  // already persisted (the reply was merely lost in transport). `en` is
+  // persisted by the change; retrying must never send `uk` again.
+  it('a snapshot confirmed before a rejected change (whose own recovery read also fails) is not retried with', async () => {
+    getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' });
+    await loadLocaleChoice();
+
+    let persisted = 'uk';
+    setLocaleChoice.mockImplementationOnce(async (choice: string) => {
+      persisted = choice;
+      throw new Error('response lost after persistence');
+    });
+    getLocale.mockRejectedValueOnce(new Error('read unavailable'));
+    await changeLocaleChoice('en');
+    expect(persisted).toBe('en');
+    expect(get(localeChoiceState).application.kind).toBe('unknown');
+
+    setLocaleChoice.mockImplementation(async (choice: string) => {
+      persisted = choice;
+      return { choice, effective: choice, applyErrors: [] };
+    });
+    await retryLocaleApplication();
+    expect(persisted).toBe('en'); // never rolled back to the stale 'uk'
+    expect(setLocaleChoice).toHaveBeenCalledTimes(1); // refused: no second call
+  });
+
+  // The other half: once a LATER read confirms the new choice, retry-apply
+  // is trusted again and repeats THAT choice, never the stale one.
+  it('retries with a NEWLY confirmed choice once a later read succeeds', async () => {
+    getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' });
+    await loadLocaleChoice();
+
+    setLocaleChoice.mockRejectedValueOnce(new Error('response lost after persistence'));
+    getLocale.mockRejectedValueOnce(new Error('read unavailable'));
+    await changeLocaleChoice('en');
+
+    getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the reconciling "Retry reading"
+    await loadLocaleChoice();
+
+    setLocaleChoice.mockResolvedValueOnce({ choice: 'en', effective: 'en', applyErrors: [] });
+    await retryLocaleApplication();
+    expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+  });
 });

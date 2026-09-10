@@ -32,6 +32,25 @@ export type LocaleApplicationState =
 
 export type LocaleChoiceState = {
   snapshot: LocaleReply | null;
+  // Review, PR44 P2-2: `snapshot` alone is not "safe to retry-apply with" —
+  // it is also the LAST value a read confirmed, which a change in flight (or
+  // one that just rejected, with its own recovery read ALSO rejecting) can
+  // leave stale and unconfirmed. Scenario the review names: a read confirms
+  // `uk`; a change to `en` persists on the backend but its own reply is lost
+  // in transport, and the recovery read that follows also fails — `snapshot`
+  // still holds the pre-write `uk`, `application` is `unknown`, and retrying
+  // with `snapshot.choice` would call `set_locale('uk')`, rolling back the
+  // `en` the backend already saved. `snapshotConfirmed` is false exactly
+  // there: set false the instant a change STARTS (the snapshot behind it is
+  // stale from that point, whichever way the change turns out), true only by
+  // a read or a command reply that itself confirms a fresh one.
+  //
+  // Deliberately NOT `snapshot: null` on the rejection path instead (the
+  // brief's other option): the select must keep showing the last
+  // AUTHORITATIVE value while unconfirmed (`languageChoice` in
+  // `Application.svelte` still reads `snapshot`), not blank out to nothing
+  // — only retry-apply's own eligibility is what turns out to be stale.
+  snapshotConfirmed: boolean;
   busy: boolean;
   // `error` and `changeError` are two DIFFERENT operations' own rejection
   // messages, kept in two fields on purpose (review round 1, Minor 3). A
@@ -59,7 +78,8 @@ export type LocaleChoiceState = {
 };
 
 const INITIAL: LocaleChoiceState = {
-  snapshot: null, busy: false, error: null, changeError: null, application: { kind: 'initial' },
+  snapshot: null, snapshotConfirmed: false, busy: false, error: null, changeError: null,
+  application: { kind: 'initial' },
 };
 
 const state = writable<LocaleChoiceState>({ ...INITIAL });
@@ -89,7 +109,7 @@ export async function loadLocaleChoice(): Promise<void> {
   try {
     const reply = await getLocale();
     if (mine !== opSeq) return; // superseded by a change that started after this read did
-    state.update((s) => ({ ...s, snapshot: reply, error: null }));
+    state.update((s) => ({ ...s, snapshot: reply, error: null, snapshotConfirmed: true }));
   } catch (e) {
     if (mine !== opSeq) return;
     state.update((s) => ({ ...s, error: errorMessage(e), application: { kind: 'unknown' } }));
@@ -112,7 +132,11 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
   // left `busy` set forever on the one path that could have reached it, which
   // is a latent deadlock rather than a guard.
   opSeq++;
-  state.update((s) => ({ ...s, busy: true, changeError: null }));
+  // Review, PR44 P2-2: the snapshot behind this change is stale from THIS
+  // point on, whichever way the change turns out — a rejection (with its own
+  // recovery read possibly also failing) must not leave retry-apply trusting
+  // a pre-write value it never re-confirmed.
+  state.update((s) => ({ ...s, busy: true, changeError: null, snapshotConfirmed: false }));
   try {
     const reply = await setLocaleChoice(choice);
     // The confirmed reply is the truth, applied through the SAME setter
@@ -121,6 +145,7 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
     applyEffectiveLocale(reply.effective);
     state.set({
       snapshot: { choice: reply.choice, effective: reply.effective },
+      snapshotConfirmed: true,
       busy: false,
       error: null,
       changeError: null,
@@ -143,12 +168,18 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
 
 // Task 2's own retry path: repeating the CURRENT choice re-runs every apply
 // step and the emit, so retrying is `changeLocaleChoice` with nothing new to
-// decide. Needs a confirmed snapshot to retry with — with none (the first
+// decide. Needs a CONFIRMED snapshot to retry with — with none (the first
 // read itself failed), there is no choice here to repeat; the failed-read
 // recovery is `loadLocaleChoice()` again, a separate control in the UI.
+// Review, PR44 P2-2: `s.snapshot === null` alone let a STALE, pre-write
+// snapshot through — left behind by a rejected change whose own recovery
+// read also failed — and retrying with it silently repeated the OLD choice,
+// rolling back a write the backend had already persisted. `snapshotConfirmed`
+// is what actually answers "is this the last thing a read or a command
+// reply confirmed", which `snapshot !== null` never did on its own.
 export async function retryLocaleApplication(): Promise<void> {
   const s = get(state);
-  if (s.busy || s.snapshot === null) return;
+  if (s.busy || s.snapshot === null || !s.snapshotConfirmed) return;
   await changeLocaleChoice(s.snapshot.choice);
 }
 

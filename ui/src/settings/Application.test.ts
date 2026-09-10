@@ -1519,6 +1519,37 @@ test('a rejected change with no confirmed snapshot yet shows the unknown sentenc
   expect(screen.queryByTestId('application-language-retry-apply')).toBeNull();
 });
 
+// Independent review of PR #44 (2026-09-10), P2-2. Unlike the test above,
+// THIS state has a previously confirmed snapshot (the ordinary mount read) —
+// `languageReady` (`snapshot !== null`) alone would have offered
+// retry-apply from it, and pressing it would have called `set_locale` with
+// the STALE pre-write choice, rolling back a change the backend had already
+// persisted (the reply was merely lost in transport). Only "Retry reading"
+// is offered until a later read actually confirms a choice.
+test('an unconfirmed snapshot after a rejected change and a failed recovery read offers Retry reading, never Retry applying, until a later read confirms one', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('response lost after persistence'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own CONFIRMED read
+
+  getLocale.mockRejectedValueOnce(new Error('read unavailable')); // the change's own recovery read fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+  expect(screen.getByTestId('application-language-failed')).toBeTruthy();
+  expect(screen.getByTestId('application-language-retry-read')).toBeTruthy();
+  expect(screen.queryByTestId('application-language-retry-apply')).toBeNull();
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the later, successful "Retry reading"
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-failed')).toBeNull());
+  expect(screen.getByTestId('application-language-retry-apply')).toBeTruthy();
+
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  // Sends the newly confirmed choice — never the stale pre-write one the
+  // mount's own read had left behind.
+  expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+});
+
 // Review round 2, Minor C. `changeError` has no exit path except a FRESH
 // change/retry attempt — a plain read (successful or not) never touches it,
 // by the same rule `application` itself follows (a read has no `applyErrors`

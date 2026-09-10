@@ -468,6 +468,15 @@
   // group above: three languages read fine in one control, and a person only
   // ever wants one of them at a time in exactly the way a `<select>` states.
   const languageReady = $derived($localeChoiceState.snapshot !== null);
+  // Review, PR44 P2-2: `languageReady` alone (`snapshot !== null`) is NOT
+  // "safe to offer retry-apply" — a rejected change whose own recovery read
+  // also fails leaves `snapshot` holding the stale PRE-write value, still
+  // non-null, so `languageReady` stays true while that value is no longer
+  // trustworthy to repeat (`locale-choice.ts`'s own comment on
+  // `snapshotConfirmed`). The select itself still uses `languageReady`
+  // unchanged: it keeps showing that last authoritative value and stays
+  // usable, only the retry-APPLY control is gated on confirmation too.
+  const languageRetryApplyReady = $derived($localeChoiceState.snapshotConfirmed);
   const languageChoice: LocaleChoice = $derived($localeChoiceState.snapshot?.choice ?? 'auto');
   const languageBusy = $derived($localeChoiceState.busy);
   const languageApplication = $derived($localeChoiceState.application);
@@ -693,7 +702,7 @@
            this sentence never states more than that, and the messages below
            only ever ADD detail beside it. -->
       <p id="application-language-unknown" data-testid="application-language-unknown">{languageUnknownLabel}</p>
-      {#if languageReady}
+      {#if languageRetryApplyReady}
         <!-- Whole-branch review, Important 1. Spec §7.1: the retry-apply
              control is available after an `unknown` outcome too, once
              `get_locale` has confirmed A choice — not only after `partial`.
@@ -701,10 +710,16 @@
              (review round 1's own fix writes the DOM back to the confirmed
              value before `changeLocaleChoice` runs), so this was the only
              control left that could repeat the attempt. Guarded by
-             `languageReady` (`snapshot !== null`), the same condition
-             `retryLocaleApplication` itself enforces — with no confirmed
-             snapshot (the first read itself failed), there is nothing to
-             retry with, and the button would be a no-op. -->
+             `languageRetryApplyReady` (`snapshotConfirmed`), the same
+             condition `retryLocaleApplication` itself enforces (review, PR44
+             P2-2) — with no CONFIRMED snapshot (the first read itself
+             failed, or a later change's own recovery read also failed,
+             leaving only a stale pre-write value behind), there is nothing
+             safe to retry with, and the button would either be a no-op or,
+             worse, silently repeat a choice the backend has already moved
+             past. The failed-read case below (`languageReadError !== null`)
+             already offers "Retry reading" here instead — the read that
+             confirms a fresh choice is what turns this button back on. -->
         <button
           type="button"
           data-testid="application-language-retry-apply"
