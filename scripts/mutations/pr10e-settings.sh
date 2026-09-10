@@ -124,11 +124,23 @@ case_ "Folders.svelte: the row loses its layout class" \
   '<li class:excl={row.excluded}' \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
 
-case_ "settings.css: the current model looks like every other button" \
-  ui/src/styles/settings.css \
-  's~main button\[aria-current="true"\] \{~main button[aria-current="never"] {~' \
-  'main button[aria-current="never"]' \
-  src/styles/tokens.test.ts 'marks the current model' runner=vitest
+# Rebound (PR 10f Task 7 review round 1, task-7-report.md fix report): "the
+# current model looks like every other button" named a CSS rule
+# (`aria-current`) and a test that are both gone — Task 4 replaced the row
+# of buttons this case mutated with a native `<select>` (`Models.svelte`),
+# whose selected-option state a browser draws itself, so there is no
+# `aria-current` highlight left to break (`grep -n aria-current
+# ui/src/styles/settings.css` is empty). But the CASE's own intent — the
+# select must actually show the model the app THINKS is current, not some
+# other value nobody wrote — has a live carrier one property over:
+# `value={selectValue}` (`Models.svelte:942`), asserted at
+# `Models.test.ts:1015` and `:1028` among others. Rebound there instead of
+# invented back into CSS.
+case_ "Models.svelte: the select stops showing which model is actually current" \
+  ui/src/settings/Models.svelte \
+  "s~        disabled=\{changeBusy\}\n        value=\{selectValue\}~        disabled={changeBusy}\n        value={''}~" \
+  "value={''}" \
+  src/settings/Models.test.ts 'the shown selection does not change until set_chat_model AND its re-read both resolve — not on the click alone' runner=vitest
 
 case_ "settings.css: !important on a font property that already sets the triple" \
   ui/src/styles/settings.css \

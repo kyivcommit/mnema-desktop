@@ -462,10 +462,12 @@ fn read_autostart(state: &AppState) -> AutostartState {
 ///
 /// ⚠️ **No headless test distinguishes this from not doing it, and that is a
 /// property of the runtime rather than a gap somebody left.** `swap_tray_menu`
-/// returns at its first line when there is no tray, and `mock_builder()` builds
-/// no tray at all — so under the mock this dispatch and its absence are
-/// observationally identical. It is verified by changing the shortcut in the
-/// running application and reading the menu bar, which is Task 9's live run.
+/// returns `Ok(())` at whichever `None`-safe check it reaches first (its own
+/// `AppState` lookup, or the tray lookup inside the `install_tray_menu` it
+/// calls into), and `mock_builder()` builds neither — so under the mock this
+/// dispatch and its absence are observationally identical. It is verified by
+/// changing the shortcut in the running application and reading the menu bar,
+/// which is Task 9's live run.
 #[tauri::command(async)]
 pub fn set_hotkey<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -480,7 +482,13 @@ pub fn set_hotkey<R: tauri::Runtime>(
     // not wait — so nothing here holds the worker thread on the event loop.
     let _ = app.run_on_main_thread(move || {
         let locale = handle.state::<AppState>().locale();
-        crate::tray::swap_tray_menu(&handle, locale.effective, locale.choice);
+        // Task 1: `swap_tray_menu` now reports a failed install instead of
+        // swallowing it; this hop already has no error channel of its own
+        // (see the doc above), so the failure is logged and not otherwise
+        // acted on — the hotkey's own `outcome` still reaches the caller.
+        if let Err(e) = crate::tray::swap_tray_menu(&handle, locale.effective, locale.choice) {
+            eprintln!("mnema: tray menu relabel after hotkey change failed: {e}");
+        }
     });
     outcome
 }

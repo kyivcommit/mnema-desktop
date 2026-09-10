@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import type { EndReason, Frozen, FrozenReason, IndexRead, RootOutcome } from '../lib/ipc';
-  import { continueAction, progressShape, type JobController } from './jobs';
+  import { continueAction, phaseLabel, type JobController } from './jobs';
+  import ScanProgress from './ScanProgress.svelte';
 
   // §9.2 — the settings window's status line: what a pass is doing, what the
   // last READING came to (which outlives the pass that made it), what the
@@ -10,18 +12,23 @@
   // carry on.
   //
   // 🔴 This is the WINDOW's job strip, not the Scanning section. It is drawn
-  // above the nav and outside every `{#if section === …}` (`Settings.svelte`),
-  // so a running scan stays visible and stoppable from every section — the
-  // live run's finding 3. The §9.3 section, which says what the index HOLDS
-  // rather than what a pass is doing, is `Scanning.svelte` (called
-  // `Indexing.svelte` until Task 8), a different file mounted inside the panel.
+  // after `.scols` (`Settings.svelte`), so a running scan stays visible and
+  // stoppable from every section — the live run's finding 3, and Task 5's own
+  // correction of where "outside the section" actually means (the bottom of
+  // the window, not the top — see the geometry note there). The §9.3 section,
+  // which says what the index HOLDS rather than what a pass is doing, is
+  // `Scanning.svelte`, a different file mounted inside the panel.
   //
-  // 🔴 Task 6 gave this component the smallest thing drawable from the new
-  // `ScanState` snapshot and left the rest for this task, by name: the reading
-  // outcome from `scan.lastReading` (the per-root rows, the frozen prefixes,
-  // the folders-read count, the partly-read sentence), the embedding block
-  // from `report.embedding`, the removal sentence, and the continue button
-  // from `continueAction`. This is that rewrite.
+  // Task 5 turned this into a non-modal DISCLOSURE: one line always on
+  // screen, in every section, and the report itself behind a `<details>` a
+  // person opens on purpose rather than a card permanently taking up the
+  // window's height. `ScanProgress.svelte` now draws the running phase — the
+  // sentence, the counts, the estimate, the busy note — as the same
+  // projection `Scanning.svelte` draws from the same snapshot; what stays here
+  // is the reading outcome from `scan.lastReading` (the per-root rows, the
+  // frozen prefixes, the folders-read count, the partly-read sentence), the
+  // embedding block from `report.embedding`, the removal sentence, Stop, and
+  // the continue button from `continueAction`.
   //
   // The controller is a PROP, not something this component builds: it is
   // created once by `Settings.svelte`, above every section, because the
@@ -29,11 +36,13 @@
   // `read` is the second prop for the same shape of reason — `continueAction`
   // needs the index's own markers when a report names no resumption, and a
   // read taken inside a section would not survive the section's own unmount.
-  // `null` is a real value here, not a loading placeholder to wait out: with
-  // it the strip can only ever show ITS OWN row (`continueAction`'s `read ===
-  // null` arm returns `null`, never a guess), which is the correct
-  // degradation for a window whose model settings never loaded at all.
-  let { jobs, read }: { jobs: JobController; read: IndexRead | null } = $props();
+  // `focusFallback` is the third: where focus goes when the whole disclosure
+  // disappears out from under it (the job ended with nothing left to say) —
+  // `Settings.svelte` is the one place that knows which nav button is
+  // pressed, so it is the one place that can answer this.
+  let { jobs, read, focusFallback, section }: {
+    jobs: JobController; read: IndexRead | null; focusFallback: () => void; section: string;
+  } = $props();
   // Read once, on purpose: the controller is created above this component and
   // its identity never changes for the life of the window, which is the whole
   // point of it living there. `$jobState` is then ordinary store
@@ -137,92 +146,9 @@
   const note = $derived($jobState.note);
 
   // The running phase, or `null` for every other snapshot. Read once here so
-  // the several derivations below do not each re-narrow `snapshot.kind`.
+  // the several derivations below do not each re-narrow `snapshot.kind`, and
+  // handed to `ScanProgress` whole — it is the one component that draws it.
   const phase = $derived(snapshot.kind === 'running' ? snapshot.phase : null);
-
-  // The counts of the phase that has any. `removing` carries none at all and
-  // `other` is a job nobody asked for (`scan_state::Phase`), so there is
-  // nothing here to draw for either — not a zero, which would read as a run
-  // that has done nothing.
-  const counts = $derived(
-    phase !== null && (phase.kind === 'reading' || phase.kind === 'embedding') ? phase.counts : null,
-  );
-
-  // Offered exactly when the core says the job may be interrupted, and never
-  // inferred from the phase: `cancellable` is fixed for the life of the job and
-  // a removal is not stoppable, so a strip deciding for itself would offer a
-  // button that does nothing.
-  const cancellable = $derived(snapshot.kind === 'running' && snapshot.cancellable);
-
-  const passLabel = $derived.by(() => {
-    void $locale;
-    if (phase === null) return null;
-    switch (phase.kind) {
-      case 'reading':
-        // One-based on the wire (`scan_job.rs`: "3 of 7" is what a person
-        // reads), so nothing here adds or subtracts one.
-        return t('indexing_reading_root', {
-          rootIndex: phase.rootIndex, rootCount: phase.rootCount, rootPath: phase.rootPath,
-        });
-      case 'embedding':
-        return t('indexing_embed_running');
-      case 'removing':
-        return t('indexing_removing', { rootPath: phase.rootPath });
-      // A probe or a model adoption (`scan_state::OtherJob`): nobody asked for
-      // either, and this build has no words for them — Stop alone still
-      // shows, because `cancellable` does not depend on having a sentence.
-      case 'other':
-        return null;
-    }
-  });
-
-  // A fresh embedding pass reporting zero of zero reads as "nothing to do"
-  // while a run is genuinely under way — the same trap `progressShape`'s own
-  // "countingUp" shape exists for on a reading pass, except an embedding pass
-  // has no such shape of its own to fall into, so it gets a sentence instead
-  // of a line of counts.
-  const embedStartingZero = $derived(
-    phase !== null && phase.kind === 'embedding' && phase.counts.total === 0 && phase.counts.done === 0,
-  );
-
-  const countsLabel = $derived.by(() => {
-    void $locale;
-    if (counts === null || embedStartingZero) return null;
-    const shape = progressShape(counts);
-    const common = { done: counts.done, skipped: counts.skipped, refused: counts.refused };
-    return shape.kind === 'ratio'
-      ? t('indexing_counts_ratio', { ...common, total: shape.total })
-      : t('indexing_counts_counting', common);
-  });
-
-  // Takes the counts line's own place, for the one shape above — never beside
-  // it, which is why both are drawn into the same slot in the markup below.
-  const embedStartingLabel = $derived.by(() => {
-    void $locale;
-    return embedStartingZero ? t('indexing_embed_starting_zero') : null;
-  });
-
-  // Drawn only when the reading actually met the lock, LIVE, while a reading
-  // phase is running. `scan.lastReading`'s own copy of this fact is
-  // `readingBlock.contended` below — the same catalogue key answers both,
-  // because the fact it explains (part of the skipped count) is the same
-  // fact either way, and it is what lets the sentence survive past the
-  // ending.
-  const contendedLabel = $derived.by(() => {
-    void $locale;
-    if (counts === null || counts.contended === 0) return null;
-    return t('indexing_counts_contended');
-  });
-
-  const etaLabel = $derived.by(() => {
-    void $locale;
-    if (counts === null) return null;
-    // Not `seconds ? …` — zero seconds left is a number, and the nullish check
-    // is the one this field's `Option<u64>` actually asks for.
-    return counts.secondsLeft === null
-      ? t('indexing_eta_unknown')
-      : t('indexing_eta', { seconds: counts.secondsLeft });
-  });
 
   const cancelLabel = $derived.by(() => { void $locale; return t('indexing_cancel'); });
 
@@ -268,8 +194,8 @@
   });
 
   // The embedding block: `report.embedding`, drawn only once the job has
-  // ended — the phase's own live counts are `countsLabel`/`embedStartingLabel`
-  // above, while it is still running.
+  // ended — the phase's own live counts are `ScanProgress`'s, while it is
+  // still running.
   const embedBlock = $derived.by(() => {
     void $locale;
     if (snapshot.kind !== 'ended') return null;
@@ -362,76 +288,257 @@
   });
 
   // Nothing to say, nothing on screen. A strip that is always there, saying it
-  // is idle, is noise on a window somebody opened to change a model — and an
-  // empty box during a phase this build has no words for is the same noise
-  // with less in it.
+  // is idle, is noise on a window somebody opened to change a model. `phase`
+  // alone stands in for the three counts-shaped things `ScanProgress` now
+  // draws (they are never non-null unless it is), and Task 5 gave `other` a
+  // name too, so a probe or a model adoption no longer needs `cancellable`
+  // named separately here — every running snapshot carries a phase.
   const anything = $derived(
-    passLabel !== null || countsLabel !== null || embedStartingLabel !== null
-    || readingBlock !== null || embedBlock !== null || failureLabel !== null
-    || note !== null || stripAction !== null || cancellable,
+    phase !== null || readingBlock !== null || embedBlock !== null
+    || failureLabel !== null || note !== null || stripAction !== null,
   );
+
+  // Task 5 — the ended report's OWN top-line sentence, picked by which phase
+  // it ended IN rather than assembled from scratch: `embedBlock.sentence`
+  // already carries "the embedding pass broke off/was stopped/finished" for
+  // every `EndReason`, `readingBlock.sentence` carries the matching table for
+  // a reading. Picking by `endedIn` is what keeps a failure that happened
+  // AFTER a clean reading from disappearing behind that reading's own
+  // `indexing_walk_ended_completed` sentence — the failure is the embedding
+  // block's own sentence, not the reading's, and only `endedIn` says which
+  // block is the report's own voice.
+  const endedSentence = $derived(
+    snapshot.kind !== 'ended'
+      ? null
+      : snapshot.report.endedIn === 'embedding'
+        ? (embedBlock?.sentence ?? readingBlock?.sentence ?? null)
+        : (readingBlock?.sentence ?? null),
+  );
+
+  // The disclosure's one-line summary — §4.2's own priority order. A command
+  // note (a refusal) outranks everything, because it is about the press the
+  // person just made; a running phase is the next most current fact; an ended
+  // report's own sentence next; and `scan.lastReading` last, for a window that
+  // opened onto a pass that finished before it existed, or whose report has
+  // since been superseded by an idle snapshot with nothing else to say.
+  // `indexing_summary_fallback` is the floor under all four — reachable only
+  // if `anything` is true for a reason none of the four names, which nothing
+  // built today does.
+  const summaryText = $derived.by(() => {
+    void $locale;
+    if (note !== null) return note;
+    if (phase !== null) {
+      const l = phaseLabel(phase);
+      return t(l.key, l.params);
+    }
+    if (endedSentence !== null) return endedSentence;
+    if (readingBlock !== null) return readingBlock.sentence;
+    return t('indexing_summary_fallback');
+  });
+
+  // ---------------------------------------------------------------------------
+  // The disclosure itself: non-modal, closed by default, and never trapping
+  // focus. It closes on Escape, on a click or a focus move outside it, on a
+  // section change, and when the DOM update that follows a state change
+  // removes the element focus was actually on — never on an ordinary count
+  // tick, which changes none of those things.
+  // ---------------------------------------------------------------------------
+  let disclosure: HTMLDetailsElement | undefined = $state();
+  let summaryEl: HTMLElement | undefined = $state();
+  let open = $state(false);
+
+  // The element inside the panel that last held focus, tracked so a DOM
+  // update that removes it (the report reshaped, or the whole panel went)
+  // can decide where focus goes next instead of leaving it on `<body>`.
+  let lastFocused: HTMLElement | null = null;
+
+  function withinPanel(node: EventTarget | null): boolean {
+    // `!= null`, not `!== undefined`: `bind:this` resets a torn-down element
+    // to `null`, not `undefined` — a strict check here let a `disclosure ===
+    // null` (the panel just removed) reach `disclosure.contains(...)` and
+    // throw, found the moment `focusFallback` itself moves focus and this
+    // handler fires for that very focusin (review round 1).
+    return disclosure != null && node instanceof Node && disclosure.contains(node);
+  }
+
+  // Document-level, because the panel closing is a reaction to focus or a
+  // press LANDING OUTSIDE it — an outside element's own handler owes this
+  // component nothing, and this must not stop it from also getting the click
+  // or the focus it asked for (no `preventDefault`, no `stopPropagation` on
+  // either of these two).
+  //
+  // Review round 1, Important 1. Recording `lastFocused` must NOT be gated on
+  // `open`: the browser focuses `<summary>` as part of the very click that
+  // opens the panel (`onSummaryClick` runs after focus has already moved),
+  // so a guard checked first would throw away the summary's own focus event
+  // every time — `lastFocused` would stay `null` for a person who never
+  // moves focus any further in, and the removal effect below would then find
+  // nothing to act on and leave focus stranded on `<body>`. Only the CLOSING
+  // half is `open`'s business.
+  function onDocumentFocusIn(e: FocusEvent) {
+    if (withinPanel(e.target)) {
+      lastFocused = e.target as HTMLElement;
+      return;
+    }
+    // Review round 1, Important 2. Cleared here, not left standing: once
+    // focus has genuinely moved outside, whatever this was tracking no
+    // longer describes what the person is doing. Left uncleared, a LATER,
+    // unrelated DOM update that happens to remove that same (still-present,
+    // merely hidden) element would read as "focus fell to `<body>` because
+    // the panel changed shape" and steal focus back to the summary — even
+    // though the person had already dismissed the panel and moved on.
+    lastFocused = null;
+    if (open) open = false;
+  }
+
+  function onDocumentPointerDown(e: PointerEvent) {
+    if (open && !withinPanel(e.target)) open = false;
+  }
+
+  // On the `<details>` itself, not `document` — Escape is this panel's own
+  // business only while focus is somewhere inside it, which is exactly what
+  // a listener on the element itself already guarantees, and it must not
+  // reach a window-level Escape handler (`Application.svelte`'s recorder,
+  // `Launcher.svelte`'s own hide) meant for something else entirely.
+  function onDetailsKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !open) return;
+    e.stopPropagation();
+    open = false;
+    summaryEl?.focus();
+  }
+
+  // The summary drives `open` itself, one-way, rather than trusting the
+  // native toggle to report back through `bind:open` — a browser's own
+  // "activation behaviour" fires a `toggle` event to say so, and this
+  // project's test environment does not implement that event at all, which
+  // would leave every OTHER close path here (Escape, an outside focus, a
+  // section change) fighting a component state the DOM had already moved
+  // past without ever telling it. `preventDefault` refuses the native toggle
+  // outright, so there is exactly one writer of `open`.
+  function onSummaryClick(e: MouseEvent) {
+    e.preventDefault();
+    open = !open;
+  }
+
+  onMount(() => {
+    document.addEventListener('focusin', onDocumentFocusIn);
+    document.addEventListener('pointerdown', onDocumentPointerDown);
+    return () => {
+      document.removeEventListener('focusin', onDocumentFocusIn);
+      document.removeEventListener('pointerdown', onDocumentPointerDown);
+    };
+  });
+
+  // A section change closes the overlay without touching the report itself —
+  // `jobs.state` is untouched by a nav click, so the reading block, the
+  // embedding block and the continue button are all still there the next
+  // time this opens.
+  // svelte-ignore state_referenced_locally
+  let seenSection = section;
+  $effect(() => {
+    if (section !== seenSection) {
+      seenSection = section;
+      open = false;
+    }
+  });
+
+  // Collapsed again once there is nothing left to show, so the next report —
+  // whenever the slot is next claimed — starts closed rather than reopening
+  // stale from before.
+  $effect(() => {
+    if (!anything) open = false;
+  });
+
+  // Focus restoration. Runs after every state change (`$jobState` is read
+  // for exactly that), by which point Svelte has already applied whatever DOM
+  // update the new state called for. `lastFocused` no longer being in the
+  // document, with focus having fallen all the way to `<body>` rather than
+  // somewhere the person chose, is what tells the two apart: a DOM update
+  // that removed the element focus was on, from a person who moved focus
+  // away on their own. The second case never reaches here at all:
+  // `onDocumentFocusIn` clears `lastFocused` the moment focus lands outside
+  // the panel, so a LATER removal of whatever it used to point at finds
+  // `null` above and does nothing — focus simply stays wherever the person
+  // already put it.
+  $effect(() => {
+    void $jobState;
+    if (lastFocused === null) return;
+    if (document.body.contains(lastFocused)) return;
+    if (document.activeElement !== document.body) return;
+    lastFocused = null;
+    // `anything`, not `disclosure !== undefined`: whether Svelte has already
+    // reset the `bind:this` reference by the time this runs is an ordering
+    // detail between this effect and the `{#if anything}` block's own
+    // teardown, and not one this file may lean on — `anything` is the same
+    // fact the markup itself gates on, read directly instead.
+    if (anything) summaryEl?.focus();
+    else focusFallback();
+  });
 </script>
 
 {#if anything}
-  <div class="indexing" data-testid="indexing">
-    {#if passLabel}<p data-testid="indexing-pass">{passLabel}</p>{/if}
-    {#if embedStartingLabel}
-      <p data-testid="indexing-counts">{embedStartingLabel}</p>
-    {:else if countsLabel}
-      <p data-testid="indexing-counts">{countsLabel}</p>
-    {/if}
-    {#if contendedLabel}<p data-testid="indexing-contended">{contendedLabel}</p>{/if}
-    {#if etaLabel}<p data-testid="indexing-eta">{etaLabel}</p>{/if}
-    {#if cancellable}
-      <button type="button" data-testid="indexing-cancel" onclick={() => jobs.cancel()}>{cancelLabel}</button>
-    {/if}
-    {#if readingBlock}
-      <div data-testid="indexing-walk-outcome">
-        <span>{readingBlock.sentence}</span>
-      </div>
-      {#if readingBlock.rootsReadLine}<p data-testid="indexing-roots-read">{readingBlock.rootsReadLine}</p>{/if}
-      <p data-testid="indexing-walk-result">{readingBlock.result}</p>
-      {#if readingBlock.contended}<p data-testid="indexing-contended">{readingBlock.contended}</p>{/if}
-      {#each readingBlock.rows as row (row.rootPath)}
-        <p data-testid="indexing-root-row">{row.text}</p>
-      {/each}
-      {#if readingBlock.frozenHeading}
-        <div data-testid="indexing-frozen">
-          <p>{readingBlock.frozenHeading}</p>
-          <ul>
-            <!-- Unkeyed on purpose. Two prefixes CAN be equal even after the
-                 root-path prefix above: `walk.rs` skips the climb when an
-                 existing entry covers `parent`, but pushes `resolve_ancestor`'s
-                 answer, a different string whenever `parent` is not itself on
-                 disk — so two parents under the same root can resolve to one
-                 prefix and both be reported. Keying by it would throw and take
-                 the whole strip down; the rows carry no state of their own, so
-                 there is nothing to keep across a re-render. -->
-            {#each readingBlock.frozen as row}<li>{row.text}</li>{/each}
-          </ul>
-        </div>
+  <!-- A live region OUTSIDE `<details>` on purpose: a browser hides every
+       child but `<summary>` while the disclosure is closed, taking a nested
+       one out of the accessibility tree along with it, so an announcement
+       tied to state/phase/result (never to a count tick — `summaryText`
+       never reads `counts` at all) needs its own element the collapse cannot
+       hide. -->
+  <p aria-live="polite" class="sr-only" data-testid="indexing-live">{summaryText}</p>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <details class="job-disclosure" data-testid="indexing" bind:this={disclosure} {open} onkeydown={onDetailsKeydown}>
+    <summary data-testid="job-summary" bind:this={summaryEl} onclick={onSummaryClick}>{summaryText}</summary>
+    <div class="job-details">
+      {#if phase}<ScanProgress {phase} />{/if}
+      {#if snapshot.kind === 'running' && snapshot.cancellable}
+        <button type="button" data-testid="indexing-cancel" onclick={() => jobs.cancel()}>{cancelLabel}</button>
       {/if}
-    {/if}
-    {#if embedBlock}
-      <div data-testid="indexing-embed-outcome">
-        <span>{embedBlock.sentence}</span>
-      </div>
-      {#if embedBlock.result}<p data-testid="indexing-embed-result">{embedBlock.result}</p>{/if}
-    {/if}
-    {#if failureLabel}<p data-testid="indexing-ended-failure">{failureLabel}</p>{/if}
-    {#if stripAction}
-      <button
-        type="button"
-        data-testid="indexing-continue"
-        onclick={() => jobs.scan(stripAction.entry)}
-      >{continueLabel}</button>
-    {/if}
-    <!-- A rejected command crosses the IPC as text (`error.rs`) and nothing
-         here branches on it: the backend's own sentence, verbatim, and no
-         lead-in of this window's own — Task 7 drops `indexing_note_rejected`,
-         which was the only remaining reader of that heading key. -->
-    {#if note !== null}
-      <p data-testid="indexing-rejection">{note}</p>
-    {/if}
-  </div>
+      {#if readingBlock}
+        <div data-testid="indexing-walk-outcome">
+          <span>{readingBlock.sentence}</span>
+        </div>
+        {#if readingBlock.rootsReadLine}<p data-testid="indexing-roots-read">{readingBlock.rootsReadLine}</p>{/if}
+        <p data-testid="indexing-walk-result">{readingBlock.result}</p>
+        {#if readingBlock.contended}<p data-testid="indexing-contended">{readingBlock.contended}</p>{/if}
+        {#each readingBlock.rows as row (row.rootPath)}
+          <p data-testid="indexing-root-row">{row.text}</p>
+        {/each}
+        {#if readingBlock.frozenHeading}
+          <div data-testid="indexing-frozen">
+            <p>{readingBlock.frozenHeading}</p>
+            <ul>
+              <!-- Unkeyed on purpose. Two prefixes CAN be equal even after the
+                   root-path prefix above: `walk.rs` skips the climb when an
+                   existing entry covers `parent`, but pushes `resolve_ancestor`'s
+                   answer, a different string whenever `parent` is not itself on
+                   disk — so two parents under the same root can resolve to one
+                   prefix and both be reported. Keying by it would throw and take
+                   the whole strip down; the rows carry no state of their own, so
+                   there is nothing to keep across a re-render. -->
+              {#each readingBlock.frozen as row}<li>{row.text}</li>{/each}
+            </ul>
+          </div>
+        {/if}
+      {/if}
+      {#if embedBlock}
+        <div data-testid="indexing-embed-outcome">
+          <span>{embedBlock.sentence}</span>
+        </div>
+        {#if embedBlock.result}<p data-testid="indexing-embed-result">{embedBlock.result}</p>{/if}
+      {/if}
+      {#if failureLabel}<p data-testid="indexing-ended-failure">{failureLabel}</p>{/if}
+      {#if stripAction}
+        <button
+          type="button"
+          data-testid="indexing-continue"
+          onclick={() => jobs.scan(stripAction.entry)}
+        >{continueLabel}</button>
+      {/if}
+      <!-- A rejected command crosses the IPC as text (`error.rs`) and nothing
+           here branches on it: the backend's own sentence, verbatim, and no
+           lead-in of this window's own. -->
+      {#if note !== null}
+        <p data-testid="indexing-rejection">{note}</p>
+      {/if}
+    </div>
+  </details>
 {/if}

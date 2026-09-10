@@ -3,10 +3,13 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type ThemeChoice,
+    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type LocaleChoice, type ThemeChoice,
   } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
   import { theme, changeTheme } from '../theme';
+  import {
+    localeChoiceState, loadLocaleChoice, changeLocaleChoice, retryLocaleApplication,
+  } from '../locale-choice';
 
   // §9.4 — the Application section: the shortcut, autostart, and the version.
   //
@@ -105,7 +108,14 @@
     }
   }
 
-  onMount(() => { void refresh(); });
+  onMount(() => {
+    void refresh();
+    // `localeChoiceState` is module-level (`../locale-choice`), not reset on
+    // destroy: `Settings.svelte` destroys and recreates this component on
+    // every section switch, and busy/warning/snapshot must survive that. This
+    // mount only asks for a fresh read; it never clears the store first.
+    void loadLocaleChoice();
+  });
 
   // ---------------------------------------------------------------------------
   // The shortcut, as the operating system reports it (D-b).
@@ -444,6 +454,72 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Language (Task 3, PR 10f): moved out of the tray's temporary language
+  // submenu (Task 1/2) into this section. The store lives in
+  // `../locale-choice`, a module-level singleton like `../theme` — this
+  // component only reads it and calls its three writers; it holds no busy or
+  // choice field of its own, and `Settings.svelte`'s remount (`{#if section
+  // === 'application'}`) is exactly why: a per-component field would restart
+  // at every navigation, and a change or warning left in flight would look
+  // gone.
+  // ---------------------------------------------------------------------------
+
+  // Native `<select>`, per the mockup — not three buttons like the theme
+  // group above: three languages read fine in one control, and a person only
+  // ever wants one of them at a time in exactly the way a `<select>` states.
+  const languageReady = $derived($localeChoiceState.snapshot !== null);
+  // Review, PR44 P2-2: `languageReady` alone (`snapshot !== null`) is NOT
+  // "safe to offer retry-apply" — a rejected change whose own recovery read
+  // also fails leaves `snapshot` holding the stale PRE-write value, still
+  // non-null, so `languageReady` stays true while that value is no longer
+  // trustworthy to repeat (`locale-choice.ts`'s own comment on
+  // `snapshotConfirmed`). The select itself still uses `languageReady`
+  // unchanged: it keeps showing that last authoritative value and stays
+  // usable, only the retry-APPLY control is gated on confirmation too.
+  const languageRetryApplyReady = $derived($localeChoiceState.snapshotConfirmed);
+  const languageChoice: LocaleChoice = $derived($localeChoiceState.snapshot?.choice ?? 'auto');
+  const languageBusy = $derived($localeChoiceState.busy);
+  const languageApplication = $derived($localeChoiceState.application);
+  const languageReadError = $derived($localeChoiceState.error);
+  const languageChangeError = $derived($localeChoiceState.changeError);
+
+  const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
+  const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
+  const languageUkLabel = $derived.by(() => { void $locale; return t('application_language_uk'); });
+  const languageEnLabel = $derived.by(() => { void $locale; return t('application_language_en'); });
+  const languagePartialLabel = $derived.by(() => { void $locale; return t('application_language_partial'); });
+  const languageUnknownLabel = $derived.by(() => { void $locale; return t('application_language_unknown'); });
+  const languageRetryApplyLabel = $derived.by(() => { void $locale; return t('application_language_retry_apply'); });
+  const languageRetryReadLabel = $derived.by(() => { void $locale; return t('application_language_retry_read'); });
+  const languageFailedLabel = $derived.by(() => { void $locale; return t('application_language_failed'); });
+  const languageChangeUnconfirmedLabel = $derived.by(() => { void $locale; return t('application_language_change_unconfirmed'); });
+
+  // 🔴 Review round 1, Critical. The select's `value={languageChoice}` binding
+  // compiles to a dirty check against the LAST value Svelte itself wrote
+  // (`svelte/compiler` 5.56.10: `if (value !== (value = languageChoice))
+  // select.value = value`) — it does not compare against what the DOM
+  // currently shows. A user pick that the store's re-read then reports
+  // UNCHANGED (persist rejected, the recovery read confirms the same old
+  // choice) leaves `languageChoice` equal to what it already was, so that
+  // check never fires and the browser's own selection — moved by the user's
+  // own click, not by Svelte — is left showing the rejected pick forever.
+  // Picking that same option again fires no `change` event at all, so the
+  // normal recovery path is dead until the section is torn down and rebuilt.
+  //
+  // Reading the candidate and writing `currentTarget.value` back to the
+  // CONFIRMED choice immediately, before `changeLocaleChoice` is even called,
+  // sidesteps the compiled check entirely: the DOM is put back in sync with
+  // the store synchronously, on every change regardless of what Svelte
+  // thinks moved, and a later successful reply then moves it again through
+  // the ordinary reactive write once `languageChoice` actually changes value.
+  function onLanguageSelect(e: Event) {
+    const select = e.currentTarget as HTMLSelectElement;
+    const candidate = select.value as LocaleChoice;
+    select.value = languageChoice;
+    void changeLocaleChoice(candidate);
+  }
+
+  // ---------------------------------------------------------------------------
   // The version (D-h): shown as it is, with no "up to date" claim beside it.
   // ---------------------------------------------------------------------------
 
@@ -454,6 +530,38 @@
   });
 
   const loadFailedLabel = $derived.by(() => { void $locale; return t('application_load_failed'); });
+
+  // ---------------------------------------------------------------------------
+  // Task 6: the four group headings the mockup arranges this section into.
+  // The controls under each keep their own handlers and guards unchanged —
+  // only the labelled `role="group"` wrapper around them is new.
+  // ---------------------------------------------------------------------------
+
+  const groupShortcutLabel = $derived.by(() => { void $locale; return t('application_group_shortcut'); });
+  const groupAppearanceLabel = $derived.by(() => { void $locale; return t('application_group_appearance'); });
+  const groupStartupLabel = $derived.by(() => { void $locale; return t('application_group_startup'); });
+  const groupVersionLabel = $derived.by(() => { void $locale; return t('application_group_version'); });
+
+  // The ids an error paragraph carries, joined for `aria-describedby` on the
+  // control it is about. `undefined` and not `''` where nothing applies —
+  // Svelte omits the attribute entirely rather than writing it empty.
+  const shortcutDescribedBy = $derived(hotkeyError === null ? undefined : 'application-shortcut-failed application-shortcut-error');
+  const autostartDescribedBy = $derived(autostartError === null ? undefined : 'application-autostart-failed application-autostart-error');
+  const themeDescribedBy = $derived(themeError === null ? undefined : 'application-theme-failed application-theme-error');
+  // Language has two independent rejections (a failed READ, a failed CHANGE)
+  // plus two non-error outcomes worth describing (`partial`, `unknown`) —
+  // never more than one pair on screen at once, but the select links to
+  // whichever is standing.
+  const languageDescribedBy = $derived.by(() => {
+    const ids: string[] = [];
+    if (languageApplication.kind === 'partial') ids.push('application-language-partial');
+    else if (languageApplication.kind === 'unknown') ids.push('application-language-unknown');
+    if (languageChangeError !== null) {
+      ids.push('application-language-change-unconfirmed', 'application-language-change-error');
+    }
+    if (languageReadError !== null) ids.push('application-language-failed', 'application-language-error');
+    return ids.length === 0 ? undefined : ids.join(' ');
+  });
 </script>
 
 <!-- The failed read leads and does not gate what follows: on the FIRST read's
@@ -467,100 +575,228 @@
 {/if}
 
 {#if prefs}
-  <p>
-    {shortcutLabelText}
-    <span class="kbd" data-testid="application-shortcut">{shortcutText}</span>
-  </p>
-  <p data-testid="application-shortcut-status">{shortcutStatusText}</p>
-  {#if unavailable}
-    <p data-testid="application-shortcut-reason">{shortcutReasonText}</p>
-    <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
-  {/if}
-  {#if hotkeyError !== null}
-    <p data-testid="application-shortcut-failed">{shortcutFailedLabel}</p>
-    <p data-testid="application-shortcut-error">{hotkeyError}</p>
-  {/if}
-  <button
-    type="button"
-    data-testid="application-shortcut-record"
-    bind:this={recordButton}
-    disabled={hotkeyBusy}
-    onclick={startRecording}
-    onkeydown={onRecorderKeydown}
-    onblur={stopRecordingOnBlur}
-  >{recordLabel}</button>
-  {#if recording}
-    <p data-testid="application-shortcut-recording">{recordingText}</p>
-  {/if}
-  {#if notUsable}
-    <p data-testid="application-shortcut-not-usable">{notUsableText}</p>
-  {/if}
-
-  <p>{autostartLabelText}</p>
-  <p data-testid="application-autostart-status">{autostartStatusText}</p>
-  {#if autostartUnknown}
-    <p data-testid="application-autostart-reason">{autostartReasonText}</p>
-  {/if}
-  {#if autostartError !== null}
-    <p data-testid="application-autostart-failed">{autostartFailedLabel}</p>
-    <p data-testid="application-autostart-error">{autostartError}</p>
-  {/if}
-  {#if autostartOffersBothDirections}
-    <!-- Both disabled by the one flag: a press on either asks the operating
-         system once, and the other must not be able to ask again over it. -->
+  <!-- Task 6: the mockup's four groups (mockup .grp — a bare block, no CSS
+       rule of its own; `.spane`'s own 16px gap separates them, `.gh`/
+       `.spane h3` above is the only styling). Each control keeps its own
+       handler and guard verbatim — only the labelled `role="group"` wrapper
+       around it is new, and each error text is linked to its control by
+       `aria-describedby` now that the markup around it is changing anyway. -->
+  <div role="group" aria-labelledby="application-group-shortcut">
+    <h3 id="application-group-shortcut">{groupShortcutLabel}</h3>
+    <p>
+      {shortcutLabelText}
+      <span class="kbd" data-testid="application-shortcut">{shortcutText}</span>
+    </p>
+    <p data-testid="application-shortcut-status">{shortcutStatusText}</p>
+    {#if unavailable}
+      <p data-testid="application-shortcut-reason">{shortcutReasonText}</p>
+      <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
+    {/if}
+    {#if hotkeyError !== null}
+      <p id="application-shortcut-failed" data-testid="application-shortcut-failed">{shortcutFailedLabel}</p>
+      <p id="application-shortcut-error" data-testid="application-shortcut-error">{hotkeyError}</p>
+    {/if}
     <button
       type="button"
-      data-testid="application-autostart-enable"
-      disabled={autostartBusy}
-      onclick={() => setAutostartTo(true)}
-    >{autostartEnableLabel}</button>
-    <button
-      type="button"
-      data-testid="application-autostart-disable"
-      disabled={autostartBusy}
-      onclick={() => setAutostartTo(false)}
-    >{autostartDisableLabel}</button>
-  {:else}
-    <button
-      type="button"
-      data-testid="application-autostart-toggle"
-      disabled={autostartBusy}
-      onclick={toggleAutostart}
-    >{autostartActionLabel}</button>
-  {/if}
-
-  <p id="application-theme-label">{themeLabelText}</p>
-  {#if themeError !== null}
-    <p data-testid="application-theme-failed">{themeFailedLabel}</p>
-    <p data-testid="application-theme-error">{themeError}</p>
-  {/if}
-  <!-- Three explicit buttons rather than an `{#each}` over the choices: three
-       literal `data-testid` strings stay greppable from the tests, and a loop
-       over a three-member union costs more to read than the three lines it
-       saves. Order is the mockup's: light, dark, system. -->
-  <div role="group" aria-labelledby="application-theme-label">
-    <button
-      type="button"
-      data-testid="application-theme-light"
-      aria-pressed={$theme === 'light'}
-      disabled={themeBusy}
-      onclick={() => chooseTheme('light')}
-    >{themeLightLabel}</button>
-    <button
-      type="button"
-      data-testid="application-theme-dark"
-      aria-pressed={$theme === 'dark'}
-      disabled={themeBusy}
-      onclick={() => chooseTheme('dark')}
-    >{themeDarkLabel}</button>
-    <button
-      type="button"
-      data-testid="application-theme-system"
-      aria-pressed={$theme === 'system'}
-      disabled={themeBusy}
-      onclick={() => chooseTheme('system')}
-    >{themeSystemLabel}</button>
+      data-testid="application-shortcut-record"
+      bind:this={recordButton}
+      disabled={hotkeyBusy}
+      aria-describedby={shortcutDescribedBy}
+      onclick={startRecording}
+      onkeydown={onRecorderKeydown}
+      onblur={stopRecordingOnBlur}
+    >{recordLabel}</button>
+    {#if recording}
+      <p data-testid="application-shortcut-recording">{recordingText}</p>
+    {/if}
+    {#if notUsable}
+      <p data-testid="application-shortcut-not-usable">{notUsableText}</p>
+    {/if}
   </div>
 
-  <p data-testid="application-version">{versionText}</p>
+  <div role="group" aria-labelledby="application-group-appearance">
+    <h3 id="application-group-appearance">{groupAppearanceLabel}</h3>
+    <p id="application-theme-label">{themeLabelText}</p>
+    {#if themeError !== null}
+      <p id="application-theme-failed" data-testid="application-theme-failed">{themeFailedLabel}</p>
+      <p id="application-theme-error" data-testid="application-theme-error">{themeError}</p>
+    {/if}
+    <!-- Three explicit buttons rather than an `{#each}` over the choices:
+         three literal `data-testid` strings stay greppable from the tests,
+         and a loop over a three-member union costs more to read than the
+         three lines it saves. Order is the mockup's: light, dark, system.
+         `.seg`, not a bare `role="group"` (Task 6): this section's own OUTER
+         groups carry that role too now, and a selector keyed on the
+         attribute alone would hand the segmented-control look to every plain
+         button in them (`settings.css`'s own comment on `.seg`). -->
+    <div class="seg" role="group" aria-labelledby="application-theme-label" aria-describedby={themeDescribedBy}>
+      <button
+        type="button"
+        data-testid="application-theme-light"
+        aria-pressed={$theme === 'light'}
+        disabled={themeBusy}
+        onclick={() => chooseTheme('light')}
+      >{themeLightLabel}</button>
+      <button
+        type="button"
+        data-testid="application-theme-dark"
+        aria-pressed={$theme === 'dark'}
+        disabled={themeBusy}
+        onclick={() => chooseTheme('dark')}
+      >{themeDarkLabel}</button>
+      <button
+        type="button"
+        data-testid="application-theme-system"
+        aria-pressed={$theme === 'system'}
+        disabled={themeBusy}
+        onclick={() => chooseTheme('system')}
+      >{themeSystemLabel}</button>
+    </div>
+
+    <p id="application-language-label">{languageLabelText}</p>
+    <select
+      id="application-language-select"
+      data-testid="application-language-select"
+      aria-labelledby="application-language-label"
+      aria-describedby={languageDescribedBy}
+      value={languageChoice}
+      disabled={languageBusy || !languageReady}
+      onchange={onLanguageSelect}
+    >
+      <!-- `value={'auto'}`, not a bare `value="auto"`: the hardcode guard
+           (`i18n/guard.test.ts`) scans every bare attribute string not in its
+           own machine-attribute list, and `value` is not on it — reasonably,
+           since a `<button value="Submit">` IS prose. These three are wire
+           values (`LocaleChoice`), never shown, so they take the guard's own
+           documented escape hatch: an attribute written as an expression is
+           never scanned, whatever its name. -->
+      <option value={'auto'}>{languageAutoLabel}</option>
+      <option value={'uk'}>{languageUkLabel}</option>
+      <option value={'en'}>{languageEnLabel}</option>
+    </select>
+    {#if languageApplication.kind === 'partial'}
+      <!-- Confirmed choice/effective, some surfaces did not pick it up —
+           never a rejection: `set_locale` resolved, and this is what it
+           resolved with. -->
+      <p id="application-language-partial" role="alert" data-testid="application-language-partial">{languagePartialLabel}</p>
+      <ul data-testid="application-language-partial-errors">
+        {#each languageApplication.errors as err (err.surface)}
+          <!-- `err.message` is the backend's own English sentence, shown as
+               text — never as HTML, never parsed for a discriminant of its
+               own; `surface` already is one. -->
+          <li>{err.surface}: {err.message}</li>
+        {/each}
+      </ul>
+      <button
+        type="button"
+        data-testid="application-language-retry-apply"
+        disabled={languageBusy}
+        onclick={() => retryLocaleApplication()}
+      >{languageRetryApplyLabel}</button>
+    {:else if languageApplication.kind === 'unknown'}
+      <!-- Shown for EVERY `unknown` outcome, unconditionally (review round 2,
+           Important A) — never suppressed by a pending command/read message.
+           "Unconfirmed" is true whichever of those is also showing (or
+           neither, once a later attempt has cleared them): persist-vs-
+           transport genuinely cannot be told apart from a message alone, so
+           this sentence never states more than that, and the messages below
+           only ever ADD detail beside it. -->
+      <p id="application-language-unknown" data-testid="application-language-unknown">{languageUnknownLabel}</p>
+      {#if languageRetryApplyReady}
+        <!-- Whole-branch review, Important 1. Spec §7.1: the retry-apply
+             control is available after an `unknown` outcome too, once
+             `get_locale` has confirmed A choice — not only after `partial`.
+             Without it, a picked-again-same-option select fires no `change`
+             (review round 1's own fix writes the DOM back to the confirmed
+             value before `changeLocaleChoice` runs), so this was the only
+             control left that could repeat the attempt. Guarded by
+             `languageRetryApplyReady` (`snapshotConfirmed`), the same
+             condition `retryLocaleApplication` itself enforces (review, PR44
+             P2-2) — with no CONFIRMED snapshot (the first read itself
+             failed, or a later change's own recovery read also failed,
+             leaving only a stale pre-write value behind), there is nothing
+             safe to retry with, and the button would either be a no-op or,
+             worse, silently repeat a choice the backend has already moved
+             past. The failed-read case below (`languageReadError !== null`)
+             already offers "Retry reading" here instead — the read that
+             confirms a fresh choice is what turns this button back on. -->
+        <button
+          type="button"
+          data-testid="application-language-retry-apply"
+          disabled={languageBusy}
+          onclick={() => retryLocaleApplication()}
+        >{languageRetryApplyLabel}</button>
+      {/if}
+    {/if}
+    {#if languageChangeError !== null}
+      <!-- The CHANGE's own rejection (review round 1, Minor 3) — distinct
+           from a failed READ below: `set_locale` was refused OR its reply
+           was lost in transport after it actually applied
+           (`locale-choice.ts`'s own comment on `changeError`), and the
+           automatic recovery read that followed is what confirmed
+           `languageChoice` above, whichever it turned out to be. Worded
+           "not confirmed", never "not changed" (review round 2,
+           Important A): the language may well have changed, only the
+           OUTCOME of this call could not be. No retry control of its own:
+           picking the select again is the retry, the same as every other
+           rejection in this section (shortcut/autostart/theme). -->
+      <p id="application-language-change-unconfirmed" data-testid="application-language-change-unconfirmed">{languageChangeUnconfirmedLabel}</p>
+      <p id="application-language-change-error" data-testid="application-language-change-error">{languageChangeError}</p>
+    {/if}
+    {#if languageReadError !== null}
+      <p id="application-language-failed" data-testid="application-language-failed">{languageFailedLabel}</p>
+      <p id="application-language-error" data-testid="application-language-error">{languageReadError}</p>
+      <button
+        type="button"
+        data-testid="application-language-retry-read"
+        disabled={languageBusy}
+        onclick={() => loadLocaleChoice()}
+      >{languageRetryReadLabel}</button>
+    {/if}
+  </div>
+
+  <div role="group" aria-labelledby="application-group-startup">
+    <h3 id="application-group-startup">{groupStartupLabel}</h3>
+    <p>{autostartLabelText}</p>
+    <p data-testid="application-autostart-status">{autostartStatusText}</p>
+    {#if autostartUnknown}
+      <p data-testid="application-autostart-reason">{autostartReasonText}</p>
+    {/if}
+    {#if autostartError !== null}
+      <p id="application-autostart-failed" data-testid="application-autostart-failed">{autostartFailedLabel}</p>
+      <p id="application-autostart-error" data-testid="application-autostart-error">{autostartError}</p>
+    {/if}
+    {#if autostartOffersBothDirections}
+      <!-- Both disabled by the one flag: a press on either asks the
+           operating system once, and the other must not be able to ask
+           again over it. -->
+      <button
+        type="button"
+        data-testid="application-autostart-enable"
+        disabled={autostartBusy}
+        aria-describedby={autostartDescribedBy}
+        onclick={() => setAutostartTo(true)}
+      >{autostartEnableLabel}</button>
+      <button
+        type="button"
+        data-testid="application-autostart-disable"
+        disabled={autostartBusy}
+        aria-describedby={autostartDescribedBy}
+        onclick={() => setAutostartTo(false)}
+      >{autostartDisableLabel}</button>
+    {:else}
+      <button
+        type="button"
+        data-testid="application-autostart-toggle"
+        disabled={autostartBusy}
+        aria-describedby={autostartDescribedBy}
+        onclick={toggleAutostart}
+      >{autostartActionLabel}</button>
+    {/if}
+  </div>
+
+  <div role="group" aria-labelledby="application-group-version">
+    <h3 id="application-group-version">{groupVersionLabel}</h3>
+    <p data-testid="application-version">{versionText}</p>
+  </div>
 {/if}

@@ -1,21 +1,24 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
-  | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
+  | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
   | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
-  | 'models_key_removed' | 'models_key_nothing_to_remove'
+  | 'models_key_removed' | 'models_key_nothing_to_remove' | 'models_key_forget_confirm'
   | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
   | 'models_index_not_open' | 'models_index_read_failed'
-  | 'models_mac_keychain_note' | 'models_load_failed'
+  | 'models_load_failed'
   | 'models_index_label'
   | 'models_tab_embedding' | 'models_tab_chat'
   | 'models_status_ready' | 'models_status_not_ready'
+  | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
+  | 'models_selection_absent'
+  | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
-  | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
-  | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
-  | 'models_refusal_no_text_output' | 'models_entry_reason_separator'
+  | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
+  | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
+  | 'models_hidden_no_text_output'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -78,6 +81,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_masks_already_stored' | 'settings_masks_question_withdrawn'
   | 'indexing_reading_root'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
+  | 'indexing_probe_running' | 'indexing_model_adoption_running' | 'indexing_summary_fallback'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
   | 'indexing_eta' | 'indexing_eta_unknown'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
@@ -104,6 +108,9 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
   | 'indexing_index_pending_chunks'
+  | 'indexing_statcard_documents' | 'indexing_statcard_updated'
+  | 'application_group_shortcut' | 'application_group_appearance'
+  | 'application_group_startup' | 'application_group_version'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
@@ -116,6 +123,19 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_version' | 'application_load_failed'
   | 'application_theme' | 'theme_light' | 'theme_dark' | 'theme_system'
   | 'application_theme_failed'
+  // Task 3 (PR 10f): the language choice, moved out of the tray's temporary
+  // submenu into this section. `application_language_uk`/`_en` are endonyms —
+  // a language's own name for itself — so they read the SAME in both
+  // catalogue blocks below; only `_auto` and every other key here translates.
+  // (Review round 1, Minor 6: `locale.rs`'s own `endonym`/`Key::LangAuto`/
+  // `Key::MenuLanguage`, which drew the now-deleted tray submenu, are gone —
+  // this catalogue's two endonym keys are the only place these strings live
+  // now.)
+  | 'application_language_label' | 'application_language_auto'
+  | 'application_language_uk' | 'application_language_en'
+  | 'application_language_partial' | 'application_language_unknown'
+  | 'application_language_retry_apply' | 'application_language_retry_read'
+  | 'application_language_failed' | 'application_language_change_unconfirmed'
   | 'recent_now' | 'recent_minutes' | 'recent_hours' | 'recent_days';
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
@@ -139,7 +159,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // key, before or after this commit; P3-7 review.)
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
-    settings_folders_remove: 'Видалити',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
@@ -150,10 +169,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // duplicating them (do not change that shared key: it is a different
     // sentence for a different place, §7.3/launcher `Tree.svelte`).
     settings_folders_indexed: '{count, plural, one {Проіндексовано: # документ} few {Проіндексовано: # документи} many {Проіндексовано: # документів} other {Проіндексовано: # документа}}',
-    // §9.2 review (P2-5): two "Видалити" buttons in a two-folder list share
-    // one accessible name. `aria-label` carries the folder's own path so a
-    // screen reader distinguishes them; the visible button text stays plain
-    // "Видалити" (settings_folders_remove, above).
+    // §9.2 review (P2-5): two remove buttons in a two-folder list share one
+    // accessible name. `aria-label` carries the folder's own path so a
+    // screen reader distinguishes them; the visible button (Task 6: a plain
+    // "✕" icon, not this catalogue string) needs no such distinction.
     settings_folders_remove_named: 'Видалити {path}',
     // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
     // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
@@ -191,6 +210,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // NothingToRemove is not a failure and is not "the key was removed" either.
     models_key_removed: 'Ключ видалено.',
     models_key_nothing_to_remove: 'Ключа й так не було.',
+    // Task 9 (owner's ruling, live run 2026-09-10): Forget now asks before it
+    // acts — the same non-modal-confirmation shape Folders' own removal
+    // question and the embedding discard question already use.
+    models_key_forget_confirm: 'Забути збережений ключ? Індекс і моделі залишаться, але запити до постачальника припиняться до нового ключа.',
     // KeyStoreFailure's four causes (models.rs:718-746), each naming the one
     // action its own doc comment names — never `reason`, which stays out of
     // this screen entirely. Locked stands for two situations and claims
@@ -212,18 +235,15 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // show, so this is the one sentence the section renders on that branch.
     models_index_not_open: 'Індекс ще не відкрито.',
     models_index_read_failed: 'Не вдалося прочитати індекс — це вада цієї збірки.',
-    // Platform note (models.rs:606-627) — macOS only; Windows and Linux show
-    // nothing here, because the same sentence would be noise on them.
-    models_mac_keychain_note: 'Кожне оновлення застосунку робить його чужим для збереженого ключа: система один раз попросить пароль від зв’язки ключів для входу.',
     // The lead-in for a rejected read of `model_settings`. The rejection's own
     // sentence is shown verbatim beside it and never branched on (§10): a
     // rejection arrives as text, so this names what failed and the backend says
     // why.
     models_load_failed: 'Не вдалося прочитати налаштування моделей.',
     // Task 5 — the subject header the index sentence lacked: Task 4's review
-    // found "Провайдер / [index sentence] / [mac note] / [key sentence]"
-    // unreadable as a person, because nothing said the second line was about
-    // the index. Shown only alongside that sentence, never on its own.
+    // found "Провайдер / [index sentence] / [key sentence]" unreadable as a
+    // person, because nothing said the second line was about the index.
+    // Shown only alongside that sentence, never on its own.
     models_index_label: 'Індекс:',
     models_tab_embedding: 'Ембединг',
     models_tab_chat: 'Чат',
@@ -233,6 +253,25 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces the same thing a sighted person reads.
     models_status_ready: 'Підключено — OpenRouter, ключ і обрана модель embedding готові.',
     models_status_not_ready: 'Ще не підключено — додайте ключ і оберіть модель embedding, щоб увімкнути пошук за змістом.',
+    // Task 4 — the native model select. A label over the control (the same
+    // pattern `models_provider_label`/`models_key_label` already use), and
+    // the placeholder option's own text for the three states a confirmed
+    // model id cannot stand for on its own: a read that said nothing is
+    // chosen, a build that currently cannot say either way, and a confirmed
+    // id the active catalogue no longer lists.
+    models_selection_label: 'Модель:',
+    models_selection_not_chosen: 'Модель ще не обрано.',
+    models_selection_unknown: 'Поточна модель невідома.',
+    models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
+    // The per-role configured dot (review P2-1). Task 9 moved the dot inside
+    // its own tab button, so one of these three words is now the SECOND half
+    // of the TAB BUTTON's accessible name ("Ембединг, Налаштовано"), sr-only
+    // beside a sighted reader's own "Ембединг" — not the dot's own name, which
+    // no longer exists apart from the button that carries it; the colour is
+    // still a visual reinforcement of the same fact, not a second source of it.
+    models_dot_configured: 'Налаштовано',
+    models_dot_not_configured: 'Не налаштовано',
+    models_dot_unknown: 'Невідомо',
     // An empty-but-well-formed catalogue (`models.rs:186-190`) is a stated
     // fact about the provider, not a failure of this build — said once, so a
     // person does not read a blank tab as a bug.
@@ -241,21 +280,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // promise the list is complete on its own — this sentence is the promise,
     // and it is absent exactly when the count is zero.
     models_catalogue_unreadable: '{count, plural, one {# запис не вдалося прочитати} few {# записи не вдалося прочитати} many {# записів не вдалося прочитати} other {# записів не вдалося прочитати}}.',
-    // `Refusal`'s five variants (catalogue.rs) — one sentence each, fixed
-    // catalogue text rather than the provider's own words: see
-    // `Models.svelte`'s `refusalReason` for why `raw` is not interpolated
-    // into the three variants that carry it.
-    models_refusal_input_too_small: 'Ця модель заявляє ліміт входу {limit} токенів — менше за поріг {floor}, потрібний цій програмі.',
-    models_refusal_no_stated_limit: 'Постачальник не вказує ліміт входу цієї моделі.',
-    models_refusal_limit_not_understood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
-    models_refusal_no_stated_output_modalities: 'Постачальник не вказує, що видає ця модель.',
-    models_refusal_no_text_output: 'Постачальник заявляє, що ця модель не видає текст.',
-    // The same seam as the labels above, one row lower and never reached by the
-    // live run: a greyed model's name and the sentence saying why it cannot be
-    // chosen are two inline spans, so they read as «Назва моделі Постачальник не
-    // вказує ліміт входу…» — one phrase. The dash belongs to neither of them, so
-    // it is its own string rather than a prefix inside five reason sentences.
-    models_entry_reason_separator: '—',
+    // Owner's ruling (live run, 2026-09-10): `Refusal`'s five variants no
+    // longer render inline on a disabled option — the entry disappears from
+    // the select outright, and one of these renders below it per DISTINCT
+    // reason, with the count of entries it folded together. `{count}` and
+    // `{floor}` are always read off the fixture/build data, never a UI
+    // literal — see `Models.svelte`'s `hiddenReasonLabel`.
+    models_hidden_input_too_small: 'Приховано {count}: ліміт входу менший за {floor} токенів',
+    models_hidden_no_stated_limit: 'Приховано {count}: постачальник не вказує ліміт входу',
+    models_hidden_limit_not_understood: 'Приховано {count}: ліміт входу у форматі, який ця збірка не читає',
+    models_hidden_no_stated_output_modalities: 'Приховано {count}: постачальник не вказує, що видає модель',
+    models_hidden_no_text_output: 'Приховано {count}: модель не видає текст',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
     // unreadable" points at something (Task 2 review, item 4).
@@ -694,6 +729,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // cancellable (`bridge.rs` fixes it at `false`), so this is the whole of
     // what the strip has to say while it runs.
     indexing_removing: 'Видаляємо теку {rootPath}…',
+    // Task 5 — the two jobs nobody asked to start (`scan_state::OtherJob`) get
+    // their own name now, so the bottom disclosure has something to say in
+    // its summary while either holds the slot, rather than a bare Stop button
+    // with no sentence beside it.
+    indexing_probe_running: 'Триває перевірка з’єднання…',
+    indexing_model_adoption_running: 'Триває заміна моделі вбудовування…',
+    // The disclosure's summary always needs a line — see `jobs.ts`'s own
+    // priority order — and every real state above already earns one of its
+    // own. This is the floor under all of them, never expected to render in
+    // practice.
+    indexing_summary_fallback: 'Стан індексації',
     indexing_counts_ratio: 'Опрацьовано {done} з {total}. Пропущено: {skipped}. Відхилено: {refused}.',
     // `total: 0` is not an edge case: a walk reports it before phase 1 has
     // counted anything. "0 з 0" would read as "нема чого робити".
@@ -877,6 +923,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `lastIndexedAt: null` is the backend's own statement that nothing has
     // ever finished indexing. Never a blank, never an epoch date.
     indexing_index_never: 'Ще нічого не проіндексовано.',
+    // Task 6: the statcard's two cells — the same numbers the sentences above
+    // already state, drawn beside a short label instead of inside one. Not a
+    // decorative number: `indexing_statcard_documents`'s value is
+    // `read.indexedFiles`, and `indexing_statcard_updated`'s is the existing
+    // `formatIndexedDate`/`neverLine`, never a value invented for the card.
+    indexing_statcard_documents: 'Документів',
+    indexing_statcard_updated: 'Останнє оновлення',
     // Two causes, two sentences (`UnreadableCause`, models.rs:809-826). One
     // sentence for both would be a surface that cannot tell a closed index
     // from one that broke while being read.
@@ -919,6 +972,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // below is a refusal or a statement the WINDOW makes, so it lives here in
     // both languages. A refusal the BACKEND makes is shown verbatim beside
     // these and is English, like every other rejection in this product.
+    // Task 6: the four group headings the mockup arranges this section into
+    // (mockup .gh, `.spane h3`'s own styling). The controls under each are
+    // unchanged; only the labelled `role="group"` wrapper around them is new.
+    application_group_shortcut: 'Виклик',
+    application_group_appearance: 'Вигляд',
+    application_group_startup: 'Запуск',
+    application_group_version: 'Версія',
     application_shortcut_label: 'Скорочення для відкриття пошуку:',
     // 🔴 «Зареєстровано» — і ніколи «працює» чи «належить лише вам». D128
     // виміряв, що macOS реєструє скорочення, яке вже тримає інший застосунок:
@@ -964,6 +1024,33 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Темна',
     theme_system: 'Системна',
     application_theme_failed: 'Вигляд не змінено. Ось що відповів застосунок:',
+    // Task 3 (PR 10f). `_uk`/`_en` are endonyms — a language's own name for
+    // itself — and read the same in the `en` block below. `locale.rs`'s own
+    // `endonym`, which gave these same two strings to the tray submenu this
+    // replaces, is deleted (review round 1, Minor 6): this catalogue is the
+    // only place they live now.
+    application_language_label: 'Мова:',
+    application_language_auto: 'Авто (система)',
+    application_language_uk: 'Українська',
+    application_language_en: 'English',
+    // Exact string, pinned by `Application.test.ts` against the brief.
+    application_language_partial: 'Мову збережено, але застосовано не всюди',
+    application_language_unknown: 'Застосування мови не підтверджено.',
+    application_language_retry_apply: 'Повторити застосування',
+    application_language_retry_read: 'Повторити читання',
+    application_language_failed: 'Не вдалося прочитати мову. Ось що відповів застосунок:',
+    // Distinct from `_failed` above: that one is a failed READ, this one a
+    // rejected CHANGE — two different operations, shown under two different
+    // headings (review round 1, Minor 3), the same way `application_shortcut_
+    // failed`/`application_autostart_failed`/`application_theme_failed` each
+    // name their own control rather than sharing one sentence.
+    //
+    // NEVER "не змінено" / "was not changed" (review round 2, Important A):
+    // `application.kind === 'unknown'` means persist-vs-transport could not
+    // be told apart from the message alone — the change may well have
+    // applied and only its REPLY got lost. "Не підтверджено" states only
+    // what is actually known.
+    application_language_change_unconfirmed: 'Зміну мови не підтверджено. Ось що відповів застосунок:',
   },
   en: {
     pin: 'Pin',
@@ -974,7 +1061,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_application: 'Application',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
-    settings_folders_remove: 'Remove',
     settings_folders_load_failed: 'The list of folders could not be read.',
     settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
     settings_folders_remove_named: 'Remove {path}',
@@ -989,27 +1075,33 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_key_cancel: 'Cancel',
     models_key_removed: 'The key was removed.',
     models_key_nothing_to_remove: 'There was no key to remove.',
+    models_key_forget_confirm: 'Forget the saved key? The index and models stay, but requests to the provider stop until a new key is entered.',
     models_key_locked: 'The credential store did not answer. Unlock it, or allow access when the system asks for it, then open this window again.',
     models_key_duplicate: 'More than one credential is filed under this installation. Remove the duplicate in the system credential store.',
     models_key_refused: 'The credential store refused to answer. This build cannot tell what to do next.',
     models_key_defect: 'This is a defect in this build, not a state of your system. Please report it to the developers.',
     models_index_not_open: 'The index is not open yet.',
     models_index_read_failed: 'The index could not be read — this is a defect in this build.',
-    models_mac_keychain_note: 'Every update makes this application a stranger to its own key: the system will ask once for your login keychain password.',
     models_load_failed: 'The model settings could not be read.',
     models_index_label: 'Index:',
     models_tab_embedding: 'Embedding',
     models_tab_chat: 'Chat',
     models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
     models_status_not_ready: 'Not connected yet — add a key and choose an embedding model to enable content search.',
+    models_selection_label: 'Model:',
+    models_selection_not_chosen: 'No model chosen yet.',
+    models_selection_unknown: 'The current model is unknown.',
+    models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
+    models_dot_configured: 'Configured',
+    models_dot_not_configured: 'Not configured',
+    models_dot_unknown: 'Unknown',
     models_catalogue_empty: 'The provider does not currently list any models for this role.',
     models_catalogue_unreadable: '{count, plural, one {# record could not be read} other {# records could not be read}}.',
-    models_refusal_input_too_small: 'This model states an input limit of {limit} tokens, under the {floor} this application requires.',
-    models_refusal_no_stated_limit: 'The provider does not state an input limit for this model.',
-    models_refusal_limit_not_understood: 'The provider states an input limit in a shape this build cannot read.',
-    models_refusal_no_stated_output_modalities: 'The provider does not state what this model outputs.',
-    models_refusal_no_text_output: 'The provider states that this model does not output text.',
-    models_entry_reason_separator: '—',
+    models_hidden_input_too_small: '{count} hidden: input limit below {floor} tokens',
+    models_hidden_no_stated_limit: '{count} hidden: the provider states no input limit',
+    models_hidden_limit_not_understood: '{count} hidden: input limit in a format this build cannot read',
+    models_hidden_no_stated_output_modalities: '{count} hidden: the provider does not say what the model outputs',
+    models_hidden_no_text_output: '{count} hidden: the model outputs no text',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',
@@ -1141,6 +1233,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_embed_starting_zero: 'Embedding is starting…',
     indexing_embed_running: 'The whole index is being embedded.',
     indexing_removing: 'Removing the folder {rootPath}…',
+    indexing_probe_running: 'Checking the connection…',
+    indexing_model_adoption_running: 'Switching the embedding model…',
+    indexing_summary_fallback: 'Indexing status',
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
@@ -1186,6 +1281,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_updated: 'Last updated: {date}.',
     indexing_index_updated_ago: 'That was {ago}.',
     indexing_index_never: 'Nothing has been indexed yet.',
+    indexing_statcard_documents: 'Documents',
+    indexing_statcard_updated: 'Last update',
     indexing_index_unreadable_not_open: 'The index could not be read: it is not open.',
     indexing_index_unreadable_read_failed: 'The index could not be read: the attempt to read it failed.',
     indexing_index_unreadable_reason: 'The program reported: {reason}',
@@ -1199,6 +1296,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // below is a refusal or a statement the WINDOW makes, so it lives here in
     // both languages. A refusal the BACKEND makes is shown verbatim beside
     // these and is English, like every other rejection in this product.
+    application_group_shortcut: 'Shortcut',
+    application_group_appearance: 'Appearance',
+    application_group_startup: 'Startup',
+    application_group_version: 'Version',
     application_shortcut_label: 'Shortcut for opening the search:',
     application_shortcut_registered: 'This shortcut is registered with the system.',
     application_shortcut_unavailable: 'This shortcut is not registered with the system.',
@@ -1224,5 +1325,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Dark',
     theme_system: 'Match the system',
     application_theme_failed: 'The appearance was not changed. This is what the application answered:',
+    application_language_label: 'Language:',
+    application_language_auto: 'Auto (system)',
+    application_language_uk: 'Українська',
+    application_language_en: 'English',
+    // Exact string, pinned by `Application.test.ts` against the brief.
+    application_language_partial: 'Language saved, but not applied everywhere',
+    application_language_unknown: 'Whether the language applied everywhere could not be confirmed.',
+    application_language_retry_apply: 'Retry applying',
+    application_language_retry_read: 'Retry reading',
+    application_language_failed: 'The language could not be read. This is what the application answered:',
+    application_language_change_unconfirmed: 'The language change could not be confirmed. This is what the application answered:',
   },
 };

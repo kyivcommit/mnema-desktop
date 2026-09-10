@@ -169,11 +169,15 @@ case_ "the wait must be announced, not answered with an empty screen" \
 # finding — the editor has to hear a reading pass end to withdraw a question
 # whose estimate that pass invalidated. The mutant is the same one, the whole
 # element commented out.
+# Rebound (PR 10f Task 7 staleness sweep, task-7-report.md fix report):
+# Task 4 rewrote this test for Models mounted-hidden rather than removed
+# (`ui/src/settings/Settings.test.ts`); the expression/marker are untouched
+# — only the test's title moved.
 case_ "the folders panel must really hold the mask editor, not just its heading" \
   ui/src/settings/Settings.svelte \
   "s{        <Masks \{jobs\} />}{        <!-- Masks -->}" \
   "        <!-- Masks -->" \
-  src/settings/Settings.test.ts 'clicking Folders shows the Folders heading and removes the Models heading' runner=vitest
+  src/settings/Settings.test.ts 'clicking Folders shows the Folders heading and hides the Models section, still mounted' runner=vitest
 
 # ── Task 11 fix round 1 additions ────────────────────────────────────────────
 #

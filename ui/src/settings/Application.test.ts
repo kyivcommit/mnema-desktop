@@ -1,11 +1,12 @@
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Application from './Application.svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
 import { theme } from '../theme';
-import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
+import { resetLocaleChoiceForTests } from '../locale-choice';
+import type { AppPrefs, LocaleApplyReply, ModelSettings, ScanState } from '../lib/ipc';
 
 // The typed wrappers, not the raw `invoke` — the shape `Scanning.test.ts` uses.
 // Every wrapper `Settings.svelte`'s other sections reach for is declared too,
@@ -16,6 +17,8 @@ const appPrefs = vi.fn();
 const setHotkey = vi.fn();
 const setAutostart = vi.fn();
 const setTheme = vi.fn();
+const getLocale = vi.fn();
+const setLocaleChoice = vi.fn();
 const modelSettings = vi.fn();
 const providerModels = vi.fn();
 const listTree = vi.fn();
@@ -26,6 +29,8 @@ vi.mock('../lib/ipc', () => ({
   setHotkey: (...a: unknown[]) => setHotkey(...a),
   setAutostart: (...a: unknown[]) => setAutostart(...a),
   setTheme: (...a: unknown[]) => setTheme(...a),
+  getLocale: (...a: unknown[]) => getLocale(...a),
+  setLocaleChoice: (...a: unknown[]) => setLocaleChoice(...a),
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   providerModels: (...a: unknown[]) => providerModels(...a),
   listTree: (...a: unknown[]) => listTree(...a),
@@ -86,17 +91,26 @@ function prefs(over: Partial<AppPrefs> = {}): AppPrefs {
   };
 }
 
+// A clean, fully-applied `set_locale`/`get_locale` reply — every locale test
+// below overrides only the field it means to exercise.
+function localeReply(over: Partial<LocaleApplyReply> = {}): LocaleApplyReply {
+  return { choice: 'auto', effective: 'uk', applyErrors: [], ...over };
+}
+
 beforeEach(() => {
   appPrefs.mockReset();
   setHotkey.mockReset();
   setAutostart.mockReset();
   setTheme.mockReset();
+  getLocale.mockReset();
+  setLocaleChoice.mockReset();
   modelSettings.mockReset();
   providerModels.mockReset();
   listTree.mockReset();
   listMasks.mockReset();
   jobStatus.mockReset();
   appPrefs.mockResolvedValue(prefs());
+  getLocale.mockResolvedValue({ choice: 'auto', effective: 'uk' });
   modelSettings.mockResolvedValue(SETTINGS);
   providerModels.mockResolvedValue({ entries: [], unreadable: 0, unreadableRecords: [] });
   listTree.mockResolvedValue({ roots: [], recents: [] });
@@ -104,6 +118,10 @@ beforeEach(() => {
   jobStatus.mockResolvedValue(IDLE_SCAN);
   setLocale('uk');
   theme.set('system');
+  // `../locale-choice` is a module-level store, on purpose (it must survive
+  // an `Application` remount within a real window) — which means it also
+  // survives from one test to the next in this file unless reset here.
+  resetLocaleChoiceForTests();
 });
 
 afterEach(() => {
@@ -849,16 +867,23 @@ test('a person who opens Application in the settings window reads the shortcut, 
   // never notices an empty panel or a value drawn under the wrong label.
   expect(visible(panel())).toBe(
     'Застосунок'
+    // Task 6: the four mockup groups, each opening with its own heading.
+    + ' Виклик'
     + ' Скорочення для відкриття пошуку: ⌥Space'
     + ' Це скорочення зареєстровано в системі.'
     + ' Змінити скорочення'
-    + ' Запуск під час входу в систему:'
-    + ' Mnema не запускається під час входу в систему.'
-    + ' Запускати під час входу'
+    + ' Вигляд'
     + ' Тема:'
     + ' Світла'
     + ' Темна'
     + ' Системна'
+    + ' Мова:'
+    + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
+    + ' Запуск'
+    + ' Запуск під час входу в систему:'
+    + ' Mnema не запускається під час входу в систему.'
+    + ' Запускати під час входу'
+    + ' Версія'
     + ' Версія 0.0.0',
   );
   // (review, Important 1) A `not.toContain` against `settings_section_not_ready`'s
@@ -1228,4 +1253,457 @@ test('the theme segment speaks the window language, both directions', async () =
   expect(at('application-theme-dark')).toBe('Dark');
   setLocale('uk');
   await waitFor(() => expect(at('application-theme-system')).toBe('Системна'));
+});
+
+// ---------------------------------------------------------------------------
+// Language (Task 3, PR 10f): moved out of the tray's temporary submenu into
+// this section. The store is `../locale-choice`, module-level like `../theme`
+// — busy, a partial-apply warning and the confirmed choice all have to survive
+// `Settings.svelte` destroying and recreating this component on navigation,
+// which is why the remount tests below drive it directly (`renderSection()`
+// called a second time), the same way the theme segment's own remount test
+// does just above.
+// ---------------------------------------------------------------------------
+
+const languageSelect = () => screen.getByTestId('application-language-select') as HTMLSelectElement;
+
+test('the language select is disabled until the first snapshot lands, then shows the confirmed choice', async () => {
+  let resolve!: (v: { choice: string; effective: 'uk' }) => void;
+  getLocale.mockReset();
+  getLocale.mockImplementationOnce(() => new Promise((res) => { resolve = res; }));
+  renderSection();
+  await shown('application-shortcut'); // the rest of the section is up
+  expect(languageSelect().disabled).toBe(true);
+  resolve({ choice: 'uk', effective: 'uk' });
+  await waitFor(() => expect(languageSelect().disabled).toBe(false));
+  expect(languageSelect().value).toBe('uk');
+});
+
+test('choosing a language sends that choice once, and the select follows the confirmed reply', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({ choice: 'en', effective: 'en' }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(languageSelect().value).toBe('en'));
+  expect(setLocaleChoice).toHaveBeenCalledTimes(1);
+  expect(setLocaleChoice).toHaveBeenCalledWith('en');
+  // Applied through the confirmed reply's `effective`, not merely requested —
+  // the whole window's language follows, the same proof the theme segment's
+  // own "both directions" test makes for `data-theme`.
+  expect(pageText()).toContain('Language:');
+});
+
+// Review round 1, Critical. `<select value={languageChoice}>` compiles to a
+// dirty check against the LAST value Svelte itself wrote
+// (`if (value !== (value = languageChoice)) select.value = value`), not
+// against what the DOM currently shows. A rejected change whose recovery
+// read confirms the SAME choice the user already had never trips that check
+// — `languageChoice` never actually changes value — so nothing tells the
+// browser's own selection (moved by the click itself, not by Svelte) to
+// revert. Every OTHER rejection test in this file confirms a DIFFERENT value
+// than the one picked, which the ordinary reactive write handles fine even
+// with this bug present; this is the one case that needs the same choice
+// back.
+test('a rejected change whose recovery read confirms the SAME choice as before still shows that choice, and the control is not left stuck', async () => {
+  renderSection();
+  await shown('application-language-select');
+  expect(languageSelect().value).toBe('auto'); // the default beforeEach snapshot
+
+  setLocaleChoice.mockRejectedValueOnce(new Error('still refused'));
+  getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' }); // unchanged — same choice as before
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy());
+  expect(languageSelect().value).toBe('auto');
+
+  // Not stuck: picking the very same option again still fires a fresh
+  // `change` and reaches `set_locale` a second time.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(languageSelect().value).toBe('en'));
+  expect(setLocaleChoice).toHaveBeenCalledTimes(2);
+});
+
+test('a partial reply keeps the select on the confirmed choice and lists the surfaces that did not pick it up', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'en',
+    effective: 'en',
+    applyErrors: [{ surface: 'tray', message: 'tray not open' }],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
+  // Confirmed, not rejected: the select stays on the choice the reply named.
+  expect(languageSelect().value).toBe('en');
+  expect(at('application-language-partial')).toBe('Language saved, but not applied everywhere');
+  expect(pageText()).toContain('tray: tray not open');
+  expect(screen.queryByTestId('application-language-failed')).toBeNull(); // this is not a rejection
+});
+
+test('loading_locale_keeps_partial_application_warning', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'en',
+    effective: 'en',
+    applyErrors: [{ surface: 'appMenu', message: 'menu not open' }],
+  }));
+  const first = renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
+  first.unmount(); // Settings.svelte's `{#if section === 'application'}` navigating away
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the remount's own mount-time read
+  renderSection();
+  await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
+  expect(languageSelect().value).toBe('en');
+  expect(pageText()).toContain('menu not open');
+});
+
+test('busy survives unmount and remount, so a remounted select stays disabled until the in-flight change settles', async () => {
+  let resolveChange!: (v: LocaleApplyReply) => void;
+  setLocaleChoice.mockImplementationOnce(() => new Promise((res) => { resolveChange = res; }));
+  const first = renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await tick();
+  expect(languageSelect().disabled).toBe(true);
+  first.unmount();
+
+  // The remount's own mount-time `loadLocaleChoice()` must not start a
+  // concurrent read while the store is busy. `getLocale` resolves an
+  // ORDINARY value on every call here (`beforeEach`'s own
+  // `mockResolvedValue`, not a one-shot `mockResolvedValueOnce`) — a stray
+  // second call would not hang, it would quietly succeed, so a bare "this
+  // test finished" proves nothing (review round 1, Minor 5: an earlier
+  // comment here claimed the opposite). The call COUNT is the only thing
+  // that can catch a broken busy-guard. `shown` (not a bare `tick`) waits out
+  // the remounted instance's own `appPrefs()` read, the way the theme
+  // segment's own remount test does.
+  renderSection();
+  await shown('application-language-select');
+  expect(languageSelect().disabled).toBe(true);
+  expect(getLocale).toHaveBeenCalledTimes(1); // only the FIRST instance's own mount-time read
+
+  resolveChange(localeReply({ choice: 'en', effective: 'en' }));
+  await waitFor(() => expect(languageSelect().disabled).toBe(false));
+  expect(languageSelect().value).toBe('en');
+});
+
+test('retry applying uses the confirmed choice and clears the warning only once it comes back clean', async () => {
+  setLocaleChoice.mockResolvedValueOnce(localeReply({
+    choice: 'en',
+    effective: 'en',
+    applyErrors: [{ surface: 'tray', message: 'tray not open' }],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
+
+  // A press does nothing early: the warning must still be up right before
+  // the retry's own reply lands — it clears BECAUSE the reply came back
+  // clean, not merely because the button was pressed.
+  let resolveRetry!: (v: LocaleApplyReply) => void;
+  setLocaleChoice.mockImplementationOnce(() => new Promise((res) => { resolveRetry = res; }));
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  expect(screen.getByTestId('application-language-partial')).toBeTruthy();
+
+  resolveRetry(localeReply({ choice: 'en', effective: 'en', applyErrors: [] }));
+  await waitFor(() => expect(screen.queryByTestId('application-language-partial')).toBeNull());
+  expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
+});
+
+test('a failed read shows the backend message and a retry-read control that recovers', async () => {
+  getLocale.mockReset();
+  getLocale.mockRejectedValueOnce(new Error('locale store unreadable'));
+  renderSection();
+  await shown('application-language-failed');
+  expect(at('application-language-error')).toBe('locale store unreadable');
+  expect(languageSelect().disabled).toBe(true); // no confirmed snapshot yet
+
+  getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' });
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-failed')).toBeNull());
+  expect(languageSelect().value).toBe('uk');
+  expect(languageSelect().disabled).toBe(false);
+});
+
+test('a rejected change shows its own message and re-reads, alongside the unconfirmed-state sentence', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select');
+
+  getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' }); // the rejection's own recovery read
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  // Review round 2, Important A: the generic "unconfirmed" sentence is shown
+  // for EVERY `unknown` outcome, not suppressed by a pending command message
+  // — the two are never mutually exclusive (persist-vs-transport genuinely
+  // is not knowable, so "unconfirmed" is always true here; the command's own
+  // message adds detail beside it, never replaces it). Review round 1,
+  // Minor 3: the CHANGE's own rejection message is under its own heading,
+  // not mislabelled as a failed READ (the recovery read here succeeds).
+  await waitFor(() => expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy());
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
+  expect(at('application-language-change-error')).toBe('IPC closed');
+  expect(screen.queryByTestId('application-language-partial')).toBeNull();
+  // The recovery read succeeded, so there is no READ message left to retry.
+  expect(screen.queryByTestId('application-language-failed')).toBeNull();
+
+  // A fresh, successful change clears the earlier rejection's own message.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.queryByTestId('application-language-change-unconfirmed')).toBeNull());
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
+});
+
+// Review round 2, Important A. `application.kind === 'unknown'` means
+// persist-vs-transport could not be told apart from the message alone
+// (`locale-choice.ts`'s own comment on `changeError`) — reachable even when
+// the change DID apply: the reply is lost in transport, and the recovery
+// read then confirms the NEW choice, not the old one. Asserting "the
+// language was not changed" in that state is a fact the code has no basis to
+// state; this is exactly that scenario, proven by the recovery read
+// confirming 'en' where the store held 'auto' before.
+test('a rejected change whose recovery read confirms a NEW choice never claims the language was not changed', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the REJECTION's recovery read — confirms the NEW choice
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(languageSelect().value).toBe('en'));
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
+  expect(pageText()).not.toMatch(/not changed|не змінено/i);
+});
+
+// Whole-branch review, Important 1. Spec §7.1: the retry-apply control is
+// available after an `unknown` outcome too, once `get_locale` has confirmed A
+// choice — not only after `partial`. Without this, the change picked back up
+// above (a recovery read that lands on a NEW confirmed choice) has no control
+// left that repeats the attempt: re-selecting the SAME option fires no
+// `change` at all, because `onLanguageSelect` already wrote the DOM back to
+// the confirmed value.
+test('the retry-apply button appears after a rejected change whose recovery read succeeded, and pressing it calls set_locale with the confirmed choice', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the REJECTION's recovery read — confirms a choice
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+});
+
+// The deferred T3 item. With no confirmed snapshot at all — the FIRST read
+// itself failed, so `retryLocaleApplication`'s own guard
+// (`s.snapshot === null`) would make a press a no-op — the button must not
+// even be offered: nothing exists yet to retry with. A change attempted from
+// this state (the select is disabled, but nothing stops a rejection from
+// reaching it before the user could act) still ends in `unknown`, and its own
+// recovery read failing too must not, on its own, manufacture a snapshot to
+// retry with.
+test('a rejected change with no confirmed snapshot yet shows the unknown sentence without offering a retry-apply control', async () => {
+  getLocale.mockRejectedValueOnce(new Error('locale store unreadable')); // mount's own read fails — nothing confirmed yet
+  renderSection();
+  await shown('application-language-failed');
+  expect(languageSelect().disabled).toBe(true); // no confirmed snapshot yet
+
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  getLocale.mockRejectedValueOnce(new Error('disk unreadable')); // the change's own recovery read fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+  expect(screen.queryByTestId('application-language-retry-apply')).toBeNull();
+});
+
+// Independent review of PR #44 (2026-09-10), P2-2. Unlike the test above,
+// THIS state has a previously confirmed snapshot (the ordinary mount read) —
+// `languageReady` (`snapshot !== null`) alone would have offered
+// retry-apply from it, and pressing it would have called `set_locale` with
+// the STALE pre-write choice, rolling back a change the backend had already
+// persisted (the reply was merely lost in transport). Only "Retry reading"
+// is offered until a later read actually confirms a choice.
+test('an unconfirmed snapshot after a rejected change and a failed recovery read offers Retry reading, never Retry applying, until a later read confirms one', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('response lost after persistence'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own CONFIRMED read
+
+  getLocale.mockRejectedValueOnce(new Error('read unavailable')); // the change's own recovery read fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+  expect(screen.getByTestId('application-language-failed')).toBeTruthy();
+  expect(screen.getByTestId('application-language-retry-read')).toBeTruthy();
+  expect(screen.queryByTestId('application-language-retry-apply')).toBeNull();
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the later, successful "Retry reading"
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-failed')).toBeNull());
+  expect(screen.getByTestId('application-language-retry-apply')).toBeTruthy();
+
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  // Sends the newly confirmed choice — never the stale pre-write one the
+  // mount's own read had left behind.
+  expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+});
+
+// Review round 2, Minor C. `changeError` has no exit path except a FRESH
+// change/retry attempt — a plain read (successful or not) never touches it,
+// by the same rule `application` itself follows (a read has no `applyErrors`
+// to confirm one way or the other). This proves that rule end to end: the
+// command's own message outlives a failed-then-successful "Retry reading",
+// and only a later command clears it.
+test('a rejected change\'s own message outlives a failed-then-successful read, and only a fresh command clears it', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockRejectedValueOnce(new Error('disk unreadable')); // the REJECTION's own recovery read, and it fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  // Waited on the READ's own signal, not the change's: `changeLocaleChoice`
+  // awaits its own recovery `loadLocaleChoice()` before its promise settles,
+  // so the read failing is the LATER of the two and implies the change's own
+  // message already landed.
+  await waitFor(() => expect(screen.getByTestId('application-language-failed')).toBeTruthy());
+  expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy();
+  expect(at('application-language-change-error')).toBe('IPC closed');
+
+  // A later, independent "Retry reading" succeeds: it clears the READ's own
+  // error and reveals the unknown sentence (it was suppressed by nothing —
+  // `error !== null` just drew its own block instead), but the CHANGE's own
+  // message is not a read's to clear.
+  getLocale.mockResolvedValueOnce({ choice: 'uk', effective: 'uk' });
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-failed')).toBeNull());
+  expect(screen.getByTestId('application-language-unknown')).toBeTruthy();
+  expect(screen.getByTestId('application-language-change-unconfirmed')).toBeTruthy();
+  expect(at('application-language-change-error')).toBe('IPC closed');
+
+  // Only a fresh, successful command clears it.
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.queryByTestId('application-language-change-unconfirmed')).toBeNull());
+  expect(screen.queryByTestId('application-language-unknown')).toBeNull();
+});
+
+test('the language segment speaks the window language, both directions', async () => {
+  renderSection();
+  await shown('application-language-select');
+  expect(pageText()).toContain('Мова:');
+  expect(at('application-language-select')).toContain('Авто (система)');
+  setLocale('en');
+  await waitFor(() => expect(pageText()).toContain('Language:'));
+  expect(at('application-language-select')).toContain('Auto (system)');
+  setLocale('uk');
+  await waitFor(() => expect(pageText()).toContain('Мова:'));
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — the four mockup groups: `role="group"` plus an accessible name,
+// each holding the controls this section already draws for that subject. The
+// handlers under test above are unchanged; this only pins where the markup
+// now puts them.
+// ---------------------------------------------------------------------------
+
+test('the shortcut controls sit inside a group named for the shortcut', async () => {
+  renderSection();
+  await shown('application-shortcut-record');
+
+  const group = screen.getByRole('group', { name: 'Виклик' });
+  expect(within(group).getByTestId('application-shortcut-record')).toBeTruthy();
+  expect(within(group).getByTestId('application-shortcut-status')).toBeTruthy();
+});
+
+test('the theme and language controls sit inside a group named for appearance', async () => {
+  renderSection();
+  await shown('application-language-select');
+
+  const group = screen.getByRole('group', { name: 'Вигляд' });
+  expect(within(group).getByTestId('application-theme-light')).toBeTruthy();
+  expect(within(group).getByTestId('application-language-select')).toBeTruthy();
+});
+
+test('the autostart controls sit inside a group named for startup', async () => {
+  renderSection();
+  await shown('application-autostart-toggle');
+
+  const group = screen.getByRole('group', { name: 'Запуск' });
+  expect(within(group).getByTestId('application-autostart-toggle')).toBeTruthy();
+});
+
+test('the version sits inside a group named for the version', async () => {
+  renderSection();
+  await shown('application-version');
+
+  const group = screen.getByRole('group', { name: 'Версія' });
+  expect(within(group).getByTestId('application-version')).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — each error text gets an accessible link to the control it is
+// about, now that the markup around it is changing. `aria-describedby` names
+// every id that is actually on screen; none of it dangles.
+// ---------------------------------------------------------------------------
+
+function describedByIds(el: HTMLElement): string[] {
+  return (el.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean);
+}
+
+test('a shortcut change that fails links the record control to the sentence it drew', async () => {
+  const SENTENCE = 'the preferences file could not be written';
+  appPrefs.mockResolvedValueOnce(prefs());
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  appPrefs.mockResolvedValueOnce(prefs());
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true });
+
+  await shown('application-shortcut-error');
+  const button = screen.getByTestId('application-shortcut-record');
+  const ids = describedByIds(button);
+  expect(ids).toContain('application-shortcut-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a refused autostart change links its buttons to the sentence it drew', async () => {
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'disabled' } }));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await shown('application-autostart-toggle');
+
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+
+  await shown('application-autostart-error');
+  const ids = describedByIds(screen.getByTestId('application-autostart-toggle'));
+  expect(ids).toContain('application-autostart-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a refused theme change links the theme group to the sentence it drew', async () => {
+  setTheme.mockRejectedValue(new Error('could not write preferences: disk full'));
+  renderSection();
+  await shown('application-theme-dark');
+
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+
+  await shown('application-theme-error');
+  const seg = screen.getByRole('group', { name: 'Тема:' });
+  const ids = describedByIds(seg);
+  expect(ids).toContain('application-theme-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a failed language read links the select to the sentence and the retry it offers', async () => {
+  getLocale.mockRejectedValue(new Error('IPC closed'));
+  renderSection();
+
+  await shown('application-language-failed');
+  const ids = describedByIds(screen.getByTestId('application-language-select'));
+  expect(ids).toContain('application-language-failed');
+  expect(ids).toContain('application-language-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
 });

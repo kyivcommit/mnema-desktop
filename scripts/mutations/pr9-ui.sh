@@ -36,11 +36,12 @@
 #   the running-pass guard — the pending line and its button step aside
 #                            while the strip above owns a run already
 #                            under way
-#   the trailing-stop strip — `formatIndexedDate` (`ui/src/i18n/recency.ts`,
+#   the combined date/time call — `formatIndexedDate` (`ui/src/i18n/recency.ts`,
 #                            reached from here rather than from its own file)
-#                            drops ICU's own stop, so a locale whose long-date
-#                            form ends in one is not doubled by the sentence
-#                            wrapped around it
+#                            carries `timeStyle` alongside `dateStyle` (PR 10f
+#                            Task 9) so the scan time follows the date; the
+#                            trailing-stop strip this used to name is gone —
+#                            see the Rebound note below
 #   the no-modifier guard — the recorder refuses a press that carries no
 #                            modifier at all, same as `set_hotkey` step 3
 #   the canonical order   — the modifiers are joined in ONE fixed order, on
@@ -326,19 +327,30 @@ case_ "the pending line and its button must step aside while a run is under way"
 # when the index marks a walk incomplete' (`Scanning.test.ts`).
 
 # ---------------------------------------------------------------------------
-# F1 (measured live, 2026-09-04): `formatIndexedDate`'s own trailing-stop
-# strip. `ui/src/i18n/recency.ts`, not `Scanning.svelte` — the two other files
-# this case file already reaches beyond its own header's list
-# (`ui/src/i18n/shortcut.ts` below) — because the fix is one function used by
-# every locale, and the fixture that tells "uk ends in «р.»" apart from "the
-# rest of the sentence" lives beside that function.
+# Rebound (PR 10f Task 9, task-9-report.md): "the date must not carry its own
+# trailing stop into the sentence around it" named a strip
+# (`.replace(/\.$/, '')`) and a test (`carries no trailing stop, so the
+# sentence around it supplies the only one`) that are both gone — the owner's
+# remark (screenshot, 2026-09-10 12:14) put the scan time after the date, one
+# `Intl.DateTimeFormat` call carrying both `dateStyle` and `timeStyle`, and
+# that moves uk's own «р.» abbreviation stop off the END of the string: it now
+# sits ahead of the time rather than beside `indexing_index_updated`'s own
+# full stop, so nothing needs stripping any more (measured: `node -e` against
+# this exact call, both locales, prints no trailing `.` — see `recency.ts`'s
+# own updated comment and `recency.test.ts`). The strip is gone from the code,
+# not moved.
+#
+# The CASE's own intent — this is the one place a regression reaches every
+# caller, uk included — has a live carrier one property over: `timeStyle:
+# 'short'` itself, the option Task 9 added and the one a careless future edit
+# could drop silently, taking the scan time back out with it. Rebound there.
 # ---------------------------------------------------------------------------
 
-case_ "the date must not carry its own trailing stop into the sentence around it" \
+case_ "the scan time must not silently disappear from the combined date/time call" \
   ui/src/i18n/recency.ts \
-  's~    \.format\(new Date\(indexedAt \* 1000\)\)\n    \.replace\(/\\\.\$/, \x27\x27\);~    .format(new Date(indexedAt * 1000)); // mutant: the trailing stop survives~' \
-  '.format(new Date(indexedAt * 1000)); // mutant: the trailing stop survives' \
-  src/i18n/recency.test.ts 'carries no trailing stop, so the sentence around it supplies the only one' runner=vitest
+  's~\{ dateStyle: \x27long\x27, timeStyle: \x27short\x27 \}~{ dateStyle: \x27long\x27 } /* mutant: timeStyle silently dropped */~' \
+  '/* mutant: timeStyle silently dropped */' \
+  src/i18n/recency.test.ts 'formats the timestamp as a date and time in the locale it is given' runner=vitest
 
 # ---------------------------------------------------------------------------
 # PR 9 Task 7 — the Application section: the shortcut, autostart, the version.

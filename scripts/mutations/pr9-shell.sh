@@ -586,9 +586,17 @@ case_ "the search hint is read off the hotkey state, not written into the label"
 # holding the shortcut — and a menu promising a combination that does nothing is
 # the same class of defect this task exists for, one step smaller. Every
 # `Registered` fixture passes under this mutant.
+# Rebound (PR 10f Task 7 staleness sweep, task-7-report.md fix report):
+# `tray_label`'s "show_search" arm no longer carries a literal 🔍 prefix at
+# all (Task 1 moved the glyph to a real menu icon, `tray_icons::menu_icon`)
+# and the `Registered`/`Unavailable` branch this case's old expression was
+# ADDING already exists in the committed code, correctly — `grep -n 🔍
+# src-tauri/src/tray.rs` is empty. The intent survives: mutate the
+# `Unavailable` arm to format the shortcut anyway, the same wrong behaviour
+# the case has always named.
 case_ "a shortcut the operating system refused is named by no hint at all" \
   src-tauri/src/tray.rs \
-  's~                format!\("🔍 \{\}", locale::t\(lang, Key::TrayShowSearch\)\)~                // mutant: an unusable shortcut is named anyway\n                format!(\n                    "🔍 \{\} (\{\})",\n                    locale::t(lang, Key::TrayShowSearch),\n                    crate::shortcut::format_shortcut(\n                        \&hotkey.shortcut,\n                        crate::models::Platform::of_this_build()\n                    )\n                )~' \
+  's~            HotkeyStatus::Unavailable \{ \.\. \} => locale::t\(lang, Key::TrayShowSearch\)\.to_string\(\),~            HotkeyStatus::Unavailable { .. } => format!(\n                "{} ({})",\n                locale::t(lang, Key::TrayShowSearch),\n                crate::shortcut::format_shortcut(\n                    \&hotkey.shortcut,\n                    crate::models::Platform::of_this_build()\n                )\n            ), // mutant: an unusable shortcut is named anyway~' \
   '// mutant: an unusable shortcut is named anyway' \
   mnema-desktop 'tray::tests::an_unregistered_shortcut_is_named_by_no_hint_at_all' --lib
 

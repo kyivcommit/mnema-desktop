@@ -375,7 +375,7 @@ export type Price =
 
 // `catalogue.rs`'s `Refusal`: five variants; one of them (`limitNotUnderstood`)
 // carries the provider's own `raw` text, and `Models.svelte`'s
-// `refusalReason` does not render it — see that function for why the
+// `hiddenReasonLabel` does not render it — see that function for why the
 // sentence is fixed catalogue text rather than provider text.
 export type ModelRefusal =
   | { kind: 'inputTooSmall'; limit: number; floor: number }
@@ -881,3 +881,31 @@ export type ThemeChoice = 'system' | 'light' | 'dark';
 // A rejection is `Error::Prefs`: the file was not written, nothing was applied,
 // and the window's own store is therefore still the truth — no re-read needed.
 export const setTheme = (choice: ThemeChoice) => invoke<void>('set_theme', { choice });
+
+// PR 10f (Task 3). The language choice, moved out of the tray's temporary
+// submenu (Task 1/2) into the Application section — `locale-choice.ts` is the
+// module-level store built on these two wrappers.
+export type LocaleChoice = 'auto' | 'uk' | 'en';
+export type LocaleReply = { choice: LocaleChoice; effective: 'uk' | 'en' };
+// One surface `set_locale` tried to update and did not — mirrors `locale.rs`'s
+// `LocaleSurface` (`#[serde(rename_all = "camelCase")]` on that enum, not
+// inherited from `LocaleApplyReply`). `message` is English and backend-owned:
+// shown as plain text, never matched on.
+export type LocaleApplyError = {
+  surface: 'tray' | 'settingsTitle' | 'appMenu' | 'localeEvent';
+  message: string;
+};
+// What `set_locale` returns: the choice that WAS persisted (a persist failure
+// rejects instead — see below) and every surface that did not pick it up.
+// `applyErrors` is always present, even empty, so a caller never has to treat
+// "no errors" and "field omitted" as different things.
+export type LocaleApplyReply = LocaleReply & { applyErrors: LocaleApplyError[] };
+export const getLocale = () => invoke<LocaleReply>('get_locale');
+// Repeating the already-current choice re-runs every apply step and the
+// emit — Task 2's own retry path, which is why `retryLocaleApplication`
+// (`locale-choice.ts`) is nothing more than this call with `snapshot.choice`.
+// A rejection is `Error::Prefs`: the choice was never persisted (persist is
+// the first and only step that can fail — locale.rs `write_choice(...)?`), so
+// the caller re-reads `getLocale()` rather than guessing what happened.
+export const setLocaleChoice = (choice: LocaleChoice) =>
+  invoke<LocaleApplyReply>('set_locale', { choice });

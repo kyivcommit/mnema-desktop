@@ -1,7 +1,7 @@
 /* Settings window — the mockup's rules over the attributes the markup already
  * carries. One global file on purpose: tokens.test.ts reads every var() in
  * one place, and the mockup stays the single source. Selectors lean on
- * attributes first (aria-pressed, aria-current, role, disabled), on elements
+ * attributes first (aria-pressed, data-configured, role, disabled), on elements
  * under main (text, lists and controls — the job strip sits outside .scols
  * and must get them too) or .spane (headings) second, and on the mockup's
  * class names only where the markup has no attribute to stand on.
@@ -16,7 +16,11 @@
  */
 
 main {
-  min-height: 100vh;
+  /* Task 5: bounded, not merely floored — a bottom disclosure whose own
+   * popup is `position: absolute; bottom: 100%` needs an ancestor that does
+   * not grow past the viewport, or the popup's own anchor drifts with it. */
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -69,13 +73,6 @@ main button[aria-pressed="true"] {
   color: var(--ink);
 }
 
-/* the current one (mockup .tree .row.sel) — cite tokens, as the spec says for "current" */
-main button[aria-current="true"] {
-  border-color: var(--cite-line);
-  background: var(--cite-wash);
-  color: var(--cite);
-}
-
 main input,
 main select {
   height: 37px;
@@ -103,16 +100,98 @@ main select:focus-visible {
   outline-offset: 1px;
 }
 
-/* the window's status line (mockup .statcard) — drawn before the two columns */
-.indexing {
-  margin: 12px 24px 0;
+/* screen-reader only — the live region beside the bottom disclosure below
+ * needs a place to live that a browser's own `<details>` collapse cannot
+ * hide (it hides every child but `<summary>`), so it is not IN one. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* the window's status line (mockup .statcard), now a bottom disclosure (Task
+ * 5): one line always on screen, in every section, with the full report
+ * behind it — a `<details>` a person opens on purpose rather than a card
+ * permanently taking the window's height. `position: relative` anchors its
+ * own popup below. */
+.job-disclosure {
+  position: relative;
+  flex: none;
+  margin: 12px 24px;
+}
+
+.job-disclosure > summary {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  list-style: none;
+}
+
+.job-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Whole-branch review, Important 2. `list-style: none` plus the marker rule
+ * above removes the native disclosure triangle and puts nothing in its
+ * place — spec §4.2 requires the row to carry a state and a disclosure
+ * marker. Glyph and colour measured from the mockup's own `.fchev`/`.car`
+ * (`▸`, `color: var(--ink-faint)`, `font-size: 11px`) rather than invented:
+ * one glyph, rotated under `[open]`, instead of swapping text. */
+.job-disclosure > summary::after {
+  content: '▸';
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  transform: rotate(0deg);
+}
+
+.job-disclosure[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.job-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* the report, popped ABOVE the summary rather than pushing the window's own
+ * height around under it — `bottom: 100%` anchors it to the summary's own
+ * top edge, and `main`'s bounded height (Task 5) is what keeps that anchor
+ * from drifting off screen. */
+.job-details {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  max-height: 60vh;
+  overflow: auto;
   padding: 14px 18px;
   border: 1px solid var(--line);
   border-radius: 11px;
   background: var(--surface);
+  box-shadow: 0 -4px 14px -4px var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* the phase progress bar (mockup carries none of its own — new to Task 5) */
+.job-details progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
 }
 
 /* navigation | pane (mockup .sbody) */
@@ -222,19 +301,92 @@ main select:focus-visible {
 
 .mtabs {
   display: flex;
+  align-items: center;
   gap: 10px;
 }
 
-/* a watched folder (mockup .fitem + .frow) */
+/* Task 9 (owner's ruling, live run 2026-09-10): the dot moved inside its own
+ * tab button, as its last child — mockup values (8×8, gap 9px), measured
+ * rather than the base `main button` rule's own 7px. */
+.mtab {
+  gap: 9px;
+}
+
+/* the per-role configured dot (Task 4, review P2-1; Task 9 moved it inside
+ * `.mtab`): the small mark carries the colour, and the accessible word beside
+ * it is `sr-only` (Task 9) rather than the ordinary readable ink it used to
+ * be. `flex: none` (mockup `.sd`) keeps the mark from being asked to grow or
+ * shrink as a flex item of the button it now sits inside.
+ *
+ * Review round 1, Minor 6: `font-family`/`font-weight`/`font-style`/
+ * `font-size`/`color` are gone — this element's only text is `sr-only` now,
+ * so none of them has had any visual effect since Task 9 moved the word off
+ * screen, and a font rule with only some of the triple set is exactly what
+ * the font-grammar guard above (tokens.test.ts) exists to catch. */
+.mdot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.mdot-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+
+.mdot[data-configured="true"] .mdot-mark {
+  background: var(--ok);
+}
+
+.mdot[data-configured="false"] .mdot-mark {
+  background: var(--err);
+}
+
+/* a watched folder (mockup .fitem): the row, the removal confirmation and the
+ * subfolder panel stack as sibling blocks now (Task 6) — `.row` below is the
+ * mockup's own .frow and lays out ONLY the top line inside it. */
 .folders > ul > li {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 11px;
+}
+
+/* the top line (mockup .frow): 11px, not the generic `.row`'s 9px — the
+ * mockup's own value for this specific row (line 139 of the mockup). */
+.folders .row {
+  gap: 11px;
+}
+
+/* the trailing remove control (mockup .frow .rm): a small icon, never a
+ * bordered `main button` — every property that rule sets differently, and
+ * that this row's layout would otherwise inherit, is overridden here (Task
+ * 6 review, Minor 5: `align-self: flex-start` is one of them — `main
+ * button`'s own top-aligned default reads as a stray offset once `.row`
+ * wraps a taller multi-line path beside this 24px icon). `flex: none` keeps
+ * it from being squeezed by `.fp`'s own `flex: 1 1 auto`. */
+.folders .row > .rm {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  font-family: var(--sans);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-faint);
+  flex: none;
+  align-self: center;
 }
 
 .fp {
@@ -258,7 +410,6 @@ main select:focus-visible {
 
 /* the opened folder's panel (mockup .fsubs) */
 .fsubs {
-  flex-basis: 100%;
   margin: 6px -12px -10px;
   padding: 10px 12px 10px 36px;
   border-top: 1px solid var(--line);
@@ -326,8 +477,12 @@ main select:focus-visible {
   color: var(--ink-faint);
 }
 
-/* the theme choice (mockup .seg, .seg .opt, .seg .opt.on) */
-.spane [role="group"] {
+/* the theme choice (mockup .seg, .seg .opt, .seg .opt.on). Its own class and
+ * not a bare `[role="group"]` selector (Task 6): Application's four section
+ * groups carry that same role now for their accessible name, and a selector
+ * keyed on the attribute alone would hand this segmented-control look to
+ * every plain button inside THEM too. */
+.seg {
   align-self: flex-start;
   padding: 3px;
   border-radius: 9px;
@@ -336,7 +491,7 @@ main select:focus-visible {
   gap: 3px;
 }
 
-.spane [role="group"] button {
+.seg button {
   height: auto;
   padding: 6px 14px;
   border: 0;
@@ -346,13 +501,49 @@ main select:focus-visible {
   font-style: normal;
 }
 
-.spane [role="group"] button[aria-pressed="true"] {
+.seg button[aria-pressed="true"] {
   background: var(--surface);
   color: var(--ink);
   font-family: var(--sans);
   font-weight: 600;
   font-style: normal;
   box-shadow: 0 1px 2px -1px var(--shadow);
+}
+
+/* the index's own numbers (mockup .statcard, .stat1, .stat1 .v/.k, lines
+ * 148-151). The wrapping `<div>` around each `dt`/`dd` pair plays `.stat1`'s
+ * role; `.stat1 .k` sets no font of its own in the mockup (it inherits the
+ * window's ambient sans/400), so `dt` here does neither. */
+.statcard {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  padding: 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+}
+
+.statcard > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statcard dt {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+.statcard dd {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-style: normal;
+  font-size: 21px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 /* the shortcut (mockup .kbd) */

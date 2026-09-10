@@ -2,25 +2,34 @@
 //! the only way to quit. Built in `lib.rs::run`'s `setup` hook.
 //!
 //! Nothing here holds a user-facing sentence — the text comes from `locale.rs`
-//! and the emoji are composed onto it in [`tray_label`]. The one value that is
-//! neither is the shortcut hint on «Показати пошук», and from Task 11a it is
-//! not a literal either: it is the `prefs::HotkeyState` the operating system
-//! answered with, drawn by `shortcut::format_shortcut`, which mirrors the
-//! settings window's own formatter against `ui/src/i18n/shortcut.fixtures.json`
-//! — one fixture, two implementations, so neither can drift alone. Three
-//! entry points read that state and so three menus can change with it:
-//! [`build_tray`] at boot, [`swap_tray_menu`] on a language change, and
-//! `prefs::set_hotkey` when the shortcut itself moves.
+//! and each row's picture comes from [`crate::tray_icons`] (Task 1 — an
+//! `IconMenuItem`, not an emoji folded into the string). The one value that is
+//! neither a translation nor a fixed icon is the shortcut hint on «Показати
+//! пошук», and from Task 11a it is not a literal either: it is the
+//! `prefs::HotkeyState` the operating system answered with, drawn by
+//! `shortcut::format_shortcut`, which mirrors the settings window's own
+//! formatter against `ui/src/i18n/shortcut.fixtures.json` — one fixture, two
+//! implementations, so neither can drift alone. Three entry points read that
+//! state and so three menus can change with it: [`build_tray`] at boot,
+//! [`swap_tray_menu`] on a language change, and `prefs::set_hotkey` when the
+//! shortcut itself moves.
+//!
+//! **Task 1**: the candidate menu built for any of those three moments (plus
+//! [`refresh_tray`]'s own escalation when a scan's Stop/Resume state moves) is
+//! never the live one until [`install_then_publish`] has actually installed
+//! it — see [`TrayItems`] for what «live» means and what happens when install
+//! fails.
 
 use tauri::Manager as _;
 use tauri::{
     Runtime,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{IconMenuItem, IsMenuItem, Menu, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
 
 use crate::locale::{self, Key, Lang, LocaleChoice};
 use crate::prefs::{HotkeyState, HotkeyStatus};
+use crate::tray_icons::{self, MenuIcon};
 
 /// The two tray ids that more than one module has to spell: the item's own
 /// menu entry is built here and its press is dispatched in `lib.rs`, so the
@@ -28,10 +37,10 @@ use crate::prefs::{HotkeyState, HotkeyStatus};
 /// dispatcher arm spelled `"resume_scan"` against a menu item built as
 /// `"resume"` is an item that silently does nothing when pressed.
 ///
-/// Only these two. The other ids (`show_search`, `open_settings`, `quit`, the
-/// language items) are left as the bare literals they have always been:
-/// widening this to all of them is a rename, not a fix, and the review that
-/// asked for these two asked for exactly these two.
+/// Only these two. The other ids (`show_search`, `open_settings`, `quit`) are
+/// left as the bare literals they have always been: widening this to all of
+/// them is a rename, not a fix, and the review that asked for these two asked
+/// for exactly these two.
 ///
 /// `TRAY_ITEM_IDS` is built from them, and so is [`tray_label`]'s match — but
 /// `tray_item_ids_match_spec_order` deliberately keeps its literals, because a
@@ -40,9 +49,17 @@ use crate::prefs::{HotkeyState, HotkeyStatus};
 pub const STOP_ID: &str = "stop_indexing";
 pub const RESUME_ID: &str = "resume";
 
-/// Composes one tray item's label from the catalog (§D129). The emoji is a
-/// literal here and not in the catalog: the same glyph in both languages, not
-/// translatable text.
+/// The tray icon's own id, spelled in this file and in `locale.rs` (which
+/// looks it up with [`tauri::Manager::tray_by_id`] to tell "the tray itself
+/// is gone" apart from every other reason a language apply step can fail).
+/// Deferred from Task 2: the same literal duplicated at three call sites with
+/// nothing tying them together is the identical hazard [`STOP_ID`]'s own doc
+/// names for a dispatcher arm and a menu id.
+pub const TRAY_ID: &str = "mnema-tray";
+
+/// Composes one tray item's label from the catalog (§D129) — text only from
+/// Task 1: the picture beside it is a fixed [`MenuIcon`] on the `IconMenuItem`
+/// itself (`build_tray_menu`), not a glyph folded into this string.
 ///
 /// 🔴 **The shortcut hint is DERIVED, and that is the whole of Task 11a.** It
 /// used to be the literal `(⌥Space)`, written when the shortcut could not be
@@ -73,34 +90,40 @@ pub fn tray_label(lang: Lang, id: &str, hotkey: &HotkeyState) -> String {
             // second derivation of one fact is how the two halves of a label
             // start disagreeing. See `models::Platform`.
             HotkeyStatus::Registered => format!(
-                "🔍 {} ({})",
+                "{} ({})",
                 locale::t(lang, Key::TrayShowSearch),
                 crate::shortcut::format_shortcut(
                     &hotkey.shortcut,
                     crate::models::Platform::of_this_build()
                 )
             ),
-            HotkeyStatus::Unavailable { .. } => {
-                format!("🔍 {}", locale::t(lang, Key::TrayShowSearch))
-            }
+            HotkeyStatus::Unavailable { .. } => locale::t(lang, Key::TrayShowSearch).to_string(),
         },
-        "open_settings" => format!("⚙ {}", locale::t(lang, Key::TrayOpenSettings)),
-        STOP_ID => format!("⏹ {}", locale::t(lang, Key::TrayStopIndexing)),
-        RESUME_ID => format!("▶ {}", locale::t(lang, Key::TrayResumeScanning)),
-        "quit" => format!("⏻ {}", locale::t(lang, Key::TrayQuit)),
+        "open_settings" => locale::t(lang, Key::TrayOpenSettings).to_string(),
+        STOP_ID => locale::t(lang, Key::TrayStopIndexing).to_string(),
+        RESUME_ID => locale::t(lang, Key::TrayResumeScanning).to_string(),
+        "quit" => locale::t(lang, Key::TrayQuit).to_string(),
         other => panic!("unknown tray id {other}"),
     }
 }
 
-/// The tray's action-item ids in display order — §8. Pure data, ids only (no
-/// labels: those are locale-dependent, via `tray_label`), so a headless test
-/// can guard against spec drift without constructing a native menu. On macOS,
-/// `muda` requires the main thread to build even a plain `Menu` — not only
-/// the tray *icon* — and `cfg!(test)` inside `muda` only bypasses that check
-/// when `muda` itself is compiled for test, not when a dependent crate is;
-/// see `muda-0.19.3/src/platform_impl/macos/mod.rs:132,328`. So
-/// `build_tray_menu`, like `build_tray`, is exercised only by the live run —
-/// this array is what stays headlessly testable.
+/// Every id [`tray_label`] must answer for, as one fixed list — NOT a live
+/// menu's display order. It reads that way because it once was one (§8), but
+/// Task 1's `tray_action` means `STOP_ID` and `RESUME_ID` are never both on
+/// screen at the same time (`build_tray_menu` draws at most one), so a list
+/// naming both back to back is no longer a row-for-row picture of any menu a
+/// person could actually see. What it still is: the ids
+/// `every_tray_id_has_a_non_empty_label_in_both_languages` walks to check
+/// `tray_label`'s coverage, and the ids `tray_item_ids_match_spec_order` pins
+/// against spec drift. Pure data, ids only (no labels: those are
+/// locale-dependent, via `tray_label`), so a headless test can guard against
+/// that drift without constructing a native menu. On macOS, `muda` requires
+/// the main thread to build even a plain `Menu` — not only the tray *icon* —
+/// and `cfg!(test)` inside `muda` only bypasses that check when `muda` itself
+/// is compiled for test, not when a dependent crate is; see
+/// `muda-0.19.3/src/platform_impl/macos/mod.rs:132,328`. So `build_tray_menu`,
+/// like `build_tray`, is exercised only by the live run — this array is what
+/// stays headlessly testable.
 pub const TRAY_ITEM_IDS: &[&str] = &[
     "status",
     "show_search",
@@ -109,34 +132,6 @@ pub const TRAY_ITEM_IDS: &[&str] = &[
     RESUME_ID,
     "quit",
 ];
-
-/// The «Мова» submenu's three items as pure `(id, label, checked)` data —
-/// the only part of the submenu that carries a decision (which language is
-/// currently selected). Kept separate from `CheckMenuItem` construction so a
-/// headless test can catch a wrong-variant mapping (e.g. `lang_en` compared
-/// against `LocaleChoice::Uk`) or an all-checked/all-unchecked slip — neither
-/// of which any other test here would catch, and the built `Menu` itself is
-/// macOS main-thread-only (see `TRAY_ITEM_IDS`), so this is the only headless
-/// path to it.
-fn lang_menu_items(lang: Lang, choice: LocaleChoice) -> [(&'static str, String, bool); 3] {
-    [
-        (
-            "lang_auto",
-            locale::t(lang, Key::LangAuto).to_string(),
-            choice == LocaleChoice::Auto,
-        ),
-        (
-            "lang_uk",
-            locale::endonym(LocaleChoice::Uk).to_string(),
-            choice == LocaleChoice::Uk,
-        ),
-        (
-            "lang_en",
-            locale::endonym(LocaleChoice::En).to_string(),
-            choice == LocaleChoice::En,
-        ),
-    ]
-}
 
 /// Composes the tray's status line from the current [`ScanState`] — the ONE
 /// place that picks which of the five phase sentences to draw. Pure: nothing
@@ -295,27 +290,126 @@ pub fn resume_enabled(state: &crate::scan_state::ScanState) -> bool {
     resume_entry(state).is_some()
 }
 
+/// Which single action the tray's third group offers for a scan — Task 1's
+/// "at most one", replacing the pair of always-present Stop/Resume items the
+/// menu used to draw with one of them merely disabled. Built from the same
+/// two pure predicates that pair read ([`stop_enabled`] / [`resume_entry`]),
+/// so this can never disagree with either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    Stop,
+    Resume,
+}
+
+/// Pure, like [`stop_enabled`] and [`resume_entry`] beside it — no `AppState`,
+/// no tray — so `tray_action_matches_the_snapshot` pins the whole table
+/// without a live menu. The order asks `stop_enabled` first, but the two
+/// predicates never both answer `true` for the same snapshot: `resume_entry`
+/// is `Some` only in `Ended`, `stop_enabled` only in `Running`.
+pub fn tray_action(scan: &crate::scan_state::ScanState) -> Option<TrayAction> {
+    if stop_enabled(scan) {
+        Some(TrayAction::Stop)
+    } else if resume_entry(scan).is_some() {
+        Some(TrayAction::Resume)
+    } else {
+        None
+    }
+}
+
+/// Everything a redraw needs in order to tell "nothing changed but the
+/// numbers" from "the menu itself has to change": the resolved language, the
+/// persisted choice, the hotkey state, and which action (if any) the scan
+/// offers. Deliberately NOT the counts inside a `Running` phase —
+/// `status_label`'s own percentage ticks on every progress event, and
+/// comparing that too would turn every tick into a full menu rebuild instead
+/// of a text update.
+type MenuKey = (Lang, LocaleChoice, HotkeyState, Option<TrayAction>);
+
+/// The bookkeeping half of [`TrayItems`] — what is actually installed, and
+/// whether the last attempt to reach some OTHER state failed and is still
+/// owed a retry. Factored out on its own, with no Tauri type in reach, so
+/// `failed_refresh_retries_without_mode_change` can drive the exact state
+/// machine [`refresh_tray`] runs without a live menu (`Menu`/`IconMenuItem`
+/// need the main thread even under `cfg!(test)` — see `TRAY_ITEM_IDS`'s own
+/// doc for why no headless test can build one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Installed {
+    key: MenuKey,
+    retry: bool,
+}
+
+impl Installed {
+    /// `true` when the next redraw must rebuild and reinstall the whole menu
+    /// rather than just restate the status line: the candidate differs from
+    /// what is on screen, or the last attempt to install one never landed.
+    fn needs_full_swap(&self, candidate: &MenuKey) -> bool {
+        self.retry || self.key != *candidate
+    }
+
+    /// A setter or an install attempt failed: the key and handles already on
+    /// screen are left exactly as they were (nothing here touches them), and
+    /// the next redraw is forced onto the full path regardless of what it
+    /// finds there.
+    fn record_failure(&mut self) {
+        self.retry = true;
+    }
+
+    /// A full swap landed: `key` is now what is on screen, and nothing is
+    /// owed anymore. [`install_tray_menu`]'s publish closure calls this on
+    /// the live `TrayItems` (rather than replacing the struct whole) so that
+    /// `failed_refresh_retries_without_mode_change` drives the SAME function
+    /// production does, and can fail from a production bug in it rather than
+    /// only from a bug in a test-only mirror of it.
+    fn record_success(&mut self, key: MenuKey) {
+        self.key = key;
+        self.retry = false;
+    }
+}
+
+/// The seam between building a candidate menu and it becoming the one a
+/// person sees: `install` is always `tray.set_menu`, and `publish` is always
+/// writing the candidate into [`TrayItems`]'s `Mutex`. A menu candidate and
+/// its handles become current ONLY after `install` succeeds — before Task 1
+/// both real callers wrote publish-then-install by hand instead, and
+/// `swap_tray_menu`'s copy did it in the wrong order and silently discarded a
+/// failed `set_menu` besides: the `Mutex` held the NEW handles before
+/// `tray.set_menu` had even been asked to show the menu they belong to, so a
+/// failed install left the tray showing its OLD items while every handle
+/// pointing at them addressed items in no menu at all. One function, used by
+/// both real callers, makes "install must win before publish runs" a fact
+/// about the type instead of a discipline two call sites had to keep
+/// matching by hand — see `failed_install_does_not_publish_candidate`.
+fn install_then_publish<M, H, E>(
+    menu: M,
+    handles: H,
+    install: impl FnOnce(M) -> Result<(), E>,
+    publish: impl FnOnce(H),
+) -> Result<(), E> {
+    install(menu)?;
+    publish(handles);
+    Ok(())
+}
+
 /// Assembles the tray menu for a resolved language, the persisted choice
-/// behind it, and the scan the moment this is called — §8, plus the «Мова»
-/// submenu (§D129) that lets the user pin a language or return to Auto
-/// (`lang_auto`/`lang_uk`/`lang_en`, checked to match `choice`). Like
-/// `build_tray`, this needs the main thread on macOS (see `TRAY_ITEM_IDS`) and
-/// so is exercised only by the live run, not a headless test; from Task 6, it
-/// is also what a language change calls to relabel the live menu via
-/// `set_menu`.
+/// behind it, and the scan the moment this is called — §8. The temporary
+/// «Мова» submenu (§D129) that used to sit here is gone as of Task 3: the
+/// language choice lives in the settings window's Application section now
+/// (`locale-choice.ts`), and `choice` stays a parameter only because
+/// [`MenuKey`] still carries it (see that type's own doc). Like `build_tray`,
+/// this needs the main thread on macOS (see `TRAY_ITEM_IDS`) and so is
+/// exercised only by the live run, not a headless test.
 ///
-/// Hands back both live items alongside the menu, because whoever swaps this
-/// menu in has to keep [`TrayItems`]'s slot pointing at the items that are
-/// actually on screen — see [`swap_tray_menu`], which is the only caller that
-/// should be doing either.
+/// Hands back the candidate alongside the menu it belongs to — a candidate,
+/// not yet a live [`TrayItems`], since Task 1 that becomes current only after
+/// [`install_then_publish`] installs the menu it was built for. Its own
+/// `installed` field carries the key this candidate WOULD represent, with
+/// `retry: false`; the glue that installs it is what decides whether that
+/// promise is kept.
 ///
-/// `scan` seeds BOTH items at construction, unlike the `false` this function
-/// used to hardcode for Stop before Task 5: the status line has a sentence to
-/// draw the moment the menu appears (nobody polls it before then), and Stop's
-/// initial state is a fact about `scan` rather than something the caller reads
-/// back out of `AppState` a second time — `status_label`/`stop_enabled` are
-/// the pure functions that decide both, so this function and `refresh_tray`
-/// can never compute them differently.
+/// **At most one action item, never both** — `stop`/`resume` used to be two
+/// always-present items, one merely disabled; Task 1 replaces the pair with
+/// [`tray_action`]'s single answer, and the separator around it disappears
+/// too when there is nothing to separate.
 pub fn build_tray_menu<R: Runtime>(
     app: &tauri::AppHandle<R>,
     lang: Lang,
@@ -323,121 +417,147 @@ pub fn build_tray_menu<R: Runtime>(
     hotkey: &HotkeyState,
     scan: &crate::scan_state::ScanState,
 ) -> tauri::Result<(Menu<R>, TrayItems<R>)> {
-    let status = MenuItem::with_id(app, "status", status_label(lang, scan), false, None::<&str>)?;
-    let show_search = MenuItem::with_id(
+    let status = IconMenuItem::with_id(
+        app,
+        "status",
+        status_label(lang, scan),
+        false,
+        Some(tray_icons::menu_icon(MenuIcon::Status)),
+        None::<&str>,
+    )?;
+    let show_search = IconMenuItem::with_id(
         app,
         "show_search",
         tray_label(lang, "show_search", hotkey),
         true,
+        Some(tray_icons::menu_icon(MenuIcon::Search)),
         None::<&str>,
     )?;
-    let open_settings = MenuItem::with_id(
+    let open_settings = IconMenuItem::with_id(
         app,
         "open_settings",
         tray_label(lang, "open_settings", hotkey),
         true,
+        Some(tray_icons::menu_icon(MenuIcon::Settings)),
         None::<&str>,
     )?;
 
-    // «Мова»: Auto plus the two supported languages, in their own endonyms.
-    // The (id, label, checked) triples come from `lang_menu_items` — pure
-    // data, headlessly tested — rather than being computed inline here.
-    let [
-        (auto_id, auto_label, auto_checked),
-        (uk_id, uk_label, uk_checked),
-        (en_id, en_label, en_checked),
-    ] = lang_menu_items(lang, choice);
-    let lang_auto =
-        CheckMenuItem::with_id(app, auto_id, auto_label, true, auto_checked, None::<&str>)?;
-    let lang_uk = CheckMenuItem::with_id(app, uk_id, uk_label, true, uk_checked, None::<&str>)?;
-    let lang_en = CheckMenuItem::with_id(app, en_id, en_label, true, en_checked, None::<&str>)?;
-    let language_menu = Submenu::with_id_and_items(
-        app,
-        "lang_menu",
-        locale::t(lang, Key::MenuLanguage),
-        true,
-        &[&lang_auto, &lang_uk, &lang_en],
-    )?;
-
-    let stop = MenuItem::with_id(
-        app,
-        STOP_ID,
-        tray_label(lang, STOP_ID, hotkey),
-        stop_enabled(scan),
-        None::<&str>,
-    )?;
-    // F4: «Продовжити сканування», seeded from `scan` like Stop beside it and
-    // for the same reason — the menu has to be right the first time it is
-    // opened, and nobody polls it before then.
-    let resume = MenuItem::with_id(
-        app,
-        RESUME_ID,
-        tray_label(lang, RESUME_ID, hotkey),
-        resume_enabled(scan),
-        None::<&str>,
-    )?;
-    let quit = MenuItem::with_id(
+    let action = tray_action(scan);
+    // The one action item this menu carries, or none — built ENABLED
+    // unconditionally where it exists: `tray_action` already asked
+    // `stop_enabled`/`resume_entry`, so an item drawn here is drawn only
+    // because a press would do something.
+    let action_item = match action {
+        Some(TrayAction::Stop) => Some(IconMenuItem::with_id(
+            app,
+            STOP_ID,
+            tray_label(lang, STOP_ID, hotkey),
+            true,
+            Some(tray_icons::menu_icon(MenuIcon::Stop)),
+            None::<&str>,
+        )?),
+        Some(TrayAction::Resume) => Some(IconMenuItem::with_id(
+            app,
+            RESUME_ID,
+            tray_label(lang, RESUME_ID, hotkey),
+            true,
+            Some(tray_icons::menu_icon(MenuIcon::Resume)),
+            None::<&str>,
+        )?),
+        None => None,
+    };
+    let quit = IconMenuItem::with_id(
         app,
         "quit",
         tray_label(lang, "quit", hotkey),
         true,
+        Some(tray_icons::menu_icon(MenuIcon::Quit)),
         None::<&str>,
     )?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status,
-            &PredefinedMenuItem::separator(app)?,
-            &show_search,
-            &open_settings,
-            &language_menu,
-            &PredefinedMenuItem::separator(app)?,
-            &stop,
-            &resume,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
-    )?;
+    let top_separator = PredefinedMenuItem::separator(app)?;
+    let action_separator = PredefinedMenuItem::separator(app)?;
+    let bottom_separator = PredefinedMenuItem::separator(app)?;
+    let mut rows: Vec<&dyn IsMenuItem<R>> =
+        vec![&status, &top_separator, &show_search, &open_settings];
+    // No empty separator group when there is nothing to separate — an
+    // action-less scan (idle, a non-cancellable job, an `Ended` report with
+    // no resume) draws straight from «Відкрити налаштування» to the bottom
+    // separator and «Вийти».
+    if let Some(item) = action_item.as_ref() {
+        rows.push(&action_separator);
+        rows.push(item);
+    }
+    rows.push(&bottom_separator);
+    rows.push(&quit);
+    let menu = Menu::with_items(app, &rows)?;
+
+    let key: MenuKey = (lang, choice, hotkey.clone(), action);
     Ok((
         menu,
         TrayItems {
             status,
-            stop,
-            resume,
+            installed: Installed { key, retry: false },
         },
     ))
 }
 
-/// The handles to the tray's live status and Stop items, as managed state
-/// (behind a `Mutex`, since `app.manage` hands out a shared reference and both
-/// items are replaced together on a language change).
+/// The handle to the tray's live status item, as managed state (behind a
+/// `Mutex`, since `app.manage` hands out a shared reference and every handle
+/// is replaced together on a full swap) — plus, from Task 1, the bookkeeping
+/// ([`Installed`]) that says what is actually on screen and whether a
+/// redraw still owes it a retry.
 ///
-/// It is here, and read out of here on every use, because the items on screen
-/// are replaced whenever the language changes: [`build_tray_menu`] builds a
-/// whole new menu and [`swap_tray_menu`] swaps it in. A caller that had
-/// captured one `MenuItem` would go on addressing an item that is in no menu,
-/// and the one a person can see would keep whatever state it was built with.
-/// `MenuItem<R>` is `Send + Sync` (Tauri unsafe-impls both on the inner type,
+/// It is here, and read out of here on every use, because the items on
+/// screen are replaced whenever a full swap runs: [`build_tray_menu`] builds
+/// a whole new candidate and [`install_then_publish`] — via
+/// [`swap_tray_menu`] or [`refresh_tray`]'s escalation — is the only path
+/// that may overwrite this `Mutex`'s contents. A caller that had captured the
+/// old `status` would go on addressing an item that is in no menu, and the
+/// one a person can see would keep whatever text it was built with.
+/// `IconMenuItem<R>` is `Send + Sync`, the same as `MenuItem<R>` this
+/// replaces (Tauri unsafe-impls both on the inner type,
 /// `tauri-2.11.5/src/menu/mod.rs:90-91`), so holding it here is sound.
 ///
-/// Replaces `StopItem`, which held only the one item — this task gave the
-/// status line a sentence of its own, so a language change has two live items
-/// to keep in step rather than one.
+/// Only `status` is kept, not a `stop`/`resume` pair each merely disabled as
+/// before Task 1: the action item [`build_tray_menu`] builds is never
+/// redrawn without a full swap (its enabled state and text are both fixed by
+/// which [`TrayAction`] it is, and that never changes without the key
+/// changing too), so nothing here would ever read a captured handle for it —
+/// and an item already appended to an installed `Menu` stays on screen once
+/// installed, whether or not this struct also holds a reference to it (the
+/// same reason `show_search`/`open_settings`/`quit`/the language submenu
+/// were never held here either).
 pub struct TrayItems<R: Runtime> {
-    pub status: MenuItem<R>,
-    pub stop: MenuItem<R>,
-    /// F4: «Продовжити сканування». Held here for [`refresh_tray`] to
-    /// re-enable, exactly like `stop` — an item whose enabled state is a fact
-    /// about the current scan is an item something has to redraw.
-    pub resume: MenuItem<R>,
+    status: IconMenuItem<R>,
+    installed: Installed,
 }
 
-/// Re-reads the scan and the locale from `AppState` and redraws both tray
-/// items to match — the observer's job, run on the main thread (`.setup`
-/// wires `state::AppState`'s job observer to call this via
-/// `run_on_main_thread`, because `set_text`/`set_enabled` hop there
-/// themselves and a caller already on it saves the round trip).
+/// Re-reads the scan, the locale and the hotkey from `AppState` and redraws
+/// the tray to match — the observer's job. Task 1: everything native this
+/// touches now runs inside its OWN `run_on_main_thread` closure, with the
+/// state read INSIDE it rather than before dispatch, so `refresh_tray` is
+/// itself the scheduler and a caller no longer has to already be on the main
+/// thread for it to be safe to call. `.setup`'s job observer still wraps its
+/// own call in `run_on_main_thread` too (`lib.rs`) — when the caller already
+/// IS the main thread, the real runtime's dispatcher runs the posted closure
+/// inline instead of posting and blocking (`send_user_message`,
+/// `tauri-runtime-wry-2.11.4/src/lib.rs:235-253`), so the extra hop there
+/// costs nothing.
+///
+/// Two paths, decided by [`Installed::needs_full_swap`]: when the key an
+/// unchanged language/choice/hotkey/[`tray_action`] would produce is still
+/// what is installed, and nothing is owed from a previous failure, only the
+/// status text is restated (counts are not part of the key — see
+/// [`MenuKey`]'s own doc — so a percentage ticking up never rebuilds the
+/// menu). Otherwise this escalates to the same full swap
+/// [`swap_tray_menu`] uses, through [`install_tray_menu`].
+///
+/// Any setter or install failure sets `retry` and is logged; the previously
+/// installed handles and key are left exactly as they were — see
+/// `failed_refresh_retries_without_mode_change`. A dispatch failure (the
+/// outer `run_on_main_thread` itself) is logged too and otherwise left: the
+/// next job-observer event schedules another `refresh_tray` regardless.
 ///
 /// 🔴 **Reads [`state::AppState::scan_state`], and NEVER `with_index` /
 /// anything that opens the index.** This runs on the main thread — the same
@@ -455,67 +575,160 @@ pub struct TrayItems<R: Runtime> {
 ///
 /// [`state::AppState::scan_state`]: crate::state::AppState::scan_state
 pub fn refresh_tray<R: Runtime>(app: &tauri::AppHandle<R>) {
-    let Some(state) = app.try_state::<crate::state::AppState>() else {
-        return;
-    };
-    let Some(items) = app.try_state::<std::sync::Mutex<TrayItems<R>>>() else {
-        return;
-    };
-    let scan = state.scan_state();
-    let lang = state.locale().effective;
-    let guard = items
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = guard.status.set_text(status_label(lang, &scan));
-    let _ = guard.stop.set_enabled(stop_enabled(&scan));
-    let _ = guard.resume.set_enabled(resume_enabled(&scan));
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || {
+        let Some(state) = handle.try_state::<crate::state::AppState>() else {
+            return;
+        };
+        let Some(slot) = handle.try_state::<std::sync::Mutex<TrayItems<R>>>() else {
+            return;
+        };
+
+        // Read INSIDE the dispatched closure, never before — the facts a
+        // redraw acts on have to be as fresh as the main thread, not as
+        // fresh as whatever thread scheduled this call.
+        let scan = state.scan_state();
+        let lang = state.locale().effective;
+        let choice = state.locale().choice;
+        let hotkey = state.hotkey();
+        let candidate: MenuKey = (lang, choice, hotkey.clone(), tray_action(&scan));
+
+        // The `Mutex` held only briefly, for the read this decision needs —
+        // never across the native call below, whichever path is taken.
+        let (needs_swap, status_item) = {
+            let guard = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                guard.installed.needs_full_swap(&candidate),
+                guard.status.clone(),
+            )
+        };
+
+        if !needs_swap {
+            if status_item.set_text(status_label(lang, &scan)).is_err() {
+                eprintln!("mnema: tray status redraw failed, will retry in full next time");
+                slot.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .installed
+                    .record_failure();
+            }
+            return;
+        }
+
+        if let Err(e) = install_tray_menu(&handle, lang, choice, &hotkey, &scan) {
+            eprintln!("mnema: tray refresh could not install its menu: {e}");
+        }
+    }) {
+        eprintln!("mnema: tray refresh dispatch failed: {e}");
+    }
 }
 
-/// Rebuilds the tray menu in `lang` and puts it on the live tray, keeping
-/// [`TrayItems`]'s slot in step.
+/// The shared glue behind every full swap: builds the candidate
+/// ([`build_tray_menu`]) for the given facts and installs it through
+/// [`install_then_publish`], so "the menu becomes current only after
+/// `tray.set_menu` succeeds" is a property of this ONE function rather than
+/// something [`swap_tray_menu`] and [`refresh_tray`]'s escalation each had to
+/// get right by hand.
+///
+/// On a failed install, the previously installed handles and key are left
+/// untouched and `retry` is set instead — the next redraw (whichever path
+/// calls here again) tries the full swap unconditionally, per
+/// `failed_refresh_retries_without_mode_change`.
+///
+/// Best-effort in its `Ok(())` shape, like every other tray call in this
+/// module: does nothing when there is no tray or no managed [`TrayItems`],
+/// which is every headless test and every moment before [`build_tray`] runs.
+fn install_tray_menu<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    lang: Lang,
+    choice: LocaleChoice,
+    hotkey: &HotkeyState,
+    scan: &crate::scan_state::ScanState,
+) -> Result<(), String> {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Ok(());
+    };
+    let Some(slot) = app.try_state::<std::sync::Mutex<TrayItems<R>>>() else {
+        return Ok(());
+    };
+
+    let (menu, candidate) =
+        build_tray_menu(app, lang, choice, hotkey, scan).map_err(|e| e.to_string())?;
+
+    let result = install_then_publish(
+        menu,
+        candidate,
+        |menu| tray.set_menu(Some(menu)).map_err(|e| e.to_string()),
+        |candidate| {
+            let mut guard = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Whole-branch review, Minor 7. Destructured, not copied field by
+            // field: `guard.status = candidate.status` beside a call that only
+            // reaches into `candidate.installed` named the two fields
+            // `TrayItems` has TODAY by hand — a third field added later would
+            // compile clean and be silently dropped on every swap. This binds
+            // `candidate` exhaustively instead, so the compiler itself refuses
+            // to build the moment `TrayItems` gains a field this does not
+            // name.
+            let TrayItems { status, installed } = candidate;
+            guard.status = status;
+            // Through `Installed::record_success`, the same transition
+            // `failed_refresh_retries_without_mode_change` drives purely —
+            // production and the pure test share one function rather than
+            // production quietly taking a different path to the same state.
+            guard.installed.record_success(installed.key);
+        },
+    );
+
+    if let Err(e) = &result {
+        eprintln!("mnema: tray menu install failed, keeping the previous menu: {e}");
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .installed
+            .record_failure();
+    }
+    result
+}
+
+/// Rebuilds the tray menu in `lang` and puts it on the live tray — a full
+/// swap, unconditionally: unlike [`refresh_tray`], a caller of this function
+/// has just changed something the candidate's key is built from, so there is
+/// no "nothing changed" path to take here.
 ///
 /// Every caller that relabels the tray goes through here — `locale::apply_locale`
 /// on a language change, `lib.rs`'s handler when a change failed to persist and
 /// the checkmark has to be put back, and from Task 11a `prefs::set_hotkey`,
-/// whose label change is the shortcut hint rather than the language. One
-/// predicate rather than three, because the half that is easy to forget is not
-/// the `set_menu`: it is that the old items have just left the menu, and
-/// anything still holding one of them is now talking to nothing.
+/// whose label change is the shortcut hint rather than the language.
 ///
 /// The hotkey AND the scan are both read from `AppState` here rather than
 /// passed in, for the same reason the locale is read inside `apply_locale`:
 /// the caller that has just changed one of them and the caller that has not
 /// must produce the same menu, and a parameter is one more thing a caller can
-/// hand in stale. The read happens AFTER the tray lookup, so a headless test —
-/// which has no tray — returns before touching state at all.
+/// hand in stale. `try_state` here and the tray lookup inside
+/// [`install_tray_menu`] are both `None`-safe, so a headless test — which has
+/// neither — returns `Ok(())` from whichever check it reaches first, without
+/// panicking either way.
 ///
-/// Best-effort throughout (`let _ =`), like everything else on the language
-/// path: this runs from a tray callback that has no error channel of its own
-/// (§6). Does nothing when there is no tray, which is every headless test.
-pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice: LocaleChoice) {
-    let Some(tray) = app.tray_by_id("mnema-tray") else {
-        return;
-    };
-    // `try_state`, like `refresh_tray` above and for its reason: `state`
-    // panics on an unmanaged type, and the sentence above promises
-    // best-effort throughout (review round 1, Minor 3). Nothing reachable gets
-    // here without the state — `manage_state` runs at `lib.rs:524`, long before
-    // any tray exists for `tray_by_id` to find — so this is the claim being
-    // made true rather than a failure being handled.
+/// Synchronous, and called ON the main thread — never dispatching itself the
+/// way [`refresh_tray`] now does: `apply_locale` is already there (`locale.rs`
+/// doc), and `prefs::set_hotkey` already hops there itself before calling in.
+/// Task 1 changes what this returns (`Result<(), String>`, from
+/// [`install_tray_menu`]) rather than swallowing every failure — every
+/// caller today still treats it best-effort (`let _ =` / logged), and
+/// Task 2 is what turns it into a sentence a person reads.
+pub fn swap_tray_menu<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    lang: Lang,
+    choice: LocaleChoice,
+) -> Result<(), String> {
     let Some(state) = app.try_state::<crate::state::AppState>() else {
-        return;
+        return Ok(());
     };
     let hotkey = state.hotkey();
     let scan = state.scan_state();
-    let Ok((menu, items)) = build_tray_menu(app, lang, choice, &hotkey, &scan) else {
-        return;
-    };
-    if let Some(slot) = app.try_state::<std::sync::Mutex<TrayItems<R>>>() {
-        *slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = items;
-    }
-    let _ = tray.set_menu(Some(menu));
+    install_tray_menu(app, lang, choice, &hotkey, &scan)
 }
 
 /// Builds the tray icon and its menu. Reads `AppState`'s locale once — set by
@@ -540,7 +753,10 @@ pub fn swap_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>, lang: Lang, choice:
 /// item before Task 5 — `.setup` has nothing left to do with either item once
 /// they exist, since `boot_files`/`set_files` already ran (before this call)
 /// to make `scan` a fact worth drawing rather than a fresh `ScanState::
-/// default()`.
+/// default()`. Items are managed only AFTER `TrayIconBuilder::build` succeeds
+/// with the menu already baked in via `.menu(&menu)` — the same
+/// install-before-publish order [`install_then_publish`] gives every later
+/// swap, here for free because there is no previous state to protect yet.
 pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let state = app.state::<crate::state::AppState>();
     let locale_state = state.locale();
@@ -554,7 +770,7 @@ pub fn build_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
         &scan,
     )?;
 
-    TrayIconBuilder::with_id("mnema-tray")
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(
             app.default_window_icon()
                 .expect("a default window icon")
@@ -596,8 +812,12 @@ mod tests {
         }
     }
 
+    /// Task 1 dropped the emoji `tray_label` used to fold into its own
+    /// string — the picture now lives on the `IconMenuItem` as a
+    /// `tray_icons::MenuIcon` (`build_tray_menu`, `tray_icons.rs`'s own
+    /// tests) — so this pins the plain translation, not a composed glyph.
     #[test]
-    fn tray_labels_compose_emoji_and_translation() {
+    fn tray_labels_compose_only_the_translation() {
         assert_eq!(
             tray_label(
                 crate::locale::Lang::En,
@@ -605,13 +825,13 @@ mod tests {
                 &registered(crate::prefs::DEFAULT_HOTKEY)
             ),
             format!(
-                "🔍 Show search ({})",
+                "Show search ({})",
                 format_shortcut("Alt+Space", Platform::of_this_build())
             )
         );
         assert_eq!(
             tray_label(crate::locale::Lang::Uk, "quit", &registered("Alt+Space")),
-            "⏻ Вийти"
+            "Вийти"
         );
         assert_eq!(
             tray_label(
@@ -619,7 +839,7 @@ mod tests {
                 "open_settings",
                 &registered("Alt+Space")
             ),
-            "⚙ Open settings"
+            "Open settings"
         );
     }
 
@@ -641,7 +861,7 @@ mod tests {
         assert_eq!(
             changed,
             format!(
-                "🔍 {} ({})",
+                "{} ({})",
                 locale::t(Lang::Uk, Key::TrayShowSearch),
                 format_shortcut("Ctrl+Alt+Space", Platform::of_this_build())
             )
@@ -664,7 +884,7 @@ mod tests {
                 "show_search",
                 &registered(crate::prefs::DEFAULT_HOTKEY)
             ),
-            "🔍 Показати пошук (⌥Space)"
+            "Показати пошук (⌥Space)"
         );
     }
 
@@ -675,10 +895,7 @@ mod tests {
     #[test]
     fn an_unregistered_shortcut_is_named_by_no_hint_at_all() {
         let label = tray_label(Lang::Uk, "show_search", &unavailable("Ctrl+Alt+Space"));
-        assert_eq!(
-            label,
-            format!("🔍 {}", locale::t(Lang::Uk, Key::TrayShowSearch))
-        );
+        assert_eq!(label, locale::t(Lang::Uk, Key::TrayShowSearch));
         assert!(
             !label.contains('('),
             "an unusable shortcut was drawn: {label}"
@@ -692,35 +909,33 @@ mod tests {
         );
     }
 
-    /// Both languages, because the glyph is composed once at this call site and
-    /// the text comes from the catalog: a label that lost either half would
-    /// still be non-empty, and `every_tray_id_has_a_non_empty_label...` would
-    /// go on passing.
+    /// Task 1 dropped the glyph — the Stop row's picture is now
+    /// `MenuIcon::Stop` on its `IconMenuItem`, not a character folded into
+    /// this string. Both languages, so a label that lost the translation
+    /// half would still be non-empty and `every_tray_id_has_a_non_empty_
+    /// label...` would go on passing.
     #[test]
-    fn the_stop_item_composes_its_glyph_with_both_translations() {
+    fn the_stop_item_is_the_plain_translation() {
         assert_eq!(
             tray_label(crate::locale::Lang::Uk, STOP_ID, &registered("Alt+Space")),
-            "⏹ Зупинити сканування"
+            "Зупинити сканування"
         );
         assert_eq!(
             tray_label(crate::locale::Lang::En, STOP_ID, &registered("Alt+Space")),
-            "⏹ Stop scanning"
+            "Stop scanning"
         );
     }
 
-    /// Both languages, for the reason the Stop item's twin above gives: the
-    /// glyph is composed at the call site and the words come from the catalog,
-    /// so a label that lost either half would still be non-empty and
-    /// `every_tray_id_has_a_non_empty_label...` would go on passing.
+    /// The Stop item's twin above, for the same reason.
     #[test]
-    fn the_resume_item_composes_its_glyph_with_both_translations() {
+    fn the_resume_item_is_the_plain_translation() {
         assert_eq!(
             tray_label(crate::locale::Lang::Uk, RESUME_ID, &registered("Alt+Space")),
-            "▶ Продовжити сканування"
+            "Продовжити сканування"
         );
         assert_eq!(
             tray_label(crate::locale::Lang::En, RESUME_ID, &registered("Alt+Space")),
-            "▶ Continue scanning"
+            "Continue scanning"
         );
     }
 
@@ -733,8 +948,11 @@ mod tests {
                 "show_search",
                 "open_settings",
                 "stop_indexing",
-                // F4: «Продовжити сканування» sits directly under Stop — the
-                // item a person reaches for after pressing the one above it.
+                // F4: adjacent here only because this is the fixed coverage
+                // list, not a live menu's display order (see this const's own
+                // doc) — Stop and Resume are never both on screen, so Resume
+                // takes Stop's OWN slot once the action flips; it does not sit
+                // in a row below it.
                 "resume",
                 "quit"
             ],
@@ -749,9 +967,6 @@ mod tests {
     /// 5, it would panic on `"status"` and never reach the other four ids.
     #[test]
     fn every_tray_id_has_a_non_empty_label_in_both_languages() {
-        // lang_auto/lang_uk/lang_en are not `tray_label` ids — they come from
-        // `locale::t`/`locale::endonym` directly in `build_tray_menu` — and
-        // are covered by locale.rs's own `every_key_has_both_languages...`.
         for &id in TRAY_ITEM_IDS.iter().filter(|&&id| id != "status") {
             for state in [registered("Alt+Space"), unavailable("Alt+Space")] {
                 assert!(
@@ -795,38 +1010,6 @@ mod tests {
     #[should_panic(expected = "unknown tray id")]
     fn tray_label_rejects_the_deleted_update_check() {
         tray_label(Lang::En, "check_updates", &registered("Alt+Space"));
-    }
-
-    #[test]
-    fn exactly_one_language_item_is_checked_and_it_matches_choice() {
-        use LocaleChoice::*;
-        for (choice, checked_id) in [(Auto, "lang_auto"), (Uk, "lang_uk"), (En, "lang_en")] {
-            let items = lang_menu_items(Lang::En, choice);
-            for (id, _label, checked) in &items {
-                // The item matching `choice` is checked, and — same assertion,
-                // both directions at once — the other two are not.
-                assert_eq!(
-                    *checked,
-                    *id == checked_id,
-                    "wrong checked state: {id} @ {choice:?}"
-                );
-            }
-            // Belt against an all-checked or all-unchecked slip, which the
-            // per-item comparison above would not catch on its own.
-            assert_eq!(items.iter().filter(|(_, _, c)| *c).count(), 1);
-        }
-    }
-
-    #[test]
-    fn language_items_are_wired_to_the_catalog() {
-        let it = lang_menu_items(Lang::En, LocaleChoice::Auto);
-        assert_eq!(
-            [it[0].0, it[1].0, it[2].0],
-            ["lang_auto", "lang_uk", "lang_en"]
-        );
-        assert_eq!(it[0].1, locale::t(Lang::En, Key::LangAuto));
-        assert_eq!(it[1].1, locale::endonym(LocaleChoice::Uk));
-        assert_eq!(it[2].1, locale::endonym(LocaleChoice::En));
     }
 
     // ── `status_label` / `stop_enabled` (Task 5) ──────────────────────────
@@ -1153,5 +1336,90 @@ mod tests {
                 "state = {state:?}, want stop_enabled = {want}"
             );
         }
+    }
+
+    // ── `tray_action` / `install_then_publish` / `Installed` (Task 1) ─────
+
+    /// `tray_action` over every shape the slot can be in — the same table
+    /// `stop_is_enabled_only_while_a_cancellable_job_is_running` and
+    /// `resume_is_enabled_only_when_the_ended_report_carries_its_own_resume`
+    /// each check half of, now asked as the ONE thing the tray actually
+    /// draws: running/cancellable (including a probe) reads `Stop`, running
+    /// but not cancellable reads `None`, an `Ended` report naming `Full` or
+    /// `EmbedOnly` reads `Resume`, and idle or an `Ended` report naming
+    /// nothing reads `None`.
+    #[test]
+    fn tray_action_matches_the_snapshot() {
+        let rows: [(ScanState, Option<TrayAction>); 8] = [
+            (idle(0), None),
+            (reading(0, 1), Some(TrayAction::Stop)),
+            (embedding(0, 1), Some(TrayAction::Stop)),
+            (removing(), None),
+            (other(OtherJob::ModelAdoption, false), None),
+            (other(OtherJob::Probe, true), Some(TrayAction::Stop)),
+            (ended_resuming(None), None),
+            (
+                ended_resuming(Some(Entry::EmbedOnly)),
+                Some(TrayAction::Resume),
+            ),
+        ];
+        for (state, want) in &rows {
+            assert_eq!(
+                tray_action(state),
+                *want,
+                "state = {state:?}, want tray_action = {want:?}"
+            );
+        }
+    }
+
+    /// 🔴 The defect this task exists for: a failed install must not publish
+    /// the candidate it was building. `install_then_publish`'s own doc names
+    /// the earlier order this replaces — this is the test that has to go RED
+    /// against it, on the ORDERING assertion (`live.get() == 1`) rather than
+    /// on a missing symbol, before the fix.
+    #[test]
+    fn failed_install_does_not_publish_candidate() {
+        let live = std::cell::Cell::new(1);
+        let result =
+            install_then_publish(2, 2, |_| Err::<(), _>("install failed"), |h| live.set(h));
+        assert_eq!(result, Err("install failed"));
+        assert_eq!(live.get(), 1);
+        install_then_publish(3, 3, |_| Ok::<(), &str>(()), |h| live.set(h)).unwrap();
+        assert_eq!(live.get(), 3);
+    }
+
+    /// A pure run of the state machine [`refresh_tray`] drives, with no
+    /// Tauri type in reach: after a failed setter/install, `retry` is true
+    /// and the installed key is untouched; the NEXT refresh with the same
+    /// scan mode (same key) performs a full swap purely because `retry` is
+    /// owed, and a successful one clears it.
+    #[test]
+    fn failed_refresh_retries_without_mode_change() {
+        let key: MenuKey = (Lang::Uk, LocaleChoice::Auto, registered("Alt+Space"), None);
+        let mut installed = Installed {
+            key: key.clone(),
+            retry: false,
+        };
+
+        // Same scan mode, nothing owed — the cheap path (status text only).
+        assert!(!installed.needs_full_swap(&key));
+
+        // A setter/install failure: the key stays put, a retry is now owed.
+        installed.record_failure();
+        assert_eq!(
+            installed.key, key,
+            "a failed attempt must not move the installed key"
+        );
+        assert!(installed.retry);
+
+        // The next refresh, the SAME scan mode: `retry` alone forces a full
+        // swap even though the candidate key has not moved.
+        assert!(installed.needs_full_swap(&key));
+
+        // That swap lands: retry clears, and an identical refresh right
+        // after is back on the cheap path.
+        installed.record_success(key.clone());
+        assert!(!installed.retry);
+        assert!(!installed.needs_full_swap(&key));
     }
 }

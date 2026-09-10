@@ -4,24 +4,30 @@
   import { formatIndexedAt, formatIndexedDate } from '../i18n/recency';
   import type { ModelSettings, UnreadableCause } from '../lib/ipc';
   import { continueAction, type JobController } from './jobs';
+  import ScanProgress from './ScanProgress.svelte';
 
   // §9.3 — the Scanning SECTION: what the index HOLDS, when it last grew, the
   // ONE Scan control, and the continue row `continueAction` (`jobs.ts`)
   // offers when the index still carries a marker a report did not name.
   //
   // 🔴 Renamed from `Indexing.svelte` (Task 8), which is the second rename this
-  // file's name has cost: `JobStrip.svelte` — the window's status line, drawn
-  // above the nav and outside every section — was itself called
-  // `Indexing.svelte` until Task 6 moved that name off it. This file has always
-  // been the one that lives inside the panel and says nothing about a running
-  // pass; it says what the index HOLDS.
+  // file's name has cost: `JobStrip.svelte` — the window's status line — was
+  // itself called `Indexing.svelte` until Task 6 moved that name off it, and
+  // Task 5 moved the strip itself: it is drawn after `.scols`, at the bottom
+  // of the window, outside every section, not above the nav any more. This
+  // file has always been the one that lives inside the panel; Task 5 gave it
+  // its own `<ScanProgress>` too — the same running-phase projection the
+  // strip draws, off the same snapshot — but what it says on its own is
+  // still what the index HOLDS, never a second account of what a pass is
+  // doing.
   //
   // The controller arrives as a PROP for the same reason every other section
   // takes it that way (`Settings.svelte`): it is created once, above every
   // section, because the channel a job reports on belongs to whoever started
   // it. This section starts a scan through it now — the Scan control
-  // below — but the running pass itself is still drawn on the strip above the
-  // nav, not here.
+  // below. Task 5 gave this section its own `<ScanProgress>` too, so the
+  // running pass is drawn here as well as on the strip — the strip now sits
+  // BELOW `.scols`, at the bottom of the window, not above the nav.
   //
   // 🔴 `settings`/`loadError`, not a `read` this component fetches itself. Task
   // 7 left this section holding its OWN `model_settings` poll — its own mount,
@@ -83,6 +89,18 @@
     void $locale;
     if (read === null || lastIndexedAt !== null) return null;
     return t('indexing_index_never');
+  });
+
+  // Task 6: the statcard's two labels, and the value its "updated" cell shows.
+  // Never a decorative number — `read.indexedFiles` is used directly in the
+  // markup below, and this text reuses the existing formatter/never-sentence
+  // rather than inventing a shorter one for the card.
+  const documentsLabel = $derived.by(() => { void $locale; return t('indexing_statcard_documents'); });
+  const updatedLabel = $derived.by(() => { void $locale; return t('indexing_statcard_updated'); });
+  const lastUpdateText = $derived.by(() => {
+    void $locale;
+    if (read === null) return null;
+    return lastIndexedAt === null ? neverLine : formatIndexedDate(lastIndexedAt, $locale);
   });
 
   // A `Record` over the two causes rather than a ternary, for the reason
@@ -161,6 +179,12 @@
   const showScanButton = $derived($jobState.scan.snapshot.kind !== 'running');
   const scanButtonLabel = $derived.by(() => { void $locale; return t('scanning_scan'); });
 
+  // Task 5 — the same running-phase projection the bottom disclosure draws,
+  // from the SAME `jobs.state` snapshot this section already reads for
+  // `showScanButton` above: one component, not two readers of the phase free
+  // to disagree about what it says.
+  const phase = $derived($jobState.scan.snapshot.kind === 'running' ? $jobState.scan.snapshot.phase : null);
+
   // D-m's table (`jobs.ts`), decided once so the strip and this section cannot
   // answer it differently. Rendered here only when it names THIS section —
   // `where: 'strip'` is `JobStrip.svelte`'s own offer, drawn from a report that
@@ -205,6 +229,7 @@
      sentence sits over the numbers it could not confirm, which is the whole of
      what it is for. Do not turn this into a gate: blanking the panel would take
      away a count that was true a moment ago and probably still is. -->
+{#if phase}<ScanProgress {phase} />{/if}
 {#if loadError}
   <p data-testid="indexing-index-load-failed">{loadFailedLabel}</p>
   <p data-testid="indexing-index-load-error">{loadError}</p>
@@ -213,10 +238,25 @@
   <p data-testid="indexing-index-unreadable">{unreadableLines.sentence}</p>
   <p data-testid="indexing-index-unreadable-reason">{unreadableLines.reason}</p>
 {/if}
+<!-- Task 6: the mockup's statcard — the same numbers the sentences below
+     already state, drawn beside a short label instead of inside one. Only
+     while `read` holds an answer: `unreadable` and a first failed read both
+     leave `read` null, and a refused RE-read leaves the previous `read`
+     standing, which is exactly the "keep old numbers" case this shares with
+     every sentence below it. -->
+{#if read}
+  <dl class="statcard" data-testid="indexing-statcard">
+    <div><dt>{documentsLabel}</dt><dd>{read.indexedFiles}</dd></div>
+    <div><dt>{updatedLabel}</dt><dd>{lastUpdateText}</dd></div>
+  </dl>
+{/if}
 {#if filesLine}<p data-testid="indexing-index-files">{filesLine}</p>{/if}
 {#if dateLine}<p data-testid="indexing-index-date">{dateLine}</p>{/if}
 {#if agoLine}<p data-testid="indexing-index-ago">{agoLine}</p>{/if}
-{#if neverLine}<p data-testid="indexing-index-never">{neverLine}</p>{/if}
+<!-- Controller ruling (Task 6, review round 1): no standalone paragraph here
+     any more — `neverLine` and the statcard's "updated" cell (`lastUpdateText`
+     above) are the SAME string whenever this would have shown, and a
+     sentence must not appear twice. The statcard already carries it. -->
 {#if failedChunksLine}<p data-testid="indexing-index-failed-chunks">{failedChunksLine}</p>{/if}
 {#if refusedRunLine}<p data-testid="indexing-index-refused-run">{refusedRunLine}</p>{/if}
 {#if sectionAction}

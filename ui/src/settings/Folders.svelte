@@ -1208,7 +1208,6 @@
 
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_folders_empty'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_folders_add'); });
-  const removeLabel = $derived.by(() => { void $locale; return t('settings_folders_remove'); });
   const loadFailedLabel = $derived.by(() => { void $locale; return t('settings_folders_load_failed'); });
   // §9.2, Task 8. Built the same way every other sentence on this screen is —
   // inside the `void $locale` rebuild — so a language switch while it is
@@ -1227,8 +1226,8 @@
   // forever, not transiently — this key names the INDEX as the subject
   // ("Indexed: 0 documents") instead. `removeAriaLabel` carries the same
   // row's path so two "Remove" buttons in a two-folder list stay
-  // distinguishable to a screen reader (P2-5); the visible button text
-  // stays the plain `removeLabel` above.
+  // distinguishable to a screen reader (P2-5); the visible button text is the
+  // mockup's own trailing ✕ glyph (Task 6), never a word to keep in step.
   // 🔴 ONE classifier over `SubfolderState`, and no default arm. Every fact a
   // row shows about a state — its sentence, which control it offers, whether it
   // can be opened — is decided here and nowhere else, so no two of them can
@@ -1607,36 +1606,56 @@
     <ul>
       {#each rows as { root, countLabel, removeAriaLabel, expandAriaLabel, expanded, panel, removeConfirm } (root.rootId)}
         <li data-testid={`folder-row-${root.rootId}`}>
-          <span class="fp">{root.absolutePath}</span>
-          <span class="fc">{countLabel}</span>
-          <!-- Task 9: while THIS row's removal is in flight the row says so in
-               place of its buttons. Not beside them: there is nothing left to
-               press here, and a button that does nothing reads as a button
-               nobody heard. -->
-          {#if removing === root.rootId}
-            <span data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>
-          {:else}
-            <button
-              type="button"
-              data-testid={`folder-expand-${root.rootId}`}
-              aria-expanded={expanded}
-              aria-label={expandAriaLabel}
-              onclick={() => toggleRoot(root)}>{expandLabel}</button>
-            <!-- The per-folder scan button's funeral, Task 8: a scan is ONE job
-                 over every watched folder now (`scan_state::Entry`), and the
-                 single Scan control lives in the Scanning section instead
-                 (`Scanning.svelte`) — this row starts nothing any more.
+          <!-- Task 6: the top line only — disclosure, path, count, the
+               trailing ✕. The confirmation and the child subtree below are
+               SIBLING blocks of this line, not flex items squeezed into its
+               row: `.folders > ul > li` stacks its children in a column now,
+               and only this inner `.row` lays its own children out in one
+               line (mockup .frow). -->
+          <div class="row">
+            <span class="fp">{root.absolutePath}</span>
+            <span class="fc">{countLabel}</span>
+            <!-- Task 9: while THIS row's removal is in flight the row says so
+                 in place of its buttons. Not beside them: there is nothing
+                 left to press here, and a button that does nothing reads as a
+                 button nobody heard. -->
+            {#if removing === root.rootId}
+              <span data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>
+            {:else}
+              <button
+                type="button"
+                data-testid={`folder-expand-${root.rootId}`}
+                aria-expanded={expanded}
+                aria-label={expandAriaLabel}
+                onclick={() => toggleRoot(root)}>{expandLabel}</button>
+              <!-- The per-folder scan button's funeral, Task 8: a scan is ONE
+                   job over every watched folder now (`scan_state::Entry`),
+                   and the single Scan control lives in the Scanning section
+                   instead (`Scanning.svelte`) — this row starts nothing any
+                   more.
 
-                 Task 9: it asks before it removes, and it is disabled while
-                 ANOTHER row's removal is in flight or while a job holds the
-                 slot — the backend refuses in the second case, and would race
-                 the re-read in the first. -->
-            <button
-              type="button"
-              aria-label={removeAriaLabel}
-              disabled={removing !== null || scanRunning}
-              onclick={() => askRemove(root)}>{removeLabel}</button>
-          {/if}
+                   Task 9: it asks before it removes, and it is disabled
+                   while ANOTHER row's removal is in flight or while a job
+                   holds the slot — the backend refuses in the second case,
+                   and would race the re-read in the first.
+
+                   Task 6: drawn as the mockup's own trailing ✕ (`.frow .rm`)
+                   rather than the word — the aria-label is what still
+                   carries the path (`removeAriaLabel`), exactly as before,
+                   so a screen reader hears the same name it always did and
+                   `removeButton()` in the test file keeps finding it by that
+                   name. `.rm` is what gives it the mockup's 24×24 icon
+                   shape and `flex: none` beside `.fp`'s own
+                   `flex: 1 1 auto`, so it cannot be squeezed by a long
+                   path. -->
+              <button
+                type="button"
+                class="rm"
+                aria-label={removeAriaLabel}
+                disabled={removing !== null || scanRunning}
+                onclick={() => askRemove(root)}>✕</button>
+            {/if}
+          </div>
           <!-- Directly under the row it is about, and that is true by
                construction rather than by hope: the question is drawn only
                while `refresh` still finds its id naming its frozen path, and

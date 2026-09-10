@@ -19,6 +19,17 @@
 
   let section = $state<SectionId>('models');
 
+  // Task 5 — where the bottom disclosure's focus goes when the whole panel
+  // disappears out from under it (the job ended with nothing left to say).
+  // Scoped to this window's own `.snav`, not a bare `document.querySelector`:
+  // a Tauri window is its own document, so nothing outside this one could
+  // ever match, but a ref is what says so to a reader instead of asking them
+  // to know that about the runtime.
+  let navEl: HTMLElement | undefined = $state();
+  function focusActiveNav() {
+    navEl?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus();
+  }
+
   // 🔴 ONE controller, here, above every section — not inside the one that
   // starts the job. A controller living in a SECTION dies with that section:
   // `mount` opens a `scan-progress` subscription and `destroy` closes it, so
@@ -243,22 +254,23 @@
 </script>
 
 <main>
-  <!-- Live run, finding 3, and it is a correction to this plan's own ruling.
-       Task 8 put the strip OUTSIDE the section conditional so a job survives
-       Folders -> Models -> Folders with its counters and its Cancel; that half
-       is right and is untouched here. What it did not weigh is WHERE outside:
-       rendered last, the strip sat under whatever the panel ended with, so a
-       person standing on a section read that section's closing line and,
-       immediately below it, the full indexing report.
-       The strip is the WINDOW's status line, not a section's content, so it is
-       drawn before the nav and the panel both. Nothing about the controller
-       moved: it is still created above every section, and `cancel_job` still
-       needs no channel.
-       ⚠️ Two components sit outside the conditional below, and for reasons
-       that are not the same one. This one, `<JobStrip>`, is outside because it
-       is the WINDOW's status line — it must be readable and stoppable from
-       every section, and it is drawn once, here, above the pair of columns.
-       The folders panel — `<Folders>` and the `<Masks>` editor beside it — is
+  <!-- Live run, finding 3 — and Task 5 corrects WHERE outside the section
+       conditional actually means. Task 8 read it as "above the pair of
+       columns", so a person standing on a section read that section's own
+       closing line and, immediately below it, the full indexing report — no
+       better than under it, just moved. The strip is the WINDOW's status line,
+       not a section's content, and Task 5 turned it into a bottom disclosure —
+       one line always on screen, in every section, opened on purpose rather
+       than a card permanently taking the window's height — so it is drawn
+       AFTER `.scols`, at the bottom, the same place a running job's own Stop
+       has to stay reachable from. Nothing about the controller moved: it is
+       still created above every section, and `cancel_job` still needs no
+       channel.
+       ⚠️ Two components sit outside the `{#if}` chain below, and for reasons
+       that are not the same one. `<JobStrip>` is outside because it is the
+       WINDOW's status line — it must be readable and stoppable from every
+       section, and it is drawn once, here, after the pair of columns. The
+       folders panel — `<Folders>` and the `<Masks>` editor beside it — is
        outside because of F10: both keep state a person built by hand, so the
        panel stays mounted and is merely `hidden` while another section is
        shown (see it below). Neither is a precedent for the other: a
@@ -274,12 +286,11 @@
        here beside `<JobStrip>` would cost something else now: it would show the
        §9.3 numbers over every other section's own content, which nobody asked
        for.
-       `.scols` exists so the CSS that lands later cannot make this a THIRD
-       column beside the nav and the panel: the pair is the row, the status line
-       is not part of it. -->
-  <JobStrip {jobs} {read} />
+       `.scols` exists so the CSS cannot make this a THIRD column beside the
+       nav and the panel: the pair is the row, the bottom disclosure is not
+       part of it — it is flex-none, under both, the full width of `main`. -->
   <div class="scols">
-    <nav class="snav">
+    <nav class="snav" bind:this={navEl}>
       {#each SECTIONS as id (id)}
         <button
           type="button"
@@ -292,41 +303,55 @@
     </nav>
 
     <div class="spane">
-      <!-- 🔴 F10 (Task 10 live run). This section is MOUNTED for the window's
-           life and hidden with the `hidden` attribute, where the other three
-           are mounted and destroyed by every nav click. What a person builds
-           by hand in here is the reason: an expanded folder panel is one
-           `list_subfolders` per level, and an exclude question is a press
-           waiting for an answer. Unmounting took all of it away without a
-           word — a person who opened the Folders section, expanded a tree to
-           find the folder they meant to protect, looked at Scanning and came
-           back found the tree shut and the question gone. Nothing about the
-           three other sections is worth that: they draw what a read already
-           answered, and re-drawing it costs nothing a person can notice.
+      <!-- 🔴 F10 (Task 10 live run), extended to Models by Task 4 (review
+           P2-1). Both sections below are MOUNTED for the window's life and
+           hidden with the `hidden` attribute, where the remaining two
+           (Scanning, Application) are mounted and destroyed by every nav
+           click. What a person builds by hand, or a question this build is
+           still waiting to hear the answer to, is the reason for each: an
+           expanded folder panel is one `list_subfolders` per level and an
+           exclude question is a press waiting for an answer; Models carries
+           the very same shape of question — an embedding change the person
+           has picked but not yet confirmed or cancelled, and (once they have)
+           a command whose result is not back yet, or a retirement report and
+           a rejection sentence about the one that just landed. Unmounting
+           took all of that away without a word: a person who picked a
+           different embedding model, looked at Scanning to see the pass
+           finish and came back used to meet a fresh `Models` instance with no
+           memory of the question or the answer. Scanning and Application are
+           not worth this: they draw what a read already answered, and
+           re-drawing it costs nothing a person can notice.
            `[hidden]` is the browser's own rule (`display: none`), and it
            takes the section out of the accessibility tree with it, so nothing
            here is read out or reachable by keyboard while another section is
            shown. There is no CSS in this project to say it a second time.
-           Two consequences are handled rather than hoped away, and the first
-           is stated narrowly on purpose (fix round 1, Minor 2 — an earlier
-           draft said the subscription "keeps it current", which is more than
-           the subscription does). `Folders.svelte` re-reads `list_tree` on ITS
-           mount, which now happens once per window instead of once per visit.
-           What its `jobs.state` subscription adds after that is exactly two
-           triggers: a re-read when `readSeq` grows or the snapshot becomes
-           `ended`, and a withdrawal of the pending questions when `readSeq`
-           grows. Both fire while the section is hidden, which is the half this
-           change had to keep. A tick that only moves counts fires neither —
-           the one progress tick that is more than that, the embedding phase's
-           first `running` snapshot of a `full` scan, is exactly where
-           `readSeq` has just grown, so the withdrawal above already covers it.
-           Short of that one tick, the counts in this panel can be as stale as
-           a reading pass is long, and the pass's ending is what re-reads them.
-           That was already true while the section was shown; hiding it
-           changes nothing about it, and nothing here claims a hidden panel
-           follows a running scan. And its subscription is now open for the
-           window's life, which is what a person expects of a question that is
-           still waiting for them. -->
+           Two consequences are handled rather than hoped away for Folders,
+           and the first is stated narrowly on purpose (fix round 1, Minor 2 —
+           an earlier draft said the subscription "keeps it current", which is
+           more than the subscription does). `Folders.svelte` re-reads
+           `list_tree` on ITS mount, which now happens once per window instead
+           of once per visit. What its `jobs.state` subscription adds after
+           that is exactly two triggers: a re-read when `readSeq` grows or the
+           snapshot becomes `ended`, and a withdrawal of the pending questions
+           when `readSeq` grows. Both fire while the section is hidden, which
+           is the half this change had to keep. A tick that only moves counts
+           fires neither — the one progress tick that is more than that, the
+           embedding phase's first `running` snapshot of a `full` scan, is
+           exactly where `readSeq` has just grown, so the withdrawal above
+           already covers it. Short of that one tick, the counts in this panel
+           can be as stale as a reading pass is long, and the pass's ending is
+           what re-reads them. That was already true while the section was
+           shown; hiding it changes nothing about it, and nothing here claims a
+           hidden panel follows a running scan. And its subscription is now
+           open for the window's life, which is what a person expects of a
+           question that is still waiting for them.
+           Models' own subscription (`jobs.state.subscribe`, `Models.svelte`)
+           is the same shape again — nothing new is added here to keep it
+           firing while hidden, because it already does. A side effect of
+           mounting it permanently: its key draft (`draftKey`/`editingKey`)
+           now survives a section switch too, the same way the folder tree's
+           expanded state and the mask editor's own draft already do — not a
+           new store, just the same component staying alive. -->
       <div data-testid="settings-panel-folders" hidden={section !== 'folders'}>
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />
@@ -355,16 +380,29 @@
              about it. -->
         <Masks {jobs} />
       </div>
-      {#if section === 'models'}
+      <!-- Task 4, review P2-1: Models joins Folders/Masks above rather than
+           the `{#if}` chain below. Its own subscription is `jobs.state.subscribe`
+           (`Models.svelte`), no polling of its own — an unconfirmed embedding
+           choice, a command still in flight, and a retirement report or
+           rejection about one that just landed are all the same class of
+           "a question this build is waiting on an answer for" F10 already
+           names, and hoisting only their state into `Settings.svelte` (a
+           handful of booleans and strings duplicated from the component that
+           already owns them) would have been the bigger diff for no extra
+           property gained. -->
+      <div data-testid="settings-panel-models" hidden={section !== 'models'}>
         <h2>{modelsLabel}</h2>
         <Models {jobs} />
-      {:else if section === 'indexing'}
+      </div>
+      {#if section === 'indexing'}
         <h2>{scanningLabel}</h2>
         <!-- §9.3 — what the index holds, and the one Scan control (Task
              8). `settings`/`loadError` are this window's own read, handed down
              rather than fetched again; `jobs` is for the button and for reading
-             the running phase this section gates on. The running pass itself is
-             the strip above the nav. -->
+             the running phase this section gates on. Task 5: the running phase
+             itself is now drawn HERE too, through `<ScanProgress>` — the same
+             projection the bottom disclosure draws off the same snapshot, not
+             a second account of it. -->
         <Scanning {jobs} {settings} {loadError} />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>
@@ -374,4 +412,5 @@
       {/if}
     </div>
   </div>
+  <JobStrip {jobs} {read} {section} focusFallback={focusActiveNav} />
 </main>

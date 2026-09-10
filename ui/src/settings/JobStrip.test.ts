@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Settings from './Settings.svelte';
@@ -280,11 +280,14 @@ test('nothing on screen until something has happened, and the strip the moment i
   expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
 });
 
-// The pair this separates: a phase this build genuinely has no words for
-// (`other` — a probe or a model adoption nobody asked to start) against one
-// that does. `other` still offers Stop when `cancellable` says so — the
-// button does not depend on having a sentence.
-test('a probe or model-adoption phase this build has no words for offers only Stop, if any', async () => {
+// Task 5: `other` — a probe or a model adoption nobody asked to start — used
+// to have no words at all, and this pair is what that used to separate: the
+// phase this build has no sentence for against one that does. A disclosure
+// needs something to say in its summary while either holds the slot, so both
+// now get their own name (`jobs.ts`'s own `phaseLabel`); `other` still offers
+// Stop when `cancellable` says so regardless — the button never depended on
+// having a sentence.
+test('a probe or model-adoption phase shows its own name and offers only Stop, if any', async () => {
   await openWindow();
 
   await emit({
@@ -292,8 +295,16 @@ test('a probe or model-adoption phase this build has no words for offers only St
     revision: (revision += 1),
     snapshot: { kind: 'running', cancellable: true, phase: { kind: 'other', job: 'probe' } },
   });
-  expect(screen.queryByTestId('indexing-pass')).toBeNull();
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває перевірка з’єднання…');
   expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+
+  await emit({
+    ...IDLE_SCAN,
+    revision: (revision += 1),
+    snapshot: { kind: 'running', cancellable: false, phase: { kind: 'other', job: 'modelAdoption' } },
+  });
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває заміна моделі вбудовування…');
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
 
   await emit(reading());
   expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
@@ -1058,8 +1069,12 @@ test('a scan refused because another job holds the slot leaves that job`s Stop i
   await fireEvent.click(screen.getByTestId('scanning-scan'));
 
   await waitFor(() => expect(screen.getByTestId('indexing-rejection')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
-  expect(screen.getByTestId('indexing-cancel')).toBeTruthy();
+  // Scoped to the strip: the Scanning section is on screen too (the test
+  // navigated there above) and now draws the very same running phase through
+  // its own `<ScanProgress>` (Task 5) — a bare `getByTestId` would match both.
+  const strip1 = within(screen.getByTestId('indexing'));
+  expect(visible(strip1.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+  expect(strip1.getByTestId('indexing-cancel')).toBeTruthy();
 });
 
 // ---------------------------------------------------------------------------
@@ -1156,7 +1171,10 @@ test('the scanning section re-reads what the index holds when a scan ends', asyn
 
   await emit(ended());
 
-  await waitFor(() => expect(calls('model_settings').length).toBe(before + 1));
+  // Two calls, not one: `Settings.svelte`'s own re-read and `Models.svelte`'s
+  // (Task 4, review P2-1 — mounted-hidden for the window's life now, so its
+  // `jobs.state` subscription stays live on every other section too).
+  await waitFor(() => expect(calls('model_settings').length).toBe(before + 2));
 });
 
 // ---------------------------------------------------------------------------
@@ -1225,4 +1243,212 @@ test('a language switch leaves the backend`s rejection sentence verbatim', async
   await tick();
 
   expect(visible(screen.getByTestId('indexing-rejection'))).toBe('LEAK-TOKEN-VERBATIM');
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 — the strip is a non-modal disclosure: closed by default, opened by
+// a click on the summary, and closed again by Escape, an outside focus move
+// or press, and a section change — never by an ordinary progress tick, and
+// never hiding a failure the summary line would otherwise still say.
+// ---------------------------------------------------------------------------
+
+// A disclosure toggle must never be how a failure goes unread: the summary
+// line — visible whether the panel is open or closed, that is what `<summary>`
+// IS — has to say so on its own. `endedSentence` (`JobStrip.svelte`) picks the
+// EMBEDDING block's own sentence here because the report ended in embedding,
+// not the reading block's «проіндексовано повністю», which would say nothing
+// happened to worry about.
+test('disclosure_does_not_hide_failure', async () => {
+  await openWindow();
+  await emit(ended(
+    {
+      reason: 'failed', endedIn: 'embedding', message: 'boom', resume: 'embedOnly',
+      embedding: { kind: 'ran', done: 1, total: 3, refused: 0 },
+    },
+    readingOutcome({ reason: 'completed', complete: true }),
+  ));
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  expect(disclosure.open).toBe(false);
+  expect(visible(screen.getByTestId('job-summary'))).toBe('Вбудовування обірвалося через збій.');
+  // The diagnostic itself is still in the (closed) detail — collapsing the
+  // panel does not delete it, only stops SHOWING it until reopened.
+  expect(visible(screen.getByTestId('indexing-ended-failure'))).toBe('Програма повідомила: boom');
+});
+
+test('escape_restores_summary_focus', async () => {
+  await openWindow();
+  await emit(reading());
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  screen.getByTestId('indexing-cancel').focus();
+  await fireEvent.keyDown(screen.getByTestId('indexing-cancel'), { key: 'Escape' });
+
+  expect(disclosure.open).toBe(false);
+  expect(document.activeElement).toBe(screen.getByTestId('job-summary'));
+});
+
+// Focus landing outside the panel — never a press or a focus move this
+// component may cancel or redirect, only one it reacts to by closing.
+test('outside_focus_closes_the_panel', async () => {
+  await openWindow();
+  await emit(reading());
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  const outside = screen.getByTestId('settings-nav-models');
+  outside.focus();
+  await tick();
+
+  expect(disclosure.open).toBe(false);
+  // The outside action itself is untouched: focus really did land there, not
+  // bounced back or intercepted.
+  expect(document.activeElement).toBe(outside);
+});
+
+// The last case in the doc comment above `JobStrip.svelte`'s focus-restore
+// effect: the element focus was on is not merely reshaped, the WHOLE panel
+// leaves the DOM (the run ends with nothing left to report at all), and
+// nothing here may fall through to `<body>` — `focusFallback`, which
+// `Settings.svelte` wires to the pressed nav button, is what catches it.
+test('removed_panel_focus_returns_to_active_navigation', async () => {
+  await openWindow();
+  await emit(reading({}, true));
+
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  screen.getByTestId('indexing-cancel').focus();
+  expect(document.activeElement).toBe(screen.getByTestId('indexing-cancel'));
+
+  // Idle, no note, no `lastReading` at all — `anything` goes false and the
+  // disclosure itself leaves the document.
+  await emit({ ...IDLE_SCAN, revision: (revision += 1) });
+
+  expect(screen.queryByTestId('indexing')).toBeNull();
+  expect(document.activeElement).toBe(screen.getByTestId('settings-nav-models'));
+});
+
+// Review round 1, Important 1. A real browser focuses `<summary>` as part of
+// the very click that opens it — before `open` itself has flipped true — so
+// recording `lastFocused` must not be gated on `open`, or a person who never
+// moves focus any further into the panel (the ordinary case: open it, read
+// it, do nothing else) leaves nothing for the removal effect to act on.
+// Focused directly here rather than through a click, because this harness's
+// `fireEvent.click` does not simulate the browser's own focus-on-click step
+// (confirmed directly against jsdom) — `.focus()` is what stands in for it.
+test('focus left on the summary alone still returns to the active navigation when the panel disappears', async () => {
+  await openWindow();
+  await emit(reading({}, true));
+
+  screen.getByTestId('job-summary').focus();
+  expect(document.activeElement).toBe(screen.getByTestId('job-summary'));
+
+  await emit({ ...IDLE_SCAN, revision: (revision += 1) });
+
+  expect(screen.queryByTestId('indexing')).toBeNull();
+  expect(document.activeElement).toBe(screen.getByTestId('settings-nav-models'));
+});
+
+// Review round 1, Important 2. Focus that has already moved outside the
+// panel is the person's own doing, not something a later, unrelated DOM
+// update may second-guess: a stale `lastFocused` plus focus having settled
+// on `<body>` afterwards (a click on empty space, a dialog elsewhere closing)
+// would otherwise read as "the panel changed shape", and steal focus back to
+// a summary the person already dismissed — even though the panel itself
+// survives (`anything` stays true; only the specific control that once held
+// focus is gone).
+test('focus already moved outside the panel is left alone by a later reshape, even once it settles on body', async () => {
+  await openWindow();
+  await emit(reading({}, true));
+
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  const cancelButton = screen.getByTestId('indexing-cancel');
+  cancelButton.focus();
+  expect(document.activeElement).toBe(cancelButton);
+
+  const outside = screen.getByTestId('settings-nav-folders');
+  outside.focus();
+  expect(document.activeElement).toBe(outside);
+  // Settles on `<body>` for a reason that has nothing to do with this
+  // component — not a new focusin this file's own listener would see.
+  outside.blur();
+  expect(document.activeElement).toBe(document.body);
+
+  // The run stops — `cancellable` goes false, so the Stop button `cancelButton`
+  // pointed at is removed — but the reading outcome now renders in its place:
+  // the panel survives this, only that one control is gone.
+  await emit(endedReading('cancelled'));
+  expect(screen.getByTestId('indexing')).toBeTruthy();
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+
+  expect(document.activeElement).toBe(document.body);
+});
+
+// A section change closes the panel without discarding the report — the
+// report and the job survive; only the popup's own `open` does not.
+test('a section change closes the open panel, and the report survives it', async () => {
+  await openWindow();
+  await emit(reading());
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await tick();
+
+  expect(disclosure.open).toBe(false);
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Індексація теки 1 з 2: /home/a/notes');
+});
+
+// An ordinary progress tick is not a reason to close: the popup stays open
+// across a count changing underneath it.
+test('an ordinary progress tick does not close an open panel', async () => {
+  await openWindow();
+  await emit(reading({ done: 1 }));
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  await emit(reading({ done: 2 }));
+
+  expect(disclosure.open).toBe(true);
+});
+
+// Review round 1, Minor 6. The brief requires Escape inside the panel to be
+// stopped before it reaches a window-level handler meant for something else
+// entirely (`Application.svelte`'s recorder, `Launcher.svelte`'s own hide) —
+// a `window`-level spy stands in for either.
+test('escape inside the panel is stopped before it reaches a window-level handler', async () => {
+  await openWindow();
+  await emit(reading());
+  await fireEvent.click(screen.getByTestId('job-summary'));
+
+  const windowKeydown = vi.fn();
+  window.addEventListener('keydown', windowKeydown);
+  await fireEvent.keyDown(screen.getByTestId('indexing-cancel'), { key: 'Escape' });
+  window.removeEventListener('keydown', windowKeydown);
+
+  expect(windowKeydown).not.toHaveBeenCalled();
+});
+
+// Review round 1, Minor 6. The other close path named in the global
+// constraints alongside an outside focus move — a press landing outside —
+// untested until now.
+test('a pointerdown outside the panel closes it', async () => {
+  await openWindow();
+  await emit(reading());
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  await fireEvent.pointerDown(screen.getByTestId('settings-nav-models'));
+
+  expect(disclosure.open).toBe(false);
 });

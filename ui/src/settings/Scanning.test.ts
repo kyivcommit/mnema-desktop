@@ -1,4 +1,4 @@
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Scanning from './Scanning.svelte';
@@ -69,8 +69,12 @@ const HOUR_AGO = () => Math.floor(Date.now() / 1000) - 3600;
 
 // Computed here, never written out: the test machine's zone is not the CI
 // machine's, and the section formats in the machine's own zone on purpose.
+// Task 9 (owner remark, screenshot 2026-09-10 12:14): the time now follows
+// the date, one call with both `dateStyle` and `timeStyle` — the SAME call
+// `recency.ts` makes, so every caller below picks up the new format for
+// free rather than needing its own re-measurement.
 const dateIn = (loc: string, at: number) =>
-  new Intl.DateTimeFormat(loc, { dateStyle: 'long' }).format(new Date(at * 1000)).replace(/\.$/, '');
+  new Intl.DateTimeFormat(loc, { dateStyle: 'long', timeStyle: 'short' }).format(new Date(at * 1000));
 
 beforeEach(() => {
   cancelJob.mockReset();
@@ -176,7 +180,9 @@ test('a filled index says how many files it holds, the date it last grew, and ho
   expect(visible(screen.getByTestId('indexing-index-date')))
     .toBe(`Останнє оновлення: ${dateIn('uk', at)}.`);
   expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('Це було 1 годину тому.');
-  expect(screen.queryByTestId('indexing-index-never')).toBeNull();
+  // The statcard's own "updated" cell states the date too, never the
+  // never-sentence, once there is one to state.
+  expect(screen.queryByText('Ще нічого не проіндексовано.')).toBeNull();
 });
 
 test('the date follows the language, not the machine', async () => {
@@ -199,8 +205,11 @@ test('the date follows the language, not the machine', async () => {
 test('an index nothing has ever finished indexing says so, and draws no time at all', async () => {
   renderSection(read({ indexedFiles: 0, lastIndexedAt: null }));
 
-  await waitFor(() => expect(screen.getByTestId('indexing-index-never')).toBeTruthy());
-  expect(visible(screen.getByTestId('indexing-index-never'))).toBe('Ще нічого не проіндексовано.');
+  // Task 6, review round 1: the standalone paragraph is gone — the
+  // statcard's own "updated" cell is the one and only place this sentence
+  // renders now, so a duplicate would be the regression this line guards.
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(screen.getAllByText('Ще нічого не проіндексовано.')).toHaveLength(1);
   expect(screen.queryByTestId('indexing-index-date')).toBeNull();
   expect(screen.queryByTestId('indexing-index-ago')).toBeNull();
   const text = pageText();
@@ -209,6 +218,73 @@ test('an index nothing has ever finished indexing says so, and draws no time at 
   expect(text).not.toContain('1970');
   expect(text).not.toContain('щойно');
   expect(visible(screen.getByTestId('indexing-index-files'))).toBe('В індексі 0 файлів.');
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — the statcard: the same numbers, drawn as two labelled cells
+// instead of a sentence. Never a decorative number: every fixture below reads
+// its value from `read` or from the existing never-sentence, exactly as the
+// sentences above already do.
+// ---------------------------------------------------------------------------
+
+function statcardValues(): (string | null)[] {
+  return [...screen.getByTestId('indexing-statcard').querySelectorAll('dd')]
+    .map((dd) => dd.textContent?.trim() ?? null);
+}
+
+test('the statcard states zero documents rather than an empty cell', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 0, lastIndexedAt: at }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(statcardValues()).toEqual(['0', dateIn('uk', at)]);
+});
+
+// Task 9 (owner remark, screenshot 2026-09-10 12:14): the time follows the
+// date now, in both places this value is read — the statcard's own cell and
+// `indexing_index_updated`'s sentence share one `formatIndexedDate` call
+// (`Scanning.svelte:76,103`), so proving the statcard carries the TIME part
+// proves both without a second, near-identical test.
+test('the statcard\'s updated cell carries the time as well as the date, in both locales', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 3, lastIndexedAt: at }));
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+
+  const timeIn = (loc: string) =>
+    new Intl.DateTimeFormat(loc, { timeStyle: 'short' }).format(new Date(at * 1000));
+  expect(statcardValues()).toEqual(['3', dateIn('uk', at)]);
+  expect(statcardValues()[1]).toContain(timeIn('uk'));
+
+  setLocale('en');
+  await tick();
+  expect(statcardValues()[1]).toContain(timeIn('en'));
+});
+
+test('the statcard\'s updated cell states the never sentence when nothing has ever grown the index', async () => {
+  renderSection(read({ indexedFiles: 5, lastIndexedAt: null }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(statcardValues()).toEqual(['5', 'Ще нічого не проіндексовано.']);
+});
+
+test('an unreadable index draws no statcard, only the error it could not get past', async () => {
+  renderSection(settings({
+    index: { kind: 'unreadable', cause: 'notOpen', reason: `could not open the index: ${TOKEN}` },
+  }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
+  expect(screen.queryByTestId('indexing-statcard')).toBeNull();
+});
+
+test('a failed re-read keeps the statcard\'s old numbers, with the error stated before them', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 7, lastIndexedAt: at }), 'the settings window could not reach the index');
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  const load = screen.getByTestId('indexing-index-load-failed');
+  const card = screen.getByTestId('indexing-statcard');
+  expect(!!(load.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+  expect(statcardValues()).toEqual(['7', dateIn('uk', at)]);
 });
 
 // ---------------------------------------------------------------------------
@@ -230,7 +306,7 @@ test('an index that is not open says so, and shows the backend reason verbatim',
   expect(pageText()).not.toContain('спроба читання не вдалася');
   expect(screen.queryByTestId('indexing-index-files')).toBeNull();
   expect(screen.queryByTestId('indexing-index-date')).toBeNull();
-  expect(screen.queryByTestId('indexing-index-never')).toBeNull();
+  expect(screen.queryByTestId('indexing-statcard')).toBeNull();
   expect(pageText()).not.toContain('undefined');
 });
 
@@ -403,6 +479,34 @@ test('a run under way hides the scan button and the continue row both', async ()
   expect(screen.queryByTestId('scanning-continue')).toBeNull();
   expect(screen.queryByTestId('scanning-incomplete')).toBeNull();
   expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
+});
+
+// Review round 1, Important 3. Task 5 gave this section its own
+// `<ScanProgress>`, off the same `jobs.state` snapshot `showScanButton`
+// already reads — nothing above named it directly, and the whole suite
+// stayed green with the render deleted (only `JobStrip.test.ts`'s
+// slot-contention test scopes its own query through `within`, which asks
+// nothing about whether a SECOND projection exists at all). This is that
+// direct assertion.
+//
+// Whole-branch review, Minor 6. `ScanProgress`'s own testids
+// (`indexing-pass`/`indexing-counts`) are not unique in the real window: the
+// bottom strip (`JobStrip.svelte`) renders the SAME running phase through
+// its own `<ScanProgress>` at the same time the Indexing section shows this
+// one. `renderSection` here mounts `Scanning` alone, with no `Settings.svelte`
+// `.spane` wrapper around it to scope through, so `within(container)` — this
+// render's own root, holding nothing else — is the section's own root the
+// finding asks for; a Settings-level test with both copies on screen must
+// scope the same way rather than reuse a bare `screen.getByTestId` copied
+// from here.
+test('the section shows the same running-phase projection the strip does', async () => {
+  const { container } = renderSection(read());
+  await waitFor(() => expect(within(container).getByTestId('scanning-scan')).toBeTruthy());
+
+  await emit(runningScan());
+
+  expect(visible(within(container).getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(visible(within(container).getByTestId('indexing-counts'))).toBe('Опрацьовано 1 з 4. Пропущено: 0. Відхилено: 0.');
 });
 
 // `ended` + `report.resume: null` + `scanIncomplete: true` — the

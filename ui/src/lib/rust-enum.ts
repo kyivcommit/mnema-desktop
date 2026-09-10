@@ -28,8 +28,11 @@
 // `tree.rs`'s `the_subfolder_wire_shape_is_camel_case` are the two that exist.
 // Neither half closes the gap alone: the pair does.
 
-// The variant names of `pub enum <enumName>` in `rawSource`, in source order
-// and in Rust's own spelling — `camelOf` turns one into its wire name.
+// The variant names of `pub enum <enumName>` (or `pub(crate) enum`, `pub(in
+// path::to) enum`, … — `pub` or a restricted `pub(...)`, never a private
+// enum with no `pub` at all — review round 2, Nit D) in `rawSource`, in
+// source order and in Rust's own spelling — `camelOf` turns one into its
+// wire name.
 //
 // Throws rather than answering when it cannot answer: an enum it cannot find,
 // a body it runs off the end of, a variant it cannot parse a name out of, or
@@ -43,7 +46,14 @@ export function rustEnumVariants(rawSource: string, enumName: string): string[] 
   // at that brace, the body was truncated, and the file reported green having
   // never seen the new variant.
   const source = rawSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
-  const m = new RegExp(`pub enum ${enumName}\\s*\\{`).exec(source);
+  // `pub(?:\([^)]*\))?` — bare `pub`, or `pub` with a restricted-visibility
+  // parenthetical (`(crate)`, `(super)`, `(in a::b)`, …) — added when
+  // `ipc.test.ts` needed to pin `locale.rs`'s `pub(crate) enum LocaleSurface`
+  // and had no way to, short of a second hand-rolled parser beside this one
+  // (review round 1, Minor 7). `[^)]*` rather than `[\w:]*` so an `in a::b`
+  // path's own leading/trailing detail is not this reader's business to
+  // enumerate — only the closing paren matters to find the end of it.
+  const m = new RegExp(`pub(?:\\([^)]*\\))?\\s+enum\\s+${enumName}\\s*\\{`).exec(source);
   if (!m) throw new Error(`enum ${enumName} not found in the Rust source — has it moved or been renamed?`);
   let depth = 1;
   let i = m.index + m[0].length;

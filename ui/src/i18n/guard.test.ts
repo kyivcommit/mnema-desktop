@@ -150,6 +150,8 @@ const LATIN_ALLOWLIST: Allowlisted[] = [
 
   // recency.ts: an Intl formatting option, not prose.
   { file: 'recency.ts', text: 'long', reason: 'Intl.DateTimeFormat dateStyle option value' },
+  // Task 9: the scan time follows the date, same call, one more option value.
+  { file: 'recency.ts', text: 'short', reason: 'Intl.DateTimeFormat timeStyle option value' },
 ];
 
 function isAllowlisted(file: string, text: string, list: Allowlisted[]): boolean {

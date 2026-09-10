@@ -913,14 +913,58 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     differ(on, off, 'font-weight');
   });
 
-  it('marks the current model', () => {
-    mount(`<main><div class="spane"><ul>
-      <li><button type="button">a</button></li>
-      <li><button type="button" aria-current="true">b</button></li>
-    </ul></div></main>`);
-    const [plain, current] = document.querySelectorAll('.spane button');
-    differ(current, plain, 'background');
-    differ(current, plain, 'color');
+  // Task 4: the model list's "current" button is gone (a native `<select>`
+  // replaces it); what marks a role configured or not now is the small dot
+  // beside each tab, and it is the MARK that carries the colour — the label
+  // beside it stays the ordinary readable ink, held to the same AA pair as
+  // `--ink`/`--ink-soft` elsewhere in this file. Which model is actually
+  // current is a fact `Models.test.ts` checks against the real component;
+  // this only holds that the two dot states are told apart visually.
+  //
+  // Task 9 (owner's ruling, live run 2026-09-10): the dot moved INSIDE its own
+  // tab button, as its last child — the fixture is re-pointed to that shape
+  // rather than the two bare siblings it used to mount, so this guard keeps
+  // proving something true of the actual markup rather than of a layout the
+  // component no longer draws.
+  it('marks a configuration dot by role', () => {
+    mount(`<main><div class="spane"><div class="mtabs">
+      <button type="button" class="mtab">a<span class="mdot" data-configured="true"><span class="mdot-mark"></span><span class="sr-only">configured</span></span></button>
+      <button type="button" class="mtab">b<span class="mdot" data-configured="false"><span class="mdot-mark"></span><span class="sr-only">not configured</span></span></button>
+    </div></div></main>`);
+    const [ok, err] = document.querySelectorAll('.mdot-mark');
+    // jsdom's `getComputedStyle` does not resolve `var(...)` — cssstyle hands
+    // back the declared text verbatim, so this only proves the two states
+    // are wired to DIFFERENT custom properties (`var(--ok)` vs `var(--err)`
+    // are different strings regardless of what either token resolves to). A
+    // mutant setting `--ok` and `--err` to the same colour would still pass
+    // it, which is why the actual values are pinned separately below, parsed
+    // straight from the declarations rather than through jsdom's style
+    // engine, in every theme block this file holds to each other elsewhere.
+    differ(ok, err, 'background');
+
+    const { light, mediaDark, attrDark } = loadThemes();
+    for (const [name, tokens] of [
+      ['light', light], ['media dark', mediaDark], ['attribute dark', attrDark],
+    ] as const) {
+      expect(tokens.get('--ok'), `${name}: --ok declared`).toBeTruthy();
+      expect(tokens.get('--err'), `${name}: --err declared`).toBeTruthy();
+      expect(tokens.get('--ok'), `${name}: --ok must resolve to a different colour than --err`)
+        .not.toBe(tokens.get('--err'));
+    }
+  });
+
+  // Task 9: the tab dot's state word is `sr-only` now, not the ordinary
+  // readable ink it used to be. `differ()` against the button's own visible
+  // text proves the EXISTING `.sr-only` rule (`settings.css:106`) actually
+  // reaches an element placed inside `.mtab .mdot`, not merely that the class
+  // exists somewhere in the file.
+  it('hides the tab dot\'s state word from sighted view, inside the button', () => {
+    mount(`<main><div class="mtabs">
+      <button type="button" class="mtab">Embedding<span class="mdot" data-configured="true"><span class="mdot-mark"></span><span class="sr-only">Configured</span></span></button>
+    </div></main>`);
+    const label = document.querySelector('.mtab')!;
+    const hidden = document.querySelector('.mtab .sr-only')!;
+    differ(hidden, label, 'position');
   });
 
   it('dims an excluded folder', () => {
@@ -933,13 +977,69 @@ describe('settings.css gives the DOM-only states a visual form', () => {
   });
 
   it('marks the chosen theme', () => {
-    mount(`<main><div class="spane"><div role="group">
+    // `.seg`, not a bare `role="group"` (Task 6): Application's four section
+    // groups carry that role too now, for their own accessible name, and this
+    // fixture must mirror the class the real segmented control carries or it
+    // tests a selector nothing in the app uses any more.
+    mount(`<main><div class="spane"><div class="seg" role="group">
       <button type="button" aria-pressed="false">a</button>
       <button type="button" aria-pressed="true">b</button>
     </div></div></main>`);
-    const [off, on] = document.querySelectorAll('[role="group"] button');
+    const [off, on] = document.querySelectorAll('.seg button');
     differ(on, off, 'background');
     differ(on, off, 'font-weight');
+  });
+
+  // Task 6, review round 1: nothing here asked for the `.statcard` rule
+  // itself, only for its markup — so it went missing for a whole review
+  // round with every other test still green. A bare `<dl>` against one
+  // carrying the class is what a missing rule turns back into one element.
+  it('gives the statcard a bordered card, not a bare list', () => {
+    mount(`<main><div class="spane">
+      <dl><div><dt>a</dt><dd>b</dd></div></dl>
+      <dl class="statcard"><div><dt>a</dt><dd>b</dd></div></dl>
+    </div></main>`);
+    const [plain, card] = document.querySelectorAll('dl');
+    differ(card, plain, 'border');
+    differ(card, plain, 'padding-top');
+  });
+
+  // The mockup's `.frow .rm`: a 24×24 icon, never a bordered `main button`.
+  it('draws the folder remove control as a small icon, not a bordered button', () => {
+    mount(`<main><div class="folders"><ul><li><div class="row">
+      <button type="button">plain</button>
+      <button type="button" class="rm">✕</button>
+    </div></li></ul></div></main>`);
+    const [plain, rm] = document.querySelectorAll('.row button');
+    differ(rm, plain, 'border-top-width');
+    differ(rm, plain, 'width');
+  });
+
+  // Whole-branch review, Important 2. `list-style: none` plus the
+  // `::-webkit-details-marker` rule removes the native triangle and drew
+  // nothing in its place. `differ()` above cannot hold this rule to its
+  // `[open]` counterpart: jsdom's `getComputedStyle` cannot see a
+  // pseudo-element at all (`window.getComputedStyle(elt, pseudoElt)` calls
+  // `notImplemented` in jsdom 25's own `Window.js` and then falls through to
+  // the SAME real-element declarations a bare call would have matched,
+  // which never include a pseudo-element-only rule) — proven directly: an
+  // element carrying the `::after` rule and one without it report the same
+  // (empty) `transform`. The stylesheet's own parsed rules are not subject
+  // to that limitation (a `CSSStyleRule`'s `selectorText`/`style` are read
+  // straight off the parse, never matched against an element), so this
+  // reads the two `::after` rules themselves and holds their `transform`
+  // declarations to each other the same way `differ()` holds two elements'.
+  it('rotates the disclosure chevron between closed and open', () => {
+    mount('<main></main>');
+    const sheet = document.head.querySelector<HTMLStyleElement>('style[data-guard]')!.sheet!;
+    const rules = Array.from(sheet.cssRules) as CSSStyleRule[];
+    const closed = rules.find((r) => r.selectorText === '.job-disclosure > summary::after');
+    const open = rules.find((r) => r.selectorText === '.job-disclosure[open] > summary::after');
+    expect(closed, 'no ::after rule styling the closed chevron').toBeTruthy();
+    expect(open, 'no [open] ::after rule styling the rotated chevron').toBeTruthy();
+    const a = open!.style.getPropertyValue('transform');
+    const b = closed!.style.getPropertyValue('transform');
+    expect(a, `transform: "${a}" open, "${b}" closed — no visual difference`).not.toBe(b);
   });
 });
 

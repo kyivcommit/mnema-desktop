@@ -13,6 +13,7 @@ import type {
   HotkeyState,
   HotkeyStatus,
   IndexSettings,
+  LocaleApplyError,
   OtherJob,
   ReadingOutcome,
   RootOutcome,
@@ -817,5 +818,41 @@ test('OtherJob is exactly what scan_state.rs defines, in the spelling serde send
   const jobs: readonly OtherJob[] = OTHER_JOBS;
   expect(jobs.slice().sort()).toEqual(
     rustEnumVariants(SCAN_STATE_RS, 'OtherJob').map(camelOf).sort(),
+  );
+});
+
+// Task 3 (PR 10f). `get_locale`/`set_locale` and the `LocaleApplyError.surface`
+// mirror, pinned the same way the rest of this file pins a wire shape: names
+// and args against what `lib.rs`/`locale.rs` actually declare, not against
+// what this file merely repeats about them.
+const LOCALE_RS = readFileSync(join(HERE, '../../../src-tauri/src/locale.rs'), 'utf8');
+
+test('getLocale invokes get_locale with no arguments', async () => {
+  invoke.mockResolvedValue({ choice: 'auto', effective: 'en' });
+  await ipc.getLocale();
+  expect(invoke).toHaveBeenCalledWith('get_locale');
+});
+
+test('setLocaleChoice invokes set_locale with the choice', async () => {
+  invoke.mockResolvedValue({ choice: 'uk', effective: 'uk', applyErrors: [] });
+  await ipc.setLocaleChoice('uk');
+  expect(invoke).toHaveBeenCalledWith('set_locale', { choice: 'uk' });
+});
+
+// The TS union has no runtime representation to hand to `rustEnumVariants`, so
+// the four members are listed here as data and compared against the Rust
+// enum's own variants — the same shape `OtherJob is exactly what scan_state.rs
+// defines` above pins for a real runtime array. A surface added on either side
+// without the other fails here rather than reaching the window as `undefined`.
+//
+// `LocaleSurface` is declared `pub(crate) enum` (locale.rs, kept
+// crate-private because nothing outside the crate constructs one) —
+// `rustEnumVariants` reads a restricted-visibility enum the same as a bare
+// `pub` one (review round 1, Minor 7: an earlier draft hand-rolled a second,
+// narrower parser here instead of teaching this shape to the shared one).
+test('LocaleApplyError surface lists exactly the four Rust LocaleSurface variants', () => {
+  const surfaces: Array<LocaleApplyError['surface']> = ['tray', 'settingsTitle', 'appMenu', 'localeEvent'];
+  expect(surfaces.slice().sort()).toEqual(
+    rustEnumVariants(LOCALE_RS, 'LocaleSurface').map(camelOf).sort(),
   );
 });
