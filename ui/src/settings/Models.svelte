@@ -7,7 +7,7 @@
     setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
     type ModelEntry, type ModelRefusal, type UnreadableRecord,
-    type ExistingVectors, type RetiredSpace, type ModelRole,
+    type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
   import type { JobController } from './jobs';
   import type { ScanSnapshot } from '../lib/ipc';
@@ -131,9 +131,14 @@
       // Task 4: ANY read that succeeds is the newer, more authoritative word
       // — mount's own, a scan-ended re-read, or a mutation's own — so it
       // always reconciles the visible model back onto `settings` and takes
-      // a stale `writeOutcome` away with it, not only the read a command
-      // itself triggered.
-      writeOutcome = null;
+      // a stale write outcome away with it, not only the read a command
+      // itself triggered. Both roles' outcomes are cleared here, together:
+      // this is the only accepted, current `model_settings` read there is,
+      // and a write to one role must never be the reason the OTHER role's
+      // own outcome disappears (review, PR44 P2-1) — only this reconciles
+      // either of them.
+      embeddingWriteOutcome = null;
+      chatWriteOutcome = null;
       // Review round 1, Important 2: a standing Forget question is a
       // question about THIS key. A read that finds the key no longer
       // `present` — Absent (the ordinary outcome of a confirmed Forget
@@ -393,15 +398,18 @@
       await setChatModel(model);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
-      writeOutcome = { kind: 'unknown', role: 'chat' };
+      // Review, PR44 P2-1: this role's own outcome, never the shared one —
+      // `embeddingWriteOutcome` is a different role's state and must survive
+      // a chat write untouched, the same as the reverse in `commitEmbedding`.
+      chatWriteOutcome = { kind: 'unknown' };
       // `refresh()` already reported this through `loadError`, and — on
-      // success — already reconciled `writeOutcome` away with the fresh
-      // answer; nothing here needs to inspect which happened.
+      // success — already reconciled both roles' outcomes away with the
+      // fresh answer; nothing here needs to inspect which happened.
       await refresh().catch(() => {});
       changeBusy = false;
       return;
     }
-    writeOutcome = { kind: 'acknowledged', role: 'chat', model };
+    chatWriteOutcome = { kind: 'acknowledged', model };
     await refresh().catch(() => {});
     changeBusy = false;
   }
@@ -435,20 +443,34 @@
   // answer (`settingsSeq` below still drops a stale one), so from that
   // point on the visible model is `settings`' own again, not a memory of
   // what a command claimed.
+  // Review, PR44 P2-1: one outcome PER ROLE, not one shared between them. A
+  // single `writeOutcome` meant a write of either role overwrote the other's
+  // — after a confirmed embedding change whose own re-read then failed, a
+  // FOLLOWING chat write (successful or not) replaced the shared value, and
+  // the embedding tab fell back to whatever `settings` last read (a rollback
+  // the backend never made) the moment its own re-read failed too. The role
+  // is now which FIELD holds the outcome, not a tag inside it — dropped from
+  // the type since a value can no longer land in the wrong field by mistake.
   type WriteOutcome =
     | null
-    | { kind: 'acknowledged'; role: ModelRole; model: string }
-    | { kind: 'unknown'; role: ModelRole };
-  let writeOutcome = $state<WriteOutcome>(null);
+    | { kind: 'acknowledged'; model: string }
+    | { kind: 'unknown' };
+  let embeddingWriteOutcome = $state<WriteOutcome>(null);
+  let chatWriteOutcome = $state<WriteOutcome>(null);
   // True from the moment a model choice starts its command until the read
   // that reconciles it (or fails to) has settled — the select stays
   // `disabled` for that whole stretch, so a second choice cannot start while
   // the first is still an open question the backend has not answered.
   let changeBusy = $state(false);
 
+  function outcomeFor(role: Tab): WriteOutcome {
+    return role === 'chat' ? chatWriteOutcome : embeddingWriteOutcome;
+  }
+
   function visibleModelFor(role: Tab): string | null {
-    if (writeOutcome && writeOutcome.role === role) {
-      return writeOutcome.kind === 'acknowledged' ? writeOutcome.model : null;
+    const outcome = outcomeFor(role);
+    if (outcome) {
+      return outcome.kind === 'acknowledged' ? outcome.model : null;
     }
     return role === 'chat' ? currentChatModel : currentEmbeddingModel;
   }
@@ -463,7 +485,7 @@
   // conflating them would claim "nothing is set" about a state this build
   // cannot see into at all.
   function statusFor(role: Tab): 'notChosen' | 'unknown' {
-    if (writeOutcome && writeOutcome.role === role && writeOutcome.kind === 'unknown') return 'unknown';
+    if (outcomeFor(role)?.kind === 'unknown') return 'unknown';
     if (!settings || settings.index.kind !== 'read') return 'unknown';
     return 'notChosen';
   }
@@ -475,7 +497,7 @@
   // post-mutation `unknown` both fail it safe rather than green: neither is
   // grounds to claim a role is configured.
   function dotState(role: Tab): 'true' | 'false' | 'unknown' {
-    if (writeOutcome && writeOutcome.role === role && writeOutcome.kind === 'unknown') return 'unknown';
+    if (outcomeFor(role)?.kind === 'unknown') return 'unknown';
     if (!settings || loadError) return 'unknown';
     if (settings.key.kind !== 'present') return 'false';
     if (settings.index.kind !== 'read') return 'unknown';
@@ -779,14 +801,16 @@
     changeBusy = true;
     // Command and refresh get their OWN try/catch: a command that SUCCEEDS
     // and is followed by a refresh that THROWS is not a rejected write, and
-    // `writeOutcome` must go on showing the model it just acknowledged, not
-    // fall back to whatever `settings` held before it (review P2-1,
-    // `successful_write_with_failed_refresh_keeps_acknowledged_model`).
+    // `embeddingWriteOutcome` must go on showing the model it just
+    // acknowledged, not fall back to whatever `settings` held before it
+    // (review P2-1, `successful_write_with_failed_refresh_keeps_acknowledged_model`).
+    // Review, PR44 P2-1: this role's own field only — `chatWriteOutcome` is a
+    // different role's state and must survive an embedding write untouched.
     try {
       const adopted = await setEmbeddingModel(model, existingVectors);
       retiredReport = adopted.retired;
       jobRunning = false;
-      writeOutcome = { kind: 'acknowledged', role: 'embedding', model };
+      embeddingWriteOutcome = { kind: 'acknowledged', model };
       await refresh().catch(() => {});
     } catch (e) {
       changeError = e instanceof Error ? e.message : String(e);
@@ -795,13 +819,13 @@
       // `set_embedding_model`'s own doc names a state a failed adoption can
       // leave behind where the old space is already gone, so nothing is
       // shown as current until the read below says what actually is.
-      writeOutcome = { kind: 'unknown', role: 'embedding' };
+      embeddingWriteOutcome = { kind: 'unknown' };
       // §10: a rejection arrives as a sentence, not as a kind. What the screen
       // says next is decided by re-reading the state — `model_settings` for
       // what the index is in, `job_status` for whether a job is still going —
       // and never by matching on the message text. `refresh()` already
       // reported the rejection through `loadError`, and — on success —
-      // already reconciled `writeOutcome` away with the fresh answer.
+      // already reconciled both roles' outcomes away with the fresh answer.
       await refresh().catch(() => {});
       jobRunning = await jobStatus()
         .then((s) => s.snapshot.kind === 'running')

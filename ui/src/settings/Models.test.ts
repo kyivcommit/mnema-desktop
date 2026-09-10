@@ -2934,6 +2934,83 @@ test('failed_read_does_not_erase_retirement_report', async () => {
   );
 });
 
+// Independent review of PR #44 (2026-09-10), P2-1, confirmed on this head by
+// this ported probe before the fix: the write outcome used to be ONE shared
+// value tagged with its own role, so a later write of the OTHER role (a
+// SUCCESSFUL one, not merely a rejected one) overwrote it — the embedding
+// tab's own acknowledged `emb-2` vanished the moment the chat tab confirmed
+// `chat-1`, and with the embedding re-read still failing, the tab fell back
+// to the stale cached `emb-1`: a rollback the backend never made.
+test('PR44 review: chat write must preserve acknowledged embedding after failed reads', async () => {
+  setLocale('en');
+  setEmbeddingModel.mockResolvedValue({ model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [], index: onModel(0).index });
+  setChatModel.mockResolvedValue(undefined);
+  modelSettings.mockResolvedValueOnce(onModel(0)).mockRejectedValue(new Error('read unavailable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]), chat: catalogueOf([entry('chat-1')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
+  await pickModel('emb-2');
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
+  await pickModel('chat-1');
+  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await fireEvent.click(screen.getByTestId('model-tab-embedding'));
+  expect(modelSelect().value).toBe('emb-2');
+});
+
+// The same defect, its `unknown` half: a REJECTED embedding adoption leaves
+// `unknown` (nothing shown as current — Task 4's own rule for a failed
+// write), and a later successful chat write used to erase that `unknown`
+// too, letting the embedding tab fall back to a cached model the backend
+// never confirmed after the failed adoption.
+test('PR44 review: unknown embedding must not become cached selection after chat write', async () => {
+  setLocale('en');
+  setEmbeddingModel.mockRejectedValue(new Error('adoption failed after retirement'));
+  setChatModel.mockResolvedValue(undefined);
+  modelSettings.mockResolvedValueOnce(onModel(0)).mockRejectedValue(new Error('read unavailable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]), chat: catalogueOf([entry('chat-1')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
+  await pickModel('emb-2');
+  await waitFor(() => expect(modelSelect().value).toBe(''));
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
+  await pickModel('chat-1');
+  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
+  await fireEvent.click(screen.getByTestId('model-tab-embedding'));
+  expect(modelSelect().value).toBe('');
+});
+
+// The mirror the review names but does not itself carry: the SAME defect
+// hit from the other side, an embedding write erasing a confirmed CHAT
+// model. One shared value could not tell either direction apart from the
+// other; per-role storage owes both.
+test('PR44 review mirror: embedding write must preserve acknowledged chat model after failed reads', async () => {
+  setLocale('en');
+  setChatModel.mockResolvedValue(undefined);
+  setEmbeddingModel.mockResolvedValue({ model: 'emb-2', dim: 1024, spaceId: 2, created: true, retired: [], index: onModel(0).index });
+  modelSettings.mockResolvedValueOnce(onModel(0)).mockRejectedValue(new Error('read unavailable'));
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]), chat: catalogueOf([entry('chat-1')]) });
+  renderModels();
+  await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
+  await pickModel('chat-1');
+  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await fireEvent.click(screen.getByTestId('model-tab-embedding'));
+  await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
+  await pickModel('emb-2');
+  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  expect(modelSelect().value).toBe('chat-1');
+});
+
 // Review round 1, Important 1. The same "acknowledged B, its own re-read
 // failed" state as the pair above, but this time picking a DIFFERENT model —
 // specifically the one `settings` (the last successful read, now stale)
