@@ -405,6 +405,23 @@ test('a run under way hides the scan button and the continue row both', async ()
   expect(screen.queryByTestId('indexing-index-pending-chunks')).toBeNull();
 });
 
+// Review round 1, Important 3. Task 5 gave this section its own
+// `<ScanProgress>`, off the same `jobs.state` snapshot `showScanButton`
+// already reads — nothing above named it directly, and the whole suite
+// stayed green with the render deleted (only `JobStrip.test.ts`'s
+// slot-contention test scopes its own query through `within`, which asks
+// nothing about whether a SECOND projection exists at all). This is that
+// direct assertion.
+test('the section shows the same running-phase projection the strip does', async () => {
+  renderSection(read());
+  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+
+  await emit(runningScan());
+
+  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Опрацьовано 1 з 4. Пропущено: 0. Відхилено: 0.');
+});
+
 // `ended` + `report.resume: null` + `scanIncomplete: true` — the
 // embedOnly-from-Models-after-restart case: a re-embed started from
 // `Models.svelte` reads no folder, so its report never names a resumption, and

@@ -11,11 +11,15 @@
   // offers when the index still carries a marker a report did not name.
   //
   // 🔴 Renamed from `Indexing.svelte` (Task 8), which is the second rename this
-  // file's name has cost: `JobStrip.svelte` — the window's status line, drawn
-  // above the nav and outside every section — was itself called
-  // `Indexing.svelte` until Task 6 moved that name off it. This file has always
-  // been the one that lives inside the panel and says nothing about a running
-  // pass; it says what the index HOLDS.
+  // file's name has cost: `JobStrip.svelte` — the window's status line — was
+  // itself called `Indexing.svelte` until Task 6 moved that name off it, and
+  // Task 5 moved the strip itself: it is drawn after `.scols`, at the bottom
+  // of the window, outside every section, not above the nav any more. This
+  // file has always been the one that lives inside the panel; Task 5 gave it
+  // its own `<ScanProgress>` too — the same running-phase projection the
+  // strip draws, off the same snapshot — but what it says on its own is
+  // still what the index HOLDS, never a second account of what a pass is
+  // doing.
   //
   // The controller arrives as a PROP for the same reason every other section
   // takes it that way (`Settings.svelte`): it is created once, above every

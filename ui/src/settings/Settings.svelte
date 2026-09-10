@@ -399,8 +399,10 @@
         <!-- §9.3 — what the index holds, and the one Scan control (Task
              8). `settings`/`loadError` are this window's own read, handed down
              rather than fetched again; `jobs` is for the button and for reading
-             the running phase this section gates on. The running pass itself is
-             the strip above the nav. -->
+             the running phase this section gates on. Task 5: the running phase
+             itself is now drawn HERE too, through `<ScanProgress>` — the same
+             projection the bottom disclosure draws off the same snapshot, not
+             a second account of it. -->
         <Scanning {jobs} {settings} {loadError} />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>

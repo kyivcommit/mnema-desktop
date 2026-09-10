@@ -353,7 +353,12 @@
   let lastFocused: HTMLElement | null = null;
 
   function withinPanel(node: EventTarget | null): boolean {
-    return disclosure !== undefined && node instanceof Node && disclosure.contains(node);
+    // `!= null`, not `!== undefined`: `bind:this` resets a torn-down element
+    // to `null`, not `undefined` — a strict check here let a `disclosure ===
+    // null` (the panel just removed) reach `disclosure.contains(...)` and
+    // throw, found the moment `focusFallback` itself moves focus and this
+    // handler fires for that very focusin (review round 1).
+    return disclosure != null && node instanceof Node && disclosure.contains(node);
   }
 
   // Document-level, because the panel closing is a reaction to focus or a
@@ -361,13 +366,29 @@
   // component nothing, and this must not stop it from also getting the click
   // or the focus it asked for (no `preventDefault`, no `stopPropagation` on
   // either of these two).
+  //
+  // Review round 1, Important 1. Recording `lastFocused` must NOT be gated on
+  // `open`: the browser focuses `<summary>` as part of the very click that
+  // opens the panel (`onSummaryClick` runs after focus has already moved),
+  // so a guard checked first would throw away the summary's own focus event
+  // every time — `lastFocused` would stay `null` for a person who never
+  // moves focus any further in, and the removal effect below would then find
+  // nothing to act on and leave focus stranded on `<body>`. Only the CLOSING
+  // half is `open`'s business.
   function onDocumentFocusIn(e: FocusEvent) {
-    if (!open) return;
     if (withinPanel(e.target)) {
       lastFocused = e.target as HTMLElement;
       return;
     }
-    open = false;
+    // Review round 1, Important 2. Cleared here, not left standing: once
+    // focus has genuinely moved outside, whatever this was tracking no
+    // longer describes what the person is doing. Left uncleared, a LATER,
+    // unrelated DOM update that happens to remove that same (still-present,
+    // merely hidden) element would read as "focus fell to `<body>` because
+    // the panel changed shape" and steal focus back to the summary — even
+    // though the person had already dismissed the panel and moved on.
+    lastFocused = null;
+    if (open) open = false;
   }
 
   function onDocumentPointerDown(e: PointerEvent) {
@@ -434,8 +455,11 @@
   // document, with focus having fallen all the way to `<body>` rather than
   // somewhere the person chose, is what tells the two apart: a DOM update
   // that removed the element focus was on, from a person who moved focus
-  // away on their own (handled by `onDocumentFocusIn` above, which already
-  // cleared `lastFocused` on its way out).
+  // away on their own. The second case never reaches here at all:
+  // `onDocumentFocusIn` clears `lastFocused` the moment focus lands outside
+  // the panel, so a LATER removal of whatever it used to point at finds
+  // `null` above and does nothing — focus simply stays wherever the person
+  // already put it.
   $effect(() => {
     void $jobState;
     if (lastFocused === null) return;

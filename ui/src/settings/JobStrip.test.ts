@@ -1332,6 +1332,62 @@ test('removed_panel_focus_returns_to_active_navigation', async () => {
   expect(document.activeElement).toBe(screen.getByTestId('settings-nav-models'));
 });
 
+// Review round 1, Important 1. A real browser focuses `<summary>` as part of
+// the very click that opens it — before `open` itself has flipped true — so
+// recording `lastFocused` must not be gated on `open`, or a person who never
+// moves focus any further into the panel (the ordinary case: open it, read
+// it, do nothing else) leaves nothing for the removal effect to act on.
+// Focused directly here rather than through a click, because this harness's
+// `fireEvent.click` does not simulate the browser's own focus-on-click step
+// (confirmed directly against jsdom) — `.focus()` is what stands in for it.
+test('focus left on the summary alone still returns to the active navigation when the panel disappears', async () => {
+  await openWindow();
+  await emit(reading({}, true));
+
+  screen.getByTestId('job-summary').focus();
+  expect(document.activeElement).toBe(screen.getByTestId('job-summary'));
+
+  await emit({ ...IDLE_SCAN, revision: (revision += 1) });
+
+  expect(screen.queryByTestId('indexing')).toBeNull();
+  expect(document.activeElement).toBe(screen.getByTestId('settings-nav-models'));
+});
+
+// Review round 1, Important 2. Focus that has already moved outside the
+// panel is the person's own doing, not something a later, unrelated DOM
+// update may second-guess: a stale `lastFocused` plus focus having settled
+// on `<body>` afterwards (a click on empty space, a dialog elsewhere closing)
+// would otherwise read as "the panel changed shape", and steal focus back to
+// a summary the person already dismissed — even though the panel itself
+// survives (`anything` stays true; only the specific control that once held
+// focus is gone).
+test('focus already moved outside the panel is left alone by a later reshape, even once it settles on body', async () => {
+  await openWindow();
+  await emit(reading({}, true));
+
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  const cancelButton = screen.getByTestId('indexing-cancel');
+  cancelButton.focus();
+  expect(document.activeElement).toBe(cancelButton);
+
+  const outside = screen.getByTestId('settings-nav-folders');
+  outside.focus();
+  expect(document.activeElement).toBe(outside);
+  // Settles on `<body>` for a reason that has nothing to do with this
+  // component — not a new focusin this file's own listener would see.
+  outside.blur();
+  expect(document.activeElement).toBe(document.body);
+
+  // The run stops — `cancellable` goes false, so the Stop button `cancelButton`
+  // pointed at is removed — but the reading outcome now renders in its place:
+  // the panel survives this, only that one control is gone.
+  await emit(endedReading('cancelled'));
+  expect(screen.getByTestId('indexing')).toBeTruthy();
+  expect(screen.queryByTestId('indexing-cancel')).toBeNull();
+
+  expect(document.activeElement).toBe(document.body);
+});
+
 // A section change closes the panel without discarding the report — the
 // report and the job survive; only the popup's own `open` does not.
 test('a section change closes the open panel, and the report survives it', async () => {
@@ -1362,4 +1418,37 @@ test('an ordinary progress tick does not close an open panel', async () => {
   await emit(reading({ done: 2 }));
 
   expect(disclosure.open).toBe(true);
+});
+
+// Review round 1, Minor 6. The brief requires Escape inside the panel to be
+// stopped before it reaches a window-level handler meant for something else
+// entirely (`Application.svelte`'s recorder, `Launcher.svelte`'s own hide) —
+// a `window`-level spy stands in for either.
+test('escape inside the panel is stopped before it reaches a window-level handler', async () => {
+  await openWindow();
+  await emit(reading());
+  await fireEvent.click(screen.getByTestId('job-summary'));
+
+  const windowKeydown = vi.fn();
+  window.addEventListener('keydown', windowKeydown);
+  await fireEvent.keyDown(screen.getByTestId('indexing-cancel'), { key: 'Escape' });
+  window.removeEventListener('keydown', windowKeydown);
+
+  expect(windowKeydown).not.toHaveBeenCalled();
+});
+
+// Review round 1, Minor 6. The other close path named in the global
+// constraints alongside an outside focus move — a press landing outside —
+// untested until now.
+test('a pointerdown outside the panel closes it', async () => {
+  await openWindow();
+  await emit(reading());
+
+  const disclosure = screen.getByTestId('indexing') as HTMLDetailsElement;
+  await fireEvent.click(screen.getByTestId('job-summary'));
+  expect(disclosure.open).toBe(true);
+
+  await fireEvent.pointerDown(screen.getByTestId('settings-nav-models'));
+
+  expect(disclosure.open).toBe(false);
 });
