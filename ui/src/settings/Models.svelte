@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
@@ -74,6 +74,19 @@
   // newer read has already confirmed — a claim outliving its own guard.
   let loadError = $state<string | null>(null);
   let removal = $state<KeyRemoval['kind'] | null>(null);
+  // Task 9 (owner's ruling, live run 2026-09-10): Forget used to destroy the
+  // saved credential on the first press. `false` is "no question is being
+  // asked" — the same non-modal-confirmation shape `pendingEmbedding` below
+  // and Folders' own `removeQuestion` already use for an irreversible press.
+  let forgetQuestion = $state(false);
+  // Bound so Cancel can put focus back on the exact control that opened the
+  // question, rather than losing it to the document body.
+  let forgetButtonEl = $state<HTMLButtonElement | undefined>(undefined);
+  // Bound to the whole key group, not to one control inside it: what the
+  // group shows NEXT after a confirmed Forget depends on what the re-read
+  // found (ordinarily the Absent branch's key field), and the group's own
+  // markup is what decides that shape, not this function.
+  let keyGroupEl = $state<HTMLDivElement | undefined>(undefined);
 
   // A newer request always wins over an older one that resolves later — the
   // ordering hazard booked to this task (umbrella `:525`). Every call that
@@ -189,7 +202,22 @@
     }
   }
 
-  async function doForget() {
+  // The press asks; it forgets nothing. `forget_key` is called only from the
+  // confirm button below.
+  function askForget() {
+    actionError = null;
+    removal = null;
+    forgetQuestion = true;
+  }
+
+  async function cancelForget() {
+    forgetQuestion = false;
+    await tick();
+    forgetButtonEl?.focus();
+  }
+
+  async function confirmForget() {
+    forgetQuestion = false;
     actionError = null;
     try {
       const result = await forgetKey();
@@ -198,6 +226,12 @@
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
     }
+    // Whatever the group shows now — ordinarily the Absent branch's key
+    // field — is where focus belongs next; a stale ref to the button this
+    // question replaced would be exactly the "claim outlives its guard"
+    // class this project already pays for elsewhere.
+    await tick();
+    keyGroupEl?.querySelector<HTMLElement>('input, button')?.focus();
   }
 
   const providerLabel = $derived.by(() => { void $locale; return t('models_provider_label'); });
@@ -215,6 +249,8 @@
   const cancelLabel = $derived.by(() => { void $locale; return t('models_key_cancel'); });
   const loadFailureLabel = $derived.by(() => { void $locale; return t('models_load_failed'); });
   const indexLabel = $derived.by(() => { void $locale; return t('models_index_label'); });
+
+  const forgetConfirmQuestionLabel = $derived.by(() => { void $locale; return t('models_key_forget_confirm'); });
 
   const removalLabel = $derived.by(() => {
     void $locale;
@@ -293,6 +329,11 @@
     // change it would sit under the chat list offering to discard embeddings
     // for a model that is not on screen any more.
     pendingEmbedding = null;
+    // Same rule, Task 9: the Forget question is about the key group, which
+    // stands regardless of which tab is open — but a tab switch is still the
+    // existing rule for a standing question, so it closes here too rather
+    // than surviving under a role it was never asked about.
+    forgetQuestion = false;
     // And so are the two sentences a press leaves behind. "The change discarded
     // 4 embeddings…" and a rejection are reports on an act performed from the
     // embedding list; under the chat list they are a report about nothing the
@@ -880,7 +921,7 @@
        defect report nobody reading this window can act on. The previous order
        put that defect report between the provider row and the key rows, and
        left the single actionable instruction at the bottom, unlabelled. -->
-  <div class="group" data-testid="model-key-group">
+  <div class="group" data-testid="model-key-group" bind:this={keyGroupEl}>
     <!-- One occurrence of the word, not two: when the editable field is on
          screen the group's subject heading IS that field's label, so
          `getByLabelText('Key')` still resolves to exactly one control. -->
@@ -905,13 +946,28 @@
           <button type="button" onclick={cancelEditing}>{cancelLabel}</button>
         {/if}
       </div>
+    {:else if forgetQuestion}
+      <!-- Task 9: the same non-modal-confirmation shape as Folders'
+           `removeConfirm` and the embedding discard question below — a
+           sentence, then the one act and the one refusal, no third option
+           between them. Replaces the Change/Forget row rather than sitting
+           beside it: both buttons say "Forget" (the owner's ruling states the
+           word verbatim for each), and a row that kept the original visible
+           too would leave two controls on screen answering to the same name. -->
+      <div class="group">
+        <p data-testid="model-key-forget-confirm-question">{forgetConfirmQuestionLabel}</p>
+        <div class="row">
+          <button type="button" data-testid="model-key-forget-confirm" onclick={confirmForget}>{forgetLabel}</button>
+          <button type="button" data-testid="model-key-forget-cancel" onclick={cancelForget}>{cancelLabel}</button>
+        </div>
+      </div>
     {:else if !keyFailure}
       <!-- Unreadable offers nothing to press: the store would not say whether a
            key exists at all, so add/change/forget would be a claim this build
            cannot back. -->
       <div class="row">
         <button type="button" onclick={startEditing}>{changeLabel}</button>
-        <button type="button" onclick={doForget}>{forgetLabel}</button>
+        <button type="button" bind:this={forgetButtonEl} onclick={askForget}>{forgetLabel}</button>
       </div>
     {/if}
     {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
@@ -930,24 +986,28 @@
      needs neither a key nor an open index, so browsing and choosing a chat
      model does not have to wait on either. -->
 <div class="mtabs">
+  <!-- Task 9 (owner's ruling, live run 2026-09-10): the dot moves inside its
+       own tab button, as its LAST child, and the state word it used to show
+       beside the tab goes `sr-only` (`settings.css:106`) rather than off the
+       button entirely — the button's own accessible name still reads
+       "Embedding, Configured", it is just nobody sighted who reads the second
+       half any more. The per-role predicate itself is unchanged (review
+       P2-1): read off `visibleModelFor('embedding')` alone, never off the
+       combined `ready` boolean below, which answers for the ACTIVE role only. -->
   <button
     type="button"
+    class="mtab"
     data-testid="model-tab-embedding"
     aria-pressed={activeTab === 'embedding'}
-    onclick={() => selectTab('embedding')}>{embeddingTabLabel}</button>
-  <!-- The per-role configured dot (review P2-1): its own predicate, read off
-       `visibleModelFor('embedding')` alone, never off the combined `ready`
-       boolean below — that boolean answers for the ACTIVE role only and is
-       drawn once regardless of which tab is open, which is exactly the "two
-       truths, one message" class this project pays for whenever a second
-       reader of the same fact is left to disagree with the first. -->
-  <span class="mdot" data-testid="model-dot-embedding" data-configured={embeddingDotState}><span class="mdot-mark" aria-hidden="true"></span>{embeddingDotLabel}</span>
+    onclick={() => selectTab('embedding')}
+  >{embeddingTabLabel}<span class="mdot" data-testid="model-dot-embedding" data-configured={embeddingDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">{embeddingDotLabel}</span></span></button>
   <button
     type="button"
+    class="mtab"
     data-testid="model-tab-chat"
     aria-pressed={activeTab === 'chat'}
-    onclick={() => selectTab('chat')}>{chatTabLabel}</button>
-  <span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span>{chatDotLabel}</span>
+    onclick={() => selectTab('chat')}
+  >{chatTabLabel}<span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">{chatDotLabel}</span></span></button>
 </div>
 
 {#if activeCatalogueError}

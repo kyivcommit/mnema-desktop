@@ -305,15 +305,25 @@ main select:focus-visible {
   gap: 10px;
 }
 
-/* the per-role configured dot (Task 4, review P2-1): the small mark carries
- * the colour, the text beside it stays the ordinary readable ink — an
- * accent colour on the TEXT itself is not held to the same AA pair this
- * file already checks for `--ink`/`--ink-soft`, so the word carries the
- * accessible name and the mark alone carries the colour. */
+/* Task 9 (owner's ruling, live run 2026-09-10): the dot moved inside its own
+ * tab button, as its last child — mockup values (8×8, gap 9px), measured
+ * rather than the base `main button` rule's own 7px. */
+.mtab {
+  gap: 9px;
+}
+
+/* the per-role configured dot (Task 4, review P2-1; Task 9 moved it inside
+ * `.mtab`): the small mark carries the colour, the word beside it is now
+ * `sr-only` (Task 9) rather than the ordinary readable ink it used to be —
+ * an accent colour on the mark alone still carries the fact, and the word
+ * still carries the accessible name, just not to a sighted reader any more.
+ * `flex: none` (mockup `.sd`) keeps the mark from being asked to grow or
+ * shrink as a flex item of the button it now sits inside. */
 .mdot {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: none;
   font-family: var(--sans);
   font-weight: 500;
   font-style: normal;

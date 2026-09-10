@@ -336,7 +336,53 @@ for (const loc of ['en', 'uk'] as const) {
 // ---------------------------------------------------------------------------
 // Claim 4: Forget calls forget_key and re-reads model_settings; Removed and
 // NothingToRemove say different things.
+//
+// Task 9 (owner's ruling, live run 2026-09-10): the press no longer calls
+// `forget_key` itself — it opens an inline confirmation, and only the
+// confirmation's own button does. Both tests below now go through it.
 // ---------------------------------------------------------------------------
+
+test('forget_asks_before_calling_forget_key', async () => {
+  setLocale('en');
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  const forgetButton = screen.getByRole('button', { name: 'Forget' });
+
+  await fireEvent.click(forgetButton);
+
+  expect(forgetKey).not.toHaveBeenCalled();
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+  expect(screen.getByText(/Forget the saved key\?/)).toBeTruthy();
+
+  await fireEvent.click(screen.getByTestId('model-key-forget-cancel'));
+
+  expect(forgetKey).not.toHaveBeenCalled();
+  expect(screen.queryByTestId('model-key-forget-confirm')).toBeNull();
+  // Cancel returns focus to the control that opened the question.
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Forget' }));
+});
+
+// "Ask what disappears" (CLAUDE.md): the question is about the key group,
+// which stands regardless of which tab is open — Folders' own `removeQuestion`
+// closes on the existing per-tab rule `pendingEmbedding` already follows, and
+// this must too, or a Forget question opened under Embedding would still be
+// standing, and answerable, under Chat.
+test('a tab switch closes the open Forget question, without calling forget_key', async () => {
+  setLocale('en');
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  expect(screen.queryByTestId('model-key-forget-confirm')).toBeNull();
+  expect(forgetKey).not.toHaveBeenCalled();
+});
 
 test('Forget calls forget_key, re-reads model_settings, and Removed says so', async () => {
   setLocale('en');
@@ -349,10 +395,14 @@ test('Forget calls forget_key, re-reads model_settings, and Removed says so', as
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  await fireEvent.click(screen.getByTestId('model-key-forget-confirm'));
 
   await waitFor(() => expect(forgetKey).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(modelSettings).toHaveBeenCalledTimes(2)); // mount + the re-read Forget triggers
   await waitFor(() => expect(screen.getByText('The key was removed.')).toBeTruthy());
+  // Confirm moves focus onto the key group's first control — the Absent
+  // branch's own field, since the re-read above just confirmed the key gone.
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Key:')));
 });
 
 test('Forget calls forget_key, re-reads model_settings, and NothingToRemove says a different thing', async () => {
@@ -366,6 +416,7 @@ test('Forget calls forget_key, re-reads model_settings, and NothingToRemove says
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  await fireEvent.click(screen.getByTestId('model-key-forget-confirm'));
 
   await waitFor(() => expect(forgetKey).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.getByText('There was no key to remove.')).toBeTruthy());
@@ -598,6 +649,7 @@ test('a language switch after mount reaches the removal sentence', async () => {
   const { container } = renderModels();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
   await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  await fireEvent.click(screen.getByTestId('model-key-forget-confirm'));
   await waitFor(() => expect(screen.getByText('The key was removed.')).toBeTruthy());
 
   await switchTo('uk');
@@ -824,8 +876,12 @@ test('two named tabs; switching changes the select`s own options, both asserted 
   });
   await renderWith(settings());
 
-  expect(screen.getByTestId('model-tab-embedding').textContent).toBe('Embedding');
-  expect(screen.getByTestId('model-tab-chat').textContent).toBe('Chat');
+  // Task 9: the tab button's own textContent now also carries its dot's
+  // sr-only state word (`.mdot` moved inside `.mtab` as its last child) — the
+  // label itself is asserted with `toContain`, and the state word is exactly
+  // `tab_button_names_include_the_configured_state`'s own claim below.
+  expect(screen.getByTestId('model-tab-embedding').textContent).toContain('Embedding');
+  expect(screen.getByTestId('model-tab-chat').textContent).toContain('Chat');
   await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('false');
@@ -2878,6 +2934,30 @@ test('configuration_dots_use_their_own_role', async () => {
   expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured')).toBe('false');
   expect(screen.getByTestId('model-dot-embedding').textContent).toBe('Configured');
   expect(screen.getByTestId('model-dot-chat').textContent).toBe('Not configured');
+});
+
+// Task 9 (owner's ruling, live run 2026-09-10): the dot moved inside its own
+// tab button and the visible word beside it is gone — the button's ACCESSIBLE
+// name is where the state word has to survive, sr-only span and all. Whether
+// that span is actually invisible to a sighted reader is a computed-style
+// claim, guarded in `tokens.test.ts` instead — this test is only the name.
+test('tab_button_names_include_the_configured_state', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([entry('emb-1')]),
+    chat: catalogueOf([entry('chat-1')]),
+  });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+      embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0,
+      embeddingModel: 'emb-1', chatModel: null, searchTextArm: true, searchContentArm: true,
+    },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-dot-embedding')).toBeTruthy());
+
+  expect(screen.getByRole('button', { name: /Embedding.*Configured/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /Chat.*Not configured/ })).toBeTruthy();
 });
 
 // Review P2-2's own mechanism, on the embedding tab: the confirm question

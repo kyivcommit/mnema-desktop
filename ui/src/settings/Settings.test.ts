@@ -74,6 +74,10 @@ const modelSettings = vi.fn();
 // need to be trackable/overridable here rather than the fixed stubs every
 // other test in this file was content with.
 const setEmbeddingModel = vi.fn();
+// Task 9: `forget_question_survives_a_section_switch` drives a real Forget
+// press through the real `Settings` window, the same reason `setEmbeddingModel`
+// above is trackable rather than the fixed `vi.fn()` this used to be.
+const forgetKey = vi.fn();
 const providerModels = vi.fn();
 const listTree = vi.fn();
 const listSubfolders = vi.fn();
@@ -86,7 +90,7 @@ let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
-  forgetKey: vi.fn(),
+  forgetKey: (...a: unknown[]) => forgetKey(...a),
   providerModels: (...a: unknown[]) => providerModels(...a),
   setChatModel: vi.fn(),
   setEmbeddingModel: (...a: unknown[]) => setEmbeddingModel(...a),
@@ -140,6 +144,7 @@ beforeEach(() => {
   modelSettings.mockReset();
   modelSettings.mockResolvedValue(SETTINGS);
   setEmbeddingModel.mockReset();
+  forgetKey.mockReset();
   providerModels.mockReset();
   providerModels.mockResolvedValue({ entries: [], unreadable: 0, unreadableRecords: [] });
   // The empty listing every test in this file assumed before Task 10e made
@@ -353,10 +358,19 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // (review P2-1), each carrying its own accessible word — measured again
   // rather than hand-edited, the same rule every earlier version of this
   // string followed.
+  //
+  // Task 9 (owner's ruling, live run 2026-09-10): the dot moved INSIDE its own
+  // tab button as the button's last child, and the word beside it is now
+  // `sr-only` rather than ordinary readable ink — a sighted reader no longer
+  // sees it as a separate word at all, so "Embedding" and "Not configured" no
+  // longer read as two words with a space between them; `textContent` (which
+  // this clone reads, hidden text included) runs them together as one. Read
+  // off a real render rather than hand-edited, the same rule every earlier
+  // version of this string followed.
   expect(panel()?.textContent).toBe(
     ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.  Save    '
-    + ' Embedding Not configured Chat Not configured   The provider does not currently list any models for this role.'
+    + ' EmbeddingNot configured ChatNot configured   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
     + '      ',
   );
@@ -1510,4 +1524,27 @@ test('mutation_outcome_survives_a_section_switch', async () => {
   await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
   expect(screen.getByTestId('model-embedding-error').textContent).toContain(SENTENCE);
   expect(screen.getByTestId('model-index-failure')).toBeTruthy();
+});
+
+// Task 9 (owner's ruling, live run 2026-09-10): the Forget confirmation is a
+// question about the key group, which stands regardless of which section is
+// showing — `Models` is mounted for the window's life (F10), the same reason
+// the mutation outcome above survives the same round trip. Driven through the
+// REAL `Settings` window so the section switch itself is real too.
+test('forget_question_survives_a_section_switch', async () => {
+  setLocale('en'); // seed, do not inherit
+  modelSettings.mockResolvedValue({ ...SETTINGS, key: { kind: 'present' } });
+
+  render(Settings); // opens on Models by default
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  await waitFor(() => expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy());
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
+  await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+  expect(forgetKey).not.toHaveBeenCalled();
 });

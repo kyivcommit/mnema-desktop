@@ -920,11 +920,17 @@ describe('settings.css gives the DOM-only states a visual form', () => {
   // `--ink`/`--ink-soft` elsewhere in this file. Which model is actually
   // current is a fact `Models.test.ts` checks against the real component;
   // this only holds that the two dot states are told apart visually.
+  //
+  // Task 9 (owner's ruling, live run 2026-09-10): the dot moved INSIDE its own
+  // tab button, as its last child — the fixture is re-pointed to that shape
+  // rather than the two bare siblings it used to mount, so this guard keeps
+  // proving something true of the actual markup rather than of a layout the
+  // component no longer draws.
   it('marks a configuration dot by role', () => {
-    mount(`<main><div class="spane">
-      <span class="mdot" data-configured="true"><span class="mdot-mark"></span>a</span>
-      <span class="mdot" data-configured="false"><span class="mdot-mark"></span>b</span>
-    </div></main>`);
+    mount(`<main><div class="spane"><div class="mtabs">
+      <button type="button" class="mtab">a<span class="mdot" data-configured="true"><span class="mdot-mark"></span><span class="sr-only">configured</span></span></button>
+      <button type="button" class="mtab">b<span class="mdot" data-configured="false"><span class="mdot-mark"></span><span class="sr-only">not configured</span></span></button>
+    </div></div></main>`);
     const [ok, err] = document.querySelectorAll('.mdot-mark');
     // jsdom's `getComputedStyle` does not resolve `var(...)` — cssstyle hands
     // back the declared text verbatim, so this only proves the two states
@@ -945,6 +951,20 @@ describe('settings.css gives the DOM-only states a visual form', () => {
       expect(tokens.get('--ok'), `${name}: --ok must resolve to a different colour than --err`)
         .not.toBe(tokens.get('--err'));
     }
+  });
+
+  // Task 9: the tab dot's state word is `sr-only` now, not the ordinary
+  // readable ink it used to be. `differ()` against the button's own visible
+  // text proves the EXISTING `.sr-only` rule (`settings.css:106`) actually
+  // reaches an element placed inside `.mtab .mdot`, not merely that the class
+  // exists somewhere in the file.
+  it('hides the tab dot\'s state word from sighted view, inside the button', () => {
+    mount(`<main><div class="mtabs">
+      <button type="button" class="mtab">Embedding<span class="mdot" data-configured="true"><span class="mdot-mark"></span><span class="sr-only">Configured</span></span></button>
+    </div></main>`);
+    const label = document.querySelector('.mtab')!;
+    const hidden = document.querySelector('.mtab .sr-only')!;
+    differ(hidden, label, 'position');
   });
 
   it('dims an excluded folder', () => {

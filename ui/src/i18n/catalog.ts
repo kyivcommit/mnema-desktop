@@ -5,7 +5,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
   | 'models_key_change' | 'models_key_forget' | 'models_key_save' | 'models_key_cancel'
-  | 'models_key_removed' | 'models_key_nothing_to_remove'
+  | 'models_key_removed' | 'models_key_nothing_to_remove' | 'models_key_forget_confirm'
   | 'models_key_locked' | 'models_key_duplicate' | 'models_key_refused' | 'models_key_defect'
   | 'models_index_not_open' | 'models_index_read_failed'
   | 'models_load_failed'
@@ -210,6 +210,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // NothingToRemove is not a failure and is not "the key was removed" either.
     models_key_removed: 'Ключ видалено.',
     models_key_nothing_to_remove: 'Ключа й так не було.',
+    // Task 9 (owner's ruling, live run 2026-09-10): Forget now asks before it
+    // acts — the same non-modal-confirmation shape Folders' own removal
+    // question and the embedding discard question already use.
+    models_key_forget_confirm: 'Забути збережений ключ? Індекс і моделі залишаться, але запити до постачальника припиняться до нового ключа.',
     // KeyStoreFailure's four causes (models.rs:718-746), each naming the one
     // action its own doc comment names — never `reason`, which stays out of
     // this screen entirely. Locked stands for two situations and claims
@@ -1068,6 +1072,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_key_cancel: 'Cancel',
     models_key_removed: 'The key was removed.',
     models_key_nothing_to_remove: 'There was no key to remove.',
+    models_key_forget_confirm: 'Forget the saved key? The index and models stay, but requests to the provider stop until a new key is entered.',
     models_key_locked: 'The credential store did not answer. Unlock it, or allow access when the system asks for it, then open this window again.',
     models_key_duplicate: 'More than one credential is filed under this installation. Remove the duplicate in the system credential store.',
     models_key_refused: 'The credential store refused to answer. This build cannot tell what to do next.',

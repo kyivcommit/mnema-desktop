@@ -69,8 +69,12 @@ const HOUR_AGO = () => Math.floor(Date.now() / 1000) - 3600;
 
 // Computed here, never written out: the test machine's zone is not the CI
 // machine's, and the section formats in the machine's own zone on purpose.
+// Task 9 (owner remark, screenshot 2026-09-10 12:14): the time now follows
+// the date, one call with both `dateStyle` and `timeStyle` — the SAME call
+// `recency.ts` makes, so every caller below picks up the new format for
+// free rather than needing its own re-measurement.
 const dateIn = (loc: string, at: number) =>
-  new Intl.DateTimeFormat(loc, { dateStyle: 'long' }).format(new Date(at * 1000)).replace(/\.$/, '');
+  new Intl.DateTimeFormat(loc, { dateStyle: 'long', timeStyle: 'short' }).format(new Date(at * 1000));
 
 beforeEach(() => {
   cancelJob.mockReset();
@@ -234,6 +238,26 @@ test('the statcard states zero documents rather than an empty cell', async () =>
 
   await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
   expect(statcardValues()).toEqual(['0', dateIn('uk', at)]);
+});
+
+// Task 9 (owner remark, screenshot 2026-09-10 12:14): the time follows the
+// date now, in both places this value is read — the statcard's own cell and
+// `indexing_index_updated`'s sentence share one `formatIndexedDate` call
+// (`Scanning.svelte:76,103`), so proving the statcard carries the TIME part
+// proves both without a second, near-identical test.
+test('the statcard\'s updated cell carries the time as well as the date, in both locales', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 3, lastIndexedAt: at }));
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+
+  const timeIn = (loc: string) =>
+    new Intl.DateTimeFormat(loc, { timeStyle: 'short' }).format(new Date(at * 1000));
+  expect(statcardValues()).toEqual(['3', dateIn('uk', at)]);
+  expect(statcardValues()[1]).toContain(timeIn('uk'));
+
+  setLocale('en');
+  await tick();
+  expect(statcardValues()[1]).toContain(timeIn('en'));
 });
 
 test('the statcard\'s updated cell states the never sentence when nothing has ever grown the index', async () => {

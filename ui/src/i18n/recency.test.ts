@@ -91,13 +91,10 @@ describe('formatIndexedDate', () => {
   // machine.
   const AT = 1_700_000_000; // seconds, the unit `lastIndexedAt` arrives in
   const expected = (loc: string) =>
-    new Intl.DateTimeFormat(loc, { dateStyle: 'long' }).format(new Date(AT * 1000));
+    new Intl.DateTimeFormat(loc, { dateStyle: 'long', timeStyle: 'short' }).format(new Date(AT * 1000));
 
-  it('formats the timestamp as a date in the locale it is given', () => {
-    // `uk` against `expected('uk')` with its trailing stop stripped: F1's own
-    // test below covers the stripping itself in full, so this test's claim is
-    // narrower — the rest of the string is ICU's, verbatim.
-    expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk').replace(/\.$/, ''));
+  it('formats the timestamp as a date and time in the locale it is given', () => {
+    expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk'));
     expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
   });
 
@@ -114,32 +111,24 @@ describe('formatIndexedDate', () => {
   // is seconds, and a body that passed the number through unmultiplied would
   // render a date in January 1970 for every index ever built.
   it('reads its argument as seconds, not as milliseconds', () => {
-    const asMilliseconds = new Intl.DateTimeFormat('en', { dateStyle: 'long' }).format(new Date(AT));
+    const asMilliseconds = new Intl.DateTimeFormat('en', { dateStyle: 'long', timeStyle: 'short' }).format(new Date(AT));
     expect(formatIndexedDate(AT, 'en')).not.toBe(asMilliseconds);
     expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
   });
 
-  // F1 (measured live, 2026-09-04): `Intl.DateTimeFormat('uk', {dateStyle:
-  // 'long'})` ends its own string in «р.» (an abbreviation stop, part of the
-  // date itself, not a sentence's end), and `indexing_index_updated`
-  // (`catalog.ts`) wraps it in «Останнє оновлення: {date}.» with a full stop
-  // of its own — so the rendered sentence read «...1 вересня 2026 р..», two
-  // stops where a reader expects one. This function is the one place that can
-  // fix it for every caller, uk included: the sentence's own stop is the only
-  // one that survives.
-  it('carries no trailing stop, so the sentence around it supplies the only one', () => {
-    // RED against the un-fixed implementation: ICU's own uk long-date form
-    // ends in «р.», and the un-fixed function returned that verbatim.
+  // F1 (measured live, 2026-09-04; superseded 2026-09-10 — see the function's
+  // own comment): `Intl.DateTimeFormat('uk', {dateStyle: 'long'})` used to end
+  // its own string in «р.», adjacent to `indexing_index_updated`'s own full
+  // stop. Once the time follows the date, «р.» sits ahead of the time rather
+  // than at the end of the string — measured here, against the SAME call the
+  // function makes, rather than assumed: neither locale's combined form ends
+  // in a stop, because a `timeStyle: 'short'` value never does.
+  it('carries no trailing stop in either locale, because a short time never ends in one', () => {
     expect(formatIndexedDate(AT, 'uk').endsWith('.')).toBe(false);
-    expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk').replace(/\.$/, ''));
-  });
-
-  // `en`'s ICU form ends in a bare year with no stop at all
-  // (`expected('en')` — "September 4, 2026" — is unaffected either way), so
-  // this is the direction that catches a body stripping a trailing character
-  // unconditionally rather than only a trailing stop.
-  it('leaves a locale whose date carries no trailing stop unchanged', () => {
-    expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
+    expect(formatIndexedDate(AT, 'en').endsWith('.')).toBe(false);
+    expect(expected('uk').endsWith('.')).toBe(false);
     expect(expected('en').endsWith('.')).toBe(false);
+    expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk'));
+    expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
   });
 });
