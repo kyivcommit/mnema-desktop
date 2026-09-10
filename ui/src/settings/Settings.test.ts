@@ -364,13 +364,15 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // `sr-only` rather than ordinary readable ink — a sighted reader no longer
   // sees it as a separate word at all, so "Embedding" and "Not configured" no
   // longer read as two words with a space between them; `textContent` (which
-  // this clone reads, hidden text included) runs them together as one. Read
+  // this clone reads, hidden text included) runs them together, separated by
+  // the literal ", " review round 1 added so the button's ACCESSIBLE name
+  // reads as a comma-separated pair rather than one run-together word. Read
   // off a real render rather than hand-edited, the same rule every earlier
   // version of this string followed.
   expect(panel()?.textContent).toBe(
     ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.  Save    '
-    + ' EmbeddingNot configured ChatNot configured   The provider does not currently list any models for this role.'
+    + ' Embedding, Not configured Chat, Not configured   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
     + '      ',
   );

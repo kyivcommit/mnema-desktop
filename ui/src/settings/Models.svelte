@@ -79,6 +79,12 @@
   // asked" — the same non-modal-confirmation shape `pendingEmbedding` below
   // and Folders' own `removeQuestion` already use for an irreversible press.
   let forgetQuestion = $state(false);
+  // Review round 1, Minor 5: true from the moment Confirm starts its
+  // `forget_key` round until that round (and the refresh after it) has
+  // settled — mirrors `changeBusy` below, for the same reason: a second
+  // press cannot start a second, overlapping round while the first is still
+  // an open question the backend has not answered.
+  let forgetBusy = $state(false);
   // Bound so Cancel can put focus back on the exact control that opened the
   // question, rather than losing it to the document body.
   let forgetButtonEl = $state<HTMLButtonElement | undefined>(undefined);
@@ -128,6 +134,14 @@
       // a stale `writeOutcome` away with it, not only the read a command
       // itself triggered.
       writeOutcome = null;
+      // Review round 1, Important 2: a standing Forget question is a
+      // question about THIS key. A read that finds the key no longer
+      // `present` — Absent (the ordinary outcome of a confirmed Forget
+      // elsewhere) or Unreadable (a keychain relock mid-question) — answers
+      // it either way, and leaving `forgetQuestion` true would aim a stale
+      // question at whatever key shows up here NEXT, unasked, the moment the
+      // group is present-and-not-editing again.
+      if (s.key.kind !== 'present') forgetQuestion = false;
     } catch (e) {
       // A superseded read's rejection says nothing about the CURRENT state —
       // a newer read already settled, resolved or refused, and that answer is
@@ -205,19 +219,32 @@
   // The press asks; it forgets nothing. `forget_key` is called only from the
   // confirm button below.
   function askForget() {
+    if (forgetBusy) return;
     actionError = null;
     removal = null;
     forgetQuestion = true;
   }
 
   async function cancelForget() {
+    // Review round 1, Minor 5: guarded the same way `onModelSelect` guards
+    // `changeBusy` — a script-dispatched click is not stopped by `disabled`,
+    // only a real one is, so the busy check belongs in the handler too.
+    if (forgetBusy) return;
     forgetQuestion = false;
     await tick();
     forgetButtonEl?.focus();
   }
 
   async function confirmForget() {
-    forgetQuestion = false;
+    if (forgetBusy) return;
+    // Left standing (not cleared here) for the whole round: clearing it
+    // before the request settles put the ORIGINAL Forget button back on
+    // screen while `forget_key` was still in flight, and a second press
+    // could start a second, overlapping round with no `settingsSeq`-style
+    // stamp to tell which one's answer should win. `forgetBusy` disables
+    // both buttons the confirmation shows meanwhile; the question itself
+    // closes only once this round is done, in the `finally` below.
+    forgetBusy = true;
     actionError = null;
     try {
       const result = await forgetKey();
@@ -225,7 +252,10 @@
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
+    } finally {
+      forgetBusy = false;
     }
+    forgetQuestion = false;
     // Whatever the group shows now — ordinarily the Absent branch's key
     // field — is where focus belongs next; a stale ref to the button this
     // question replaced would be exactly the "claim outlives its guard"
@@ -959,19 +989,40 @@
           <button type="button" onclick={cancelEditing}>{cancelLabel}</button>
         {/if}
       </div>
-    {:else if forgetQuestion}
+    {:else if forgetQuestion && !keyFailure}
       <!-- Task 9: the same non-modal-confirmation shape as Folders'
            `removeConfirm` and the embedding discard question below — a
            sentence, then the one act and the one refusal, no third option
            between them. Replaces the Change/Forget row rather than sitting
            beside it: both buttons say "Forget" (the owner's ruling states the
            word verbatim for each), and a row that kept the original visible
-           too would leave two controls on screen answering to the same name. -->
+           too would leave two controls on screen answering to the same name.
+
+           Review round 1, Important 1: `&& !keyFailure`, not merely ordered
+           after it — a re-read that turns the key Unreadable while this
+           question stands (a keychain relock, `refresh()` runs on every
+           scan-ended) must not go on offering a live `forget_key` button over
+           a state Unreadable's OWN branch says nothing may be offered for.
+           `refresh()` already clears `forgetQuestion` on exactly that
+           transition (Important 2) — this guard is the belt to that braces:
+           the render itself cannot show this block for a key state it was
+           never asked about, regardless of whether every future writer of
+           `forgetQuestion` remembers to. -->
       <div class="group">
         <p data-testid="model-key-forget-confirm-question">{forgetConfirmQuestionLabel}</p>
         <div class="row">
-          <button type="button" data-testid="model-key-forget-confirm" onclick={confirmForget}>{forgetLabel}</button>
-          <button type="button" data-testid="model-key-forget-cancel" onclick={cancelForget}>{cancelLabel}</button>
+          <button
+            type="button"
+            data-testid="model-key-forget-confirm"
+            disabled={forgetBusy}
+            onclick={confirmForget}
+          >{forgetLabel}</button>
+          <button
+            type="button"
+            data-testid="model-key-forget-cancel"
+            disabled={forgetBusy}
+            onclick={cancelForget}
+          >{cancelLabel}</button>
         </div>
       </div>
     {:else if !keyFailure}
@@ -980,7 +1031,12 @@
            cannot back. -->
       <div class="row">
         <button type="button" onclick={startEditing}>{changeLabel}</button>
-        <button type="button" bind:this={forgetButtonEl} onclick={askForget}>{forgetLabel}</button>
+        <button
+          type="button"
+          bind:this={forgetButtonEl}
+          disabled={forgetBusy}
+          onclick={askForget}
+        >{forgetLabel}</button>
       </div>
     {/if}
     {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
@@ -1006,21 +1062,30 @@
        "Embedding, Configured", it is just nobody sighted who reads the second
        half any more. The per-role predicate itself is unchanged (review
        P2-1): read off `visibleModelFor('embedding')` alone, never off the
-       combined `ready` boolean below, which answers for the ACTIVE role only. -->
+       combined `ready` boolean below, which answers for the ACTIVE role only.
+
+       Review round 1, Important 3: the sr-only span's own text is `, {label}`,
+       not the bare word — without a literal separator the accessible name ran
+       the two halves together with nothing between them ("EmbeddingConfigured"),
+       which is not the sentence the comment above already claimed.
+
+       Review round 1, Minor 4: the visible label is its own `<span
+       class="mtab-label">` now, so a test can assert what a SIGHTED reader
+       sees, exactly, apart from the accessible-only half beside it. -->
   <button
     type="button"
     class="mtab"
     data-testid="model-tab-embedding"
     aria-pressed={activeTab === 'embedding'}
     onclick={() => selectTab('embedding')}
-  >{embeddingTabLabel}<span class="mdot" data-testid="model-dot-embedding" data-configured={embeddingDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">{embeddingDotLabel}</span></span></button>
+  ><span class="mtab-label">{embeddingTabLabel}</span><span class="mdot" data-testid="model-dot-embedding" data-configured={embeddingDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">, {embeddingDotLabel}</span></span></button>
   <button
     type="button"
     class="mtab"
     data-testid="model-tab-chat"
     aria-pressed={activeTab === 'chat'}
     onclick={() => selectTab('chat')}
-  >{chatTabLabel}<span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">{chatDotLabel}</span></span></button>
+  ><span class="mtab-label">{chatTabLabel}</span><span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">, {chatDotLabel}</span></span></button>
 </div>
 
 {#if activeCatalogueError}

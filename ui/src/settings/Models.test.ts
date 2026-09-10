@@ -384,6 +384,91 @@ test('a tab switch closes the open Forget question, without calling forget_key',
   expect(forgetKey).not.toHaveBeenCalled();
 });
 
+// Review round 1, Important 1: a re-read that turns the key Unreadable while
+// the question stands (a keychain relock — `refresh()` runs on every
+// scan-ended, `:173`) must not go on offering a live `forget_key` button over
+// a state the Unreadable branch's own comment says nothing may be offered
+// for.
+test('a re-read that finds the key unreadable closes a standing Forget question', async () => {
+  setLocale('en');
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+
+  modelSettings.mockResolvedValue(settings({
+    key: { kind: 'unreadable', cause: 'locked', reason: 'LEAK-TOKEN-RELOCK' },
+  }));
+  emit(endedScan());
+
+  await waitFor(() => expect(screen.getByTestId('model-key-failure')).toBeTruthy());
+  expect(screen.queryByTestId('model-key-forget-confirm')).toBeNull();
+  expect(forgetKey).not.toHaveBeenCalled();
+});
+
+// Review round 1, Important 2: nothing used to clear `forgetQuestion` when a
+// re-read found the key Absent — `showInput` hid the question (Absent shows
+// the key field, not the Change/Forget row), but the flag stayed `true`, so
+// saving a NEW key brought the question back, unasked, aimed at a key nobody
+// pressed Forget on.
+test('a question left standing through an Absent read does not reappear once a new key is saved', async () => {
+  setLocale('en');
+  modelSettings
+    .mockResolvedValueOnce(settings({ key: { kind: 'present' } })) // mount
+    .mockResolvedValueOnce(settings({ key: { kind: 'absent' } })); // the scan-ended re-read below
+  setKey.mockResolvedValue({ balance: { kind: 'notStated' } });
+
+  renderModels();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+
+  emit(endedScan()); // the key turns Absent out from under the standing question
+  await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
+  expect(screen.queryByTestId('model-key-forget-confirm')).toBeNull();
+
+  modelSettings.mockResolvedValueOnce(settings({ key: { kind: 'present' } })); // the save's own re-read
+  await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: 'sk-new-key' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  expect(screen.queryByTestId('model-key-forget-confirm')).toBeNull();
+  expect(forgetKey).not.toHaveBeenCalled();
+});
+
+// Review round 1, Minor 5: Confirm used to clear `forgetQuestion` before
+// `forget_key` even resolved, putting the ORIGINAL Forget button back on
+// screen while the first round was still in flight — a second press could
+// start a second, overlapping round.
+test('two rapid Confirm presses call forget_key only once', async () => {
+  setLocale('en');
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+  let resolveForget!: (r: { kind: 'removed' }) => void;
+  forgetKey.mockImplementation(() => new Promise((res) => { resolveForget = res; }));
+
+  renderModels();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Forget' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+  const confirmButton = screen.getByTestId('model-key-forget-confirm');
+  await fireEvent.click(confirmButton);
+  await waitFor(() => expect(forgetKey).toHaveBeenCalledTimes(1));
+
+  // The confirmation is still standing — `forgetBusy` disables its own
+  // button rather than tearing the question down mid-round — so the same
+  // button is pressed again while `forget_key` is still unresolved.
+  expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
+  expect((screen.getByTestId('model-key-forget-confirm') as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByTestId('model-key-forget-confirm'));
+  expect(forgetKey).toHaveBeenCalledTimes(1);
+
+  modelSettings.mockResolvedValueOnce(settings({ key: { kind: 'absent' } }));
+  resolveForget({ kind: 'removed' });
+  await waitFor(() => expect(screen.getByText('The key was removed.')).toBeTruthy());
+  expect(forgetKey).toHaveBeenCalledTimes(1);
+});
+
 test('Forget calls forget_key, re-reads model_settings, and Removed says so', async () => {
   setLocale('en');
   modelSettings
@@ -878,10 +963,11 @@ test('two named tabs; switching changes the select`s own options, both asserted 
 
   // Task 9: the tab button's own textContent now also carries its dot's
   // sr-only state word (`.mdot` moved inside `.mtab` as its last child) — the
-  // label itself is asserted with `toContain`, and the state word is exactly
+  // VISIBLE label lives in its own `.mtab-label` span, asserted exactly here
+  // (review round 1, Minor 4); the accessible name's other half is exactly
   // `tab_button_names_include_the_configured_state`'s own claim below.
-  expect(screen.getByTestId('model-tab-embedding').textContent).toContain('Embedding');
-  expect(screen.getByTestId('model-tab-chat').textContent).toContain('Chat');
+  expect(screen.getByTestId('model-tab-embedding').querySelector('.mtab-label')?.textContent).toBe('Embedding');
+  expect(screen.getByTestId('model-tab-chat').querySelector('.mtab-label')?.textContent).toBe('Chat');
   await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
   expect(screen.getByTestId('model-tab-embedding').getAttribute('aria-pressed')).toBe('true');
   expect(screen.getByTestId('model-tab-chat').getAttribute('aria-pressed')).toBe('false');
@@ -2994,8 +3080,11 @@ test('configuration_dots_use_their_own_role', async () => {
 
   expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe('true');
   expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured')).toBe('false');
-  expect(screen.getByTestId('model-dot-embedding').textContent).toBe('Configured');
-  expect(screen.getByTestId('model-dot-chat').textContent).toBe('Not configured');
+  // Review round 1, Important 3: the sr-only span's own text is now `, {word}`
+  // — the literal separator the button's accessible name needs — so the
+  // dot's OWN textContent carries the comma too.
+  expect(screen.getByTestId('model-dot-embedding').textContent).toBe(', Configured');
+  expect(screen.getByTestId('model-dot-chat').textContent).toBe(', Not configured');
 });
 
 // Task 9 (owner's ruling, live run 2026-09-10): the dot moved inside its own
@@ -3018,8 +3107,12 @@ test('tab_button_names_include_the_configured_state', async () => {
   }));
   await waitFor(() => expect(screen.getByTestId('model-dot-embedding')).toBeTruthy());
 
-  expect(screen.getByRole('button', { name: /Embedding.*Configured/ })).toBeTruthy();
-  expect(screen.getByRole('button', { name: /Chat.*Not configured/ })).toBeTruthy();
+  // Review round 1, Important 3/Minor 4: tightened to the comma the sr-only
+  // span's own text now supplies — `.*` between the two halves matched the
+  // EMPTY gap too, which is exactly what the bug left before the separator
+  // was added (`EmbeddingConfigured`, no comma, no space).
+  expect(screen.getByRole('button', { name: /Embedding\s*,\s*Configured/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /Chat\s*,\s*Not configured/ })).toBeTruthy();
 });
 
 // Review P2-2's own mechanism, on the embedding tab: the confirm question

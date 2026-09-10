@@ -313,22 +313,21 @@ main select:focus-visible {
 }
 
 /* the per-role configured dot (Task 4, review P2-1; Task 9 moved it inside
- * `.mtab`): the small mark carries the colour, the word beside it is now
- * `sr-only` (Task 9) rather than the ordinary readable ink it used to be —
- * an accent colour on the mark alone still carries the fact, and the word
- * still carries the accessible name, just not to a sighted reader any more.
- * `flex: none` (mockup `.sd`) keeps the mark from being asked to grow or
- * shrink as a flex item of the button it now sits inside. */
+ * `.mtab`): the small mark carries the colour, and the accessible word beside
+ * it is `sr-only` (Task 9) rather than the ordinary readable ink it used to
+ * be. `flex: none` (mockup `.sd`) keeps the mark from being asked to grow or
+ * shrink as a flex item of the button it now sits inside.
+ *
+ * Review round 1, Minor 6: `font-family`/`font-weight`/`font-style`/
+ * `font-size`/`color` are gone — this element's only text is `sr-only` now,
+ * so none of them has had any visual effect since Task 9 moved the word off
+ * screen, and a font rule with only some of the triple set is exactly what
+ * the font-grammar guard above (tokens.test.ts) exists to catch. */
 .mdot {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: none;
-  font-family: var(--sans);
-  font-weight: 500;
-  font-style: normal;
-  font-size: 12px;
-  color: var(--ink-soft);
 }
 
 .mdot-mark {

@@ -263,9 +263,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_not_chosen: 'Модель ще не обрано.',
     models_selection_unknown: 'Поточна модель невідома.',
     models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
-    // The per-role configured dot (review P2-1) — its accessible name IS one
-    // of these three words; the colour is a visual reinforcement of the same
-    // fact, not a second source of it.
+    // The per-role configured dot (review P2-1). Task 9 moved the dot inside
+    // its own tab button, so one of these three words is now the SECOND half
+    // of the TAB BUTTON's accessible name ("Ембединг, Налаштовано"), sr-only
+    // beside a sighted reader's own "Ембединг" — not the dot's own name, which
+    // no longer exists apart from the button that carries it; the colour is
+    // still a visual reinforcement of the same fact, not a second source of it.
     models_dot_configured: 'Налаштовано',
     models_dot_not_configured: 'Не налаштовано',
     models_dot_unknown: 'Невідомо',
