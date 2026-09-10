@@ -6,21 +6,32 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/pr10f-settings.sh
 
-# Not the `writeOutcome = { kind: 'unknown', ... }` line itself — that write
-# is always superseded, in this very catch block, by the `refresh()` call
-# right after it: a successful re-read (which is what this test's second
-# `modelSettings()` mock is) unconditionally sets `writeOutcome = null`, so
-# whatever this line held never survives to render and mutating it here
-# reports STILL GREEN (checked). The line that actually reaches the screen
-# unrebutted is the one AFTER `refresh()` settles — so this restores the
-# just-picked model there instead, unconditionally, the same shape the case
-# table names.
+# NOT the `writeOutcome = { kind: 'unknown', ... }` line itself when the
+# recovery re-read SUCCEEDS (`failed_adoption_does_not_restore_cached_model`
+# below) — that write is superseded, in this very catch block, by the
+# `refresh()` call right after it: a successful re-read unconditionally sets
+# `writeOutcome = null`, so whatever this line held never survives to render
+# and mutating it here against THAT test reports STILL GREEN (checked, PR
+# 10f Task 7 first pass). The line that actually reaches the screen
+# unrebutted there is the one AFTER `refresh()` settles — so this case
+# restores the just-picked model at that point instead, unconditionally.
 case_ "Models.svelte: a rejected adoption restores the just-picked model anyway" \
   ui/src/settings/Models.svelte \
   "s~      await refresh\(\)\.catch\(\(\) => \{\}\);\n      jobRunning = await jobStatus\(\)~      await refresh().catch(() => {});\n      writeOutcome = { kind: 'acknowledged', role: 'embedding', model };\n      jobRunning = await jobStatus()~" \
   "writeOutcome = { kind: 'acknowledged', role: 'embedding', model };
       jobRunning = await jobStatus()" \
   src/settings/Models.test.ts 'failed_adoption_does_not_restore_cached_model' runner=vitest
+
+# The counter-example the case above cannot reach, discharged rather than
+# left disclosed: when the recovery re-read ALSO rejects, `refresh()`'s own
+# catch branch never touches `writeOutcome` (only its success branch resets
+# it), so the write's own `unknown` line IS what stays on screen — this
+# mutates that line directly.
+case_ "Models.svelte: a rejected adoption whose own re-read also fails restores a cached model anyway" \
+  ui/src/settings/Models.svelte \
+  "s~      writeOutcome = \{ kind: 'unknown', role: 'embedding' \};~      writeOutcome = { kind: 'acknowledged', role: 'embedding', model };~" \
+  "writeOutcome = { kind: 'acknowledged', role: 'embedding', model };" \
+  src/settings/Models.test.ts 'a rejected adoption whose own re-read also fails does not restore any cached model' runner=vitest
 
 case_ "Models.svelte: a failed refresh erases the retirement report" \
   ui/src/settings/Models.svelte \

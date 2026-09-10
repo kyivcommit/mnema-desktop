@@ -2553,6 +2553,35 @@ test('failed_adoption_does_not_restore_cached_model', async () => {
   expect(screen.queryByText(/PRIVATE-DIAGNOSTIC/)).toBeNull();
 });
 
+// The other counter-example the test above cannot reach: the recovery
+// re-read `commitEmbedding`'s catch block awaits does not merely come back
+// `unreadable`, it REJECTS outright. `refresh()`'s own catch branch never
+// touches `writeOutcome` (only its success branch resets it to `null`), so
+// whatever the write's own catch set `writeOutcome` to is what stays on
+// screen with nothing left to reconcile it — this is the one scenario
+// where a mutant that has the write's catch restore the just-picked (or
+// any cached) model instead of `unknown` is actually OBSERVABLE: the test
+// above's own re-read SUCCEEDS (as `unreadable`), so `refresh()` still
+// resets `writeOutcome` to `null` there and `currentEmbeddingModel`
+// (derived from `settings.index.kind === 'read'`) decides the outcome
+// instead, never crossing the write's own line at all.
+test('a rejected adoption whose own re-read also fails does not restore any cached model', async () => {
+  const SENTENCE = 'Embeddings were removed; adoption failed.';
+  setEmbeddingModel.mockRejectedValue(new Error(SENTENCE));
+  await renderOnModel(); // mount succeeds — settings holds a model WITH vectors (emb-1)
+  modelSettings.mockRejectedValue(new Error('model_settings unreachable')); // the recovery re-read itself fails
+
+  await pickModel('emb-2');
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+
+  await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-error').textContent).toBe(SENTENCE);
+  // Neither model — the one the (now stale) read named, nor the one just
+  // picked — is shown as current: the write's own `unknown` outcome is what
+  // a failed recovery re-read leaves standing.
+  expect((screen.getByTestId('model-selection') as HTMLSelectElement).value).toBe('');
+});
+
 // The other half of the same rule: a command that SUCCEEDS must not be
 // reported as a rejection just because the read that follows it fails
 // outright (a plain IPC rejection, not an `Unreadable` index) — command and
