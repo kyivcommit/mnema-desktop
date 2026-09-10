@@ -977,10 +977,18 @@ test('refused_models_are_not_options', async () => {
   mockCatalogues({
     embedding: catalogueOf([
       entry('acc-1', { name: 'Accepted One' }),
+      // Review round 1, Important 1: `bad-3` (the lone `noTextOutput`, count
+      // 1) appears BEFORE either `inputTooSmall` entry (count 2) on purpose —
+      // first-appearance order alone would put `bad-3`'s reason first, and
+      // only the count-descending comparator puts it second. A fixture that
+      // put the higher-count reason first too could not tell "sorted by
+      // count" from "sorted by appearance, which happens to agree here" —
+      // deleting the comparator left this same assertion green before this
+      // reorder.
+      entry('bad-3', { name: 'No Text', refusal: { kind: 'noTextOutput' } }),
       entry('bad-1', { name: 'Too Small A', refusal: { kind: 'inputTooSmall', limit: 100, floor: 2048 } }),
       entry('acc-2', { name: 'Accepted Two' }),
       entry('bad-2', { name: 'Too Small B', refusal: { kind: 'inputTooSmall', limit: 200, floor: 2048 } }),
-      entry('bad-3', { name: 'No Text', refusal: { kind: 'noTextOutput' } }),
     ]),
   });
   await renderWith(settings());
@@ -997,10 +1005,64 @@ test('refused_models_are_not_options', async () => {
 
   // Two distinct reasons: the two `inputTooSmall` entries share the same
   // floor and fold into one line (count 2), `noTextOutput` gets its own
-  // (count 1) — ordered by count descending.
+  // (count 1) — ordered by count descending, NOT by which one this build
+  // met first in the catalogue (the fixture above deliberately disagrees
+  // with count order on appearance order alone).
   const reasons = screen.getAllByTestId('model-hidden-reason').map((el) => el.textContent);
   expect(reasons).toEqual([
     '2 hidden: input limit below 2048 tokens',
+    '1 hidden: the model outputs no text',
+  ]);
+});
+
+// Review round 1, Minor 5: nothing above gives two refused entries the SAME
+// id, so "two records sharing an id both count" (Task 8 brief) was asserted
+// nowhere — a `hiddenReasons` that counted distinct ids instead of raw
+// entries would have passed every test above just the same.
+test('two refused entries sharing the same id both count toward their reason', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('vendor/twin', { name: 'First listing', refusal: { kind: 'noStatedLimit' } }),
+      entry('vendor/twin', { name: 'Second listing', refusal: { kind: 'noStatedLimit' } }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-hidden-reason')).toBeTruthy());
+
+  expect(optionsFor('vendor/twin').length).toBe(0);
+  expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
+    '2 hidden: the provider states no input limit',
+  );
+});
+
+// Review round 1, Important 2: no fixture covered a catalogue that is not
+// EMPTY (`cat.entries.length > 0`) but has nothing SELECTABLE left in it
+// (`selectableEntries.length === 0`) — so the render guard silently
+// switching from the former to the latter dropped every hidden-reason line
+// (and the select itself) with no test noticing.
+test('an all-refused catalogue still shows the select, placeholder only, and every hidden-reason line', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('bad-1', { name: 'Too Small', refusal: { kind: 'inputTooSmall', limit: 100, floor: 2048 } }),
+      entry('bad-2', { name: 'No Text', refusal: { kind: 'noTextOutput' } }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(screen.getByTestId('model-selection')).toBeTruthy());
+
+  // Not the "provider lists none" sentence — the provider DID list models,
+  // this build refuses all of them, and those are different claims.
+  expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
+
+  // The select still renders — nothing but the placeholder, since every
+  // entry offered is refused.
+  const options = [...modelSelect().querySelectorAll('option')];
+  expect(options.length).toBe(1);
+  expect(options[0].value).toBe('');
+
+  const reasons = screen.getAllByTestId('model-hidden-reason').map((el) => el.textContent);
+  expect(reasons).toEqual([
+    '1 hidden: input limit below 2048 tokens',
     '1 hidden: the model outputs no text',
   ]);
 });

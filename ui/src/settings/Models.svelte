@@ -545,14 +545,25 @@
     }
   }
 
-  // The options the select actually offers: `refusal === null` only.
-  // Case-sensitive to nothing about locale — an entry's `refusal` field does
-  // not change on a language switch, so unlike `hiddenReasons` below this
-  // needs no `void $locale` of its own to stay live.
+  // Review round 1, Minor 3: `selectableEntries` and `hiddenReasons` used to
+  // read this off two SEPARATE conditions (`refusal === null` and
+  // `!entry.refusal`) that only happen to agree because `ModelEntry.refusal`
+  // is typed as `ModelRefusal | null` and every object is truthy — any wire
+  // value this build did not expect (an empty object, say) would hide the
+  // entry from the select while `hiddenReasons` silently skipped it too,
+  // with no line explaining where it went. One predicate now, read by both.
+  function isRefused(entry: ModelEntry): entry is ModelEntry & { refusal: ModelRefusal } {
+    return entry.refusal !== null;
+  }
+
+  // The options the select actually offers: unrefused entries only.
+  // Indifferent to locale — an entry's `refusal` field does not change on a
+  // language switch, so unlike `hiddenReasons` below this needs no
+  // `void $locale` of its own to stay live.
   const selectableEntries = $derived.by(() => {
     const cat = activeCatalogue;
     if (!cat) return [];
-    return cat.entries.filter((entry: ModelEntry) => entry.refusal === null);
+    return cat.entries.filter((entry: ModelEntry) => !isRefused(entry));
   });
 
   // `void $locale` here, not on `hiddenReasonLabel`/`unreadableRecordLabel`
@@ -563,27 +574,29 @@
   // happen at all (`t()` itself reads `get(locale)` non-reactively,
   // `i18n/index.ts:11`).
   //
-  // Grouped by `hiddenReasonKey`, in FIRST-APPEARANCE order per group — a
-  // `Map` preserves insertion order, so the first entry reaching a new key
-  // fixes where its line sorts before count is even known. Two records
-  // sharing an id both count, same as they both would have as two separate
-  // disabled options before this ruling — no dedup here either.
+  // Grouped by `hiddenReasonKey`. Two records sharing an id both count, same
+  // as they both would have as two separate disabled options before this
+  // ruling — no dedup here either.
   const hiddenReasons = $derived.by(() => {
     void $locale;
     const cat = activeCatalogue;
     if (!cat) return [];
-    const groups = new Map<string, { refusal: ModelRefusal; count: number; firstIndex: number }>();
-    cat.entries.forEach((entry: ModelEntry, index: number) => {
-      if (!entry.refusal) return;
+    const groups = new Map<string, { refusal: ModelRefusal; count: number }>();
+    cat.entries.forEach((entry: ModelEntry) => {
+      if (!isRefused(entry)) return;
       const key = hiddenReasonKey(entry.refusal);
       const existing = groups.get(key);
       if (existing) existing.count += 1;
-      else groups.set(key, { refusal: entry.refusal, count: 1, firstIndex: index });
+      else groups.set(key, { refusal: entry.refusal, count: 1 });
     });
-    // Order: count descending, then first appearance — the owner's ruling,
-    // verbatim.
+    // Order: count descending — the owner's ruling. Ties keep first-
+    // appearance order for free and need no field or comparator of their
+    // own for it (review round 1, Minor 4): `Map` iterates in insertion
+    // order, and `Array.prototype.sort` has been a STABLE sort since
+    // ES2019 (all engines this build targets), so entries tied on count
+    // never move relative to each other.
     return [...groups.entries()]
-      .sort(([, a], [, b]) => b.count - a.count || a.firstIndex - b.firstIndex)
+      .sort(([, a], [, b]) => b.count - a.count)
       .map(([key, g]) => ({ key, label: hiddenReasonLabel(g.refusal, g.count) }));
   });
 
