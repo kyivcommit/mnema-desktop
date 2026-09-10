@@ -16,9 +16,9 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_selection_absent'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
-  | 'models_refusal_input_too_small' | 'models_refusal_no_stated_limit'
-  | 'models_refusal_limit_not_understood' | 'models_refusal_no_stated_output_modalities'
-  | 'models_refusal_no_text_output' | 'models_entry_reason_separator'
+  | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
+  | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
+  | 'models_hidden_no_text_output'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -273,21 +273,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // promise the list is complete on its own — this sentence is the promise,
     // and it is absent exactly when the count is zero.
     models_catalogue_unreadable: '{count, plural, one {# запис не вдалося прочитати} few {# записи не вдалося прочитати} many {# записів не вдалося прочитати} other {# записів не вдалося прочитати}}.',
-    // `Refusal`'s five variants (catalogue.rs) — one sentence each, fixed
-    // catalogue text rather than the provider's own words: see
-    // `Models.svelte`'s `refusalReason` for why `raw` is not interpolated
-    // into the three variants that carry it.
-    models_refusal_input_too_small: 'Ця модель заявляє ліміт входу {limit} токенів — менше за поріг {floor}, потрібний цій програмі.',
-    models_refusal_no_stated_limit: 'Постачальник не вказує ліміт входу цієї моделі.',
-    models_refusal_limit_not_understood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
-    models_refusal_no_stated_output_modalities: 'Постачальник не вказує, що видає ця модель.',
-    models_refusal_no_text_output: 'Постачальник заявляє, що ця модель не видає текст.',
-    // The same seam as the labels above, one row lower and never reached by the
-    // live run: a greyed model's name and the sentence saying why it cannot be
-    // chosen are two inline spans, so they read as «Назва моделі Постачальник не
-    // вказує ліміт входу…» — one phrase. The dash belongs to neither of them, so
-    // it is its own string rather than a prefix inside five reason sentences.
-    models_entry_reason_separator: '—',
+    // Owner's ruling (live run, 2026-09-10): `Refusal`'s five variants no
+    // longer render inline on a disabled option — the entry disappears from
+    // the select outright, and one of these renders below it per DISTINCT
+    // reason, with the count of entries it folded together. `{count}` and
+    // `{floor}` are always read off the fixture/build data, never a UI
+    // literal — see `Models.svelte`'s `hiddenReasonLabel`.
+    models_hidden_input_too_small: 'Приховано {count}: ліміт входу менший за {floor} токенів',
+    models_hidden_no_stated_limit: 'Приховано {count}: постачальник не вказує ліміт входу',
+    models_hidden_limit_not_understood: 'Приховано {count}: ліміт входу у форматі, який ця збірка не читає',
+    models_hidden_no_stated_output_modalities: 'Приховано {count}: постачальник не вказує, що видає модель',
+    models_hidden_no_text_output: 'Приховано {count}: модель не видає текст',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
     // unreadable" points at something (Task 2 review, item 4).
@@ -1093,12 +1089,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_dot_unknown: 'Unknown',
     models_catalogue_empty: 'The provider does not currently list any models for this role.',
     models_catalogue_unreadable: '{count, plural, one {# record could not be read} other {# records could not be read}}.',
-    models_refusal_input_too_small: 'This model states an input limit of {limit} tokens, under the {floor} this application requires.',
-    models_refusal_no_stated_limit: 'The provider does not state an input limit for this model.',
-    models_refusal_limit_not_understood: 'The provider states an input limit in a shape this build cannot read.',
-    models_refusal_no_stated_output_modalities: 'The provider does not state what this model outputs.',
-    models_refusal_no_text_output: 'The provider states that this model does not output text.',
-    models_entry_reason_separator: '—',
+    models_hidden_input_too_small: '{count} hidden: input limit below {floor} tokens',
+    models_hidden_no_stated_limit: '{count} hidden: the provider states no input limit',
+    models_hidden_limit_not_understood: '{count} hidden: input limit in a format this build cannot read',
+    models_hidden_no_stated_output_modalities: '{count} hidden: the provider does not say what the model outputs',
+    models_hidden_no_text_output: '{count} hidden: the model outputs no text',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',

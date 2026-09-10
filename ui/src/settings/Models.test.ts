@@ -911,6 +911,97 @@ test('two provider records sharing one id render two options and leave the secti
 });
 
 // ---------------------------------------------------------------------------
+// Task 8 (owner's ruling, live run, 2026-09-10): a refused entry no longer
+// renders as a disabled option — it disappears from the select outright, and
+// one line per DISTINCT refusal reason names how many entries it folded
+// together, below the select.
+// ---------------------------------------------------------------------------
+
+test('refused_models_are_not_options', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('acc-1', { name: 'Accepted One' }),
+      entry('bad-1', { name: 'Too Small A', refusal: { kind: 'inputTooSmall', limit: 100, floor: 2048 } }),
+      entry('acc-2', { name: 'Accepted Two' }),
+      entry('bad-2', { name: 'Too Small B', refusal: { kind: 'inputTooSmall', limit: 200, floor: 2048 } }),
+      entry('bad-3', { name: 'No Text', refusal: { kind: 'noTextOutput' } }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
+
+  // Exactly the two accepted entries plus the placeholder — nothing refused
+  // stands in as an option, disabled or otherwise.
+  const options = [...modelSelect().querySelectorAll('option')];
+  expect(options.length).toBe(3);
+  expect(options.filter((o) => o.disabled && o.value !== '').length).toBe(0);
+  expect(optionsFor('bad-1').length).toBe(0);
+  expect(optionsFor('bad-2').length).toBe(0);
+  expect(optionsFor('bad-3').length).toBe(0);
+
+  // Two distinct reasons: the two `inputTooSmall` entries share the same
+  // floor and fold into one line (count 2), `noTextOutput` gets its own
+  // (count 1) — ordered by count descending.
+  const reasons = screen.getAllByTestId('model-hidden-reason').map((el) => el.textContent);
+  expect(reasons).toEqual([
+    '2 hidden: input limit below 2048 tokens',
+    '1 hidden: the model outputs no text',
+  ]);
+});
+
+// The floor above is data from the fixture, never a UI literal — proved by
+// changing only the floor and watching the hidden line change with it.
+test('refused_models_are_not_options: the floor in the hidden line is read from the fixture, not a literal', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('acc-1', { name: 'Accepted One' }),
+      entry('bad-1', { name: 'Too Small A', refusal: { kind: 'inputTooSmall', limit: 100, floor: 4096 } }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
+
+  expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
+    '1 hidden: input limit below 4096 tokens',
+  );
+});
+
+// A confirmed model the catalogue still lists, but now refuses: it is
+// indistinguishable, on the select, from a model the provider retired
+// outright — it shows through the existing absent-id placeholder path
+// (`a confirmed model absent from the catalogue gets its own placeholder
+// option` below is the retired-model half of this claim) — and the
+// hidden-reason line still counts it, because it really is one of the
+// entries this build refused.
+test('a_refused_confirmed_model_shows_as_absent', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('confirmed-model', { name: 'Confirmed', refusal: { kind: 'noStatedLimit' } }),
+      entry('acc-1', { name: 'Accepted' }),
+    ]),
+  });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: {
+      kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+      embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'confirmed-model', chatModel: null,
+      searchTextArm: true, searchContentArm: true,
+    },
+  }));
+  await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
+
+  expect(modelSelect().value).toBe('confirmed-model');
+  expect(optionsFor('confirmed-model').length).toBe(1); // the placeholder, not a normal option too
+  const placeholder = optionFor('confirmed-model');
+  expect(placeholder.disabled).toBe(true);
+  expect(placeholder.textContent).toContain('confirmed-model');
+
+  expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
+    '1 hidden: the provider states no input limit',
+  );
+});
+
+// ---------------------------------------------------------------------------
 // The green dot: provider ∧ key ∧ a chosen embedding model, fail-safe on
 // each missing in turn — three separate fixtures, because a fixture that
 // drops two at once cannot tell which one the code actually reads.
@@ -1286,7 +1377,7 @@ test('a catalogue of nothing but unreadable records does not also claim the prov
 // and not taught to `sampleRefusal`/`sampleRecordId` fails this test with a
 // message naming exactly what to do, rather than passing silently — and a
 // variant taught here but never given a render arm in `Models.svelte` fails
-// just as loudly, because `refusalReason`/`unreadableRecordLabel` throw
+// just as loudly, because `hiddenReasonLabel`/`unreadableRecordLabel` throw
 // rather than fall through.
 //
 // `Balance` (`crates/mnema-provider/src/probe.rs`) is the third discriminant
@@ -1342,7 +1433,7 @@ async function renderInLocale(loc: 'uk' | 'en', s: ModelSettings) {
 
 // Review P1-1: distinctness is not correspondence. The old form asserted only
 // `new Set(texts).size === kinds.length`, so swapping two arms of
-// `refusalReason` — `noStatedOutputModalities` ↔ `noTextOutput` — left the
+// `hiddenReasonLabel` — `noStatedOutputModalities` ↔ `noTextOutput` — left the
 // suite at 62 passed: the sentences were still distinct, merely attached to
 // the wrong variants. `catalogue.rs:228-236` keeps those two apart precisely
 // "so a provider who renames or drops either field cannot make this code
@@ -1355,20 +1446,27 @@ async function renderInLocale(loc: 'uk' | 'en', s: ModelSettings) {
 // So: a kind → sentence table, per locale, asserted with `toBe`. The variant
 // LIST still comes from Rust, so a new variant fails the lookup loudly rather
 // than being quietly excused from the table.
-const REFUSAL_SENTENCES: Record<'en' | 'uk', Record<string, string>> = {
+//
+// Owner's ruling (live run, 2026-09-10): a refused entry no longer renders
+// inline at all — it disappears from the select, and this sentence (with
+// the count of entries it folded together) is what surfaces on its own
+// `model-hidden-reason` line instead. `sampleRefusal`'s `inputTooSmall`
+// fixes `floor` at 2048, and every kind below appears exactly once per
+// fixture, so `count` is always 1 here.
+const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number) => string>> = {
   en: {
-    inputTooSmall: 'This model states an input limit of 100 tokens, under the 2048 this application requires.',
-    noStatedLimit: 'The provider does not state an input limit for this model.',
-    limitNotUnderstood: 'The provider states an input limit in a shape this build cannot read.',
-    noStatedOutputModalities: 'The provider does not state what this model outputs.',
-    noTextOutput: 'The provider states that this model does not output text.',
+    inputTooSmall: (count) => `${count} hidden: input limit below 2048 tokens`,
+    noStatedLimit: (count) => `${count} hidden: the provider states no input limit`,
+    limitNotUnderstood: (count) => `${count} hidden: input limit in a format this build cannot read`,
+    noStatedOutputModalities: (count) => `${count} hidden: the provider does not say what the model outputs`,
+    noTextOutput: (count) => `${count} hidden: the model outputs no text`,
   },
   uk: {
-    inputTooSmall: 'Ця модель заявляє ліміт входу 100 токенів — менше за поріг 2048, потрібний цій програмі.',
-    noStatedLimit: 'Постачальник не вказує ліміт входу цієї моделі.',
-    limitNotUnderstood: 'Постачальник вказує ліміт входу у форматі, який ця збірка не вміє прочитати.',
-    noStatedOutputModalities: 'Постачальник не вказує, що видає ця модель.',
-    noTextOutput: 'Постачальник заявляє, що ця модель не видає текст.',
+    inputTooSmall: (count) => `Приховано ${count}: ліміт входу менший за 2048 токенів`,
+    noStatedLimit: (count) => `Приховано ${count}: постачальник не вказує ліміт входу`,
+    limitNotUnderstood: (count) => `Приховано ${count}: ліміт входу у форматі, який ця збірка не читає`,
+    noStatedOutputModalities: (count) => `Приховано ${count}: постачальник не вказує, що видає модель`,
+    noTextOutput: (count) => `Приховано ${count}: модель не видає текст`,
   },
 };
 
@@ -1411,46 +1509,38 @@ function expected<T>(table: Record<string, T>, kind: string, what: string): T {
   return value;
 }
 
-// The em dash `models_entry_reason_separator` resolves to, in both locales —
-// the same character either way, so a refused option's combined label is
-// always `<name> — <reason>` and this constant is what splits the two back
-// apart for the assertions below.
-const REASON_SEPARATOR = '—';
-
 for (const loc of ['en', 'uk'] as const) {
-  test(`every Refusal variant catalogue.rs defines renders its own, correct reason (${loc})`, async () => {
+  test(`every Refusal variant catalogue.rs defines renders its own, correct hidden-reason line (${loc})`, async () => {
     const kinds = rustEnumVariants(CATALOGUE_RS, 'Refusal').map(camelOf);
-    expectTableCoversExactly(REFUSAL_SENTENCES[loc], kinds);
+    expectTableCoversExactly(HIDDEN_REASON_SENTENCES[loc], kinds);
     const fixtureEntries = kinds.map((kind, i) => entry(`refusal-${i}`, { name: `Named ${kind}`, refusal: sampleRefusal(kind) }));
     mockCatalogues({ embedding: catalogueOf(fixtureEntries) });
 
     const { container } = await renderInLocale(loc, settings());
-    const texts: string[] = [];
+    await waitFor(() => expect(screen.getAllByTestId('model-hidden-reason').length).toBe(kinds.length));
+
+    // Owner's ruling (live run, 2026-09-10): every refused entry is gone from
+    // the select outright, not merely disabled — no option stands in for any
+    // of them any more.
     for (let i = 0; i < kinds.length; i++) {
-      await waitFor(() => expect(optionsFor(`refusal-${i}`).length).toBe(1));
-      const combined = optionFor(`refusal-${i}`).textContent ?? '';
-      // P2-11: a refused option still shows the model's NAME, not its id —
-      // an `<option>` cannot hold the name and the reason as two separate
-      // elements the way the old list's spans did, so the prefix is checked
-      // directly on the one string the option has.
-      const prefix = `Named ${kinds[i]} ${REASON_SEPARATOR} `;
-      expect(combined.startsWith(prefix)).toBe(true);
-      const reason = combined.slice(prefix.length);
-      texts.push(reason);
-      // P1-1: each variant pinned to ITS OWN sentence, not merely to a
-      // sentence no other variant happens to use.
-      expect(reason).toBe(expected(REFUSAL_SENTENCES[loc], kinds[i], 'Refusal'));
+      expect(optionsFor(`refusal-${i}`).length).toBe(0);
     }
-    // Both directions: as many sentences as variants, none collapsed onto a
-    // neighbour — kept alongside the table, because the table alone would
-    // still be satisfied if two variants were given the same sentence in the
-    // catalogue itself.
-    expect(texts.length).toBe(kinds.length);
+
+    // Each fixture entry is refused alone (one per kind), so every reason
+    // folds exactly one entry — count 1 — and ties on count sort by first
+    // appearance, which is exactly the kinds' own order.
+    const texts = screen.getAllByTestId('model-hidden-reason').map((el) => el.textContent ?? '');
+    const expectedTexts = kinds.map((kind) => expected(HIDDEN_REASON_SENTENCES[loc], kind, 'Refusal')(1));
+    expect(texts).toEqual(expectedTexts);
+    // P1-1's point still holds: each variant pinned to ITS OWN sentence, not
+    // merely to a sentence no other variant happens to use.
     expect(new Set(texts).size).toBe(kinds.length);
     // P1-3: `limitNotUnderstood` carries provider text. It does not reach the
-    // screen — the same rule `reason` is under, asserted rather than left to a
-    // fixture string being shorter than a length check.
+    // screen — the same rule the folded-in option label used to be under.
     expect(container.textContent ?? '').not.toContain(RAW_LEAK_TOKEN);
+    // And the model's own name reaches it even less: a refused entry is
+    // hidden wholesale now, not merely stripped of its reason.
+    expect(container.textContent ?? '').not.toContain('Named ');
   });
 }
 
@@ -1627,16 +1717,21 @@ test('a language switch after mount reaches the unreadable-count sentence', asyn
   expect(after).not.toContain('records could not be read');
 });
 
-test('a language switch after mount reaches a refusal reason', async () => {
+// Rewritten (owner's ruling, live run, 2026-09-10): the reason no longer
+// reaches the screen through the option's own label — there is no option
+// left to carry it — but the hidden-reason line below the select owes the
+// same thing the option used to: it switches language after `setLocale`.
+test('a language switch after mount reaches the hidden-reason line', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('r1', { refusal: { kind: 'noStatedLimit' } })]) });
   const { container } = await renderWith(settings());
-  await waitFor(() => expect(optionsFor('r1').length).toBe(1));
-  expect((container.textContent ?? '')).toContain('The provider does not state an input limit for this model.');
+  await waitFor(() => expect(screen.getByTestId('model-hidden-reason')).toBeTruthy());
+  expect(optionsFor('r1').length).toBe(0);
+  expect((container.textContent ?? '')).toContain('1 hidden: the provider states no input limit');
 
   await switchTo('uk');
   const after = container.textContent ?? '';
-  expect(after).toContain('Постачальник не вказує ліміт входу цієї моделі.');
-  expect(after).not.toContain('The provider does not state an input limit for this model.');
+  expect(after).toContain('Приховано 1: постачальник не вказує ліміт входу');
+  expect(after).not.toContain('hidden: the provider states no input limit');
 });
 
 test('a language switch after mount reaches an unreadable-record label', async () => {
@@ -2500,25 +2595,26 @@ test('the index label and its sentence read as two things too', async () => {
 });
 
 // And one row lower again, on the branch a provider listing a model this
-// build refuses would reach: the model's name and the sentence saying why it
-// cannot be chosen are folded into one option label (Task 4), and the two
-// still read as two things rather than one run-together phrase.
-test('a refused model`s name and its reason read as two things', async () => {
+// build refuses would reach. Rewritten (owner's ruling, live run,
+// 2026-09-10): the name and the reason used to be folded into one option
+// label (Task 4) and this test asserted they still read as two things
+// rather than one run-together phrase — there is no longer an option to
+// glue them onto at all, so the two things this now asserts are that the
+// model has NO option (its name reaches nowhere on screen) and that its
+// reason stands as its own, distinct line below the select.
+test('a refused model has no option, and its reason renders as its own line below the select', async () => {
   mockCatalogues({
     embedding: catalogueOf([entry('r1', { name: 'Tiny One', refusal: { kind: 'noStatedLimit' } })]),
   });
   const { container } = await renderWith(settings());
-  await waitFor(() => expect(optionsFor('r1').length).toBe(1));
+  await waitFor(() => expect(screen.getByTestId('model-hidden-reason')).toBeTruthy());
   const text = visible(container);
 
-  expect(text).toContain('Tiny One — The provider does not state an input limit for this model.');
-  expect(text).not.toContain('Tiny One The provider does not state an input limit for this model.');
-
-  // The separator is a catalogue string like every other word on this screen,
-  // so it survives a language switch rather than being a literal in the markup
-  // that only happens to look right in one locale.
-  await switchTo('uk');
-  expect(visible(container)).toContain('Tiny One — Постачальник не вказує ліміт входу цієї моделі.');
+  expect(optionsFor('r1').length).toBe(0);
+  expect(text).not.toContain('Tiny One');
+  expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
+    '1 hidden: the provider states no input limit',
+  );
 });
 
 // ---------------------------------------------------------------------------

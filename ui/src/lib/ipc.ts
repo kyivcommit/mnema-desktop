@@ -375,7 +375,7 @@ export type Price =
 
 // `catalogue.rs`'s `Refusal`: five variants; one of them (`limitNotUnderstood`)
 // carries the provider's own `raw` text, and `Models.svelte`'s
-// `refusalReason` does not render it — see that function for why the
+// `hiddenReasonLabel` does not render it — see that function for why the
 // sentence is fixed catalogue text rather than provider text.
 export type ModelRefusal =
   | { kind: 'inputTooSmall'; limit: number; floor: number }

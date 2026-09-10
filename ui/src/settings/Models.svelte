@@ -440,6 +440,13 @@
   // the SITUATION and stops there, the same choice already made for
   // `KeyState::Unreadable.reason`.
   //
+  // Owner's ruling (live run, 2026-09-10): a refused entry used to render as
+  // a disabled option with this sentence folded into its own label. It no
+  // longer reaches the select at all (`selectableEntries` below drops it
+  // outright) — instead every entry sharing this same reason is folded into
+  // one count, and this sentence — with that count — is what
+  // `hiddenReasons` puts on its own line under the select.
+  //
   // The `never` arm is exhaustiveness twice over: `tsc` refuses to compile if
   // a variant is added to `ModelRefusal` without a matching `case` here, and
   // a value that reaches this function some other way — the catalogue mirror
@@ -447,18 +454,18 @@
   // union — throws instead of silently falling through, so a sixth variant
   // added to `catalogue.rs` cannot pass this section silently in either
   // direction.
-  function refusalReason(r: ModelRefusal): string {
+  function hiddenReasonLabel(r: ModelRefusal, count: number): string {
     switch (r.kind) {
       case 'inputTooSmall':
-        return t('models_refusal_input_too_small', { limit: r.limit, floor: r.floor });
+        return t('models_hidden_input_too_small', { count, floor: r.floor });
       case 'noStatedLimit':
-        return t('models_refusal_no_stated_limit');
+        return t('models_hidden_no_stated_limit', { count });
       case 'limitNotUnderstood':
-        return t('models_refusal_limit_not_understood');
+        return t('models_hidden_limit_not_understood', { count });
       case 'noStatedOutputModalities':
-        return t('models_refusal_no_stated_output_modalities');
+        return t('models_hidden_no_stated_output_modalities', { count });
       case 'noTextOutput':
-        return t('models_refusal_no_text_output');
+        return t('models_hidden_no_text_output', { count });
       default: {
         const exhaustive: never = r;
         throw new Error(`unhandled model refusal kind: ${(exhaustive as { kind: string }).kind}`);
@@ -466,10 +473,22 @@
     }
   }
 
-  // `catalogue.rs`'s `RecordId`, exhaustively — same shape as `refusalReason`
-  // and for the same reason: `Absent`, `NotAString` and `Known` are three
-  // different facts about a record this build could not turn into a model,
-  // and folding them together would be false about at least one of them.
+  // The group two refusals fold into: the SAME kind, and — for
+  // `inputTooSmall` alone — the SAME floor. The owner's ruling states floor
+  // explicitly ("entries with different floors are different reasons"),
+  // never limit, so a build-wide floor stays one line even across many
+  // entries while a fixture that gives two different floors is read as two
+  // distinct reasons rather than one that would silently report only
+  // whichever floor it happened to see first.
+  function hiddenReasonKey(r: ModelRefusal): string {
+    return r.kind === 'inputTooSmall' ? `inputTooSmall:${r.floor}` : r.kind;
+  }
+
+  // `catalogue.rs`'s `RecordId`, exhaustively — same shape as
+  // `hiddenReasonLabel` and for the same reason: `Absent`, `NotAString` and
+  // `Known` are three different facts about a record this build could not
+  // turn into a model, and folding them together would be false about at
+  // least one of them.
   function unreadableRecordLabel(rec: UnreadableRecord): string {
     switch (rec.id.kind) {
       case 'absent':
@@ -485,32 +504,46 @@
     }
   }
 
-  // `void $locale` here, not on `refusalReason`/`unreadableRecordLabel`
+  // The options the select actually offers: `refusal === null` only.
+  // Case-sensitive to nothing about locale — an entry's `refusal` field does
+  // not change on a language switch, so unlike `hiddenReasons` below this
+  // needs no `void $locale` of its own to stay live.
+  const selectableEntries = $derived.by(() => {
+    const cat = activeCatalogue;
+    if (!cat) return [];
+    return cat.entries.filter((entry: ModelEntry) => entry.refusal === null);
+  });
+
+  // `void $locale` here, not on `hiddenReasonLabel`/`unreadableRecordLabel`
   // themselves: those are plain functions called from markup, and Svelte's
   // fine-grained reactivity only re-runs an expression when a signal IT reads
   // changes — `entry.refusal` does not change on a language switch, so a
   // `$derived` reading `$locale` is what makes the surrounding recomputation
   // happen at all (`t()` itself reads `get(locale)` non-reactively,
   // `i18n/index.ts:11`).
-  const activeEntries = $derived.by(() => {
+  //
+  // Grouped by `hiddenReasonKey`, in FIRST-APPEARANCE order per group — a
+  // `Map` preserves insertion order, so the first entry reaching a new key
+  // fixes where its line sorts before count is even known. Two records
+  // sharing an id both count, same as they both would have as two separate
+  // disabled options before this ruling — no dedup here either.
+  const hiddenReasons = $derived.by(() => {
     void $locale;
     const cat = activeCatalogue;
     if (!cat) return [];
-    // Live run, finding 1, one row lower than the two the run hit: a greyed
-    // model's name and the sentence saying why it cannot be chosen are two
-    // inline spans, so with no CSS they read as one phrase — "Tiny One The
-    // provider does not state an input limit for this model." The dash belongs
-    // to neither of them, so it is a catalogue string of its own rather than a
-    // prefix baked into five reason sentences (which would each then be untrue
-    // read anywhere else) — and it is built HERE, inside the `void $locale`
-    // this list already needs, rather than in a `$derived` of its own: an em
-    // dash is the same character in both locales, so a guard written for it
-    // could not be told from its absence by any test.
-    return cat.entries.map((entry: ModelEntry) => ({
-      entry,
-      reason: entry.refusal ? refusalReason(entry.refusal) : null,
-      separator: entry.refusal ? t('models_entry_reason_separator') : null,
-    }));
+    const groups = new Map<string, { refusal: ModelRefusal; count: number; firstIndex: number }>();
+    cat.entries.forEach((entry: ModelEntry, index: number) => {
+      if (!entry.refusal) return;
+      const key = hiddenReasonKey(entry.refusal);
+      const existing = groups.get(key);
+      if (existing) existing.count += 1;
+      else groups.set(key, { refusal: entry.refusal, count: 1, firstIndex: index });
+    });
+    // Order: count descending, then first appearance — the owner's ruling,
+    // verbatim.
+    return [...groups.entries()]
+      .sort(([, a], [, b]) => b.count - a.count || a.firstIndex - b.firstIndex)
+      .map(([key, g]) => ({ key, label: hiddenReasonLabel(g.refusal, g.count) }));
   });
 
   const activeUnreadableRecords = $derived.by(() => {
@@ -639,7 +672,12 @@
   // cannot currently tell"), or a confirmed id the active catalogue does not
   // list — a stale pointer at a model this provider stopped naming, which
   // still deserves its OWN id on screen rather than vanishing into the same
-  // blank placeholder as "nothing chosen".
+  // blank placeholder as "nothing chosen". A THIRD way to reach it as of the
+  // owner's ruling above: a confirmed id the catalogue still lists, but now
+  // refused — `selectableEntries` has already dropped it, so it is
+  // indistinguishable from a retired model here, and correctly so (both are
+  // "this build cannot offer it"); `hiddenReasons` below is what still says
+  // why, on its own line.
   const selectPlaceholder = $derived.by(() => {
     void $locale;
     const model = visibleActiveModel;
@@ -647,7 +685,7 @@
       const status = statusFor(activeTab);
       return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
     }
-    if (activeEntries.some(({ entry }) => entry.id === model)) return null;
+    if (selectableEntries.some((entry) => entry.id === model)) return null;
     return { value: model, label: t('models_selection_absent', { id: model }) };
   });
 
@@ -921,20 +959,21 @@
   {/each}
   {#if emptyCatalogueSentence}
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
-  {:else if activeEntries.length > 0}
+  {:else if activeCatalogue.entries.length > 0}
     <div class="row">
       <label class="fl" for="model-selection" data-testid="model-selection-label">{selectionLabel}</label>
       <!-- One native `<select>` for the active role (Task 4, review P1/P2-1/
-           P2-2) rather than the frozen list's row of buttons: every readable
-           entry is an `<option>`, refused ones `disabled` with their reason
-           folded into the label text (an `<option>` cannot hold child
-           elements, so the name/separator/reason spans below collapse into
-           one string here), and duplicates are preserved exactly as the old
-           list preserved them — unkeyed, for the same reason Task 8 made the
-           frozen list unkeyed: `catalogue.rs` enforces no uniqueness over
-           `id`, and a keyed `{#each}` throws on a repeat (`each_key_duplicate`),
-           taking the whole section down with it. `option.value` is the model
-           id; the backend's own `set_*_model` still validates the choice. -->
+           P2-2) rather than the frozen list's row of buttons: only `refusal
+           === null` entries (`selectableEntries`) become an `<option>` now
+           (owner's ruling, live run, 2026-09-10) — a refused entry no longer
+           gets a disabled row at all, it disappears from the list and its
+           reason moves to `hiddenReasons` below. Duplicates are preserved
+           exactly as the old list preserved them — unkeyed, for the same
+           reason Task 8 made the frozen list unkeyed: `catalogue.rs`
+           enforces no uniqueness over `id`, and a keyed `{#each}` throws on a
+           repeat (`each_key_duplicate`), taking the whole section down with
+           it. `option.value` is the model id; the backend's own
+           `set_*_model` still validates the choice. -->
       <select
         id="model-selection"
         data-testid="model-selection"
@@ -945,11 +984,18 @@
         {#if selectPlaceholder}
           <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
         {/if}
-        {#each activeEntries as { entry, reason, separator }}
-          <option value={entry.id} disabled={!!entry.refusal}>{entry.refusal ? `${entry.name} ${separator} ${reason}` : entry.name}</option>
+        {#each selectableEntries as entry}
+          <option value={entry.id}>{entry.name}</option>
         {/each}
       </select>
     </div>
+    <!-- One line per DISTINCT reason (owner's ruling above), each naming how
+         many entries it folded together — never one line per hidden entry,
+         which would repeat the same sentence as many times as this build
+         happened to refuse the same thing. -->
+    {#each hiddenReasons as { key, label } (key)}
+      <p data-testid="model-hidden-reason">{label}</p>
+    {/each}
   {/if}
 {/if}
 
