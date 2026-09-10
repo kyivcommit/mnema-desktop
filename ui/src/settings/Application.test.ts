@@ -1,4 +1,4 @@
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Application from './Application.svelte';
@@ -867,18 +867,23 @@ test('a person who opens Application in the settings window reads the shortcut, 
   // never notices an empty panel or a value drawn under the wrong label.
   expect(visible(panel())).toBe(
     'Застосунок'
+    // Task 6: the four mockup groups, each opening with its own heading.
+    + ' Виклик'
     + ' Скорочення для відкриття пошуку: ⌥Space'
     + ' Це скорочення зареєстровано в системі.'
     + ' Змінити скорочення'
-    + ' Запуск під час входу в систему:'
-    + ' Mnema не запускається під час входу в систему.'
-    + ' Запускати під час входу'
+    + ' Вигляд'
     + ' Тема:'
     + ' Світла'
     + ' Темна'
     + ' Системна'
     + ' Мова:'
     + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
+    + ' Запуск'
+    + ' Запуск під час входу в систему:'
+    + ' Mnema не запускається під час входу в систему.'
+    + ' Запускати під час входу'
+    + ' Версія'
     + ' Версія 0.0.0',
   );
   // (review, Important 1) A `not.toContain` against `settings_section_not_ready`'s
@@ -1521,4 +1526,111 @@ test('the language segment speaks the window language, both directions', async (
   expect(at('application-language-select')).toContain('Auto (system)');
   setLocale('uk');
   await waitFor(() => expect(pageText()).toContain('Мова:'));
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — the four mockup groups: `role="group"` plus an accessible name,
+// each holding the controls this section already draws for that subject. The
+// handlers under test above are unchanged; this only pins where the markup
+// now puts them.
+// ---------------------------------------------------------------------------
+
+test('the shortcut controls sit inside a group named for the shortcut', async () => {
+  renderSection();
+  await shown('application-shortcut-record');
+
+  const group = screen.getByRole('group', { name: 'Виклик' });
+  expect(within(group).getByTestId('application-shortcut-record')).toBeTruthy();
+  expect(within(group).getByTestId('application-shortcut-status')).toBeTruthy();
+});
+
+test('the theme and language controls sit inside a group named for appearance', async () => {
+  renderSection();
+  await shown('application-language-select');
+
+  const group = screen.getByRole('group', { name: 'Вигляд' });
+  expect(within(group).getByTestId('application-theme-light')).toBeTruthy();
+  expect(within(group).getByTestId('application-language-select')).toBeTruthy();
+});
+
+test('the autostart controls sit inside a group named for startup', async () => {
+  renderSection();
+  await shown('application-autostart-toggle');
+
+  const group = screen.getByRole('group', { name: 'Запуск' });
+  expect(within(group).getByTestId('application-autostart-toggle')).toBeTruthy();
+});
+
+test('the version sits inside a group named for the version', async () => {
+  renderSection();
+  await shown('application-version');
+
+  const group = screen.getByRole('group', { name: 'Версія' });
+  expect(within(group).getByTestId('application-version')).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Task 6 — each error text gets an accessible link to the control it is
+// about, now that the markup around it is changing. `aria-describedby` names
+// every id that is actually on screen; none of it dangles.
+// ---------------------------------------------------------------------------
+
+function describedByIds(el: HTMLElement): string[] {
+  return (el.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean);
+}
+
+test('a shortcut change that fails links the record control to the sentence it drew', async () => {
+  const SENTENCE = 'the preferences file could not be written';
+  appPrefs.mockResolvedValueOnce(prefs());
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  appPrefs.mockResolvedValueOnce(prefs());
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true });
+
+  await shown('application-shortcut-error');
+  const button = screen.getByTestId('application-shortcut-record');
+  const ids = describedByIds(button);
+  expect(ids).toContain('application-shortcut-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a refused autostart change links its buttons to the sentence it drew', async () => {
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'disabled' } }));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await shown('application-autostart-toggle');
+
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+
+  await shown('application-autostart-error');
+  const ids = describedByIds(screen.getByTestId('application-autostart-toggle'));
+  expect(ids).toContain('application-autostart-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a refused theme change links the theme group to the sentence it drew', async () => {
+  setTheme.mockRejectedValue(new Error('could not write preferences: disk full'));
+  renderSection();
+  await shown('application-theme-dark');
+
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+
+  await shown('application-theme-error');
+  const seg = screen.getByRole('group', { name: 'Тема:' });
+  const ids = describedByIds(seg);
+  expect(ids).toContain('application-theme-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a failed language read links the select to the sentence and the retry it offers', async () => {
+  getLocale.mockRejectedValue(new Error('IPC closed'));
+  renderSection();
+
+  await shown('application-language-failed');
+  const ids = describedByIds(screen.getByTestId('application-language-select'));
+  expect(ids).toContain('application-language-failed');
+  expect(ids).toContain('application-language-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
 });

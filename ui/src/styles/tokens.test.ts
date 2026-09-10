@@ -957,11 +957,15 @@ describe('settings.css gives the DOM-only states a visual form', () => {
   });
 
   it('marks the chosen theme', () => {
-    mount(`<main><div class="spane"><div role="group">
+    // `.seg`, not a bare `role="group"` (Task 6): Application's four section
+    // groups carry that role too now, for their own accessible name, and this
+    // fixture must mirror the class the real segmented control carries or it
+    // tests a selector nothing in the app uses any more.
+    mount(`<main><div class="spane"><div class="seg" role="group">
       <button type="button" aria-pressed="false">a</button>
       <button type="button" aria-pressed="true">b</button>
     </div></div></main>`);
-    const [off, on] = document.querySelectorAll('[role="group"] button');
+    const [off, on] = document.querySelectorAll('.seg button');
     differ(on, off, 'background');
     differ(on, off, 'font-weight');
   });

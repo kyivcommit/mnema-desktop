@@ -108,6 +108,9 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_unreadable_reason' | 'indexing_index_load_failed'
   | 'indexing_index_failed_chunks' | 'indexing_index_refused_run'
   | 'indexing_index_pending_chunks'
+  | 'indexing_statcard_documents' | 'indexing_statcard_updated'
+  | 'application_group_shortcut' | 'application_group_appearance'
+  | 'application_group_startup' | 'application_group_version'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
@@ -918,6 +921,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // `lastIndexedAt: null` is the backend's own statement that nothing has
     // ever finished indexing. Never a blank, never an epoch date.
     indexing_index_never: 'Ще нічого не проіндексовано.',
+    // Task 6: the statcard's two cells — the same numbers the sentences above
+    // already state, drawn beside a short label instead of inside one. Not a
+    // decorative number: `indexing_statcard_documents`'s value is
+    // `read.indexedFiles`, and `indexing_statcard_updated`'s is the existing
+    // `formatIndexedDate`/`neverLine`, never a value invented for the card.
+    indexing_statcard_documents: 'Документів',
+    indexing_statcard_updated: 'Останнє оновлення',
     // Two causes, two sentences (`UnreadableCause`, models.rs:809-826). One
     // sentence for both would be a surface that cannot tell a closed index
     // from one that broke while being read.
@@ -960,6 +970,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // below is a refusal or a statement the WINDOW makes, so it lives here in
     // both languages. A refusal the BACKEND makes is shown verbatim beside
     // these and is English, like every other rejection in this product.
+    // Task 6: the four group headings the mockup arranges this section into
+    // (mockup .gh, `.spane h3`'s own styling). The controls under each are
+    // unchanged; only the labelled `role="group"` wrapper around them is new.
+    application_group_shortcut: 'Виклик',
+    application_group_appearance: 'Вигляд',
+    application_group_startup: 'Запуск',
+    application_group_version: 'Версія',
     application_shortcut_label: 'Скорочення для відкриття пошуку:',
     // 🔴 «Зареєстровано» — і ніколи «працює» чи «належить лише вам». D128
     // виміряв, що macOS реєструє скорочення, яке вже тримає інший застосунок:
@@ -1263,6 +1280,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_index_updated: 'Last updated: {date}.',
     indexing_index_updated_ago: 'That was {ago}.',
     indexing_index_never: 'Nothing has been indexed yet.',
+    indexing_statcard_documents: 'Documents',
+    indexing_statcard_updated: 'Last update',
     indexing_index_unreadable_not_open: 'The index could not be read: it is not open.',
     indexing_index_unreadable_read_failed: 'The index could not be read: the attempt to read it failed.',
     indexing_index_unreadable_reason: 'The program reported: {reason}',
@@ -1276,6 +1295,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // below is a refusal or a statement the WINDOW makes, so it lives here in
     // both languages. A refusal the BACKEND makes is shown verbatim beside
     // these and is English, like every other rejection in this product.
+    application_group_shortcut: 'Shortcut',
+    application_group_appearance: 'Appearance',
+    application_group_startup: 'Startup',
+    application_group_version: 'Version',
     application_shortcut_label: 'Shortcut for opening the search:',
     application_shortcut_registered: 'This shortcut is registered with the system.',
     application_shortcut_unavailable: 'This shortcut is not registered with the system.',

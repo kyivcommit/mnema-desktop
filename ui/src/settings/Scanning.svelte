@@ -25,8 +25,9 @@
   // takes it that way (`Settings.svelte`): it is created once, above every
   // section, because the channel a job reports on belongs to whoever started
   // it. This section starts a scan through it now — the Scan control
-  // below — but the running pass itself is still drawn on the strip above the
-  // nav, not here.
+  // below. Task 5 gave this section its own `<ScanProgress>` too, so the
+  // running pass is drawn here as well as on the strip — the strip now sits
+  // BELOW `.scols`, at the bottom of the window, not above the nav.
   //
   // 🔴 `settings`/`loadError`, not a `read` this component fetches itself. Task
   // 7 left this section holding its OWN `model_settings` poll — its own mount,
@@ -88,6 +89,18 @@
     void $locale;
     if (read === null || lastIndexedAt !== null) return null;
     return t('indexing_index_never');
+  });
+
+  // Task 6: the statcard's two labels, and the value its "updated" cell shows.
+  // Never a decorative number — `read.indexedFiles` is used directly in the
+  // markup below, and this text reuses the existing formatter/never-sentence
+  // rather than inventing a shorter one for the card.
+  const documentsLabel = $derived.by(() => { void $locale; return t('indexing_statcard_documents'); });
+  const updatedLabel = $derived.by(() => { void $locale; return t('indexing_statcard_updated'); });
+  const lastUpdateText = $derived.by(() => {
+    void $locale;
+    if (read === null) return null;
+    return lastIndexedAt === null ? neverLine : formatIndexedDate(lastIndexedAt, $locale);
   });
 
   // A `Record` over the two causes rather than a ternary, for the reason
@@ -224,6 +237,18 @@
 {#if unreadableLines}
   <p data-testid="indexing-index-unreadable">{unreadableLines.sentence}</p>
   <p data-testid="indexing-index-unreadable-reason">{unreadableLines.reason}</p>
+{/if}
+<!-- Task 6: the mockup's statcard — the same numbers the sentences below
+     already state, drawn beside a short label instead of inside one. Only
+     while `read` holds an answer: `unreadable` and a first failed read both
+     leave `read` null, and a refused RE-read leaves the previous `read`
+     standing, which is exactly the "keep old numbers" case this shares with
+     every sentence below it. -->
+{#if read}
+  <dl class="statcard" data-testid="indexing-statcard">
+    <div><dt>{documentsLabel}</dt><dd>{read.indexedFiles}</dd></div>
+    <div><dt>{updatedLabel}</dt><dd>{lastUpdateText}</dd></div>
+  </dl>
 {/if}
 {#if filesLine}<p data-testid="indexing-index-files">{filesLine}</p>{/if}
 {#if dateLine}<p data-testid="indexing-index-date">{dateLine}</p>{/if}

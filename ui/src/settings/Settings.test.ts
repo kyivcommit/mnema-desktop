@@ -366,13 +366,14 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // — so what a person reads is the count and the sentence that stands where a
   // date would be, never a blank and never an epoch, followed by the one
   // «Scan» control Task 8 gives the section (shown whenever no run already
-  // owns the slot, which is true of this fixture's idle snapshot). Measured
-  // from a real render rather than hand-edited, the way every earlier version
-  // of this string was.
+  // owns the slot, which is true of this fixture's idle snapshot). The
+  // statcard leads (Task 6) with the same count and the same never-sentence,
+  // never a decorative number of its own. Measured from a real render rather
+  // than hand-edited, the way every earlier version of this string was.
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByTestId('indexing-index-files')).toBeTruthy());
   expect(panel()?.textContent?.replace(/\s+/g, ' ').trim())
-    .toBe('Scanning The index holds 0 files. Nothing has been indexed yet. Scan');
+    .toBe('Scanning Documents0 Last updateNothing has been indexed yet. The index holds 0 files. Nothing has been indexed yet. Scan');
 });
 
 // M2 (review): the Застосунок branch was once rendered by no test — a person
@@ -435,15 +436,19 @@ test('labels stay correct across a language switch after mount', async () => {
   // Ukrainian assertion below and the English one still resolves.
   await fireEvent.click(screen.getByRole('button', { name: 'Scanning' }));
   await waitFor(() => expect(screen.getByText('The index holds 0 files.')).toBeTruthy());
-  expect(screen.getByText('Nothing has been indexed yet.')).toBeTruthy();
+  // Task 6: the statcard reuses this same never-sentence in its own cell
+  // (`Scanning.svelte`'s `lastUpdateText`), so the sentence now renders TWICE
+  // — the paragraph above and the statcard beside it — both following the
+  // language switch below.
+  expect(screen.getAllByText('Nothing has been indexed yet.')).toHaveLength(2);
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('В індексі 0 файлів.')).toBeTruthy());
-  expect(screen.getByText('Ще нічого не проіндексовано.')).toBeTruthy();
+  expect(screen.getAllByText('Ще нічого не проіндексовано.')).toHaveLength(2);
   // Both directions: the English strings are gone from the same mount, not
   // merely joined by Ukrainian ones.
   expect(screen.queryByText('The index holds 0 files.')).toBeNull();
-  expect(screen.queryByText('Nothing has been indexed yet.')).toBeNull();
+  expect(screen.queryAllByText('Nothing has been indexed yet.')).toHaveLength(0);
 
   const nav = screen.getByRole('navigation');
   expect(nav.textContent).toBe(['Моделі', 'Теки', 'Сканування', 'Застосунок'].join(''));

@@ -445,10 +445,11 @@ test('labels and the per-row count stay correct across a language switch after m
   const removeButton = screen.getByRole('button', { name: 'Видалити /synthetic/only' });
   expect(removeButton).toBeTruthy();
   // `aria-label` overrides the accessible name entirely, so the query above
-  // would find this button even if its own VISIBLE text (`removeLabel`) had
-  // gone stale — checked separately here, since that is a distinct `$derived`
-  // with its own `void $locale` guard.
-  expect(removeButton.textContent).toBe('Видалити');
+  // finds this button by the path alone. Task 6: its own VISIBLE text is now
+  // the mockup's trailing ✕, a glyph with no language of its own — checked
+  // here so a later revert to a translated label would fail this line rather
+  // than pass it by accident.
+  expect(removeButton.textContent).toBe('✕');
   expect(screen.getByText(t('settings_folders_indexed', { count: 1 }))).toBeTruthy();
   expect(screen.getByText('Проіндексовано: 1 документ')).toBeTruthy();
 });
@@ -925,7 +926,7 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
   expect(visibleText(screen.getByTestId('folder-row-1'))).toBe([
     '/synthetic/root',
     'Indexed: 0 documents',
-    'Subfolders', 'Remove',
+    'Subfolders', '✕',
     // The tree. `Archive` carries the conditional sentence, because a rule of
     // the person's own remains under it.
     'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
@@ -1776,7 +1777,7 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
   expect(text).toBe([
     '/synthetic/root',
     'Indexed: 2 documents',
-    'Subfolders', 'Remove',
+    'Subfolders', '✕',
     '1 subfolder is not listed: its name could not be read as text.',
     'Archive', 'Excluded by your rule.', cost, 'Do not exclude', 'Subfolders',
     'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
@@ -3145,6 +3146,27 @@ test('«Remove» asks a question naming the folder and counting its files, and c
   // exactly as the two Remove buttons already are.
   expect(screen.getByRole('button', { name: 'Confirm removing /synthetic/root' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Leave /synthetic/root as it is' })).toBeTruthy();
+});
+
+// Task 6: the control is drawn as the mockup's trailing ✕ now, not the word
+// «Remove» — found by the SAME accessible name as before, since the visible
+// glyph changed and the aria-label carrying the path did not. The icon swap
+// must not loosen the guard it sits on: a press still only asks, and
+// `removeWatchedFolder` still waits for the Confirm that follows.
+test('the remove control is drawn as an icon, and still keeps its named confirmation', async () => {
+  await showTwoRoots();
+  const button = removeButton('/synthetic/root');
+  expect(button.textContent?.trim()).toBe('✕');
+  expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
+
+  await fireEvent.click(button);
+
+  expect(await screen.findByTestId('folder-remove-confirm-1')).toBeTruthy();
+  expect(removeWatchedFolder).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/root' }));
+
+  await waitFor(() => expect(removeWatchedFolder).toHaveBeenCalledWith(1, '/synthetic/root'));
 });
 
 // The states separated: "a question about this folder" and "a question about

@@ -317,16 +317,23 @@ main select:focus-visible {
   background: var(--err);
 }
 
-/* a watched folder (mockup .fitem + .frow) */
+/* a watched folder (mockup .fitem): the row, the removal confirmation and the
+ * subfolder panel stack as sibling blocks now (Task 6) — `.row` below is the
+ * mockup's own .frow and lays out ONLY the top line inside it. */
 .folders > ul > li {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
   gap: 11px;
+}
+
+/* the trailing remove control (mockup .frow .x): never squeezed by a long
+ * path, which is what `.fp`'s own `flex: 1 1 auto` would otherwise do to it. */
+.folders .row > .x {
+  flex: none;
 }
 
 .fp {
@@ -350,7 +357,6 @@ main select:focus-visible {
 
 /* the opened folder's panel (mockup .fsubs) */
 .fsubs {
-  flex-basis: 100%;
   margin: 6px -12px -10px;
   padding: 10px 12px 10px 36px;
   border-top: 1px solid var(--line);
@@ -418,8 +424,12 @@ main select:focus-visible {
   color: var(--ink-faint);
 }
 
-/* the theme choice (mockup .seg, .seg .opt, .seg .opt.on) */
-.spane [role="group"] {
+/* the theme choice (mockup .seg, .seg .opt, .seg .opt.on). Its own class and
+ * not a bare `[role="group"]` selector (Task 6): Application's four section
+ * groups carry that same role now for their accessible name, and a selector
+ * keyed on the attribute alone would hand this segmented-control look to
+ * every plain button inside THEM too. */
+.seg {
   align-self: flex-start;
   padding: 3px;
   border-radius: 9px;
@@ -428,7 +438,7 @@ main select:focus-visible {
   gap: 3px;
 }
 
-.spane [role="group"] button {
+.seg button {
   height: auto;
   padding: 6px 14px;
   border: 0;
@@ -438,7 +448,7 @@ main select:focus-visible {
   font-style: normal;
 }
 
-.spane [role="group"] button[aria-pressed="true"] {
+.seg button[aria-pressed="true"] {
   background: var(--surface);
   color: var(--ink);
   font-family: var(--sans);

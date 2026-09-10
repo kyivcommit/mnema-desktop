@@ -212,6 +212,53 @@ test('an index nothing has ever finished indexing says so, and draws no time at 
 });
 
 // ---------------------------------------------------------------------------
+// Task 6 — the statcard: the same numbers, drawn as two labelled cells
+// instead of a sentence. Never a decorative number: every fixture below reads
+// its value from `read` or from the existing never-sentence, exactly as the
+// sentences above already do.
+// ---------------------------------------------------------------------------
+
+function statcardValues(): (string | null)[] {
+  return [...screen.getByTestId('indexing-statcard').querySelectorAll('dd')]
+    .map((dd) => dd.textContent?.trim() ?? null);
+}
+
+test('the statcard states zero documents rather than an empty cell', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 0, lastIndexedAt: at }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(statcardValues()).toEqual(['0', dateIn('uk', at)]);
+});
+
+test('the statcard\'s updated cell states the never sentence when nothing has ever grown the index', async () => {
+  renderSection(read({ indexedFiles: 5, lastIndexedAt: null }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  expect(statcardValues()).toEqual(['5', 'Ще нічого не проіндексовано.']);
+});
+
+test('an unreadable index draws no statcard, only the error it could not get past', async () => {
+  renderSection(settings({
+    index: { kind: 'unreadable', cause: 'notOpen', reason: `could not open the index: ${TOKEN}` },
+  }));
+
+  await waitFor(() => expect(screen.getByTestId('indexing-index-unreadable')).toBeTruthy());
+  expect(screen.queryByTestId('indexing-statcard')).toBeNull();
+});
+
+test('a failed re-read keeps the statcard\'s old numbers, with the error stated before them', async () => {
+  const at = HOUR_AGO();
+  renderSection(read({ indexedFiles: 7, lastIndexedAt: at }), 'the settings window could not reach the index');
+
+  await waitFor(() => expect(screen.getByTestId('indexing-statcard')).toBeTruthy());
+  const load = screen.getByTestId('indexing-index-load-failed');
+  const card = screen.getByTestId('indexing-statcard');
+  expect(!!(load.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+  expect(statcardValues()).toEqual(['7', dateIn('uk', at)]);
+});
+
+// ---------------------------------------------------------------------------
 // The index that could not be read (§10: branch on `kind`, never on the text).
 // ---------------------------------------------------------------------------
 
