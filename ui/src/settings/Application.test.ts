@@ -1477,6 +1477,48 @@ test('a rejected change whose recovery read confirms a NEW choice never claims t
   expect(pageText()).not.toMatch(/not changed|не змінено/i);
 });
 
+// Whole-branch review, Important 1. Spec §7.1: the retry-apply control is
+// available after an `unknown` outcome too, once `get_locale` has confirmed A
+// choice — not only after `partial`. Without this, the change picked back up
+// above (a recovery read that lands on a NEW confirmed choice) has no control
+// left that repeats the attempt: re-selecting the SAME option fires no
+// `change` at all, because `onLanguageSelect` already wrote the DOM back to
+// the confirmed value.
+test('the retry-apply button appears after a rejected change whose recovery read succeeded, and pressing it calls set_locale with the confirmed choice', async () => {
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-select'); // consumes the mount's own read (the default 'auto')
+
+  getLocale.mockResolvedValueOnce({ choice: 'en', effective: 'en' }); // the REJECTION's recovery read — confirms a choice
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+
+  setLocaleChoice.mockResolvedValueOnce(localeReply({ choice: 'en', effective: 'en' }));
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  expect(setLocaleChoice).toHaveBeenLastCalledWith('en');
+});
+
+// The deferred T3 item. With no confirmed snapshot at all — the FIRST read
+// itself failed, so `retryLocaleApplication`'s own guard
+// (`s.snapshot === null`) would make a press a no-op — the button must not
+// even be offered: nothing exists yet to retry with. A change attempted from
+// this state (the select is disabled, but nothing stops a rejection from
+// reaching it before the user could act) still ends in `unknown`, and its own
+// recovery read failing too must not, on its own, manufacture a snapshot to
+// retry with.
+test('a rejected change with no confirmed snapshot yet shows the unknown sentence without offering a retry-apply control', async () => {
+  getLocale.mockRejectedValueOnce(new Error('locale store unreadable')); // mount's own read fails — nothing confirmed yet
+  renderSection();
+  await shown('application-language-failed');
+  expect(languageSelect().disabled).toBe(true); // no confirmed snapshot yet
+
+  setLocaleChoice.mockRejectedValueOnce(new Error('IPC closed'));
+  getLocale.mockRejectedValueOnce(new Error('disk unreadable')); // the change's own recovery read fails too
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await waitFor(() => expect(screen.getByTestId('application-language-unknown')).toBeTruthy());
+  expect(screen.queryByTestId('application-language-retry-apply')).toBeNull();
+});
+
 // Review round 2, Minor C. `changeError` has no exit path except a FRESH
 // change/retry attempt — a plain read (successful or not) never touches it,
 // by the same rule `application` itself follows (a read has no `applyErrors`

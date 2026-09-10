@@ -53,14 +53,15 @@ fn rgba(rows: [u16; 16]) -> Vec<u8> {
 
 // Each mask below is 16 rows of 16 bits, MSB-first (leftmost pixel first),
 // generated from the ASCII art in its comment so the drawing and the bits
-// can be checked against each other at a glance. STATUS, SETTINGS and QUIT
-// were regenerated from a circle of `r_in = 3.5, r_out = 5.0` centred on
-// `(8.0, 8.0)` (cell-centre sampling) — measured at exactly 2 filled cells
-// deep on all four cardinal directions AND on the diagonal, so the ring
-// itself carries one uniform stroke width everywhere, not just where it was
-// eyeballed. SEARCH, STOP and RESUME were already this uniform (SEARCH's
-// ring the same way; STOP and RESUME are solid fills with no stroke to
-// speak of) and are unchanged.
+// can be checked against each other at a glance — 16×16, one colour (`INK`,
+// above), six hand-drawn masks checked against their own ASCII art, and
+// nothing more. (Whole-branch review, Important 3: this used to also claim
+// STATUS, SETTINGS, QUIT and SEARCH shared one uniform ring stroke width and
+// centre — decoded, QUIT's bbox centres on (8.0, 7.5) and SEARCH's on (8.5,
+// 8.0), a diagonal depth of 1 rather than the claimed 2, and
+// `menu_icons_have_equal_nonempty_bounds` below never checked a stroke or a
+// centre either way.) STOP and RESUME are solid fills with no stroke to
+// speak of.
 
 /// ```text
 /// ......####......

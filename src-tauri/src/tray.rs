@@ -664,12 +664,21 @@ fn install_tray_menu<R: Runtime>(
             let mut guard = slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.status = candidate.status;
+            // Whole-branch review, Minor 7. Destructured, not copied field by
+            // field: `guard.status = candidate.status` beside a call that only
+            // reaches into `candidate.installed` named the two fields
+            // `TrayItems` has TODAY by hand — a third field added later would
+            // compile clean and be silently dropped on every swap. This binds
+            // `candidate` exhaustively instead, so the compiler itself refuses
+            // to build the moment `TrayItems` gains a field this does not
+            // name.
+            let TrayItems { status, installed } = candidate;
+            guard.status = status;
             // Through `Installed::record_success`, the same transition
             // `failed_refresh_retries_without_mode_change` drives purely —
             // production and the pure test share one function rather than
             // production quietly taking a different path to the same state.
-            guard.installed.record_success(candidate.installed.key);
+            guard.installed.record_success(installed.key);
         },
     );
 
@@ -939,8 +948,11 @@ mod tests {
                 "show_search",
                 "open_settings",
                 "stop_indexing",
-                // F4: «Продовжити сканування» sits directly under Stop — the
-                // item a person reaches for after pressing the one above it.
+                // F4: adjacent here only because this is the fixed coverage
+                // list, not a live menu's display order (see this const's own
+                // doc) — Stop and Resume are never both on screen, so Resume
+                // takes Stop's OWN slot once the action flips; it does not sit
+                // in a row below it.
                 "resume",
                 "quit"
             ],

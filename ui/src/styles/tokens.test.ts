@@ -994,6 +994,33 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     differ(rm, plain, 'border-top-width');
     differ(rm, plain, 'width');
   });
+
+  // Whole-branch review, Important 2. `list-style: none` plus the
+  // `::-webkit-details-marker` rule removes the native triangle and drew
+  // nothing in its place. `differ()` above cannot hold this rule to its
+  // `[open]` counterpart: jsdom's `getComputedStyle` cannot see a
+  // pseudo-element at all (`window.getComputedStyle(elt, pseudoElt)` calls
+  // `notImplemented` in jsdom 25's own `Window.js` and then falls through to
+  // the SAME real-element declarations a bare call would have matched,
+  // which never include a pseudo-element-only rule) — proven directly: an
+  // element carrying the `::after` rule and one without it report the same
+  // (empty) `transform`. The stylesheet's own parsed rules are not subject
+  // to that limitation (a `CSSStyleRule`'s `selectorText`/`style` are read
+  // straight off the parse, never matched against an element), so this
+  // reads the two `::after` rules themselves and holds their `transform`
+  // declarations to each other the same way `differ()` holds two elements'.
+  it('rotates the disclosure chevron between closed and open', () => {
+    mount('<main></main>');
+    const sheet = document.head.querySelector<HTMLStyleElement>('style[data-guard]')!.sheet!;
+    const rules = Array.from(sheet.cssRules) as CSSStyleRule[];
+    const closed = rules.find((r) => r.selectorText === '.job-disclosure > summary::after');
+    const open = rules.find((r) => r.selectorText === '.job-disclosure[open] > summary::after');
+    expect(closed, 'no ::after rule styling the closed chevron').toBeTruthy();
+    expect(open, 'no [open] ::after rule styling the rotated chevron').toBeTruthy();
+    const a = open!.style.getPropertyValue('transform');
+    const b = closed!.style.getPropertyValue('transform');
+    expect(a, `transform: "${a}" open, "${b}" closed — no visual difference`).not.toBe(b);
+  });
 });
 
 describe('each window imports its stylesheets', () => {

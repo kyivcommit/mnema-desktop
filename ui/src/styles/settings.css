@@ -141,6 +141,25 @@ main select:focus-visible {
   display: none;
 }
 
+/* Whole-branch review, Important 2. `list-style: none` plus the marker rule
+ * above removes the native disclosure triangle and puts nothing in its
+ * place — spec §4.2 requires the row to carry a state and a disclosure
+ * marker. Glyph and colour measured from the mockup's own `.fchev`/`.car`
+ * (`▸`, `color: var(--ink-faint)`, `font-size: 11px`) rather than invented:
+ * one glyph, rotated under `[open]`, instead of swapping text. */
+.job-disclosure > summary::after {
+  content: '▸';
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  transform: rotate(0deg);
+}
+
+.job-disclosure[open] > summary::after {
+  transform: rotate(90deg);
+}
+
 .job-disclosure > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -337,9 +356,12 @@ main select:focus-visible {
 }
 
 /* the trailing remove control (mockup .frow .rm): a small icon, never a
- * bordered `main button` — every property that rule sets differently is
- * overridden here. `flex: none` keeps it from being squeezed by `.fp`'s own
- * `flex: 1 1 auto`. */
+ * bordered `main button` — every property that rule sets differently, and
+ * that this row's layout would otherwise inherit, is overridden here (Task
+ * 6 review, Minor 5: `align-self: flex-start` is one of them — `main
+ * button`'s own top-aligned default reads as a stray offset once `.row`
+ * wraps a taller multi-line path beside this 24px icon). `flex: none` keeps
+ * it from being squeezed by `.fp`'s own `flex: 1 1 auto`. */
 .folders .row > .rm {
   width: 24px;
   height: 24px;
@@ -355,6 +377,7 @@ main select:focus-visible {
   font-size: 11px;
   color: var(--ink-faint);
   flex: none;
+  align-self: center;
 }
 
 .fp {

@@ -693,6 +693,25 @@
            this sentence never states more than that, and the messages below
            only ever ADD detail beside it. -->
       <p id="application-language-unknown" data-testid="application-language-unknown">{languageUnknownLabel}</p>
+      {#if languageReady}
+        <!-- Whole-branch review, Important 1. Spec §7.1: the retry-apply
+             control is available after an `unknown` outcome too, once
+             `get_locale` has confirmed A choice — not only after `partial`.
+             Without it, a picked-again-same-option select fires no `change`
+             (review round 1's own fix writes the DOM back to the confirmed
+             value before `changeLocaleChoice` runs), so this was the only
+             control left that could repeat the attempt. Guarded by
+             `languageReady` (`snapshot !== null`), the same condition
+             `retryLocaleApplication` itself enforces — with no confirmed
+             snapshot (the first read itself failed), there is nothing to
+             retry with, and the button would be a no-op. -->
+        <button
+          type="button"
+          data-testid="application-language-retry-apply"
+          disabled={languageBusy}
+          onclick={() => retryLocaleApplication()}
+        >{languageRetryApplyLabel}</button>
+      {/if}
     {/if}
     {#if languageChangeError !== null}
       <!-- The CHANGE's own rejection (review round 1, Minor 3) — distinct

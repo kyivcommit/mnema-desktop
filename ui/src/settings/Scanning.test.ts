@@ -1,4 +1,4 @@
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import Scanning from './Scanning.svelte';
@@ -464,14 +464,25 @@ test('a run under way hides the scan button and the continue row both', async ()
 // slot-contention test scopes its own query through `within`, which asks
 // nothing about whether a SECOND projection exists at all). This is that
 // direct assertion.
+//
+// Whole-branch review, Minor 6. `ScanProgress`'s own testids
+// (`indexing-pass`/`indexing-counts`) are not unique in the real window: the
+// bottom strip (`JobStrip.svelte`) renders the SAME running phase through
+// its own `<ScanProgress>` at the same time the Indexing section shows this
+// one. `renderSection` here mounts `Scanning` alone, with no `Settings.svelte`
+// `.spane` wrapper around it to scope through, so `within(container)` — this
+// render's own root, holding nothing else — is the section's own root the
+// finding asks for; a Settings-level test with both copies on screen must
+// scope the same way rather than reuse a bare `screen.getByTestId` copied
+// from here.
 test('the section shows the same running-phase projection the strip does', async () => {
-  renderSection(read());
-  await waitFor(() => expect(screen.getByTestId('scanning-scan')).toBeTruthy());
+  const { container } = renderSection(read());
+  await waitFor(() => expect(within(container).getByTestId('scanning-scan')).toBeTruthy());
 
   await emit(runningScan());
 
-  expect(visible(screen.getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
-  expect(visible(screen.getByTestId('indexing-counts'))).toBe('Опрацьовано 1 з 4. Пропущено: 0. Відхилено: 0.');
+  expect(visible(within(container).getByTestId('indexing-pass'))).toBe('Триває вбудовування всього індексу.');
+  expect(visible(within(container).getByTestId('indexing-counts'))).toBe('Опрацьовано 1 з 4. Пропущено: 0. Відхилено: 0.');
 });
 
 // `ended` + `report.resume: null` + `scanIncomplete: true` — the

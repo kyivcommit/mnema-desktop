@@ -1,6 +1,6 @@
 export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
-  | 'settings_folders_empty' | 'settings_folders_add' | 'settings_folders_remove'
+  | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
@@ -159,7 +159,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // key, before or after this commit; P3-7 review.)
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
-    settings_folders_remove: 'Видалити',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
@@ -170,10 +169,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // duplicating them (do not change that shared key: it is a different
     // sentence for a different place, §7.3/launcher `Tree.svelte`).
     settings_folders_indexed: '{count, plural, one {Проіндексовано: # документ} few {Проіндексовано: # документи} many {Проіндексовано: # документів} other {Проіндексовано: # документа}}',
-    // §9.2 review (P2-5): two "Видалити" buttons in a two-folder list share
-    // one accessible name. `aria-label` carries the folder's own path so a
-    // screen reader distinguishes them; the visible button text stays plain
-    // "Видалити" (settings_folders_remove, above).
+    // §9.2 review (P2-5): two remove buttons in a two-folder list share one
+    // accessible name. `aria-label` carries the folder's own path so a
+    // screen reader distinguishes them; the visible button (Task 6: a plain
+    // "✕" icon, not this catalogue string) needs no such distinction.
     settings_folders_remove_named: 'Видалити {path}',
     // §9.1 / Task 4. Provider is a fixed, disabled control (v1 = OpenRouter
     // only, §4.4) — the name is a catalogue string, not a hardcoded literal,
@@ -1059,7 +1058,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_application: 'Application',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
-    settings_folders_remove: 'Remove',
     settings_folders_load_failed: 'The list of folders could not be read.',
     settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
     settings_folders_remove_named: 'Remove {path}',
