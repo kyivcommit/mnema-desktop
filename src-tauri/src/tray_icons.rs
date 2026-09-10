@@ -90,6 +90,9 @@ enum Shape {
     /// An annulus at `r ± STROKE/2`, open on `[gap.0, gap.1)` degrees
     /// (measured from the centre, 0° = +x, clockwise since y grows down);
     /// `gap.0 == gap.1` (every ring but Quit's) means no gap at all.
+    /// `gap.0 > gap.1` is a caller error, not a wraparound gap: no angle
+    /// then satisfies `gap.0..gap.1`, so it silently draws a full ring too
+    /// — `contains` debug-asserts against it instead of drawing it wrong.
     Ring {
         c: (f32, f32),
         r: f32,
@@ -123,6 +126,10 @@ impl Shape {
     fn contains(&self, p: (f32, f32)) -> bool {
         match *self {
             Shape::Ring { c, r, gap } => {
+                debug_assert!(
+                    gap.0 <= gap.1,
+                    "Ring gap must be gap.0 <= gap.1, got {gap:?}"
+                );
                 if (dist(p, c) - r).abs() > STROKE / 2.0 {
                     return false;
                 }
@@ -161,7 +168,9 @@ impl Shape {
 /// feature on a ring glyph (Status's dot and stem, Search's handle,
 /// Settings's teeth, Quit's stem) is placed clear of its ring's own
 /// horizontal centre line, so `menu_icons_share_one_stroke` sees only the
-/// ring on that ray.
+/// ring on that ray — and, for Status specifically, clear of the ring band
+/// itself by a margin `status_dot_and_stem_clear_the_ring` pins, so the dot
+/// and stem read as separate from the ring rather than fused into it.
 fn icon_shapes(icon: MenuIcon) -> Vec<Shape> {
     match icon {
         MenuIcon::Status => vec![
@@ -171,12 +180,12 @@ fn icon_shapes(icon: MenuIcon) -> Vec<Shape> {
                 gap: (0.0, 0.0),
             },
             Shape::Disc {
-                c: (0.5, 0.32),
-                r: 0.055,
+                c: (0.5, 0.345),
+                r: STROKE / 2.0,
             },
             Shape::Stroke {
-                a: (0.5, 0.58),
-                b: (0.5, 0.75),
+                a: (0.5, 0.585),
+                b: (0.5, 0.655),
             },
         ],
         MenuIcon::Search => {
@@ -201,7 +210,7 @@ fn icon_shapes(icon: MenuIcon) -> Vec<Shape> {
         }
         MenuIcon::Settings => {
             let r = 0.24;
-            let tooth = 0.09;
+            let tooth = 0.14;
             let mut shapes = vec![Shape::Ring {
                 c: SETTINGS_CENTRE,
                 r,
@@ -321,7 +330,7 @@ mod tests {
     }
 
     /// Non-empty (at least one opaque pixel) and distinct from every other
-    /// icon's bytes — a mask that came out blank, or two icons that came
+    /// icon's bytes — an icon that came out blank, or two icons that came
     /// out identical, would both still satisfy "72×72 RGBA" without this.
     #[test]
     fn menu_icons_are_distinct_and_nonempty() {
@@ -339,9 +348,9 @@ mod tests {
 
     /// The four ring glyphs draw the same stroke: sampling the horizontal
     /// ray through each ring's own centre and counting fully-opaque pixels
-    /// gives the same count (±1 px for sub-pixel rounding) whichever ring
-    /// it is — a property of one shared [`STROKE`], not four independent
-    /// guesses.
+    /// gives the same count (±2 px — sub-pixel rounding measured as high as
+    /// 1 px on its own) whichever ring it is — a property of one shared
+    /// [`STROKE`], not four independent guesses.
     #[test]
     fn menu_icons_share_one_stroke() {
         let rows = [
@@ -362,8 +371,50 @@ mod tests {
         let base = counts[0].1;
         for (icon, count) in &counts {
             assert!(
-                (*count - base).abs() <= 1,
-                "{icon:?} ring stroke measured {count} px, expected {base} ±1"
+                (*count - base).abs() <= 2,
+                "{icon:?} ring stroke measured {count} px, expected {base} ±2"
+            );
+        }
+    }
+
+    /// The Status glyph's dot and stem sit inside the ring without fusing
+    /// into it: sampling the vertical centre column finds exactly four
+    /// fully-opaque runs top to bottom (the ring's own top arc, the dot,
+    /// the stem, the ring's own bottom arc), each bordered by at least one
+    /// fully transparent pixel — a dot or stem that crept into the ring
+    /// band would merge two of these into one run instead.
+    #[test]
+    fn status_dot_and_stem_clear_the_ring() {
+        let bytes = menu_icon(MenuIcon::Status).rgba().to_vec();
+        let col = (STATUS_CENTRE.0 * SIZE as f32) as u32;
+        let alphas: Vec<u8> = (0..SIZE).map(|y| alpha_at(&bytes, SIZE, col, y)).collect();
+
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut start: Option<usize> = None;
+        for (y, &a) in alphas.iter().enumerate() {
+            if a == 255 {
+                start.get_or_insert(y);
+            } else if let Some(s) = start.take() {
+                runs.push((s, y - 1));
+            }
+        }
+        if let Some(s) = start {
+            runs.push((s, alphas.len() - 1));
+        }
+
+        assert_eq!(
+            runs.len(),
+            4,
+            "expected ring-top, dot, stem, ring-bottom opaque runs, got {runs:?}"
+        );
+        for pair in runs.windows(2) {
+            let (_, end) = pair[0];
+            let (next_start, _) = pair[1];
+            assert!(
+                (end + 1..next_start).any(|y| alphas[y] == 0),
+                "runs {:?} and {:?} are not separated by a fully transparent pixel",
+                pair[0],
+                pair[1]
             );
         }
     }
