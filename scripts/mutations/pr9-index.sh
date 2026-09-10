@@ -209,8 +209,15 @@ case_ "the shell must forward the walk's own contention, not a zero" \
 # reads it, so the guard is `counts === null || counts.contended === 0` rather
 # than a phase check of its own; and the two directions the old case split
 # across two test names are one test now, which is what the name below is.
+# Rebound (PR 10f Task 7 staleness sweep, task-7-report.md fix report):
+# PR 10f Task 5 moved `contendedLabel` out of `JobStrip.svelte` into
+# `ScanProgress.svelte` (`JobStrip` now renders `<ScanProgress {phase} />`
+# inside its own disclosure), byte-for-byte unchanged — only the FILE this
+# case mutates moved; the expression, marker and target test are untouched
+# (the test still renders the whole Settings window, so it still exercises
+# ScanProgress's own text through JobStrip's markup).
 case_ "the busy-index line must be drawn only when the scan actually met the lock" \
-  ui/src/settings/JobStrip.svelte \
+  ui/src/settings/ScanProgress.svelte \
   "s~    if \(counts === null \|\| counts\.contended === 0\) return null;~    if (counts === null) return null; // mutant: drawn whether or not the index was busy~" \
   "if (counts === null) return null; // mutant: drawn whether or not the index was busy" \
   src/settings/JobStrip.test.ts 'a scan that met a busy index says so without touching the counts, and one that did not says nothing' runner=vitest
@@ -227,8 +234,11 @@ case_ "the busy-index line must be drawn only when the scan actually met the loc
 # sweep moved elsewhere) and this case had been naming a test that does not
 # exist — a BASELINE FAILURE that took the whole file down with it, which is
 # how `pr8-ui-folders.sh` had been failing too.
+# Rebound (PR 10f Task 7 staleness sweep, task-7-report.md fix report):
+# same move as the case above — `progressShape`/`common` now live in
+# `ScanProgress.svelte`, byte-for-byte unchanged.
 case_ "the skipped number must not absorb the contended files it already counts" \
-  ui/src/settings/JobStrip.svelte \
+  ui/src/settings/ScanProgress.svelte \
   's~    const common = \{ done: counts\.done, skipped: counts\.skipped, refused: counts\.refused \};~    const common = { done: counts.done, skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice~' \
   'skipped: counts.skipped + counts.contended, refused: counts.refused }; // mutant: one file counted twice' \
   src/settings/JobStrip.test.ts 'a scan that met a busy index says so without touching the counts, and one that did not says nothing' runner=vitest
