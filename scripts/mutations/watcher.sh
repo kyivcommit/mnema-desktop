@@ -79,3 +79,9 @@ case_ "watch: the liveness check never notices a root that stopped being a direc
   's~\.filter\(\|r\| !r\.is_dir\(\)\)~.filter(|r| false)~' \
   '.filter(|r| false)' \
   mnema-desktop 'watch::tests::a_root_renamed_away_while_watched_is_resubscribed_when_it_returns' --lib
+
+case_ "watch: a refused watcher is never retried" \
+  src-tauri/src/watch.rs \
+  's~if watcher\.is_none\(\) \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'watch::tests::a_watcher_the_os_refused_at_startup_is_created_on_a_later_tick' --lib
