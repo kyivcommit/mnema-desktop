@@ -55,6 +55,9 @@ fn measure_full_scan_on_unchanged_corpus() {
     run_scan_capturing_snapshots(app.handle(), Entry::Full, generous);
     let second = t1.elapsed();
 
+    // The synchronous cost of the `watch()` call returning, not time-to-first-event:
+    // FSEvents (and the other backends) register asynchronously, so this does not
+    // say when the watch is actually live.
     let t2 = Instant::now();
     let mut watcher = notify::recommended_watcher(|_| {}).unwrap();
     notify::Watcher::watch(
@@ -63,9 +66,16 @@ fn measure_full_scan_on_unchanged_corpus() {
         notify::RecursiveMode::Recursive,
     )
     .unwrap();
-    let register = t2.elapsed();
+    let watch_call_return = t2.elapsed();
 
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    // `first_scan` is walk + extract only: `app_in` builds `AppState` with
+    // `NO_PROVIDER`, so `Entry::Full` never reaches an embedding pass.
     println!(
-        "MEASURE files={n} profile=release first_scan={first:?} unchanged_scan={second:?} watch_register={register:?}"
+        "MEASURE files={n} profile={profile} provider=none first_scan={first:?} unchanged_scan={second:?} watch_call_return={watch_call_return:?}"
     );
 }
