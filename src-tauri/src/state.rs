@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use mnema_index::Db;
 
@@ -97,6 +98,16 @@ pub struct AppState {
     /// job asks it in a tight loop where a mutex has nothing to offer.
     scan: Arc<Mutex<crate::scan_state::ScanState>>,
     cancel: Arc<AtomicBool>,
+    /// When «Зупинити» was last pressed. Read by the watcher's Stop rule
+    /// (`watch::trigger`) BEFORE every automatic claim: a change that arrived
+    /// before the press must not restart the scan the press just stopped;
+    /// one that arrived after it must. `cancel_job` is the only writer.
+    stopped_at: Mutex<Option<Instant>>,
+    /// The folder watcher's one shared owner — the subscription set, the
+    /// pending-wake state and the thread that reconciles both. Commands only
+    /// ever call [`crate::watch::Shared::request_rewatch`] on it; the thread
+    /// `watch::install` spawns is the sole writer of the OS subscriptions.
+    watch: std::sync::Arc<crate::watch::Shared>,
     /// The interface locale (§D129): the persisted choice and what it resolves
     /// to. Set once at start-up by `resolve_effective` (Task 6) and again by
     /// `locale::apply_choice` on every change; read by `get_locale` and by
@@ -165,6 +176,8 @@ impl AppState {
             boot_open_error: Mutex::new(None),
             scan: Arc::new(Mutex::new(crate::scan_state::ScanState::default())),
             cancel: Arc::new(AtomicBool::new(false)),
+            stopped_at: Mutex::new(None),
+            watch: std::sync::Arc::new(crate::watch::Shared::new()),
             // Safe default; overwritten at startup by `resolve_effective`
             // before any window draws (Task 6).
             locale: Mutex::new(crate::locale::LocaleState {
@@ -638,7 +651,25 @@ impl AppState {
 
     /// Asks the running job to stop. A no-op when nothing is running.
     pub fn cancel_job(&self) {
+        *self
+            .stopped_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// When «Зупинити» was last pressed, or `None` if it never has been.
+    pub fn stopped_at(&self) -> Option<Instant> {
+        *self
+            .stopped_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The folder watcher's shared state — commands call
+    /// [`crate::watch::Shared::request_rewatch`] on it and nothing else.
+    pub fn watch(&self) -> &std::sync::Arc<crate::watch::Shared> {
+        &self.watch
     }
 
     /// Whether the job slot is taken.

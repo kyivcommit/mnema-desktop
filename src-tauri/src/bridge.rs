@@ -69,7 +69,12 @@ pub fn open_index(state: State<'_, AppState>) -> Result<IndexInfo, Error> {
 /// Off the main thread for the reason given on [`open_index`].
 #[tauri::command(async)]
 pub fn add_watched_folder(state: State<'_, AppState>, path: String) -> Result<i64, Error> {
-    state.with_index(|db| db.insert_watched_root(&path))
+    let id = state.with_index(|db| db.insert_watched_root(&path))?;
+    // Ask the watcher thread to re-read the folders. Subscribing is its job,
+    // not this command's (one owner); adding a folder starts no scan
+    // (Task 8 PR 9, owner's ruling) — the next scan for any reason reads it.
+    state.watch().request_rewatch();
+    Ok(id)
 }
 
 /// Off the main thread for the reason given on [`open_index`].
@@ -121,7 +126,9 @@ pub fn remove_watched_folder(
     root_id: i64,
     path: String,
 ) -> Result<u64, Error> {
-    remove_watched_root(&state, root_id, &path)
+    let n = remove_watched_root(&state, root_id, &path)?;
+    state.watch().request_rewatch();
+    Ok(n)
 }
 
 /// [`remove_watched_folder`]'s body, as a free function over `&AppState` so a

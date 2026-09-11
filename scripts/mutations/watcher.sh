@@ -1,0 +1,124 @@
+# Mutation cases for the folder watcher (spec 2026-09-10): the classifier,
+# the pending cap, the look-before-claim Stop rule, the cover and the
+# diff-based reconcile. Run with:
+#
+#   scripts/mutation-check.sh scripts/mutations/watcher.sh
+
+case_ "watch: MAX_WAIT cap removed, a steady stream starves the scan" \
+  src-tauri/src/watch.rs \
+  's~let fire_at = \(last \+ QUIET\)\.min\(first \+ MAX_WAIT\);~let fire_at = last + QUIET;~' \
+  'let fire_at = last + QUIET;' \
+  mnema-desktop 'watch::tests::a_wake_every_second_still_fires_by_max_wait' --lib
+
+case_ "watch: Access events wake like any other" \
+  src-tauri/src/watch.rs \
+  's~if matches!\(event\.kind, notify::EventKind::Access\(_\)\) \{\n        return false;~if matches!(event.kind, notify::EventKind::Access(_)) {\n        return true;~' \
+  'if matches!(event.kind, notify::EventKind::Access(_)) {
+        return true;' \
+  mnema-desktop 'watch::tests::a_read_is_not_a_change' --lib
+
+case_ "watch: the private-directory filter drops an event with ANY private path" \
+  src-tauri/src/watch.rs \
+  's~!event\n        \.paths\n        \.iter\(\)\n        \.all\(\|p\| plain\(p\)\.starts_with\(private_dir\)\)~!event\n        .paths\n        .iter()\n        .any(|p| plain(p).starts_with(private_dir))~' \
+  '.any(|p| plain(p).starts_with(private_dir))' \
+  mnema-desktop 'watch::tests::the_private_directory_is_dropped_only_when_every_path_is_inside_it' --lib
+
+case_ "watch: the Cancelled look never folds the pending wake into newest" \
+  src-tauri/src/watch.rs \
+  's~ScanSnapshot::Ended \{ report \} if report\.reason == EndReason::Cancelled => \{~ScanSnapshot::Ended { report } if report.reason == EndReason::Cancelled \&\& false => {~' \
+  'if report.reason == EndReason::Cancelled && false => {' \
+  mnema-desktop 'watch::tests::a_wake_during_the_wait_that_postdates_stop_restarts' --lib
+
+case_ "watch: the Stop rule ignores when Stop was pressed" \
+  src-tauri/src/watch.rs \
+  's~\(Some\(n\), Some\(s\)\) => n > s,~(Some(n), Some(s)) => true,~' \
+  '(Some(n), Some(s)) => true,' \
+  mnema-desktop 'watch::tests::a_change_before_stop_while_running_does_not_restart_once_cancelled' --lib
+
+case_ "watch: newest forgotten between busy retries" \
+  src-tauri/src/watch.rs \
+  's~newest = newest\.max\(p\.last\);~newest = p.last;~' \
+  'newest = p.last;' \
+  mnema-desktop 'watch::tests::newest_survives_a_second_busy_that_restores_the_cancelled_report' --lib
+
+case_ "watch: cover subscribes nested roots on their own" \
+  src-tauri/src/watch.rs \
+  's~\.filter\(\|r\| !roots\.iter\(\)\.any\(\|o\| o != \*r && r\.starts_with\(o\)\)\)~.filter(|_| true)~' \
+  '.filter(|_| true)' \
+  mnema-desktop 'watch::tests::cover_keeps_only_roots_without_a_watched_ancestor' --lib
+
+case_ "watch: reconcile rebuilds instead of diffing" \
+  src-tauri/src/watch.rs \
+  's~let gone: Vec<PathBuf> = watched\.difference\(&want\)\.cloned\(\)\.collect\(\);~let gone: Vec<PathBuf> = watched.iter().cloned().collect();~' \
+  'let gone: Vec<PathBuf> = watched.iter().cloned().collect();' \
+  mnema-desktop 'watch::tests::reconcile_touches_only_what_changed' --lib
+
+# Retargeted by Task 8 (2026-09-11) from `a_removed_root_leaves_the_watched_set`
+# to `forget_drops_a_root_from_watched_even_while_its_directory_still_exists`.
+# The mutation itself — `watched.remove(&p)` inside `rewatch`'s `forget`-drain
+# — is unchanged; what stopped catching it was the TEST, once Task 8 added a
+# liveness pass a few lines below in the same function. `classify`'s own
+# `wake()` fires for a `Remove` event regardless of `forget`, driving a
+# second `rewatch` off the ordinary scan-debounce path within `QUIET` —
+# independently of the mutation — and THAT call's liveness check finds the
+# same real deletion and removes it anyway. Measured with the harness: the
+# original mutation left the real-notify test green even retargeted at
+# `on_event`'s `request_rewatch`, for the same reason. No real-notify test
+# can isolate this any more; the new test calls `rewatch` directly with a
+# `Spy` watcher and a directory that is never deleted, so neither liveness
+# nor `reconcile`'s own re-`watch` of anything still in `roots` can be what
+# keeps the root out — only draining `forget` first can.
+case_ "watch: a removed root stays in the watched set" \
+  src-tauri/src/watch.rs \
+  's~watched\.remove\(&p\);~if false { watched.remove(&p); }~' \
+  'if false { watched.remove(&p); }' \
+  mnema-desktop 'watch::tests::forget_drops_a_root_from_watched_even_while_its_directory_still_exists' --lib
+
+case_ "watch: the liveness check never notices a root that stopped being a directory" \
+  src-tauri/src/watch.rs \
+  's~\.filter\(\|r\| !r\.is_dir\(\)\)~.filter(|r| false)~' \
+  '.filter(|r| false)' \
+  mnema-desktop 'watch::tests::a_root_renamed_away_while_watched_is_resubscribed_when_it_returns' --lib
+
+# Task 10 review (round 1, item 3): renamed from "a refused watcher is
+# never retried" — that mutation disables the ONE code path both the
+# first attempt and every later retry share (there is no separate
+# expression for "retry" alone; that is the whole point of Task 10, one
+# path for both), so it actually kills "no watcher is ever built at all"
+# (every real-notify test dies at its first generation wait) rather than
+# anything specific to retrying after a refusal. The mutation and its
+# target test are unchanged; only the label now says what it proves.
+case_ "watch: the OS watcher is built by rewatch at all" \
+  src-tauri/src/watch.rs \
+  's~if watcher\.is_none\(\) \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'watch::tests::a_watcher_the_os_refused_at_startup_is_created_on_a_later_tick' --lib
+
+case_ "watch: a refused start-up scan is never retried" \
+  src-tauri/src/watch.rs \
+  's~if !startup_done \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'watch::tests::a_startup_scan_refused_by_a_closed_index_is_retried_on_the_tick' --lib
+
+# Task 11 review (round 1, item 1) added the pre-check; this case pins it
+# on its own — case 12 covers the enclosing `if !startup_done`, not this
+# inner branch. Anchored on the full `if slot.stopped_at().is_some() {`
+# line so it hits only the pre-check site, not `trigger`'s own read of
+# `stopped_at` or the two post-hoc `startup_done = seen_last.is_some() ||
+# slot.stopped_at().is_some();` assignments elsewhere in the same function.
+case_ "watch: a Stop pressed before the retry no longer discharges the owed start-up scan" \
+  src-tauri/src/watch.rs \
+  's~if slot\.stopped_at\(\)\.is_some\(\) \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'watch::tests::a_stop_while_the_startup_scan_is_still_owed_cancels_the_obligation' --lib
+
+# Task 12 (independent review, P2): the `forget` drain removes a root from
+# `watched` before the liveness pass runs; without also feeding `lost`, a
+# root the callback reported gone never gets the wake its later return
+# owes. This mutates the drain's new `lost`-insert to a no-op, leaving the
+# removal itself untouched.
+case_ "watch: the forget drain no longer remembers a removed root as lost" \
+  src-tauri/src/watch.rs \
+  's~Self::lock\(&self\.lost\)\.extend\(removed_by_callback\);~let _ = removed_by_callback;~' \
+  'let _ = removed_by_callback;' \
+  mnema-desktop 'watch::tests::a_root_removed_through_the_callback_is_scanned_when_it_returns' --lib

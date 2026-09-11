@@ -23,6 +23,7 @@ pub mod tray;
 mod tray_icons;
 mod tree;
 pub mod walk_job;
+pub mod watch;
 
 use anyhow::Context as _;
 use tauri::Emitter as _;
@@ -703,6 +704,10 @@ pub fn run() -> anyhow::Result<()> {
             // (settings is hidden at startup). The standard menu returns only
             // while the settings window is visible.
             sync_activation_policy(app.handle());
+            // The folder watcher (spec 2026-09-10): last, because its thread
+            // starts with a scan and everything a scan announces to must
+            // already be installed above.
+            watch::install(app.handle());
             Ok(())
         })
         .invoke_handler(invoke_handler())
