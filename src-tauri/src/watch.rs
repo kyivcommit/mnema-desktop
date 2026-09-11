@@ -2022,6 +2022,52 @@ mod tests {
         );
     }
 
+    /// CI fix 2 (macos-14, PR #45): the integration test
+    /// `adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does`
+    /// went flaky on the same replay `a_tick_with_every_root_alive_touches_nothing`
+    /// hit — a directory created moments before `add_watched_folder` runs
+    /// can have FSEvents replay its own creation after the subscription
+    /// starts, landing a scan inside the "no scan yet" window for a reason
+    /// that has nothing to do with `request_rewatch`. That command's own
+    /// doc already says it: "mark the desired set dirty and nudge the
+    /// thread. Never wakes `pending`." Same construction as the Spy test
+    /// above (no thread, no real notify): with no backend in the loop,
+    /// nothing but `request_rewatch`/`rewatch` can be the source of a wake
+    /// here, so "adding a folder starts no scan" is provable directly, on
+    /// every platform, without a live watcher to replay anything.
+    #[test]
+    fn a_rewatch_request_alone_queues_no_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let shared = Arc::new(Shared::new());
+        let reader_root = plain(&root);
+        *shared.roots.lock().unwrap() =
+            Some(Box::new(move || Ok(HashSet::from([reader_root.clone()]))));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        *shared.watcher.lock().unwrap() = Some(Box::new(Spy {
+            calls: Arc::clone(&log),
+            ..Default::default()
+        }));
+
+        shared.request_rewatch();
+        shared.rewatch();
+        assert!(
+            log.lock().unwrap().contains(&("watch", plain(&root))),
+            "the rewatch request must have reached the thread and subscribed the root"
+        );
+        assert!(
+            shared.pending.lock().unwrap().first.is_none(),
+            "a rewatch request subscribes the root and queues no wake — adding a folder starts no scan"
+        );
+
+        // Positive control, same fixture: a real wake DOES queue one.
+        shared.wake();
+        assert!(
+            shared.pending.lock().unwrap().first.is_some(),
+            "a real wake must queue a wake"
+        );
+    }
+
     // Windows stand (win-pve, probe 2, 2026-09-11): removing the watched
     // root under the open `ReadDirectoryChangesW` handle produces no
     // `Remove` for the root and nothing after it — the delete is deferred

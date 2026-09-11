@@ -447,13 +447,30 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
             .contains(&c_plain)),
         "add_watched_folder never reached the watcher thread"
     );
-    std::thread::sleep(QUIET + Duration::from_secs(1));
-    assert_eq!(
-        ended.load(Ordering::SeqCst),
-        0,
-        "adding a folder started a scan by itself"
-    );
+    if !cfg!(target_os = "macos") {
+        // CI fix 2 (macos-14, PR #45): on FSEvents, a directory created
+        // moments before the subscription starts can have its own
+        // creation replayed as an event after the stream subscribes
+        // (measured: Task 1 probe 2, CI run 34633232201) — a scan can land
+        // in this window for a reason that has nothing to do with
+        // `add_watched_folder`. "Adding a folder starts no scan" is pinned
+        // deterministically on every platform by
+        // `a_rewatch_request_alone_queues_no_wake` in `src/watch.rs`; here
+        // it is also exercised live, on inotify and ReadDirectoryChangesW,
+        // which do not replay a fresh directory's own creation.
+        std::thread::sleep(QUIET + Duration::from_secs(1));
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            0,
+            "adding a folder started a scan by itself"
+        );
+    }
 
+    // Reset the baseline right before the write (needed on macOS, where the
+    // block above did not run and could have left a replay-triggered scan
+    // counted): the write-half below must mean "the write was scanned",
+    // not "some earlier scan, from any cause, already happened".
+    ended.store(0, Ordering::SeqCst);
     std::fs::write(c.path().join("live.txt"), "live").unwrap();
     assert!(
         wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
