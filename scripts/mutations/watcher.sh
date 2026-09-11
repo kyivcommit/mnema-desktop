@@ -53,21 +53,26 @@ case_ "watch: reconcile rebuilds instead of diffing" \
   'let gone: Vec<PathBuf> = watched.iter().cloned().collect();' \
   mnema-desktop 'watch::tests::reconcile_touches_only_what_changed' --lib
 
-# Retargeted by Task 8 (2026-09-11): its original mutation — disabling the
-# `watched.remove(&p)` inside `rewatch`'s `forget`-drain — no longer goes red
-# here, because Task 8's own liveness pass (same function, a few lines below,
-# `!root.is_dir()`) now independently drops the same root once its directory
-# is actually gone, in the very same `rewatch` call the `Remove` event's
-# `request_rewatch` already triggers. Measured with the harness: applying
-# only the old mutation left `a_removed_root_leaves_the_watched_set` green.
-# Retargeted to what the liveness pass cannot cover for — the callback's own
-# notification. Disabling it leaves the removal to the unconditional 60 s
-# `REWATCH` tick alone, past the test's 5 s `wait_for`.
+# Retargeted by Task 8 (2026-09-11) from `a_removed_root_leaves_the_watched_set`
+# to `forget_drops_a_root_from_watched_even_while_its_directory_still_exists`.
+# The mutation itself — `watched.remove(&p)` inside `rewatch`'s `forget`-drain
+# — is unchanged; what stopped catching it was the TEST, once Task 8 added a
+# liveness pass a few lines below in the same function. `classify`'s own
+# `wake()` fires for a `Remove` event regardless of `forget`, driving a
+# second `rewatch` off the ordinary scan-debounce path within `QUIET` —
+# independently of the mutation — and THAT call's liveness check finds the
+# same real deletion and removes it anyway. Measured with the harness: the
+# original mutation left the real-notify test green even retargeted at
+# `on_event`'s `request_rewatch`, for the same reason. No real-notify test
+# can isolate this any more; the new test calls `rewatch` directly with a
+# `Spy` watcher and a directory that is never deleted, so neither liveness
+# nor `reconcile`'s own re-`watch` of anything still in `roots` can be what
+# keeps the root out — only draining `forget` first can.
 case_ "watch: a removed root stays in the watched set" \
   src-tauri/src/watch.rs \
-  's~self\.request_rewatch\(\);~if false { self.request_rewatch(); }~' \
-  'if false { self.request_rewatch(); }' \
-  mnema-desktop 'watch::tests::a_removed_root_leaves_the_watched_set' --lib
+  's~watched\.remove\(&p\);~if false { watched.remove(&p); }~' \
+  'if false { watched.remove(&p); }' \
+  mnema-desktop 'watch::tests::forget_drops_a_root_from_watched_even_while_its_directory_still_exists' --lib
 
 case_ "watch: the liveness check never notices a root that stopped being a directory" \
   src-tauri/src/watch.rs \

@@ -1448,6 +1448,54 @@ mod tests {
         shared.close();
     }
 
+    /// Isolates `rewatch`'s `forget`-drain from the liveness pass Task 8
+    /// added right after it in the SAME function. A real-notify test
+    /// cannot do this any more: `classify`'s own `wake()` (unconditional,
+    /// for any non-`Access` event under a non-private path — a `Remove`
+    /// qualifies) drives a second `rewatch` off the ordinary scan-debounce
+    /// path within `QUIET`, independently of whatever the `forget` queue
+    /// did, and that second call runs liveness regardless — so a mutation
+    /// confined to `forget`'s own removal is masked by liveness catching
+    /// the same real deletion a couple of seconds later, in every real
+    /// scenario. Calling `rewatch` directly, with no thread involved, keeps
+    /// the directory alive throughout, so liveness's own `!root.is_dir()`
+    /// stays false and cannot be the one doing the removing here — only
+    /// draining `forget` can.
+    #[test]
+    fn forget_drops_a_root_from_watched_even_while_its_directory_still_exists() {
+        // Neither `open` nor a real thread: fields are set directly so
+        // every other moving part stays fixed but for `forget`. The
+        // directory genuinely exists throughout, so liveness's
+        // `!root.is_dir()` stays false and is not what does the removing.
+        // The `Spy` refuses to re-`watch` this path, so `reconcile`'s own
+        // habit of re-subscribing anything still in `roots` is not what
+        // keeps it out either — whether `watch` is even ATTEMPTED is the
+        // one thing that depends on `forget` having dropped it from
+        // `watched` first, and that is the one thing this isolates.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let shared = Shared::new();
+        let reader_root = plain(&root);
+        *shared.roots.lock().unwrap() =
+            Some(Box::new(move || Ok(HashSet::from([reader_root.clone()]))));
+        *shared.watched.lock().unwrap() = HashSet::from([plain(&root)]);
+        *shared.watcher.lock().unwrap() = Some(Box::new(Spy {
+            refuse: HashSet::from([plain(&root)]),
+            ..Default::default()
+        }));
+        shared.forget.lock().unwrap().push(plain(&root));
+        assert!(
+            root.is_dir(),
+            "the directory must still exist here — this is what isolates forget from liveness"
+        );
+        shared.rewatch();
+        assert!(
+            !shared.watched().contains(&plain(&root)),
+            "a root queued in `forget` must be dropped, and the Spy's refusal to re-watch it \
+             means reconcile cannot be what keeps it out"
+        );
+    }
+
     // Windows stand (win-pve, probe 2, 2026-09-11): removing the watched
     // root under the open `ReadDirectoryChangesW` handle produces no
     // `Remove` for the root and nothing after it — the delete is deferred
