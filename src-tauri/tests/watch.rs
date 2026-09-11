@@ -348,3 +348,113 @@ fn measure_scans_under_periodic_saves() {
         ended.load(Ordering::SeqCst)
     );
 }
+
+/// The id `list_watched_roots` gave a path at `add_watched_folder` time — the
+/// only handle `remove_watched_folder` accepts, and no IPC command reads it
+/// back, so the test reaches the same `Db` the command itself does.
+fn root_id(app: &tauri::App<tauri::test::MockRuntime>, path: &std::path::Path) -> i64 {
+    let target = path.display().to_string();
+    app.state::<AppState>()
+        .with_index(|db| db.list_watched_roots())
+        .expect("reading watched roots")
+        .into_iter()
+        .find(|r| r.absolute_path == target)
+        .expect("the root was never added")
+        .id
+}
+
+/// Final review, spec §5 row 9: `add_watched_folder`/`remove_watched_folder`
+/// both call `request_rewatch()` (`bridge.rs:72-77`, `:129-131`), and nothing
+/// exercises either past `install` until now.
+#[test]
+fn removing_a_folder_through_the_command_stops_its_events_and_keeps_the_other_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("a.txt"), "a").unwrap();
+    std::fs::write(b.path().join("b.txt"), "b").unwrap();
+    let (app, webview, ended) = app_watching(dir.path(), &[a.path(), b.path()]);
+    let _close = CloseOnDrop(app.handle().clone());
+
+    let b_path = b.path().display().to_string();
+    let b_id = root_id(&app, b.path());
+    call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": b_id, "path": b_path }),
+    )
+    .expect("remove_watched_folder was rejected");
+    // `plain`, unexported from this integration test's own crate boundary,
+    // is exactly `canonicalize` on unix — the one platform this suite (bar
+    // the Linux-only test elsewhere in this file) runs on.
+    let b_canonical = b.path().canonicalize().unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || !app
+            .state::<AppState>()
+            .watch()
+            .watched()
+            .contains(&b_canonical)),
+        "remove_watched_folder never reached the watcher thread"
+    );
+
+    ended.store(0, Ordering::SeqCst);
+    std::fs::write(b.path().join("late.txt"), "late").unwrap();
+    std::thread::sleep(MAX_WAIT + QUIET + Duration::from_secs(2));
+    assert_eq!(
+        ended.load(Ordering::SeqCst),
+        0,
+        "a write under the removed root B started a scan"
+    );
+
+    std::fs::write(a.path().join("late.txt"), "late").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
+            >= 1),
+        "positive control: a write under the kept root A never triggered a scan"
+    );
+}
+
+/// The mirror of the test above (split out — the combined test ran past 60
+/// lines): spec inherits «adding a folder starts no scan» (Task 8 PR 9's
+/// owner ruling, from the commands test suite) all the way out to the real
+/// watcher thread this time, not just the command's own no-op body.
+#[test]
+fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, webview, ended) = app_watching(dir.path(), &[]);
+    let _close = CloseOnDrop(app.handle().clone());
+
+    let c = tempfile::tempdir().unwrap();
+    std::fs::write(c.path().join("c.txt"), "c").unwrap();
+    call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": c.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected");
+    // `plain`, unexported from this integration test's own crate boundary,
+    // is exactly `canonicalize` on unix — the one platform this suite (bar
+    // the Linux-only test elsewhere in this file) runs on.
+    let c_canonical = c.path().canonicalize().unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || app
+            .state::<AppState>()
+            .watch()
+            .watched()
+            .contains(&c_canonical)),
+        "add_watched_folder never reached the watcher thread"
+    );
+    std::thread::sleep(QUIET + Duration::from_secs(1));
+    assert_eq!(
+        ended.load(Ordering::SeqCst),
+        0,
+        "adding a folder started a scan by itself"
+    );
+
+    std::fs::write(c.path().join("live.txt"), "live").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
+            >= 1),
+        "positive control: a write under the newly added root never triggered a scan"
+    );
+}

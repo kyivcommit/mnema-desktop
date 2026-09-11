@@ -307,18 +307,35 @@ pub struct Shared {
     pub(crate) pending: Mutex<Pending>,
     pub(crate) cv: Condvar,
     watched: Mutex<HashSet<PathBuf>>,
-    /// Root removals the callback has seen but has not folded into
-    /// `watched` (review round 2). The callback runs on the notify
-    /// backend's own thread — the one `stop()`/`join()` waits on
-    /// (FSEvents `watch_inner`, `fsevent.rs:308-346`) or that blocks in
-    /// `rx.recv()` (inotify `inotify.rs:560,576`) — and `rewatch` holds
-    /// `watched` while it calls into that same backend to
-    /// `watch`/`unwatch`, so the callback may never wait on `watched`'s
-    /// lock: it would risk hanging the very thread `rewatch`'s OS calls
-    /// (and `close()`'s watcher drop) depend on. It pushes `plain` paths
-    /// here instead and marks `dirty`; the owner thread — `rewatch`, the
-    /// only reader — drains this under its own short lock, held only for
-    /// the drain and never across any OS call, before it reconciles.
+    /// One entry per removed DIRECTORY the callback has seen but has not
+    /// yet folded into `watched` (review round 2; reworded, final review —
+    /// a plain file removal never reaches this queue at all, `on_event`'s
+    /// own doc has why). The callback runs on the notify backend's own
+    /// thread — the one `stop()`/`join()` waits on (FSEvents
+    /// `watch_inner`, `fsevent.rs:308-346`) or that blocks in `rx.recv()`
+    /// (inotify `inotify.rs:560,576`) — and `rewatch` holds `watched`
+    /// while it calls into that same backend to `watch`/`unwatch`, so the
+    /// callback may never wait on `watched`'s lock: it would risk hanging
+    /// the very thread `rewatch`'s OS calls (and `close()`'s watcher drop)
+    /// depend on. It pushes `plain` paths here instead (computed BEFORE
+    /// this lock is taken — `plain` calls `canonicalize`, an OS call of
+    /// its own, and never runs across this lock either) and marks
+    /// `dirty`; the owner thread — `rewatch`, the only reader — drains
+    /// this under its own short lock, held only for the drain and never
+    /// across any OS call, before it reconciles.
+    ///
+    /// The drain follows the CURRENT `trigger` call, never happens during
+    /// one: `run`'s loop only re-checks `dirty` (and so only calls
+    /// `rewatch`) between one `trigger` call and the next, so a removal
+    /// queued while the owner thread is asleep INSIDE `trigger` (its
+    /// `POLL` retry, or the scan it is waiting on) sits in this `Vec`
+    /// until that `trigger` call returns.
+    ///
+    /// No cap: truncating it could drop the one entry that names the
+    /// root actually being removed among whatever else queued alongside
+    /// it, and a `reconcile` that never sees that removal answers
+    /// `all == true` — fully covered — with nothing left to make it
+    /// retry.
     forget: Mutex<Vec<PathBuf>>,
     watcher: Mutex<Option<Box<dyn Subscriptions + Send>>>,
     roots: Mutex<Option<RootsReader>>,
@@ -409,19 +426,30 @@ impl Shared {
 
     fn on_event(&self, res: &Result<notify::Event, notify::Error>) {
         if let Ok(ev) = res
-            && matches!(ev.kind, notify::EventKind::Remove(_))
+            && matches!(
+                ev.kind,
+                notify::EventKind::Remove(
+                    notify::event::RemoveKind::Folder
+                        | notify::event::RemoveKind::Other
+                        | notify::event::RemoveKind::Any
+                )
+            )
         {
             // A root removed from under us: inotify drops the watch itself
             // (`inotify.rs:305-315`). This callback must never take
             // `watched`'s lock (review round 2 — see `forget`'s own doc for
             // why), so the removal travels through `forget` instead of
             // being applied here; `rewatch` folds it in before it next
-            // reconciles. Keys are `plain`.
+            // reconciles. `plain` calls `canonicalize`, an OS call of its
+            // own — computed here, BEFORE `forget`'s lock is taken, never
+            // across it. Only a directory kind reaches this branch at all
+            // (final review): roots are directories, and a `Remove(File)`
+            // event — the bulk of an ordinary mass delete — has nothing to
+            // do with the watched-root list `forget` exists to patch.
+            let paths: Vec<PathBuf> = ev.paths.iter().map(|p| plain(p)).collect();
             {
                 let mut forget = Self::lock(&self.forget);
-                for p in &ev.paths {
-                    forget.push(plain(p));
-                }
+                forget.extend(paths);
             }
             self.request_rewatch();
         }
@@ -735,38 +763,39 @@ mod tests {
     /// as `/var/…`). This builds a private dir reached through a real
     /// symlink and classifies events already given in the *resolved* form —
     /// the form FSEvents actually delivers — against it.
+    #[cfg(unix)]
     #[test]
     fn the_private_directory_is_dropped_when_it_is_reached_through_a_symlink() {
+        // Final review: this whole test is unix-only (a real symlink), and
+        // the `#[cfg(unix)]` used to sit on an inner block rather than the
+        // function — vacuously green on Windows, asserting nothing there.
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(real.join("data/mnema")).unwrap();
-        #[cfg(unix)]
-        {
-            let link = tmp.path().join("link");
-            std::os::unix::fs::symlink(real.join("data"), &link).unwrap();
-            let private_dir = plain(&link.join("mnema"));
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(real.join("data"), &link).unwrap();
+        let private_dir = plain(&link.join("mnema"));
 
-            assert!(
-                !classify(
-                    &ev(
-                        EventKind::Modify(ModifyKind::Any),
-                        &[real.join("data/mnema/index.sqlite").to_str().unwrap()]
-                    ),
-                    &private_dir
+        assert!(
+            !classify(
+                &ev(
+                    EventKind::Modify(ModifyKind::Any),
+                    &[real.join("data/mnema/index.sqlite").to_str().unwrap()]
                 ),
-                "a resolved path under the symlinked private dir is still recognised as private"
-            );
-            assert!(
-                classify(
-                    &ev(
-                        EventKind::Modify(ModifyKind::Any),
-                        &[real.join("data/other/file.txt").to_str().unwrap()]
-                    ),
-                    &private_dir
+                &private_dir
+            ),
+            "a resolved path under the symlinked private dir is still recognised as private"
+        );
+        assert!(
+            classify(
+                &ev(
+                    EventKind::Modify(ModifyKind::Any),
+                    &[real.join("data/other/file.txt").to_str().unwrap()]
                 ),
-                "positive control: a resolved path outside the private dir still wakes"
-            );
-        }
+                &private_dir
+            ),
+            "positive control: a resolved path outside the private dir still wakes"
+        );
     }
 
     use std::time::Instant;
@@ -1014,7 +1043,7 @@ mod tests {
     fn newest_survives_a_second_busy_that_restores_the_cancelled_report() {
         // Plan review P2-6: after the restart was allowed, an `Other` job
         // takes the slot and, on ending, restores the previous Cancelled
-        // report (`state.rs:532-539`). The trigger must remember the
+        // report (`state.rs:538-541`). The trigger must remember the
         // post-Stop wake it already accepted.
         let base = Instant::now();
         let s = script(
@@ -1089,7 +1118,7 @@ mod tests {
     fn a_change_before_stop_is_not_restarted_by_a_foreign_completed_scan() {
         // Review round 1: the Stop rule guarded only the Cancelled arm; a
         // pre-Stop wake read against a foreign job that ended Completed (not
-        // Cancelled, so `claim_job`'s restore condition at `state.rs:532-539`
+        // Cancelled, so `claim_job`'s restore condition at `state.rs:538-541`
         // never applies) fell through to the `_` arm and restarted the scan
         // Stop had just stopped.
         let base = Instant::now();

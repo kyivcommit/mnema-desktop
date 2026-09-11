@@ -23,7 +23,7 @@ case_ "watch: the private-directory filter drops an event with ANY private path"
   '.any(|p| plain(p).starts_with(private_dir))' \
   mnema-desktop 'watch::tests::the_private_directory_is_dropped_only_when_every_path_is_inside_it' --lib
 
-case_ "watch: the trigger claims first and looks at the slot never" \
+case_ "watch: the Cancelled look never folds the pending wake into newest" \
   src-tauri/src/watch.rs \
   's~ScanSnapshot::Ended \{ report \} if report\.reason == EndReason::Cancelled => \{~ScanSnapshot::Ended { report } if report.reason == EndReason::Cancelled \&\& false => {~' \
   'if report.reason == EndReason::Cancelled && false => {' \
