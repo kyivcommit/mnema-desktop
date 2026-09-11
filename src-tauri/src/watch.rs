@@ -261,8 +261,12 @@ pub(crate) fn cover(roots: &HashSet<PathBuf>) -> HashSet<PathBuf> {
 
 /// Bring `watched` in line with `cover(roots)` through `subs`: unwatch what
 /// is gone FIRST, then watch what is new, touch nothing else (plan review
-/// P2-5, P2-7). A refusal is logged and left out of `watched`, so the next
-/// call retries it. Answers whether the whole cover is watched.
+/// P2-5, P2-7). A refusal to `watch` is logged and left out of `watched`, so
+/// the next call retries it. A refusal to `unwatch` (review round 1, item 5)
+/// is logged and left IN `watched` — the OS subscription is still there, and
+/// forgetting it would let a later call re-`watch` the same root while it is
+/// already subscribed, or think it is free of it when it is not. Answers
+/// whether the whole cover is watched.
 pub(crate) fn reconcile(
     subs: &mut dyn Subscriptions,
     watched: &mut HashSet<PathBuf>,
@@ -270,11 +274,17 @@ pub(crate) fn reconcile(
 ) -> bool {
     let want = cover(roots);
     let gone: Vec<PathBuf> = watched.difference(&want).cloned().collect();
+    let mut all_gone = true;
     for path in &gone {
-        if let Err(e) = subs.unwatch(path) {
-            eprintln!("mnema: could not stop watching {}: {e}", path.display());
+        match subs.unwatch(path) {
+            Ok(()) => {
+                watched.remove(path);
+            }
+            Err(e) => {
+                eprintln!("mnema: could not stop watching {}: {e}", path.display());
+                all_gone = false;
+            }
         }
-        watched.remove(path);
     }
     let missing: Vec<PathBuf> = want.difference(watched).cloned().collect();
     for path in &missing {
@@ -285,7 +295,7 @@ pub(crate) fn reconcile(
             Err(e) => eprintln!("mnema: not watching {}: {e}", path.display()),
         }
     }
-    watched.len() == want.len()
+    all_gone && watched.len() == want.len()
 }
 
 type RootsReader = Box<dyn Fn() -> Result<HashSet<PathBuf>, String> + Send + Sync>;
@@ -327,6 +337,35 @@ impl Shared {
         m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `try_lock`, recovering a poisoned lock the same way [`Shared::lock`]
+    /// does. Only contention (`WouldBlock`) answers `None` — this exists so
+    /// a caller that must never block (see `on_event`'s doc, review round 1
+    /// item 1) can back off instead.
+    fn try_lock<T>(m: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+        match m.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// Stores `true` into `flag` while holding `pending`'s lock, and
+    /// notifies before releasing it. Every writer of `dirty`, `closed` and
+    /// `tick` goes through this (review round 1, item 2): `run`'s wait loop
+    /// checks those same flags while holding this same lock, immediately
+    /// before calling `cv.wait`/`wait_timeout` — a store made without it can
+    /// land in the gap between that check and the wait, and the wakeup is
+    /// then lost until an unrelated event happens to arrive.
+    fn raise(&self, flag: &AtomicBool, notify_all: bool) {
+        let _p = Self::lock(&self.pending);
+        flag.store(true, Ordering::SeqCst);
+        if notify_all {
+            self.cv.notify_all();
+        } else {
+            self.cv.notify_one();
+        }
+    }
+
     pub(crate) fn wake(&self) {
         Self::lock(&self.pending).wake(Instant::now());
         self.cv.notify_one();
@@ -334,17 +373,19 @@ impl Shared {
     /// Commands call this and nothing else: mark the desired set dirty and
     /// nudge the thread. Never wakes `pending`.
     pub fn request_rewatch(&self) {
-        self.dirty.store(true, Ordering::SeqCst);
-        self.cv.notify_one();
+        self.raise(&self.dirty, false);
     }
     pub fn watched(&self) -> HashSet<PathBuf> {
         Self::lock(&self.watched).clone()
     }
-    /// Stop the thread and drop the OS watches. Idempotent.
+    /// Stop the thread and drop the OS watches. Idempotent. Also clears
+    /// `watched` (review round 1, item 6): once the watcher is dropped, no
+    /// OS subscription it named still exists, so `watched()` must not keep
+    /// reporting one.
     pub fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.raise(&self.closed, true);
         *Self::lock(&self.watcher) = None; // drops the OS watches
-        self.cv.notify_all();
+        *Self::lock(&self.watched) = HashSet::new();
     }
 
     /// Builds the OS watcher. The callback holds a `Weak` (no cycle: `Shared`
@@ -371,11 +412,31 @@ impl Shared {
             // A root removed from under us: inotify drops the watch itself
             // (`inotify.rs:305-315`); forget it so the next reconcile
             // re-subscribes once it exists again. Keys are `plain`.
-            let mut watched = Self::lock(&self.watched);
-            for p in &ev.paths {
-                if watched.remove(&plain(p)) {
-                    self.dirty.store(true, Ordering::SeqCst);
+            //
+            // `try_lock`, never `lock` (review round 1, item 1): this
+            // callback runs on the notify backend's own thread — the one
+            // `stop()`/`join()` waits on (FSEvents `watch_inner`,
+            // `fsevent.rs:308-346`) or that blocks in `rx.recv()` (inotify
+            // `inotify.rs:560,576`) — and `rewatch` holds `watched` while it
+            // calls into that same backend to `watch`/`unwatch`. Blocking
+            // here on contention would hang that backend thread forever,
+            // and `close()`'s watcher drop, which waits on it, with it. On
+            // contention, skip the removal here and mark dirty instead — the
+            // next reconcile re-reads the roots and catches up regardless.
+            let removed_any = match Self::try_lock(&self.watched) {
+                Some(mut watched) => {
+                    let mut changed = false;
+                    for p in &ev.paths {
+                        if watched.remove(&plain(p)) {
+                            changed = true;
+                        }
+                    }
+                    changed
                 }
+                None => true,
+            };
+            if removed_any {
+                self.request_rewatch();
             }
         }
         if classify(res, &Self::lock(&self.private_dir)) {
@@ -395,7 +456,11 @@ impl Shared {
             Ok(r) => r.iter().map(|p| plain(p)).collect(),
             Err(e) => {
                 eprintln!("mnema: the watcher could not read the watched folders: {e}");
-                return true;
+                // Unknown, not "fully covered" (review round 1, item 3): a
+                // roots-reader error that answered `true` would let the loop
+                // wait with no timeout, and an index still closed at startup
+                // means nothing is ever retried.
+                return false;
             }
         };
         let all = {
@@ -403,7 +468,11 @@ impl Shared {
             let mut watched = Self::lock(&self.watched);
             match watcher.as_mut() {
                 Some(w) => reconcile(w.as_mut(), &mut watched, &roots),
-                None => true,
+                // No watcher means nothing is actually subscribed, whatever
+                // `roots` says (review round 1, item 3) — `false`, so the
+                // loop retries on the `REWATCH` timeout instead of waiting
+                // forever.
+                None => false,
             }
         };
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -474,8 +543,7 @@ impl Shared {
     }
     #[cfg(test)]
     pub(crate) fn tick_for_test(&self) {
-        self.tick.store(true, Ordering::SeqCst);
-        self.cv.notify_one();
+        self.raise(&self.tick, false);
     }
     #[cfg(test)]
     pub(crate) fn rewatch_generation(&self) -> u64 {
@@ -1240,6 +1308,13 @@ mod tests {
         let root = parent.path().join("gone");
         std::fs::create_dir(&root).unwrap();
         let (shared, _, _slot) = shared_for(vec![root.clone()]);
+        // Positive control (review round 1, item 4): `watched().is_empty()`
+        // after the removal would also pass if the root was never
+        // subscribed in the first place.
+        assert!(
+            wait_for(|| shared.watched().contains(&plain(&root))),
+            "the root must be subscribed before the test removes it"
+        );
         std::fs::remove_dir_all(&root).unwrap();
         assert!(
             wait_for(|| shared.watched().is_empty()),
