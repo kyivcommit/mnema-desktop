@@ -1423,15 +1423,23 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    /// Records every call; `watch` refuses paths in `refuse`.
+    /// Records every call; `watch` refuses paths in `refuse`. `calls` is
+    /// `Arc<Mutex<…>>>`, not a plain `Vec` (CI fix, macos-14, PR #45): a
+    /// clone of the log survives moving a `Spy` into a
+    /// `Box<dyn Subscriptions + Send>` and on into `Shared`, so a test
+    /// that stores the Spy there can still read what it recorded after
+    /// `rewatch` returns.
     #[derive(Default)]
     struct Spy {
-        calls: Vec<(&'static str, PathBuf)>,
+        calls: Arc<Mutex<Vec<(&'static str, PathBuf)>>>,
         refuse: HashSet<PathBuf>,
     }
     impl Subscriptions for Spy {
         fn watch(&mut self, root: &Path) -> Result<(), String> {
-            self.calls.push(("watch", root.to_path_buf()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("watch", root.to_path_buf()));
             if self.refuse.contains(root) {
                 Err("refused".into())
             } else {
@@ -1439,7 +1447,10 @@ mod tests {
             }
         }
         fn unwatch(&mut self, root: &Path) -> Result<(), String> {
-            self.calls.push(("unwatch", root.to_path_buf()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("unwatch", root.to_path_buf()));
             Ok(())
         }
     }
@@ -1467,7 +1478,10 @@ mod tests {
         let mut spy = Spy::default();
         let mut watched = set(&["/a", "/b"]);
         assert!(reconcile(&mut spy, &mut watched, &set(&["/a"])));
-        assert_eq!(spy.calls, vec![("unwatch", PathBuf::from("/b"))]);
+        assert_eq!(
+            *spy.calls.lock().unwrap(),
+            vec![("unwatch", PathBuf::from("/b"))]
+        );
         assert_eq!(watched, set(&["/a"]));
     }
 
@@ -1482,10 +1496,10 @@ mod tests {
             set(&["/docs"]),
             "the child is covered by the parent, never subscribed on its own"
         );
-        spy.calls.clear();
+        spy.calls.lock().unwrap().clear();
         reconcile(&mut spy, &mut watched, &set(&["/docs/sub"]));
         assert_eq!(
-            spy.calls,
+            *spy.calls.lock().unwrap(),
             vec![
                 ("unwatch", PathBuf::from("/docs")),
                 ("watch", PathBuf::from("/docs/sub"))
@@ -1501,7 +1515,7 @@ mod tests {
         let mut watched = set(&["/docs"]);
         reconcile(&mut spy, &mut watched, &set(&["/docs"]));
         assert!(
-            spy.calls.is_empty(),
+            spy.calls.lock().unwrap().is_empty(),
             "removing a covered child must not unwatch anything — that would punch a hole in the parent"
         );
     }
@@ -1871,6 +1885,13 @@ mod tests {
         // Control for the liveness pass above: a tick over a root that is
         // still a directory must not unsubscribe it or start a scan — the
         // check is `!root.is_dir()`, not "every tick clears everything".
+        // Does NOT assert `pending` stays empty here (CI fix, macos-14,
+        // PR #45): a freshly created root can receive a replayed creation
+        // event from FSEvents after the subscription starts, waking
+        // `pending` for a reason that has nothing to do with `rewatch` —
+        // that "queues no wake" property belongs to
+        // `a_rewatch_over_a_healthy_root_queues_no_wake_and_touches_nothing`
+        // below, which has no real backend in the loop to replay anything.
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("root");
         std::fs::create_dir(&root).unwrap();
@@ -1888,13 +1909,6 @@ mod tests {
         assert!(
             wait_for(|| shared.rewatch_generation() > before),
             "the tick must have driven a rewatch"
-        );
-        // `starts` only moves once the full `QUIET` debounce has elapsed,
-        // so a wrongly queued wake would sit unseen in `pending` for the
-        // length of this assertion alone — check the queue directly too.
-        assert!(
-            shared.pending.lock().unwrap().first.is_none(),
-            "a tick over healthy roots must not queue a wake"
         );
         assert!(
             shared.watched().contains(&plain(&root))
@@ -1949,6 +1963,61 @@ mod tests {
             !shared.watched().contains(&plain(&root)),
             "a root queued in `forget` must be dropped, and the Spy's refusal to re-watch it \
              means reconcile cannot be what keeps it out"
+        );
+    }
+
+    /// CI fix (macos-14, PR #45):
+    /// `a_tick_with_every_root_alive_touches_nothing` asserted "a tick over
+    /// healthy roots queues no wake" through a real thread and a real
+    /// directory just created, and failed on CI — FSEvents on that runner
+    /// replayed the directory's own creation as an event AFTER the
+    /// subscription started, waking `pending` for a reason that has
+    /// nothing to do with `rewatch`. Same construction as the isolation
+    /// test above (no `open`, no real thread, fields set directly): with
+    /// no real backend in the loop, nothing but `rewatch` itself can be
+    /// the source of a wake here, so the property is provable directly.
+    /// Two states, one fixture: a healthy root queues nothing and is
+    /// untouched; the SAME root, arriving back from `lost`, queues
+    /// exactly one wake (Task 8 review, round 1, item 1) — the positive
+    /// control that the first half is a real property, not `rewatch`
+    /// never queuing anything at all.
+    #[test]
+    fn a_rewatch_over_a_healthy_root_queues_no_wake_and_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let shared = Arc::new(Shared::new());
+        let reader_root = plain(&root);
+        *shared.roots.lock().unwrap() =
+            Some(Box::new(move || Ok(HashSet::from([reader_root.clone()]))));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        *shared.watched.lock().unwrap() = HashSet::from([plain(&root)]);
+        *shared.watcher.lock().unwrap() = Some(Box::new(Spy {
+            calls: Arc::clone(&log),
+            ..Default::default()
+        }));
+
+        shared.rewatch();
+        assert!(
+            shared.pending.lock().unwrap().first.is_none(),
+            "a rewatch over a healthy root must not queue a wake"
+        );
+        assert!(
+            shared.watched().contains(&plain(&root)),
+            "a healthy root must still be watched"
+        );
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a healthy root must be neither re-watched nor unwatched"
+        );
+
+        // Positive control, same fixture: the same root, arriving back
+        // from `lost`, DOES queue exactly one wake.
+        *shared.watched.lock().unwrap() = HashSet::new();
+        shared.lost.lock().unwrap().insert(plain(&root));
+        shared.rewatch();
+        assert!(
+            shared.pending.lock().unwrap().first.is_some(),
+            "a root returning from `lost` must queue exactly one wake"
         );
     }
 
