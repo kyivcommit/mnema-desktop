@@ -510,6 +510,7 @@ jobs:
           - pr10d-launcher
           - pr10f-tray-locale
           - pr10f-settings
+          - watcher
         include:
           - file: pr8-ui-folders
             node: true
