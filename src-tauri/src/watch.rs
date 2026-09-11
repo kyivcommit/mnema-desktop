@@ -586,6 +586,26 @@ impl Shared {
                 let mut forget = Self::lock(&self.forget);
                 std::mem::take(&mut *forget)
             };
+            // Independent review (Task 12, P2): a root the callback reports
+            // gone is removed from `watched` right here, before the
+            // liveness pass below — so without this, it never enters
+            // `lost`, and its later return through `reconcile` costs no
+            // `wake()` (the only source of one is the `lost`-retain below).
+            // Real on Linux: inotify turns `DELETE_SELF` into
+            // `Remove(Folder)` and drops the watch itself, with no event on
+            // the (unwatched) parent when the folder comes back. Same
+            // shape as liveness's own two steps below: check membership
+            // and remember first, remove after — so a `forget` entry for
+            // something already gone (a duplicate event, or a root the
+            // command already dropped from `roots`) remembers nothing.
+            let removed_by_callback: Vec<PathBuf> = forgotten
+                .iter()
+                .filter(|p| watched.contains(*p))
+                .cloned()
+                .collect();
+            if !removed_by_callback.is_empty() {
+                Self::lock(&self.lost).extend(removed_by_callback);
+            }
             for p in forgotten {
                 watched.remove(&p);
             }
@@ -1423,9 +1443,12 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    /// Records every call; `watch` refuses paths in `refuse`. `calls` is
-    /// `Arc<Mutex<…>>>`, not a plain `Vec` (CI fix, macos-14, PR #45): a
-    /// clone of the log survives moving a `Spy` into a
+    /// Records every call; `watch` refuses paths in `refuse`, and (Task 12,
+    /// independent review) any path at all while `refuse_missing` is set
+    /// and the path is not currently a directory — the smallest stand-in
+    /// for a real backend refusing to subscribe something that is not
+    /// there yet. `calls` is `Arc<Mutex<…>>>`, not a plain `Vec` (CI fix,
+    /// macos-14, PR #45): a clone of the log survives moving a `Spy` into a
     /// `Box<dyn Subscriptions + Send>` and on into `Shared`, so a test
     /// that stores the Spy there can still read what it recorded after
     /// `rewatch` returns.
@@ -1433,6 +1456,7 @@ mod tests {
     struct Spy {
         calls: Arc<Mutex<Vec<(&'static str, PathBuf)>>>,
         refuse: HashSet<PathBuf>,
+        refuse_missing: bool,
     }
     impl Subscriptions for Spy {
         fn watch(&mut self, root: &Path) -> Result<(), String> {
@@ -1440,7 +1464,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(("watch", root.to_path_buf()));
-            if self.refuse.contains(root) {
+            if self.refuse.contains(root) || (self.refuse_missing && !root.is_dir()) {
                 Err("refused".into())
             } else {
                 Ok(())
@@ -1941,7 +1965,11 @@ mod tests {
         // habit of re-subscribing anything still in `roots` is not what
         // keeps it out either — whether `watch` is even ATTEMPTED is the
         // one thing that depends on `forget` having dropped it from
-        // `watched` first, and that is the one thing this isolates.
+        // `watched` first, and that is the one thing this isolates. Task 12
+        // (independent review, P2): the drain now also remembers this root
+        // in `lost`, but the Spy's refusal means `reconcile` never gets it
+        // back into `watched`, so `returned` stays false and no `wake()`
+        // fires — this test's own assertion is unaffected.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let shared = Arc::new(Shared::new()); // `rewatch` needs `&Arc<Self>` (Task 10)
@@ -1963,6 +1991,71 @@ mod tests {
             !shared.watched().contains(&plain(&root)),
             "a root queued in `forget` must be dropped, and the Spy's refusal to re-watch it \
              means reconcile cannot be what keeps it out"
+        );
+    }
+
+    /// Independent review (Task 12, P2): the `forget` drain removes a root
+    /// from `watched` before the liveness pass right below it, in the same
+    /// function — so without this drain also feeding `lost`, a root the
+    /// callback reported gone never gets the wake its later return owes
+    /// (real on Linux: inotify turns `DELETE_SELF` into `Remove(Folder)`
+    /// and drops the watch itself, with no event on the root's own,
+    /// unwatched parent when it comes back). Same construction as the
+    /// isolation test above (no `open`, no real thread): a real existing
+    /// directory, actually removed and recreated, with a `Spy` that
+    /// refuses `watch` only while the path is genuinely missing and
+    /// accepts it once it exists again — the smallest stand-in for what a
+    /// real backend would do, so the "it returned" half is not faked.
+    #[test]
+    fn a_root_removed_through_the_callback_is_scanned_when_it_returns() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let shared = Arc::new(Shared::new());
+        let reader_root = plain(&root);
+        *shared.roots.lock().unwrap() =
+            Some(Box::new(move || Ok(HashSet::from([reader_root.clone()]))));
+        *shared.watched.lock().unwrap() = HashSet::from([plain(&root)]);
+        *shared.watcher.lock().unwrap() = Some(Box::new(Spy {
+            refuse_missing: true,
+            ..Default::default()
+        }));
+        shared.forget.lock().unwrap().push(plain(&root));
+
+        std::fs::remove_dir_all(&root).unwrap();
+        shared.rewatch();
+        assert!(
+            !shared.watched().contains(&plain(&root)),
+            "a root the callback reported gone must leave `watched`"
+        );
+        assert!(
+            shared.lost.lock().unwrap().contains(&plain(&root)),
+            "a removal reported by the callback must be remembered as lost"
+        );
+        assert!(
+            shared.pending.lock().unwrap().first.is_none(),
+            "nothing has returned yet — this rewatch alone must not queue a wake"
+        );
+
+        // Model the removal scan (triggered by `classify`'s own wake on the
+        // real `Remove` event, off the ordinary scan-debounce path) having
+        // already completed by the time the root comes back.
+        shared.pending.lock().unwrap().take();
+
+        std::fs::create_dir(&root).unwrap();
+        shared.rewatch();
+        assert!(
+            shared.watched().contains(&plain(&root)),
+            "the root must be re-subscribed once it exists again"
+        );
+        assert!(
+            !shared.lost.lock().unwrap().contains(&plain(&root)),
+            "a root that returned must leave `lost`"
+        );
+        let p = shared.pending.lock().unwrap();
+        assert!(
+            p.first.is_some() && p.first == p.last,
+            "a root that returns after a callback-reported removal is scanned once"
         );
     }
 

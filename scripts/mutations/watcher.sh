@@ -111,3 +111,14 @@ case_ "watch: a Stop pressed before the retry no longer discharges the owed star
   's~if slot\.stopped_at\(\)\.is_some\(\) \{~if false {~' \
   'if false {' \
   mnema-desktop 'watch::tests::a_stop_while_the_startup_scan_is_still_owed_cancels_the_obligation' --lib
+
+# Task 12 (independent review, P2): the `forget` drain removes a root from
+# `watched` before the liveness pass runs; without also feeding `lost`, a
+# root the callback reported gone never gets the wake its later return
+# owes. This mutates the drain's new `lost`-insert to a no-op, leaving the
+# removal itself untouched.
+case_ "watch: the forget drain no longer remembers a removed root as lost" \
+  src-tauri/src/watch.rs \
+  's~Self::lock\(&self\.lost\)\.extend\(removed_by_callback\);~let _ = removed_by_callback;~' \
+  'let _ = removed_by_callback;' \
+  mnema-desktop 'watch::tests::a_root_removed_through_the_callback_is_scanned_when_it_returns' --lib
