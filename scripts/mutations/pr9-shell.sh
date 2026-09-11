@@ -543,7 +543,7 @@ case_ "the outgoing job writes its ending before it announces, never after" \
 # the marker nor the occurrence count of.
 case_ "the release is announced when the job ends, not when a stop is asked for" \
   src-tauri/src/state.rs \
-  's~    pub fn cancel_job\(&self\) \{\n        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~    pub fn cancel_job(\&self) \{\n        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        self\.finished = true;\n        self\.announce\(\);~        self.finished = true;\n        // mutant: the ending is not announced~' \
+  's~        self\.cancel\.store\(true, Ordering::SeqCst\);\n    \}~        self.cancel.store(true, Ordering::SeqCst);\n        // mutant: the release is announced when a stop is requested\n        if let Some(f) = self.job_observer.lock().unwrap().as_ref() \{\n            f();\n        \}\n    \}~; s~        self\.finished = true;\n        self\.announce\(\);~        self.finished = true;\n        // mutant: the ending is not announced~' \
   '// mutant: the release is announced when a stop is requested' \
   mnema-desktop 'state::tests::the_observer_hears_a_job_start_and_finish' --lib
 
