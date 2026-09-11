@@ -99,3 +99,15 @@ case_ "watch: a refused start-up scan is never retried" \
   's~if !startup_done \{~if false {~' \
   'if false {' \
   mnema-desktop 'watch::tests::a_startup_scan_refused_by_a_closed_index_is_retried_on_the_tick' --lib
+
+# Task 11 review (round 1, item 1) added the pre-check; this case pins it
+# on its own — case 12 covers the enclosing `if !startup_done`, not this
+# inner branch. Anchored on the full `if slot.stopped_at().is_some() {`
+# line so it hits only the pre-check site, not `trigger`'s own read of
+# `stopped_at` or the two post-hoc `startup_done = seen_last.is_some() ||
+# slot.stopped_at().is_some();` assignments elsewhere in the same function.
+case_ "watch: a Stop pressed before the retry no longer discharges the owed start-up scan" \
+  src-tauri/src/watch.rs \
+  's~if slot\.stopped_at\(\)\.is_some\(\) \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'watch::tests::a_stop_while_the_startup_scan_is_still_owed_cancels_the_obligation' --lib
