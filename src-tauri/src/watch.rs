@@ -676,14 +676,26 @@ impl Shared {
         // refused start-up attempt (the index not open yet — `boot_index`
         // → `set_boot_open_error`, opened later by hand) read back as
         // `None` and a genuinely started one as `Some`, distinguishing
-        // them at all. The Stop rule is unaffected: `stopped_at` is
-        // `None` at start-up, so `after_stop` defaults to `true`
-        // regardless of what `newest` carries.
+        // them at all. This first look sees `stopped_at` as `None` (Stop
+        // cannot have been pressed before the thread exists), so the
+        // Stop rule inside `trigger` defaults to allowing it; every later
+        // retry below runs mid-life and obeys that same rule like any
+        // other trigger call — and Task 11 review round 1, item 1, below,
+        // is what a Stop pressed while a retry is still owed does to it.
         let mut seen_last = trigger(&*slot, &self.pending, Some(Instant::now()), &mut sleep);
         // Owner decision 1 (a scan at launch) must hold even when that
         // first attempt was refused — retried below, on every `dirty`/
-        // `tick` wake, until one actually starts.
-        let mut startup_done = seen_last.is_some();
+        // `tick` wake, until one actually starts OR a Stop discharges the
+        // obligation (Task 11 review, round 1, item 1): `trigger` answers
+        // `None` not only on a refusal but also when the Stop rule itself
+        // blocked it (the retry's own `now` predates `stopped_at`) — left
+        // unguarded, the NEXT retry would fabricate a fresh
+        // `Some(Instant::now())` that postdates the press, starting a
+        // full scan up to one `REWATCH` after Stop with nothing changed
+        // on disk. `slot.stopped_at().is_some()` on its own is enough:
+        // once Stop has ever been pressed, the launch obligation is
+        // discharged either way, started or deliberately not.
+        let mut startup_done = seen_last.is_some() || slot.stopped_at().is_some();
         while !self.closed.load(Ordering::SeqCst) {
             let taken = {
                 let mut p = Self::lock(&self.pending);
@@ -696,17 +708,45 @@ impl Shared {
                     {
                         drop(p);
                         if !startup_done {
-                            // Cheap once it has started — one `if` — and
-                            // harmless if an ordinary wake's own trigger
-                            // (below, via `rewatch` and the outer loop's
-                            // own call) got there first: `slot.start()`
-                            // then answers `JobAlreadyRunning`, `trigger`
-                            // waits `POLL` and starts again once that scan
-                            // ends — one extra scan, acceptable, not worth
-                            // guarding against.
-                            seen_last =
-                                trigger(&*slot, &self.pending, Some(Instant::now()), &mut sleep);
-                            startup_done = seen_last.is_some();
+                            // A Stop discharges the launch obligation
+                            // outright (Task 11 review, round 1, item 1)
+                            // — checked BEFORE attempting the retry, not
+                            // only after: a retry attempted now always
+                            // builds its own fresh `Instant::now()`, which
+                            // necessarily postdates a Stop already
+                            // pressed, so `trigger`'s own comparison
+                            // against `stopped_at` could never block THIS
+                            // attempt on that timestamp alone — only
+                            // knowing Stop happened AT ALL, checked here,
+                            // does. Still checked again after the call
+                            // (`|| slot.stopped_at().is_some()` below),
+                            // for a Stop that lands WHILE this retry is
+                            // in flight (blocked inside `trigger`'s own
+                            // `Running`-poll loop, using the `now` this
+                            // call started with, which DOES predate that
+                            // press, so `trigger` correctly answers
+                            // `None` for it — the case the launch
+                            // obligation's own comment narrates).
+                            if slot.stopped_at().is_some() {
+                                startup_done = true;
+                            } else {
+                                // Cheap once it has started — one `if` —
+                                // and harmless if an ordinary wake's own
+                                // trigger (below, via `rewatch` and the
+                                // outer loop's own call) got there first:
+                                // `slot.start()` then answers
+                                // `JobAlreadyRunning`, `trigger` waits
+                                // `POLL` and starts again once that scan
+                                // ends — one extra scan, acceptable, not
+                                // worth guarding against.
+                                seen_last = trigger(
+                                    &*slot,
+                                    &self.pending,
+                                    Some(Instant::now()),
+                                    &mut sleep,
+                                );
+                                startup_done = seen_last.is_some() || slot.stopped_at().is_some();
+                            }
                         }
                         self.rewatch();
                         p = Self::lock(&self.pending);
@@ -835,6 +875,10 @@ pub(crate) struct CountingSlot {
     /// Task 11: the first this-many calls to `start()` answer as though
     /// the index were still closed, instead of counting.
     pub refuse_starts: AtomicU32,
+    /// Task 11 review (round 1, item 1): settable `stopped_at()` answer,
+    /// `None` by default — a test sets it to simulate Stop being pressed
+    /// while a start-up retry is still owed.
+    pub stopped: Mutex<Option<Instant>>,
 }
 #[cfg(test)]
 impl Slot for CountingSlot {
@@ -850,7 +894,7 @@ impl Slot for CountingSlot {
         crate::scan_state::ScanSnapshot::Idle
     }
     fn stopped_at(&self) -> Option<Instant> {
-        None
+        *self.stopped.lock().unwrap()
     }
 }
 
@@ -1570,6 +1614,80 @@ mod tests {
             0,
             "a rewatch that returns before ever reaching `make_watcher` must not count as one that ran"
         );
+    }
+
+    #[test]
+    fn a_stop_while_the_startup_scan_is_still_owed_cancels_the_obligation() {
+        // Task 11 review (round 1, item 1): index closed at boot →
+        // start-up refused → the person opens the index and presses Stop
+        // before any retry has actually started a scan. The owed
+        // start-up scan must not fire on a LATER tick just because that
+        // later retry's own fresh timestamp postdates the press — a Stop
+        // discharges the obligation outright, not merely until the next
+        // tick's fabricated `now()` slips past it.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let desired = Arc::new(Mutex::new(vec![root.clone()]));
+        let shared = Arc::new(Shared::new());
+        let reader = Arc::clone(&desired);
+        shared.open(
+            plain(Path::new("/nonexistent-private")),
+            Box::new(move || Ok(reader.lock().unwrap().iter().cloned().collect())),
+        );
+        let slot = shared.spawn_for_test_refusing(1);
+        assert!(wait_for(|| shared.rewatch_generation() >= 1));
+        assert_eq!(
+            slot.starts.load(Ordering::SeqCst),
+            0,
+            "the refused start-up scan must not count as started"
+        );
+        *slot.stopped.lock().unwrap() = Some(Instant::now());
+        let before = shared.rewatch_generation();
+        shared.tick_for_test();
+        assert!(wait_for(|| shared.rewatch_generation() > before));
+        assert_eq!(
+            slot.starts.load(Ordering::SeqCst),
+            0,
+            "a Stop pressed while the start-up scan was still owed must not be undone by the retry"
+        );
+        shared.close();
+    }
+
+    #[test]
+    fn a_folder_added_after_a_refused_boot_carries_out_the_owed_startup_scan() {
+        // Task 11 review (round 1, item 3): pins the accepted
+        // interaction. With the index opened after a refused boot, the
+        // first `add_watched_folder` — which marks `dirty`, the same as
+        // `request_rewatch()` here — carries out the OWED start-up scan;
+        // the scan is owed independently of the add, not caused by it.
+        // The mirror case — adding a folder does NOT start a scan of its
+        // own once the start-up obligation is already discharged — is
+        // `adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does`
+        // (integration suite), left untouched.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let desired = Arc::new(Mutex::new(vec![root.clone()]));
+        let shared = Arc::new(Shared::new());
+        let reader = Arc::clone(&desired);
+        shared.open(
+            plain(Path::new("/nonexistent-private")),
+            Box::new(move || Ok(reader.lock().unwrap().iter().cloned().collect())),
+        );
+        let slot = shared.spawn_for_test_refusing(1);
+        assert!(wait_for(|| shared.rewatch_generation() >= 1));
+        assert_eq!(
+            slot.starts.load(Ordering::SeqCst),
+            0,
+            "the refused start-up scan must not count as started"
+        );
+        shared.request_rewatch(); // stands in for `add_watched_folder`'s own dirty mark
+        assert!(
+            wait_for(|| slot.starts.load(Ordering::SeqCst) == 1),
+            "the folder-add's dirty wake must carry out the owed start-up scan, not one of its own"
+        );
+        shared.close();
     }
 
     #[test]
