@@ -656,7 +656,20 @@ impl Shared {
     fn run(self: Arc<Self>, slot: Arc<dyn Slot + Send + Sync>) {
         let mut sleep = |d: Duration| std::thread::sleep(d);
         self.rewatch();
-        let mut seen_last = trigger(&*slot, &self.pending, None, &mut sleep);
+        // `Some(Instant::now())`, not `None` (Task 11, owner ruling
+        // 2026-09-11, night): `trigger`'s `Ok(()) => return newest` only
+        // answers `Some` when it was GIVEN one, so this is what lets a
+        // refused start-up attempt (the index not open yet — `boot_index`
+        // → `set_boot_open_error`, opened later by hand) read back as
+        // `None` and a genuinely started one as `Some`, distinguishing
+        // them at all. The Stop rule is unaffected: `stopped_at` is
+        // `None` at start-up, so `after_stop` defaults to `true`
+        // regardless of what `newest` carries.
+        let mut seen_last = trigger(&*slot, &self.pending, Some(Instant::now()), &mut sleep);
+        // Owner decision 1 (a scan at launch) must hold even when that
+        // first attempt was refused — retried below, on every `dirty`/
+        // `tick` wake, until one actually starts.
+        let mut startup_done = seen_last.is_some();
         while !self.closed.load(Ordering::SeqCst) {
             let taken = {
                 let mut p = Self::lock(&self.pending);
@@ -668,6 +681,19 @@ impl Shared {
                         || self.tick.swap(false, Ordering::SeqCst)
                     {
                         drop(p);
+                        if !startup_done {
+                            // Cheap once it has started — one `if` — and
+                            // harmless if an ordinary wake's own trigger
+                            // (below, via `rewatch` and the outer loop's
+                            // own call) got there first: `slot.start()`
+                            // then answers `JobAlreadyRunning`, `trigger`
+                            // waits `POLL` and starts again once that scan
+                            // ends — one extra scan, acceptable, not worth
+                            // guarding against.
+                            seen_last =
+                                trigger(&*slot, &self.pending, Some(Instant::now()), &mut sleep);
+                            startup_done = seen_last.is_some();
+                        }
                         self.rewatch();
                         p = Self::lock(&self.pending);
                         continue;
@@ -706,7 +732,16 @@ impl Shared {
 
     #[cfg(test)]
     pub(crate) fn spawn_for_test(self: &Arc<Self>) -> Arc<CountingSlot> {
-        let slot = Arc::new(CountingSlot::default());
+        self.spawn_for_test_refusing(0)
+    }
+    /// Like `spawn_for_test`, but the slot's first `n` `start()` calls
+    /// answer `Err(IndexNotOpen)` instead of counting (Task 11).
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test_refusing(self: &Arc<Self>, n: u32) -> Arc<CountingSlot> {
+        let slot = Arc::new(CountingSlot {
+            refuse_starts: AtomicU32::new(n),
+            ..Default::default()
+        });
         let me = Arc::clone(self);
         let s: Arc<dyn Slot + Send + Sync> = slot.clone();
         std::thread::spawn(move || me.run(s));
@@ -783,10 +818,17 @@ impl<R: tauri::Runtime> Slot for HandleSlot<R> {
 #[derive(Default)]
 pub(crate) struct CountingSlot {
     pub starts: AtomicU64,
+    /// Task 11: the first this-many calls to `start()` answer as though
+    /// the index were still closed, instead of counting.
+    pub refuse_starts: AtomicU32,
 }
 #[cfg(test)]
 impl Slot for CountingSlot {
     fn start(&self) -> Result<(), crate::error::Error> {
+        if self.refuse_starts.load(Ordering::SeqCst) > 0 {
+            self.refuse_starts.fetch_sub(1, Ordering::SeqCst);
+            return Err(crate::error::Error::IndexNotOpen);
+        }
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -1479,6 +1521,56 @@ mod tests {
             "the callback holds only a Weak — no cycle keeps Shared alive: \
              expected the thread's Arc to be released, found it still held"
         );
+    }
+
+    #[test]
+    fn a_startup_scan_refused_by_a_closed_index_is_retried_on_the_tick() {
+        // Owner ruling 2026-09-11 (night): owner decision 1 (a scan at
+        // launch) must hold even when the index did not open at boot
+        // (`boot_index` → `set_boot_open_error`, opened later by hand) —
+        // the thread retries the start-up trigger on every tick until one
+        // actually starts.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let desired = Arc::new(Mutex::new(vec![root.clone()]));
+        let shared = Arc::new(Shared::new());
+        let reader = Arc::clone(&desired);
+        shared.open(
+            plain(Path::new("/nonexistent-private")),
+            Box::new(move || Ok(reader.lock().unwrap().iter().cloned().collect())),
+        );
+        let slot = shared.spawn_for_test_refusing(1);
+        // No `request_rewatch()` here, unlike `shared_for`: that call sets
+        // `dirty`, which shares this same retry branch in `run` (any wake
+        // is a reasonable moment to retry the start-up scan, not only the
+        // `REWATCH` tick — faster recovery, and there is no `tick`-only
+        // restriction to preserve) — it would consume the one queued
+        // refusal before the test's own `tick_for_test()` gets to.
+        assert!(wait_for(|| shared.rewatch_generation() >= 1));
+        assert_eq!(
+            slot.starts.load(Ordering::SeqCst),
+            0,
+            "the refused start-up scan must not count as started"
+        );
+        shared.tick_for_test();
+        assert!(
+            wait_for(|| slot.starts.load(Ordering::SeqCst) == 1),
+            "the tick must retry the start-up scan once the slot accepts it"
+        );
+        // A second tick must not retry it again — wait for this tick's
+        // own `rewatch` to have completed (a fresh generation) before
+        // checking `starts`, so a slow thread cannot be mistaken for one
+        // that correctly stopped retrying.
+        let before = shared.rewatch_generation();
+        shared.tick_for_test();
+        assert!(wait_for(|| shared.rewatch_generation() > before));
+        assert_eq!(
+            slot.starts.load(Ordering::SeqCst),
+            1,
+            "a started start-up scan is not retried again"
+        );
+        shared.close();
     }
 
     #[test]
