@@ -4,11 +4,48 @@
 //! module only decides WHEN to run it again. Nothing here touches the index.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 pub const QUIET: Duration = Duration::from_secs(2);
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
 pub const POLL: Duration = Duration::from_secs(5);
 pub const REWATCH: Duration = Duration::from_secs(60);
+
+/// What the trigger thread waits on: the first and the last wake since the
+/// last trigger. Two instants and nothing else — spec review P2-4 asked for
+/// a bounded pending state instead of an unbounded queue, and P2-3 for a
+/// cap so that a stream of wakes cannot starve the scan.
+// Driven by the trigger thread from Task 4; the allow leaves with it.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pending {
+    pub first: Option<Instant>,
+    pub last: Option<Instant>,
+}
+
+// Driven by the trigger thread from Task 4; the allow leaves with it.
+#[allow(dead_code)]
+impl Pending {
+    pub(crate) fn wake(&mut self, now: Instant) {
+        self.first.get_or_insert(now);
+        self.last = Some(now);
+    }
+
+    /// `None`: nothing pending. `Some(ZERO)`: fire now. `Some(d)`: wait `d`.
+    /// Fires when `QUIET` has passed since the last wake OR `MAX_WAIT` since
+    /// the first; the sooner of the two.
+    pub(crate) fn due(&self, now: Instant) -> Option<Duration> {
+        let (first, last) = (self.first?, self.last?);
+        let fire_at = (last + QUIET).min(first + MAX_WAIT);
+        Some(fire_at.saturating_duration_since(now))
+    }
+
+    pub(crate) fn take(&mut self) -> Option<Instant> {
+        let last = self.last;
+        *self = Self::default();
+        last
+    }
+}
 
 /// One form for every path this module compares. Resolves symlinks in the
 /// longest EXISTING prefix (so a path that was just deleted still resolves
@@ -222,6 +259,68 @@ mod tests {
         assert!(
             !classify(&ev(EventKind::Modify(ModifyKind::Any), &[]), &private()),
             "no paths, no rescan flag: nothing to act on"
+        );
+    }
+
+    use std::time::Instant;
+    fn t(base: Instant, secs: u64) -> Instant {
+        base + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn five_wakes_in_a_burst_fire_once_after_quiet() {
+        let base = Instant::now();
+        let mut p = Pending::default();
+        for ms in [0, 20, 40, 60, 80] {
+            p.wake(base + Duration::from_millis(ms));
+        }
+        assert_eq!(
+            p.due(base + Duration::from_millis(100)),
+            Some(QUIET - Duration::from_millis(20))
+        );
+        assert_eq!(
+            p.due(base + Duration::from_millis(80) + QUIET),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(p.take(), Some(base + Duration::from_millis(80)));
+        assert_eq!(
+            p.due(base + Duration::from_secs(10)),
+            None,
+            "taken means nothing pending"
+        );
+    }
+
+    #[test]
+    fn a_wake_every_second_still_fires_by_max_wait() {
+        // Spec review P2-3: trailing-only debounce under a one-per-second stream never fires.
+        let base = Instant::now();
+        let mut p = Pending::default();
+        let mut fired_at = None;
+        for s in 0..61u64 {
+            let now = t(base, s);
+            p.wake(now);
+            if p.due(now + Duration::from_millis(500)) == Some(Duration::ZERO) {
+                fired_at = Some(s);
+                break;
+            }
+        }
+        assert_eq!(
+            fired_at,
+            Some(30),
+            "the cap from the first wake must fire at MAX_WAIT, not never"
+        );
+    }
+
+    #[test]
+    fn due_never_exceeds_the_cap() {
+        let base = Instant::now();
+        let mut p = Pending::default();
+        p.wake(base);
+        p.wake(t(base, 29));
+        assert_eq!(
+            p.due(t(base, 29)),
+            Some(Duration::from_secs(1)),
+            "one second to the cap, not two of quiet"
         );
     }
 
