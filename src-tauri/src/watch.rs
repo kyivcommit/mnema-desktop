@@ -3,6 +3,7 @@
 //! Spec: docs 2026-09-10 (private). The walk is the source of truth; this
 //! module only decides WHEN to run it again. Nothing here touches the index.
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -15,17 +16,16 @@ pub const REWATCH: Duration = Duration::from_secs(60);
 /// last trigger. Two instants and nothing else — spec review P2-4 asked for
 /// a bounded pending state instead of an unbounded queue, and P2-3 for a
 /// cap so that a stream of wakes cannot starve the scan.
-// Driven by the trigger thread from Task 4; the allow leaves with it.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Pending {
     pub first: Option<Instant>,
     pub last: Option<Instant>,
 }
 
-// Driven by the trigger thread from Task 4; the allow leaves with it.
-#[allow(dead_code)]
 impl Pending {
+    // `trigger` (Task 4) only ever calls `take`; `wake` and `due` are driven
+    // by the watcher thread once Task 5 subscribes — the allow leaves with it.
+    #[allow(dead_code)]
     pub(crate) fn wake(&mut self, now: Instant) {
         self.first.get_or_insert(now);
         self.last = Some(now);
@@ -34,6 +34,8 @@ impl Pending {
     /// `None`: nothing pending. `Some(ZERO)`: fire now. `Some(d)`: wait `d`.
     /// Fires when `QUIET` has passed since the last wake OR `MAX_WAIT` since
     /// the first; the sooner of the two.
+    // Driven by the watcher thread once Task 5 subscribes; the allow leaves with it.
+    #[allow(dead_code)]
     pub(crate) fn due(&self, now: Instant) -> Option<Duration> {
         let (first, last) = (self.first?, self.last?);
         let fire_at = (last + QUIET).min(first + MAX_WAIT);
@@ -113,6 +115,83 @@ fn resolve_existing_prefix(p: &Path) -> PathBuf {
                 cur = parent;
             }
             _ => return p.to_path_buf(),
+        }
+    }
+}
+
+/// What the trigger needs from the application — a trait so the busy and
+/// Stop paths can be driven from a script instead of a real scan.
+///
+/// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
+#[allow(dead_code)]
+pub(crate) trait Slot {
+    fn start(&self) -> Result<(), crate::error::Error>;
+    fn snapshot(&self) -> crate::scan_state::ScanSnapshot;
+    fn stopped_at(&self) -> Option<Instant>;
+}
+
+impl Slot for crate::state::AppState {
+    fn start(&self) -> Result<(), crate::error::Error> {
+        crate::scan_job::start(self, crate::scan_state::Entry::Full)
+    }
+    fn snapshot(&self) -> crate::scan_state::ScanSnapshot {
+        self.scan_state().snapshot
+    }
+    fn stopped_at(&self) -> Option<Instant> {
+        crate::state::AppState::stopped_at(self)
+    }
+}
+
+/// One trigger. Looks at the slot BEFORE every claim (plan review P1-1:
+/// `claim_job` overwrites a Cancelled report with Running and resets the
+/// cancel flag, so a `start()`-first design never sees the Stop). Carries
+/// `newest`, the latest wake it has accepted, across every retry (P2-6).
+///
+/// Answers the wake it started on, or `None` when it dropped the trigger.
+/// The one residual race — Stop pressed on an IDLE slot between the look
+/// and the claim — is a Stop with nothing to stop, and `cancel_job` on an
+/// idle slot is a no-op by its own doc.
+// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
+#[allow(dead_code)]
+pub(crate) fn trigger(
+    slot: &dyn Slot,
+    pending: &Mutex<Pending>,
+    seen_last: Option<Instant>,
+    sleep: &mut dyn FnMut(Duration),
+) -> Option<Instant> {
+    use crate::job::EndReason;
+    use crate::scan_state::ScanSnapshot;
+    let mut newest = seen_last;
+    loop {
+        match slot.snapshot() {
+            ScanSnapshot::Running { .. } => {
+                sleep(POLL);
+                continue;
+            }
+            ScanSnapshot::Ended { report } if report.reason == EndReason::Cancelled => {
+                let mut p = pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                newest = newest.max(p.last);
+                let after_stop = matches!((newest, slot.stopped_at()), (Some(n), Some(s)) if n > s);
+                if !after_stop {
+                    p.take();
+                    return None;
+                }
+                p.take();
+            }
+            // Idle, or ended for another reason: our change may have been
+            // missed by whatever ran — claim. `pending` is left alone; a
+            // wake that arrived meanwhile is the next scan's.
+            _ => {}
+        }
+        match slot.start() {
+            Ok(()) => return newest,
+            Err(crate::error::Error::JobAlreadyRunning) => continue,
+            Err(e) => {
+                eprintln!("mnema: the watcher did not start a scan: {e}");
+                return None;
+            }
         }
     }
 }
@@ -389,5 +468,237 @@ mod tests {
             ),
             "positive control"
         );
+    }
+
+    use crate::job::EndReason;
+    use crate::scan_state::{ScanReport, ScanSnapshot};
+    use std::cell::RefCell;
+    use std::sync::Mutex;
+
+    /// A scripted slot. `snapshot()` answers `snaps` in order and repeats the
+    /// last one; `start()` answers `starts` in order.
+    struct Script {
+        starts: RefCell<Vec<Result<(), crate::error::Error>>>,
+        snaps: RefCell<Vec<ScanSnapshot>>,
+        stopped: Option<Instant>,
+        started: RefCell<usize>,
+    }
+    impl Slot for Script {
+        fn start(&self) -> Result<(), crate::error::Error> {
+            *self.started.borrow_mut() += 1;
+            self.starts.borrow_mut().remove(0)
+        }
+        fn snapshot(&self) -> ScanSnapshot {
+            let mut s = self.snaps.borrow_mut();
+            if s.len() > 1 {
+                s.remove(0)
+            } else {
+                s[0].clone()
+            }
+        }
+        fn stopped_at(&self) -> Option<Instant> {
+            self.stopped
+        }
+    }
+    fn ended(reason: EndReason) -> ScanSnapshot {
+        ScanSnapshot::Ended {
+            report: ScanReport {
+                reason,
+                ..ScanReport::default()
+            },
+        }
+    }
+    fn running() -> ScanSnapshot {
+        ScanSnapshot::Running {
+            phase: crate::scan_state::Phase::Other {
+                job: crate::scan_state::OtherJob::Probe,
+            },
+            cancellable: true,
+        }
+    }
+    fn busy() -> crate::error::Error {
+        crate::error::Error::JobAlreadyRunning
+    }
+    fn script(
+        starts: Vec<Result<(), crate::error::Error>>,
+        snaps: Vec<ScanSnapshot>,
+        stopped: Option<Instant>,
+    ) -> Script {
+        Script {
+            starts: RefCell::new(starts),
+            snaps: RefCell::new(snaps),
+            stopped,
+            started: RefCell::new(0),
+        }
+    }
+    fn no_sleep() -> impl FnMut(Duration) {
+        |_| {}
+    }
+
+    #[test]
+    fn a_cancelled_scan_already_ended_before_the_first_attempt_is_not_restarted() {
+        // Plan review P1-1: the slot is FREE; a `start()`-first trigger would
+        // claim it and never read the Stop rule.
+        let base = Instant::now();
+        let s = script(
+            vec![Ok(())],
+            vec![ended(EndReason::Cancelled)],
+            Some(base + Duration::from_secs(5)),
+        );
+        let pending = Mutex::new(Pending::default());
+        let out = trigger(
+            &s,
+            &pending,
+            Some(base + Duration::from_secs(3)),
+            &mut no_sleep(),
+        );
+        assert_eq!(
+            *s.started.borrow(),
+            0,
+            "a change before Stop must not claim the freed slot"
+        );
+        assert_eq!(out, None);
+        assert_eq!(*pending.lock().unwrap(), Pending::default());
+    }
+
+    #[test]
+    fn a_change_after_stop_starts_even_though_the_slot_shows_cancelled() {
+        let base = Instant::now();
+        let s = script(
+            vec![Ok(())],
+            vec![ended(EndReason::Cancelled)],
+            Some(base + Duration::from_secs(5)),
+        );
+        let pending = Mutex::new(Pending::default());
+        let out = trigger(
+            &s,
+            &pending,
+            Some(base + Duration::from_secs(7)),
+            &mut no_sleep(),
+        );
+        assert_eq!(
+            *s.started.borrow(),
+            1,
+            "positive control: a change after Stop scans"
+        );
+        assert_eq!(out, Some(base + Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn a_change_before_stop_while_running_does_not_restart_once_cancelled() {
+        let base = Instant::now();
+        let s = script(
+            vec![],
+            vec![running(), ended(EndReason::Cancelled)],
+            Some(base + Duration::from_secs(5)),
+        );
+        let pending = Mutex::new(Pending::default());
+        trigger(
+            &s,
+            &pending,
+            Some(base + Duration::from_secs(3)),
+            &mut no_sleep(),
+        );
+        assert_eq!(*s.started.borrow(), 0);
+    }
+
+    #[test]
+    fn a_wake_during_the_wait_that_postdates_stop_restarts() {
+        let base = Instant::now();
+        let s = script(
+            vec![Ok(())],
+            vec![running(), ended(EndReason::Cancelled)],
+            Some(base + Duration::from_secs(5)),
+        );
+        let pending = Mutex::new(Pending::default());
+        pending.lock().unwrap().wake(base + Duration::from_secs(7));
+        let out = trigger(
+            &s,
+            &pending,
+            Some(base + Duration::from_secs(3)),
+            &mut no_sleep(),
+        );
+        assert_eq!(*s.started.borrow(), 1);
+        assert_eq!(out, Some(base + Duration::from_secs(7)));
+        assert_eq!(
+            *pending.lock().unwrap(),
+            Pending::default(),
+            "the restart consumed it"
+        );
+    }
+
+    #[test]
+    fn newest_survives_a_second_busy_that_restores_the_cancelled_report() {
+        // Plan review P2-6: after the restart was allowed, an `Other` job
+        // takes the slot and, on ending, restores the previous Cancelled
+        // report (`state.rs:805-815`). The trigger must remember the
+        // post-Stop wake it already accepted.
+        let base = Instant::now();
+        let s = script(
+            vec![Err(busy()), Ok(())],
+            vec![
+                running(),
+                ended(EndReason::Cancelled),
+                running(),
+                ended(EndReason::Cancelled),
+            ],
+            Some(base + Duration::from_secs(5)),
+        );
+        let pending = Mutex::new(Pending::default());
+        pending.lock().unwrap().wake(base + Duration::from_secs(7));
+        let out = trigger(
+            &s,
+            &pending,
+            Some(base + Duration::from_secs(3)),
+            &mut no_sleep(),
+        );
+        assert_eq!(
+            *s.started.borrow(),
+            2,
+            "the third look at the slot must still start"
+        );
+        assert_eq!(out, Some(base + Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn a_completed_foreign_scan_is_followed_by_ours_and_pending_is_kept() {
+        let base = Instant::now();
+        let s = script(
+            vec![Ok(())],
+            vec![running(), ended(EndReason::Completed)],
+            None,
+        );
+        let pending = Mutex::new(Pending::default());
+        pending.lock().unwrap().wake(base + Duration::from_secs(1));
+        trigger(&s, &pending, Some(base), &mut no_sleep());
+        assert_eq!(*s.started.borrow(), 1);
+        assert!(
+            pending.lock().unwrap().first.is_some(),
+            "a wake during the wait is the next scan's"
+        );
+    }
+
+    #[test]
+    fn a_second_busy_answer_keeps_waiting() {
+        let s = script(
+            vec![Err(busy()), Err(busy()), Ok(())],
+            vec![ScanSnapshot::Idle],
+            None,
+        );
+        let pending = Mutex::new(Pending::default());
+        trigger(&s, &pending, None, &mut no_sleep());
+        assert_eq!(*s.started.borrow(), 3);
+    }
+
+    #[test]
+    fn any_other_refusal_is_logged_and_dropped() {
+        let s = script(
+            vec![Err(crate::error::Error::IndexNotOpen)],
+            vec![ScanSnapshot::Idle],
+            None,
+        );
+        let pending = Mutex::new(Pending::default());
+        assert_eq!(trigger(&s, &pending, None, &mut no_sleep()), None);
+        assert_eq!(*s.started.borrow(), 1);
     }
 }
