@@ -53,10 +53,20 @@ case_ "watch: reconcile rebuilds instead of diffing" \
   'let gone: Vec<PathBuf> = watched.iter().cloned().collect();' \
   mnema-desktop 'watch::tests::reconcile_touches_only_what_changed' --lib
 
+# Retargeted by Task 8 (2026-09-11): its original mutation — disabling the
+# `watched.remove(&p)` inside `rewatch`'s `forget`-drain — no longer goes red
+# here, because Task 8's own liveness pass (same function, a few lines below,
+# `!root.is_dir()`) now independently drops the same root once its directory
+# is actually gone, in the very same `rewatch` call the `Remove` event's
+# `request_rewatch` already triggers. Measured with the harness: applying
+# only the old mutation left `a_removed_root_leaves_the_watched_set` green.
+# Retargeted to what the liveness pass cannot cover for — the callback's own
+# notification. Disabling it leaves the removal to the unconditional 60 s
+# `REWATCH` tick alone, past the test's 5 s `wait_for`.
 case_ "watch: a removed root stays in the watched set" \
   src-tauri/src/watch.rs \
-  's~watched\.remove\(&p\);~if false { watched.remove(&p); }~' \
-  'if false { watched.remove(&p); }' \
+  's~self\.request_rewatch\(\);~if false { self.request_rewatch(); }~' \
+  'if false { self.request_rewatch(); }' \
   mnema-desktop 'watch::tests::a_removed_root_leaves_the_watched_set' --lib
 
 case_ "watch: the liveness check never notices a root that stopped being a directory" \
