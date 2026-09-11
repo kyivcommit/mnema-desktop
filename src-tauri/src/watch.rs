@@ -11,9 +11,9 @@ use std::time::Instant;
 
 /// How long nothing may change before a debounced scan fires. Owner ruling
 /// 2026-09-11: an editor's own save-every-few-seconds habit must coalesce
-/// into ONE scan under the `MAX_WAIT` cap rather than fire one scan per
-/// save — measured at the old 2 s value on 2026-09-11: twelve saves a
-/// minute gave twelve scans, not the two or three the cap should have
+/// into one scan per `MAX_WAIT` window rather than fire one scan per save
+/// — measured at the old 2 s value on 2026-09-11: twelve saves a minute
+/// gave twelve scans, not the two or three a window this wide should have
 /// forced. The price of the wider window is the reaction time to a single,
 /// isolated change: 10 s instead of 2.
 pub const QUIET: Duration = Duration::from_secs(10);
@@ -347,12 +347,14 @@ pub struct Shared {
     /// Roots the liveness pass has dropped, waiting to be woken once they
     /// return (Task 8 review, round 1, item 1). Owner thread only: the
     /// liveness pass in `rewatch` adds to this when it drops a root, and
-    /// right after the `reconcile` call that follows, any entry that is
-    /// back in `watched` is removed from here and costs exactly one
-    /// `wake()` — the owner's ruling asked for a root that returns to be
-    /// «стежиться знову» (watched again), not merely re-subscribed with
-    /// whatever changed while it was away left unindexed until some later,
-    /// unrelated event happened to arrive. Persists across ticks on
+    /// right after the `reconcile` call that follows, an entry leaves here
+    /// one of two ways: back in `watched` costs exactly one `wake()` — the
+    /// owner's ruling asked for a root that returns to be «стежиться
+    /// знову» (watched again), not merely re-subscribed with whatever
+    /// changed while it was away left unindexed until some later,
+    /// unrelated event happened to arrive — or no longer a desired root at
+    /// all (removed through the folder command while it was away), which
+    /// leaves silently, with nothing left to scan for. Persists across ticks on
     /// purpose: a root can take more than one `REWATCH` cycle to come
     /// back, and this is what lets the cycle that finally finds it alive
     /// still know it was lost. The callback never touches this — it only
@@ -563,14 +565,22 @@ impl Shared {
                     watched.remove(r);
                 }
                 reconcile(w.as_mut(), &mut watched, &roots);
-                // A root added through a command was never in `lost` (it
-                // was never subscribed before, so liveness never dropped
-                // it) — this only ever fires for a root that came BACK,
-                // which is why «adding a folder starts no scan» stays true
-                // for the ordinary add path.
+                // A root leaves `lost` one of two ways: it returns (still
+                // wanted — still in `roots`, the set `reconcile` just
+                // worked from — and now back in `watched`), which costs
+                // one `wake()`; or it stops being wanted at all (no longer
+                // in `roots`, e.g. removed through the folder command
+                // while it was away), which leaves silently — there is
+                // nothing left to scan for. A root added through a
+                // command was never subscribed before, so liveness never
+                // drops it and it is never in `lost` to begin with — THAT
+                // is what keeps «adding a folder starts no scan» true for
+                // the ordinary add path, not this retain.
                 let mut returned = false;
                 Self::lock(&self.lost).retain(|p| {
-                    if watched.contains(p) {
+                    if !roots.contains(p) {
+                        false
+                    } else if watched.contains(p) {
                         returned = true;
                         false
                     } else {
@@ -942,7 +952,7 @@ mod tests {
         }
         assert_eq!(
             fired_at,
-            Some(30),
+            Some(MAX_WAIT.as_secs()),
             "the cap from the first wake must fire at MAX_WAIT, not never"
         );
     }
@@ -1518,6 +1528,13 @@ mod tests {
         assert!(
             wait_for(|| shared.rewatch_generation() > before),
             "the tick must have driven a rewatch"
+        );
+        // `starts` only moves once the full `QUIET` debounce has elapsed,
+        // so a wrongly queued wake would sit unseen in `pending` for the
+        // length of this assertion alone — check the queue directly too.
+        assert!(
+            shared.pending.lock().unwrap().first.is_none(),
+            "a tick over healthy roots must not queue a wake"
         );
         assert!(
             shared.watched().contains(&plain(&root))
