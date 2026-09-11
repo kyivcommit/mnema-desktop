@@ -15,7 +15,7 @@ use mnema_desktop::scan_state::{Entry, ScanSnapshot};
 use mnema_desktop::state::AppState;
 use mnema_desktop::watch::{MAX_WAIT, QUIET};
 use serde_json::json;
-use support::scan::{reading_of, run_scan_capturing_snapshots};
+use support::scan::{reading_of, report_of, run_scan_capturing_snapshots};
 use tauri::Manager;
 
 /// §6 of the spec: what one trigger on an unchanged corpus costs. Release
@@ -267,11 +267,33 @@ fn a_manual_stop_is_not_undone_by_a_change_that_came_before_it() {
     // inside `QUIET` (2 s) so no natural trigger fires first.
     std::fs::write(root.path().join("b.txt"), "b").unwrap();
     std::thread::sleep(Duration::from_millis(200));
+    // Otherwise this test cannot tell a Stop on a running scan from a scan
+    // that happened to end by itself before Stop was ever pressed — Task 6
+    // review, round 1: `cancel_job` writes `stopped_at` unconditionally even
+    // on an already-`Ended` slot, so the assertions below would stay green
+    // either way without this one pinning WHICH case actually happened.
+    assert!(
+        matches!(
+            app.state::<AppState>().scan_state().snapshot,
+            ScanSnapshot::Running { .. }
+        ),
+        "the scan must still be running when Stop is pressed — otherwise this \
+         test cannot tell a Stop on a running scan from a scan that ended by \
+         itself"
+    );
     app.state::<AppState>().cancel_job();
     assert!(
         wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
             >= 1),
         "the triggered scan never ended"
+    );
+    // And Stop must be WHY it ended, not a no-op racing a scan that had
+    // already completed on its own.
+    let report = report_of(&app.state::<AppState>().scan_state());
+    assert_eq!(
+        report.reason,
+        EndReason::Cancelled,
+        "the manual Stop must be what ended the scan, not completion"
     );
     std::thread::sleep(MAX_WAIT + QUIET + Duration::from_secs(2));
     assert_eq!(
