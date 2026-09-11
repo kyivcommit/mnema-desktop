@@ -53,7 +53,7 @@ impl Pending {
 /// `/private/var/…` for a root handed over as `/var/…`; Windows
 /// `canonicalize` answers `\\?\C:\…` while notify builds event paths from
 /// the plain `C:\…` it was given.
-pub(crate) fn plain(p: &Path) -> PathBuf {
+pub fn plain(p: &Path) -> PathBuf {
     let resolved = resolve_existing_prefix(p);
     #[cfg(not(windows))]
     {
@@ -679,6 +679,11 @@ mod tests {
             real.join("gone").join("deeper.txt"),
             "a deleted tail resolves through its existing parent"
         );
+        // Windows stand (win-pve, 2026-09-11): `/` under `canonicalize`
+        // resolves against the current drive rather than answering "no such
+        // prefix", so this specific assertion is unix-only; the `#[cfg(windows)]`
+        // block below carries the equivalent Windows-rooted case instead.
+        #[cfg(unix)]
         assert_eq!(
             plain(Path::new("/no/such/prefix/at/all")),
             PathBuf::from("/no/such/prefix/at/all")
@@ -693,6 +698,14 @@ mod tests {
             assert_eq!(
                 plain(Path::new(r"C:\WINDOWS")),
                 PathBuf::from(r"c:\windows")
+            );
+            // The non-existent-prefix case, Windows-rooted (the unix
+            // assertion above is gated out here) — a deleted tail resolves
+            // through the longest existing prefix, `C:\` itself, not the
+            // current drive `/` would.
+            assert_eq!(
+                plain(Path::new(r"C:\no\such\prefix\at\all")),
+                PathBuf::from(r"c:\no\such\prefix\at\all")
             );
         }
     }
@@ -1331,6 +1344,13 @@ mod tests {
         shared.close();
     }
 
+    // Windows stand (win-pve, probe 2, 2026-09-11): removing the watched
+    // root under the open `ReadDirectoryChangesW` handle produces no
+    // `Remove` for the root and nothing after it — the delete is deferred
+    // while the handle stays open, so the subscription's death is
+    // unobservable there. Platform boundary, not a defect (same family as
+    // the Linux unmount/rename limit).
+    #[cfg(not(windows))]
     #[test]
     fn a_removed_root_leaves_the_watched_set() {
         let parent = tempfile::tempdir().unwrap();

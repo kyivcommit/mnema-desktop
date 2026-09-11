@@ -376,6 +376,16 @@ fn removing_a_folder_through_the_command_stops_its_events_and_keeps_the_other_ro
     let (app, webview, ended) = app_watching(dir.path(), &[a.path(), b.path()]);
     let _close = CloseOnDrop(app.handle().clone());
 
+    let b_plain = mnema_desktop::watch::plain(b.path());
+    assert!(
+        wait_until(Duration::from_secs(60), || app
+            .state::<AppState>()
+            .watch()
+            .watched()
+            .contains(&b_plain)),
+        "root B must be subscribed before the command removes it"
+    );
+
     let b_path = b.path().display().to_string();
     let b_id = root_id(&app, b.path());
     call(
@@ -384,16 +394,12 @@ fn removing_a_folder_through_the_command_stops_its_events_and_keeps_the_other_ro
         json!({ "rootId": b_id, "path": b_path }),
     )
     .expect("remove_watched_folder was rejected");
-    // `plain`, unexported from this integration test's own crate boundary,
-    // is exactly `canonicalize` on unix — the one platform this suite (bar
-    // the Linux-only test elsewhere in this file) runs on.
-    let b_canonical = b.path().canonicalize().unwrap();
     assert!(
         wait_until(Duration::from_secs(60), || !app
             .state::<AppState>()
             .watch()
             .watched()
-            .contains(&b_canonical)),
+            .contains(&b_plain)),
         "remove_watched_folder never reached the watcher thread"
     );
 
@@ -432,16 +438,13 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
         json!({ "path": c.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected");
-    // `plain`, unexported from this integration test's own crate boundary,
-    // is exactly `canonicalize` on unix — the one platform this suite (bar
-    // the Linux-only test elsewhere in this file) runs on.
-    let c_canonical = c.path().canonicalize().unwrap();
+    let c_plain = mnema_desktop::watch::plain(c.path());
     assert!(
         wait_until(Duration::from_secs(60), || app
             .state::<AppState>()
             .watch()
             .watched()
-            .contains(&c_canonical)),
+            .contains(&c_plain)),
         "add_watched_folder never reached the watcher thread"
     );
     std::thread::sleep(QUIET + Duration::from_secs(1));
