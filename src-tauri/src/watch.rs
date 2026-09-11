@@ -307,6 +307,19 @@ pub struct Shared {
     pub(crate) pending: Mutex<Pending>,
     pub(crate) cv: Condvar,
     watched: Mutex<HashSet<PathBuf>>,
+    /// Root removals the callback has seen but has not folded into
+    /// `watched` (review round 2). The callback runs on the notify
+    /// backend's own thread — the one `stop()`/`join()` waits on
+    /// (FSEvents `watch_inner`, `fsevent.rs:308-346`) or that blocks in
+    /// `rx.recv()` (inotify `inotify.rs:560,576`) — and `rewatch` holds
+    /// `watched` while it calls into that same backend to
+    /// `watch`/`unwatch`, so the callback may never wait on `watched`'s
+    /// lock: it would risk hanging the very thread `rewatch`'s OS calls
+    /// (and `close()`'s watcher drop) depend on. It pushes `plain` paths
+    /// here instead and marks `dirty`; the owner thread — `rewatch`, the
+    /// only reader — drains this under its own short lock, held only for
+    /// the drain and never across any OS call, before it reconciles.
+    forget: Mutex<Vec<PathBuf>>,
     watcher: Mutex<Option<Box<dyn Subscriptions + Send>>>,
     roots: Mutex<Option<RootsReader>>,
     private_dir: Mutex<PathBuf>,
@@ -323,6 +336,7 @@ impl Shared {
             pending: Mutex::new(Pending::default()),
             cv: Condvar::new(),
             watched: Mutex::new(HashSet::new()),
+            forget: Mutex::new(Vec::new()),
             watcher: Mutex::new(None),
             roots: Mutex::new(None),
             private_dir: Mutex::new(PathBuf::new()),
@@ -335,18 +349,6 @@ impl Shared {
     }
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// `try_lock`, recovering a poisoned lock the same way [`Shared::lock`]
-    /// does. Only contention (`WouldBlock`) answers `None` — this exists so
-    /// a caller that must never block (see `on_event`'s doc, review round 1
-    /// item 1) can back off instead.
-    fn try_lock<T>(m: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
-        match m.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-        }
     }
 
     /// Stores `true` into `flag` while holding `pending`'s lock, and
@@ -410,34 +412,18 @@ impl Shared {
             && matches!(ev.kind, notify::EventKind::Remove(_))
         {
             // A root removed from under us: inotify drops the watch itself
-            // (`inotify.rs:305-315`); forget it so the next reconcile
-            // re-subscribes once it exists again. Keys are `plain`.
-            //
-            // `try_lock`, never `lock` (review round 1, item 1): this
-            // callback runs on the notify backend's own thread — the one
-            // `stop()`/`join()` waits on (FSEvents `watch_inner`,
-            // `fsevent.rs:308-346`) or that blocks in `rx.recv()` (inotify
-            // `inotify.rs:560,576`) — and `rewatch` holds `watched` while it
-            // calls into that same backend to `watch`/`unwatch`. Blocking
-            // here on contention would hang that backend thread forever,
-            // and `close()`'s watcher drop, which waits on it, with it. On
-            // contention, skip the removal here and mark dirty instead — the
-            // next reconcile re-reads the roots and catches up regardless.
-            let removed_any = match Self::try_lock(&self.watched) {
-                Some(mut watched) => {
-                    let mut changed = false;
-                    for p in &ev.paths {
-                        if watched.remove(&plain(p)) {
-                            changed = true;
-                        }
-                    }
-                    changed
+            // (`inotify.rs:305-315`). This callback must never take
+            // `watched`'s lock (review round 2 — see `forget`'s own doc for
+            // why), so the removal travels through `forget` instead of
+            // being applied here; `rewatch` folds it in before it next
+            // reconciles. Keys are `plain`.
+            {
+                let mut forget = Self::lock(&self.forget);
+                for p in &ev.paths {
+                    forget.push(plain(p));
                 }
-                None => true,
-            };
-            if removed_any {
-                self.request_rewatch();
             }
+            self.request_rewatch();
         }
         if classify(res, &Self::lock(&self.private_dir)) {
             self.wake();
@@ -466,6 +452,20 @@ impl Shared {
         let all = {
             let mut watcher = Self::lock(&self.watcher);
             let mut watched = Self::lock(&self.watched);
+            // Fold in whatever the callback queued in `forget` (its own doc
+            // explains why a removal cannot land in `watched` directly)
+            // before reconciling, so a root the kernel already dropped is
+            // not treated as still subscribed and re-`unwatch`ed for
+            // nothing, and a root that reappears gets re-subscribed. Locked
+            // only for the drain itself, never across the `reconcile` call
+            // below — lock order here is `watcher` → `watched` → `forget`.
+            let forgotten: Vec<PathBuf> = {
+                let mut forget = Self::lock(&self.forget);
+                std::mem::take(&mut *forget)
+            };
+            for p in forgotten {
+                watched.remove(&p);
+            }
             match watcher.as_mut() {
                 Some(w) => reconcile(w.as_mut(), &mut watched, &roots),
                 // No watcher means nothing is actually subscribed, whatever
