@@ -581,7 +581,8 @@ impl Shared {
             // not treated as still subscribed and re-`unwatch`ed for
             // nothing, and a root that reappears gets re-subscribed. Locked
             // only for the drain itself, never across the `reconcile` call
-            // below — lock order here is `watcher` → `watched` → `forget`.
+            // below — lock order here is `watcher` → `watched` → `forget`
+            // (drained, released) → `lost` (briefly).
             let forgotten: Vec<PathBuf> = {
                 let mut forget = Self::lock(&self.forget);
                 std::mem::take(&mut *forget)
