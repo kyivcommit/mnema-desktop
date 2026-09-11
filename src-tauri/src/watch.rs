@@ -49,8 +49,8 @@ impl Pending {
 
 /// One form for every path this module compares. Resolves symlinks in the
 /// longest EXISTING prefix (so a path that was just deleted still resolves
-/// through its parent), then on Windows strips the verbatim prefix
-/// `canonicalize` adds and folds case. Measured: FSEvents on macOS delivers
+/// through its parent), then on Windows strips the `\\?\C:` (verbatim disk)
+/// prefix `canonicalize` adds and folds case. Measured: FSEvents on macOS delivers
 /// `/private/var/…` for a root handed over as `/var/…`; Windows
 /// `canonicalize` answers `\\?\C:\…` while notify builds event paths from
 /// the plain `C:\…` it was given.
@@ -119,15 +119,17 @@ fn resolve_existing_prefix(p: &Path) -> PathBuf {
 
 /// Whether an event from `notify` is a reason to run the scan again.
 ///
-/// Three rules, in this order, and the order is the contract:
-/// 1. `Rescan` (queue overflow on Linux, `MustScanSubDirs` on macOS) wakes
+/// Four rules, in this order, and the order is the contract:
+/// 1. `Err` always wakes — the watcher itself is in trouble (queue overflow,
+///    a backend error), which is not something a missed scan can wait out.
+/// 2. `Rescan` (queue overflow on Linux, `MustScanSubDirs` on macOS) wakes
 ///    unconditionally — it carries no paths and means "something changed,
 ///    I do not know what", which is exactly what a full scan answers.
-/// 2. `Access` never wakes. The inotify backend subscribes to `IN_OPEN`
+/// 3. `Access` never wakes. The inotify backend subscribes to `IN_OPEN`
 ///    (notify 8.2.0 `inotify.rs:427`), so the walk's own directory reads and
 ///    the ingest's own file reads would otherwise re-trigger the scan
 ///    they belong to.
-/// 3. Everything else wakes unless EVERY path is under `private_dir` — the
+/// 4. Everything else wakes unless EVERY path is under `private_dir` — the
 ///    whole app-data directory, not the index file: the WAL and SHM
 ///    sidecars and `prefs.json.<pid>.<n>.tmp` live beside it, and a scan
 ///    writes `SCAN_INCOMPLETE` before it walks anything. One private path
@@ -260,6 +262,48 @@ mod tests {
             !classify(&ev(EventKind::Modify(ModifyKind::Any), &[]), &private()),
             "no paths, no rescan flag: nothing to act on"
         );
+    }
+
+    /// `private()` above is a directory that never exists, so every test that
+    /// uses it takes `plain`'s "no such prefix" branch: none of them exercise
+    /// `plain` + `classify` together over a root whose real path differs from
+    /// the raw one, which is the failure mode §2's amendment exists for
+    /// (measured: FSEvents delivers `/private/var/…` for a root handed over
+    /// as `/var/…`). This builds a private dir reached through a real
+    /// symlink and classifies events already given in the *resolved* form —
+    /// the form FSEvents actually delivers — against it.
+    #[test]
+    fn the_private_directory_is_dropped_when_it_is_reached_through_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("data/mnema")).unwrap();
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(real.join("data"), &link).unwrap();
+            let private_dir = plain(&link.join("mnema"));
+
+            assert!(
+                !classify(
+                    &ev(
+                        EventKind::Modify(ModifyKind::Any),
+                        &[real.join("data/mnema/index.sqlite").to_str().unwrap()]
+                    ),
+                    &private_dir
+                ),
+                "a resolved path under the symlinked private dir is still recognised as private"
+            );
+            assert!(
+                classify(
+                    &ev(
+                        EventKind::Modify(ModifyKind::Any),
+                        &[real.join("data/other/file.txt").to_str().unwrap()]
+                    ),
+                    &private_dir
+                ),
+                "positive control: a resolved path outside the private dir still wakes"
+            );
+        }
     }
 
     use std::time::Instant;
