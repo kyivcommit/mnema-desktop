@@ -495,7 +495,39 @@ impl Shared {
                 watched.remove(&p);
             }
             match watcher.as_mut() {
-                Some(w) => reconcile(w.as_mut(), &mut watched, &roots),
+                Some(w) => {
+                    // Liveness (Task 8, owner ruling 2026-09-11): a root can
+                    // vanish while watched with no event to catch it on some
+                    // backends — Linux unmount/rename (`notify` 8.2.0 handles
+                    // neither `IN_UNMOUNT` nor `IN_IGNORED`, and `MOVE_SELF`
+                    // yields `Modify(Name(From))` without dropping the watch,
+                    // `inotify.rs:268-278`) or Windows deleting the root
+                    // under the open `ReadDirectoryChangesW` handle (no
+                    // `Remove`, stand probe 2026-09-11). The filesystem
+                    // itself is the only cross-platform signal, so every
+                    // tick checks it directly: a `watched` root that is no
+                    // longer a directory is dropped here — best-effort
+                    // `unwatch` first (the backend may already have dropped
+                    // it on its own, so a refusal is expected and only
+                    // logged), `watched.remove` regardless of that result,
+                    // since the directory is gone either way. `reconcile`
+                    // below then re-`watch`es it once it is a directory
+                    // again — the same retry path
+                    // `a_failed_new_root_is_retried_on_the_tick_after_it_appears`
+                    // already proves for a root absent at startup.
+                    let dead: Vec<PathBuf> =
+                        watched.iter().filter(|r| !r.is_dir()).cloned().collect();
+                    for r in &dead {
+                        if let Err(e) = w.unwatch(r) {
+                            eprintln!(
+                                "mnema: {} was already gone from the OS watch: {e}",
+                                r.display()
+                            );
+                        }
+                        watched.remove(r);
+                    }
+                    reconcile(w.as_mut(), &mut watched, &roots)
+                }
                 // No watcher means nothing is actually subscribed, whatever
                 // `roots` says (review round 1, item 3) — `false`, so the
                 // loop retries on the `REWATCH` timeout instead of waiting
@@ -509,9 +541,16 @@ impl Shared {
 
     /// The thread body. `slot` is the application in production and a
     /// counting stub in tests.
+    ///
+    /// Waits with the `REWATCH` timeout even when the last `rewatch` found
+    /// everything subscribed (Task 8, owner ruling 2026-09-11): a root can
+    /// vanish while watched with nothing to observe on some backends (see
+    /// `rewatch`'s own liveness comment), so the periodic tick is the only
+    /// thing that ever notices — an unconditional `cv.wait(p)` here would
+    /// never fire it.
     fn run(self: Arc<Self>, slot: Arc<dyn Slot + Send + Sync>) {
         let mut sleep = |d: Duration| std::thread::sleep(d);
-        let mut all = self.rewatch();
+        self.rewatch();
         let mut seen_last = trigger(&*slot, &self.pending, None, &mut sleep);
         while !self.closed.load(Ordering::SeqCst) {
             let taken = {
@@ -524,7 +563,7 @@ impl Shared {
                         || self.tick.swap(false, Ordering::SeqCst)
                     {
                         drop(p);
-                        all = self.rewatch();
+                        self.rewatch();
                         p = Self::lock(&self.pending);
                         continue;
                     }
@@ -537,7 +576,6 @@ impl Shared {
                                 .unwrap_or_else(|e| e.into_inner())
                                 .0
                         }
-                        None if all => p = self.cv.wait(p).unwrap_or_else(|e| e.into_inner()),
                         None => {
                             let (g, r) = self
                                 .cv
@@ -554,7 +592,7 @@ impl Shared {
             if self.closed.load(Ordering::SeqCst) {
                 break;
             }
-            all = self.rewatch();
+            self.rewatch();
             seen_last =
                 trigger(&*slot, &self.pending, taken.max(seen_last), &mut sleep).or(seen_last);
         }
@@ -1341,6 +1379,72 @@ mod tests {
         assert!(wait_for(|| shared.watched().contains(&plain(&later))));
         std::fs::write(later.join("x.txt"), "x").unwrap();
         assert!(wait_for(|| shared.pending.lock().unwrap().first.is_some()));
+        shared.close();
+    }
+
+    #[test]
+    fn a_root_renamed_away_while_watched_is_resubscribed_when_it_returns() {
+        // Owner ruling 2026-09-11 (whole-branch review, boundary C1 not
+        // accepted): a root that vanishes while watched — a rename, here,
+        // which delivers no `Remove` on FSEvents or Windows and so never
+        // reaches the `forget` queue — must still be re-subscribed once it
+        // comes back, without an application restart. `rename`, not
+        // `remove_dir_all`, is the point of the test: it is the case the
+        // liveness pass exists for, not the one `forget` already covers.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        let aside = parent.path().join("aside");
+        std::fs::create_dir(&root).unwrap();
+        let (shared, _, slot) = shared_for(vec![root.clone()]);
+        assert!(
+            wait_for(|| shared.watched().contains(&plain(&root))),
+            "the root must be subscribed before the test renames it away"
+        );
+        std::fs::rename(&root, &aside).unwrap();
+        shared.tick_for_test();
+        assert!(
+            wait_for(|| !shared.watched().contains(&plain(&root))),
+            "a root that is no longer a directory must leave `watched` on the tick"
+        );
+        std::fs::rename(&aside, &root).unwrap();
+        shared.tick_for_test();
+        assert!(
+            wait_for(|| shared.watched().contains(&plain(&root))),
+            "a root that is a directory again must be re-subscribed on the tick after it returns"
+        );
+        std::fs::write(root.join("x.txt"), "x").unwrap();
+        assert!(
+            wait_for(|| slot.starts.load(Ordering::SeqCst) >= 1),
+            "and the new subscription must deliver events, not just a map entry"
+        );
+        shared.close();
+    }
+
+    #[test]
+    fn a_tick_with_every_root_alive_touches_nothing() {
+        // Control for the liveness pass above: a tick over a root that is
+        // still a directory must not unsubscribe it or start a scan — the
+        // check is `!root.is_dir()`, not "every tick clears everything".
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let (shared, _, slot) = shared_for(vec![root.clone()]);
+        assert!(wait_for(|| shared.watched().contains(&plain(&root))));
+        // `run` fires one trigger unconditionally at start-up (owner
+        // decision 1), so `starts` is already >= 1 here — the baseline for
+        // "the tick did not start a scan" is THIS count, not zero.
+        let starts_before = slot.starts.load(Ordering::SeqCst);
+        let before = shared.rewatch_generation();
+        shared.tick_for_test();
+        assert!(
+            wait_for(|| shared.rewatch_generation() > before),
+            "the tick must have driven a rewatch"
+        );
+        assert!(
+            shared.watched().contains(&plain(&root))
+                && slot.starts.load(Ordering::SeqCst) == starts_before,
+            "a tick over a healthy root must not unsubscribe it nor start a scan"
+        );
         shared.close();
     }
 

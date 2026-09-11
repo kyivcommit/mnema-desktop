@@ -58,3 +58,9 @@ case_ "watch: a removed root stays in the watched set" \
   's~watched\.remove\(&p\);~if false { watched.remove(&p); }~' \
   'if false { watched.remove(&p); }' \
   mnema-desktop 'watch::tests::a_removed_root_leaves_the_watched_set' --lib
+
+case_ "watch: the liveness check never notices a root that stopped being a directory" \
+  src-tauri/src/watch.rs \
+  's~\.filter\(\|r\| !r\.is_dir\(\)\)~.filter(|r| false)~' \
+  '.filter(|r| false)' \
+  mnema-desktop 'watch::tests::a_root_renamed_away_while_watched_is_resubscribed_when_it_returns' --lib
