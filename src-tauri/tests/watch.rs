@@ -264,7 +264,7 @@ fn a_manual_stop_is_not_undone_by_a_change_that_came_before_it() {
     // timestamp — 200ms gives the watcher's backend time to have actually
     // delivered this write's event before Stop is recorded, the same gap any
     // real person clicking Stop right after saving a file would leave, well
-    // inside `QUIET` (2 s) so no natural trigger fires first.
+    // inside `QUIET`'s window so no natural trigger fires first.
     std::fs::write(root.path().join("b.txt"), "b").unwrap();
     std::thread::sleep(Duration::from_millis(200));
     // Otherwise this test cannot tell a Stop on a running scan from a scan

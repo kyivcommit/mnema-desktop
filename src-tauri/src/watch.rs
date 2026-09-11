@@ -9,7 +9,14 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 use std::time::Instant;
 
-pub const QUIET: Duration = Duration::from_secs(2);
+/// How long nothing may change before a debounced scan fires. Owner ruling
+/// 2026-09-11: an editor's own save-every-few-seconds habit must coalesce
+/// into ONE scan under the `MAX_WAIT` cap rather than fire one scan per
+/// save — measured at the old 2 s value on 2026-09-11: twelve saves a
+/// minute gave twelve scans, not the two or three the cap should have
+/// forced. The price of the wider window is the reaction time to a single,
+/// isolated change: 10 s instead of 2.
+pub const QUIET: Duration = Duration::from_secs(10);
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
 pub const POLL: Duration = Duration::from_secs(5);
 pub const REWATCH: Duration = Duration::from_secs(60);
@@ -907,7 +914,8 @@ mod tests {
         assert_eq!(
             p.due(t(base, 29)),
             Some(Duration::from_secs(1)),
-            "one second to the cap, not two of quiet"
+            "one second to the cap, not a full {} of quiet",
+            QUIET.as_secs()
         );
     }
 
