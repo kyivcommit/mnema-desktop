@@ -23,6 +23,7 @@ pub mod tray;
 mod tray_icons;
 mod tree;
 pub mod walk_job;
+pub mod watch;
 
 use anyhow::Context as _;
 use tauri::Emitter as _;
