@@ -548,6 +548,20 @@ impl Shared {
             // the code below, which is why nothing past this point has an
             // arm for one any more.
             if watcher.is_none() {
+                // Task 10 review (round 1, item 1): `close()` can land
+                // before this thread's very first `rewatch` (unguarded,
+                // called before the loop below even starts) or in the
+                // narrow gap between the loop's own `closed` check and
+                // its `rewatch` call — either way, `watcher` is `None`
+                // (never built, or just dropped by `close()`), and
+                // without this check we would build a brand new OS
+                // watcher and re-subscribe every root right after
+                // `close()` was supposed to be the last word. `closed`
+                // read here, right before the one call that would
+                // otherwise create it, covers both windows.
+                if self.closed.load(Ordering::SeqCst) {
+                    return;
+                }
                 match self.make_watcher() {
                     Ok(w) => *watcher = Some(Box::new(w)),
                     Err(e) => {
@@ -1524,6 +1538,41 @@ mod tests {
     }
 
     #[test]
+    fn close_before_the_first_rewatch_creates_no_watcher() {
+        // Task 10 review (round 1, item 1): `close()` landing before the
+        // thread's very first `rewatch` — the unguarded call `run` makes
+        // before its own loop even starts — must still be final: no
+        // fresh OS watcher, no re-subscribed root. `root` is a real,
+        // existing directory on purpose: without the fix, `reconcile`
+        // would actually succeed in watching it, so `watched()` staying
+        // empty is a genuine signal here, not a coincidence of a bad path
+        // failing to watch for an unrelated reason.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let shared = Arc::new(Shared::new());
+        shared.open(
+            plain(Path::new("/nonexistent-private")),
+            Box::new(move || Ok(HashSet::from([root.clone()]))),
+        );
+        shared.close();
+        let _slot = shared.spawn_for_test();
+        assert!(
+            wait_for(|| shared.thread_exited()),
+            "a thread closed before its first rewatch must still exit"
+        );
+        assert!(
+            shared.watched().is_empty(),
+            "a watcher closed before its thread's first rewatch must build nothing"
+        );
+        assert_eq!(
+            shared.rewatch_generation(),
+            0,
+            "a rewatch that returns before ever reaching `make_watcher` must not count as one that ran"
+        );
+    }
+
+    #[test]
     fn a_startup_scan_refused_by_a_closed_index_is_retried_on_the_tick() {
         // Owner ruling 2026-09-11 (night): owner decision 1 (a scan at
         // launch) must hold even when the index did not open at boot
@@ -1616,7 +1665,11 @@ mod tests {
             Box::new(move || Ok(reader.lock().unwrap().iter().cloned().collect())),
         );
         let slot = shared.spawn_for_test();
-        shared.request_rewatch();
+        // No `request_rewatch()` here (Task 10 review, round 1, item 2):
+        // `run`'s own first `rewatch` is unconditional, so this line only
+        // added a timing risk — a late `dirty` store could drive a second
+        // `rewatch` that subscribes the root before the "nothing
+        // subscribed" assertion below runs.
         assert!(wait_for(|| shared.rewatch_generation() >= 1));
         assert!(
             shared.watched().is_empty(),

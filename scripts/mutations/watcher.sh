@@ -80,7 +80,15 @@ case_ "watch: the liveness check never notices a root that stopped being a direc
   '.filter(|r| false)' \
   mnema-desktop 'watch::tests::a_root_renamed_away_while_watched_is_resubscribed_when_it_returns' --lib
 
-case_ "watch: a refused watcher is never retried" \
+# Task 10 review (round 1, item 3): renamed from "a refused watcher is
+# never retried" — that mutation disables the ONE code path both the
+# first attempt and every later retry share (there is no separate
+# expression for "retry" alone; that is the whole point of Task 10, one
+# path for both), so it actually kills "no watcher is ever built at all"
+# (every real-notify test dies at its first generation wait) rather than
+# anything specific to retrying after a refusal. The mutation and its
+# target test are unchanged; only the label now says what it proves.
+case_ "watch: the OS watcher is built by rewatch at all" \
   src-tauri/src/watch.rs \
   's~if watcher\.is_none\(\) \{~if false {~' \
   'if false {' \
