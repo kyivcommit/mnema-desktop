@@ -161,17 +161,27 @@ pub(crate) fn trigger(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 newest = newest.max(p.last);
-                let after_stop = matches!((newest, slot.stopped_at()), (Some(n), Some(s)) if n > s);
-                if !after_stop {
-                    p.take();
-                    return None;
-                }
                 p.take();
             }
-            // Idle, or ended for another reason: our change may have been
-            // missed by whatever ran — claim. `pending` is left alone; a
-            // wake that arrived meanwhile is the next scan's.
+            // Idle, or ended for a reason other than Cancelled: our change
+            // may have been missed by whatever ran, so the Stop rule below
+            // still applies here too — a wake that arrived before the press
+            // must not restart the scan the press just stopped, even when
+            // whatever took the slot in between did not itself end
+            // Cancelled. `pending` is left alone in this arm either way; a
+            // wake that arrives meanwhile is the next scan's.
             _ => {}
+        }
+        // The Stop rule, read once per look, for every branch above: a wake
+        // `newest` has accepted is good to start on only if it postdates the
+        // last Stop. Either side missing — Stop never pressed, or nothing
+        // accepted yet — has nothing to forbid, so it defaults to starting.
+        let after_stop = match (newest, slot.stopped_at()) {
+            (Some(n), Some(s)) => n > s,
+            _ => true,
+        };
+        if !after_stop {
+            return None;
         }
         match slot.start() {
             Ok(()) => return newest,
@@ -779,7 +789,6 @@ mod tests {
     use crate::job::EndReason;
     use crate::scan_state::{ScanReport, ScanSnapshot};
     use std::cell::RefCell;
-    use std::sync::Mutex;
 
     /// A scripted slot. `snapshot()` answers `snaps` in order and repeats the
     /// last one; `start()` answers `starts` in order.
@@ -937,7 +946,7 @@ mod tests {
     fn newest_survives_a_second_busy_that_restores_the_cancelled_report() {
         // Plan review P2-6: after the restart was allowed, an `Other` job
         // takes the slot and, on ending, restores the previous Cancelled
-        // report (`state.rs:805-815`). The trigger must remember the
+        // report (`state.rs:532-539`). The trigger must remember the
         // post-Stop wake it already accepted.
         let base = Instant::now();
         let s = script(
@@ -1006,6 +1015,47 @@ mod tests {
         let pending = Mutex::new(Pending::default());
         assert_eq!(trigger(&s, &pending, None, &mut no_sleep()), None);
         assert_eq!(*s.started.borrow(), 1);
+    }
+
+    #[test]
+    fn a_change_before_stop_is_not_restarted_by_a_foreign_completed_scan() {
+        // Review round 1: the Stop rule guarded only the Cancelled arm; a
+        // pre-Stop wake read against a foreign job that ended Completed (not
+        // Cancelled, so `claim_job`'s restore condition at `state.rs:532-539`
+        // never applies) fell through to the `_` arm and restarted the scan
+        // Stop had just stopped.
+        let base = Instant::now();
+        let t = base + Duration::from_secs(10);
+        let s = script(vec![], vec![ended(EndReason::Completed)], Some(t));
+        let pending = Mutex::new(Pending::default());
+        let out = trigger(
+            &s,
+            &pending,
+            Some(t - Duration::from_secs(1)),
+            &mut no_sleep(),
+        );
+        assert_eq!(
+            *s.started.borrow(),
+            0,
+            "pre-Stop wake after a foreign Completed: dropped"
+        );
+        assert_eq!(out, None);
+
+        // Positive control: the identical shape, but the wake postdates Stop.
+        let s = script(vec![Ok(())], vec![ended(EndReason::Completed)], Some(t));
+        let pending = Mutex::new(Pending::default());
+        let out = trigger(
+            &s,
+            &pending,
+            Some(t + Duration::from_secs(1)),
+            &mut no_sleep(),
+        );
+        assert_eq!(
+            *s.started.borrow(),
+            1,
+            "positive control: a post-Stop wake after a foreign Completed still starts"
+        );
+        assert_eq!(out, Some(t + Duration::from_secs(1)));
     }
 
     use std::collections::HashSet;
