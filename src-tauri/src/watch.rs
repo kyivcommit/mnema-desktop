@@ -2015,9 +2015,10 @@ mod tests {
         *shared.watched.lock().unwrap() = HashSet::new();
         shared.lost.lock().unwrap().insert(plain(&root));
         shared.rewatch();
+        let p = shared.pending.lock().unwrap();
         assert!(
-            shared.pending.lock().unwrap().first.is_some(),
-            "a root returning from `lost` must queue exactly one wake"
+            p.first.is_some() && p.first == p.last,
+            "a root returning from `lost` queues exactly one wake — first and last coincide"
         );
     }
 
