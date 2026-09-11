@@ -53,6 +53,11 @@ mnema-secrets = { path = "../crates/mnema-secrets" }
 # `mnema-provider` are both already here by name, which is what
 # `tests/dependency_boundary.rs` was re-run to confirm rather than assumed.
 mnema-embed = { path = "../crates/mnema-embed" }
+# The folder watcher (spec 2026-09-10). Default features only: FSEvents on
+# macOS, inotify on Linux, ReadDirectoryChangesW on Windows. Nothing here
+# reaches the index; every event ends in the same `scan_job::start` the
+# window's button calls.
+notify = "8.2"
 # The two arms of search and the rule that fuses them. Brings nothing new into
 # this graph — `mnema-index` and `mnema-provider` are both already here by
 # name — which `tests/dependency_boundary.rs` was re-run to confirm.
