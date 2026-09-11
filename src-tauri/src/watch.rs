@@ -344,6 +344,22 @@ pub struct Shared {
     /// `all == true` — fully covered — with nothing left to make it
     /// retry.
     forget: Mutex<Vec<PathBuf>>,
+    /// Roots the liveness pass has dropped, waiting to be woken once they
+    /// return (Task 8 review, round 1, item 1). Owner thread only: the
+    /// liveness pass in `rewatch` adds to this when it drops a root, and
+    /// right after the `reconcile` call that follows, any entry that is
+    /// back in `watched` is removed from here and costs exactly one
+    /// `wake()` — the owner's ruling asked for a root that returns to be
+    /// «стежиться знову» (watched again), not merely re-subscribed with
+    /// whatever changed while it was away left unindexed until some later,
+    /// unrelated event happened to arrive. Persists across ticks on
+    /// purpose: a root can take more than one `REWATCH` cycle to come
+    /// back, and this is what lets the cycle that finally finds it alive
+    /// still know it was lost. The callback never touches this — it only
+    /// ever writes `forget`, a different queue for the opposite direction
+    /// (a root leaving, not returning). Locked only briefly inside
+    /// `rewatch`, never across an OS call.
+    lost: Mutex<HashSet<PathBuf>>,
     watcher: Mutex<Option<Box<dyn Subscriptions + Send>>>,
     roots: Mutex<Option<RootsReader>>,
     private_dir: Mutex<PathBuf>,
@@ -361,6 +377,7 @@ impl Shared {
             cv: Condvar::new(),
             watched: Mutex::new(HashSet::new()),
             forget: Mutex::new(Vec::new()),
+            lost: Mutex::new(HashSet::new()),
             watcher: Mutex::new(None),
             roots: Mutex::new(None),
             private_dir: Mutex::new(PathBuf::new()),
@@ -465,26 +482,30 @@ impl Shared {
         }
     }
 
-    /// The thread's only subscription step. Reads the desired roots and
-    /// reconciles; answers whether the cover is fully watched.
-    fn rewatch(&self) -> bool {
+    /// The thread's only subscription step. Reads the desired roots,
+    /// reconciles, and wakes `pending` once for any root that just
+    /// returned from being lost (Task 8 review, round 1, item 1). Its
+    /// answer used to matter to `run`'s wait loop (a `bool`, "is the cover
+    /// fully watched"); Task 8 made `run` wait with the `REWATCH` timeout
+    /// unconditionally, so nothing has read that value since — dropped
+    /// rather than kept it with a comment justifying a value nobody reads.
+    /// Every early return below used to matter to that same dead value;
+    /// now they just skip the rest of this call, and the `REWATCH` tick
+    /// retries regardless, in every case.
+    fn rewatch(&self) {
         self.dirty.store(false, Ordering::SeqCst);
         let roots = match Self::lock(&self.roots).as_ref() {
             Some(read) => read(),
-            None => return true,
+            None => return,
         };
         let roots: HashSet<PathBuf> = match roots {
             Ok(r) => r.iter().map(|p| plain(p)).collect(),
             Err(e) => {
                 eprintln!("mnema: the watcher could not read the watched folders: {e}");
-                // Unknown, not "fully covered" (review round 1, item 3): a
-                // roots-reader error that answered `true` would let the loop
-                // wait with no timeout, and an index still closed at startup
-                // means nothing is ever retried.
-                return false;
+                return;
             }
         };
-        let all = {
+        {
             let mut watcher = Self::lock(&self.watcher);
             let mut watched = Self::lock(&self.watched);
             // Fold in whatever the callback queued in `forget` (its own doc
@@ -501,49 +522,70 @@ impl Shared {
             for p in forgotten {
                 watched.remove(&p);
             }
-            match watcher.as_mut() {
-                Some(w) => {
-                    // Liveness (Task 8, owner ruling 2026-09-11): a root can
-                    // vanish while watched with no event to catch it on some
-                    // backends — Linux unmount/rename (`notify` 8.2.0 handles
-                    // neither `IN_UNMOUNT` nor `IN_IGNORED`, and `MOVE_SELF`
-                    // yields `Modify(Name(From))` without dropping the watch,
-                    // `inotify.rs:268-278`) or Windows deleting the root
-                    // under the open `ReadDirectoryChangesW` handle (no
-                    // `Remove`, stand probe 2026-09-11). The filesystem
-                    // itself is the only cross-platform signal, so every
-                    // tick checks it directly: a `watched` root that is no
-                    // longer a directory is dropped here — best-effort
-                    // `unwatch` first (the backend may already have dropped
-                    // it on its own, so a refusal is expected and only
-                    // logged), `watched.remove` regardless of that result,
-                    // since the directory is gone either way. `reconcile`
-                    // below then re-`watch`es it once it is a directory
-                    // again — the same retry path
-                    // `a_failed_new_root_is_retried_on_the_tick_after_it_appears`
-                    // already proves for a root absent at startup.
-                    let dead: Vec<PathBuf> =
-                        watched.iter().filter(|r| !r.is_dir()).cloned().collect();
-                    for r in &dead {
-                        if let Err(e) = w.unwatch(r) {
-                            eprintln!(
-                                "mnema: {} was already gone from the OS watch: {e}",
-                                r.display()
-                            );
-                        }
-                        watched.remove(r);
-                    }
-                    reconcile(w.as_mut(), &mut watched, &roots)
+            if let Some(w) = watcher.as_mut() {
+                // Liveness (Task 8, owner ruling 2026-09-11): a root can
+                // vanish while watched with no event to catch it on some
+                // backends — Linux unmount/rename (`notify` 8.2.0 handles
+                // neither `IN_UNMOUNT` nor `IN_IGNORED`, and `MOVE_SELF`
+                // yields `Modify(Name(From))` without dropping the watch,
+                // `inotify.rs:268-278`) or Windows deleting the root
+                // under the open `ReadDirectoryChangesW` handle (no
+                // `Remove`, stand probe 2026-09-11). The filesystem
+                // itself is the only cross-platform signal, so every
+                // tick checks it directly: a `watched` root that is no
+                // longer a directory is dropped here — best-effort
+                // `unwatch` first (the backend may already have dropped
+                // it on its own, so a refusal is expected and only
+                // logged), `watched.remove` regardless of that result,
+                // since the directory is gone either way — deliberately
+                // the opposite of `reconcile`'s own rule for a refused
+                // `unwatch` (its own doc: keep it in `watched` so a later
+                // call does not re-`watch` an already-subscribed root):
+                // here the root is gone regardless of what `unwatch`
+                // answered, so keeping it would only stop it from ever
+                // being retried. `reconcile` below then re-`watch`es it
+                // once it is a directory again — the same retry path
+                // `a_failed_new_root_is_retried_on_the_tick_after_it_appears`
+                // already proves for a root absent at startup. Every
+                // dropped root also goes into `lost`, so returning is not
+                // just a silent re-subscription (see that field's own doc).
+                let dead: Vec<PathBuf> = watched.iter().filter(|r| !r.is_dir()).cloned().collect();
+                if !dead.is_empty() {
+                    Self::lock(&self.lost).extend(dead.iter().cloned());
                 }
-                // No watcher means nothing is actually subscribed, whatever
-                // `roots` says (review round 1, item 3) — `false`, so the
-                // loop retries on the `REWATCH` timeout instead of waiting
-                // forever.
-                None => false,
+                for r in &dead {
+                    if let Err(e) = w.unwatch(r) {
+                        eprintln!(
+                            "mnema: {} was already gone from the OS watch: {e}",
+                            r.display()
+                        );
+                    }
+                    watched.remove(r);
+                }
+                reconcile(w.as_mut(), &mut watched, &roots);
+                // A root added through a command was never in `lost` (it
+                // was never subscribed before, so liveness never dropped
+                // it) — this only ever fires for a root that came BACK,
+                // which is why «adding a folder starts no scan» stays true
+                // for the ordinary add path.
+                let mut returned = false;
+                Self::lock(&self.lost).retain(|p| {
+                    if watched.contains(p) {
+                        returned = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if returned {
+                    self.wake();
+                }
             }
-        };
+            // No watcher: nothing to reconcile against. The `REWATCH` tick
+            // (`run` waits with that timeout unconditionally) retries this
+            // call regardless.
+        }
         self.generation.fetch_add(1, Ordering::SeqCst);
-        all
     }
 
     /// The thread body. `slot` is the application in production and a
@@ -1330,7 +1372,16 @@ mod tests {
         (shared, desired, slot)
     }
     fn wait_for(mut f: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A bare `5 s` was fine while `QUIET` was 2 s; Task 9 raised
+        // `QUIET` to 10 s, so a condition that can only become true after
+        // a full debounce (e.g. a wake actually reaching `trigger`, not
+        // just landing in `pending`) could never be observed inside a
+        // fixed 5 s window regardless of whether the code under test is
+        // right — the deadline has to cover one full `QUIET` cycle, with
+        // margin for scheduling, expressed through the constant rather
+        // than another bare number (Task 8 review, round 1, item 2's
+        // underlying cause).
+        let deadline = Instant::now() + QUIET + Duration::from_secs(5);
         while Instant::now() < deadline {
             if f() {
                 return true;
@@ -1396,7 +1447,11 @@ mod tests {
         // accepted): a root that vanishes while watched — a rename, here,
         // which delivers no `Remove` on FSEvents or Windows and so never
         // reaches the `forget` queue — must still be re-subscribed once it
-        // comes back, without an application restart. `rename`, not
+        // comes back, without an application restart, AND scanned once for
+        // whatever changed while it was away (Task 8 review, round 1, item
+        // 1: `rewatch` never woke `pending` on a successful re-`watch`, so
+        // a change made while the disk was away would sit unindexed until
+        // some later, unrelated event happened to arrive). `rename`, not
         // `remove_dir_all`, is the point of the test: it is the case the
         // liveness pass exists for, not the one `forget` already covers.
         let parent = tempfile::tempdir().unwrap();
@@ -1408,6 +1463,12 @@ mod tests {
             wait_for(|| shared.watched().contains(&plain(&root))),
             "the root must be subscribed before the test renames it away"
         );
+        // `run` fires one trigger unconditionally at start-up (owner
+        // decision 1); wait for it to land before sampling `before`, so
+        // the baseline is stable rather than racing that first trigger
+        // (review round 1, item 2 — otherwise this guard could not fail).
+        assert!(wait_for(|| slot.starts.load(Ordering::SeqCst) >= 1));
+        let before = slot.starts.load(Ordering::SeqCst);
         std::fs::rename(&root, &aside).unwrap();
         shared.tick_for_test();
         assert!(
@@ -1420,10 +1481,17 @@ mod tests {
             wait_for(|| shared.watched().contains(&plain(&root))),
             "a root that is a directory again must be re-subscribed on the tick after it returns"
         );
+        assert!(
+            wait_for(|| slot.starts.load(Ordering::SeqCst) > before),
+            "a root that returns is scanned once for what changed while it was away"
+        );
+        // Second positive control: the wake-on-return above proves a scan
+        // was started, not that the new OS subscription is actually live.
+        let after_return = slot.starts.load(Ordering::SeqCst);
         std::fs::write(root.join("x.txt"), "x").unwrap();
         assert!(
-            wait_for(|| slot.starts.load(Ordering::SeqCst) >= 1),
-            "and the new subscription must deliver events, not just a map entry"
+            wait_for(|| slot.starts.load(Ordering::SeqCst) > after_return),
+            "and the new subscription must deliver events too, not just the one wake-on-return scan"
         );
         shared.close();
     }
@@ -1439,8 +1507,11 @@ mod tests {
         let (shared, _, slot) = shared_for(vec![root.clone()]);
         assert!(wait_for(|| shared.watched().contains(&plain(&root))));
         // `run` fires one trigger unconditionally at start-up (owner
-        // decision 1), so `starts` is already >= 1 here — the baseline for
-        // "the tick did not start a scan" is THIS count, not zero.
+        // decision 1); wait for it to land before sampling, so the
+        // baseline for "the tick did not start a scan" is a stable count
+        // and not a race with that first trigger (review round 1, item 2
+        // — otherwise `starts_before` could itself be racy).
+        assert!(wait_for(|| slot.starts.load(Ordering::SeqCst) >= 1));
         let starts_before = slot.starts.load(Ordering::SeqCst);
         let before = shared.rewatch_generation();
         shared.tick_for_test();
