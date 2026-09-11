@@ -403,6 +403,11 @@ fn removing_a_folder_through_the_command_stops_its_events_and_keeps_the_other_ro
         "remove_watched_folder never reached the watcher thread"
     );
 
+    // CI fix 2 (macos-14, PR #45): `a`/`b` are created immediately before
+    // `app_watching`'s `install`, so an install-time FSEvents replay of
+    // one root's own creation can land after this point — drain it before
+    // the reset below (same replay as the other CI fix 2 test).
+    std::thread::sleep(QUIET + Duration::from_secs(1));
     ended.store(0, Ordering::SeqCst);
     std::fs::write(b.path().join("late.txt"), "late").unwrap();
     std::thread::sleep(MAX_WAIT + QUIET + Duration::from_secs(2));
@@ -447,18 +452,20 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
             .contains(&c_plain)),
         "add_watched_folder never reached the watcher thread"
     );
+    // CI fix 2 (macos-14, PR #45): on FSEvents, a directory created moments
+    // before the subscription starts can have its own creation replayed as
+    // an event after the stream subscribes (measured: Task 1 probe 2, CI
+    // run 34633232201) — a scan can land in this window for a reason that
+    // has nothing to do with `add_watched_folder`. Drained here, on every
+    // platform, before the reset below, so a replay scan is not still
+    // pending when the write-half's `ended >= 1` is checked.
+    std::thread::sleep(QUIET + Duration::from_secs(1));
     if !cfg!(target_os = "macos") {
-        // CI fix 2 (macos-14, PR #45): on FSEvents, a directory created
-        // moments before the subscription starts can have its own
-        // creation replayed as an event after the stream subscribes
-        // (measured: Task 1 probe 2, CI run 34633232201) — a scan can land
-        // in this window for a reason that has nothing to do with
-        // `add_watched_folder`. "Adding a folder starts no scan" is pinned
-        // deterministically on every platform by
-        // `a_rewatch_request_alone_queues_no_wake` in `src/watch.rs`; here
-        // it is also exercised live, on inotify and ReadDirectoryChangesW,
-        // which do not replay a fresh directory's own creation.
-        std::thread::sleep(QUIET + Duration::from_secs(1));
+        // "Adding a folder starts no scan" is pinned deterministically on
+        // every platform by `a_rewatch_request_alone_queues_no_wake` in
+        // `src/watch.rs`; here it is also exercised live, on inotify and
+        // ReadDirectoryChangesW, which do not replay a fresh directory's
+        // own creation, so only those platforms can assert it directly.
         assert_eq!(
             ended.load(Ordering::SeqCst),
             0,
@@ -466,10 +473,9 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
         );
     }
 
-    // Reset the baseline right before the write (needed on macOS, where the
-    // block above did not run and could have left a replay-triggered scan
-    // counted): the write-half below must mean "the write was scanned",
-    // not "some earlier scan, from any cause, already happened".
+    // Reset the baseline right before the write: the write-half below must
+    // mean "the write was scanned", not "some earlier scan, from any
+    // cause, already happened" (the sleep above already drained a replay).
     ended.store(0, Ordering::SeqCst);
     std::fs::write(c.path().join("live.txt"), "live").unwrap();
     assert!(
