@@ -103,6 +103,11 @@ pub struct AppState {
     /// before the press must not restart the scan the press just stopped;
     /// one that arrived after it must. `cancel_job` is the only writer.
     stopped_at: Mutex<Option<Instant>>,
+    /// The folder watcher's one shared owner — the subscription set, the
+    /// pending-wake state and the thread that reconciles both. Commands only
+    /// ever call [`crate::watch::Shared::request_rewatch`] on it; the thread
+    /// `watch::install` spawns is the sole writer of the OS subscriptions.
+    watch: std::sync::Arc<crate::watch::Shared>,
     /// The interface locale (§D129): the persisted choice and what it resolves
     /// to. Set once at start-up by `resolve_effective` (Task 6) and again by
     /// `locale::apply_choice` on every change; read by `get_locale` and by
@@ -172,6 +177,7 @@ impl AppState {
             scan: Arc::new(Mutex::new(crate::scan_state::ScanState::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             stopped_at: Mutex::new(None),
+            watch: std::sync::Arc::new(crate::watch::Shared::new()),
             // Safe default; overwritten at startup by `resolve_effective`
             // before any window draws (Task 6).
             locale: Mutex::new(crate::locale::LocaleState {
@@ -658,6 +664,12 @@ impl AppState {
             .stopped_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The folder watcher's shared state — commands call
+    /// [`crate::watch::Shared::request_rewatch`] on it and nothing else.
+    pub fn watch(&self) -> &std::sync::Arc<crate::watch::Shared> {
+        &self.watch
     }
 
     /// Whether the job slot is taken.

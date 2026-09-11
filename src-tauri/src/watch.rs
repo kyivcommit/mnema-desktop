@@ -2,8 +2,10 @@
 //!
 //! Spec: docs 2026-09-10 (private). The walk is the source of truth; this
 //! module only decides WHEN to run it again. Nothing here touches the index.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -23,9 +25,6 @@ pub(crate) struct Pending {
 }
 
 impl Pending {
-    // `trigger` (Task 4) only ever calls `take`; `wake` and `due` are driven
-    // by the watcher thread once Task 5 subscribes — the allow leaves with it.
-    #[allow(dead_code)]
     pub(crate) fn wake(&mut self, now: Instant) {
         self.first.get_or_insert(now);
         self.last = Some(now);
@@ -34,8 +33,6 @@ impl Pending {
     /// `None`: nothing pending. `Some(ZERO)`: fire now. `Some(d)`: wait `d`.
     /// Fires when `QUIET` has passed since the last wake OR `MAX_WAIT` since
     /// the first; the sooner of the two.
-    // Driven by the watcher thread once Task 5 subscribes; the allow leaves with it.
-    #[allow(dead_code)]
     pub(crate) fn due(&self, now: Instant) -> Option<Duration> {
         let (first, last) = (self.first?, self.last?);
         let fire_at = (last + QUIET).min(first + MAX_WAIT);
@@ -56,8 +53,6 @@ impl Pending {
 /// `/private/var/…` for a root handed over as `/var/…`; Windows
 /// `canonicalize` answers `\\?\C:\…` while notify builds event paths from
 /// the plain `C:\…` it was given.
-// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
-#[allow(dead_code)]
 pub(crate) fn plain(p: &Path) -> PathBuf {
     let resolved = resolve_existing_prefix(p);
     #[cfg(not(windows))]
@@ -93,8 +88,6 @@ pub(crate) fn plain(p: &Path) -> PathBuf {
 
 /// `canonicalize` of the longest prefix that exists, with the rest appended
 /// as given. A path with no existing prefix at all comes back unchanged.
-// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
-#[allow(dead_code)]
 fn resolve_existing_prefix(p: &Path) -> PathBuf {
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     let mut cur = p.to_path_buf();
@@ -121,9 +114,6 @@ fn resolve_existing_prefix(p: &Path) -> PathBuf {
 
 /// What the trigger needs from the application — a trait so the busy and
 /// Stop paths can be driven from a script instead of a real scan.
-///
-/// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
-#[allow(dead_code)]
 pub(crate) trait Slot {
     fn start(&self) -> Result<(), crate::error::Error>;
     fn snapshot(&self) -> crate::scan_state::ScanSnapshot;
@@ -151,8 +141,6 @@ impl Slot for crate::state::AppState {
 /// The one residual race — Stop pressed on an IDLE slot between the look
 /// and the claim — is a Stop with nothing to stop, and `cancel_job` on an
 /// idle slot is a no-op by its own doc.
-// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
-#[allow(dead_code)]
 pub(crate) fn trigger(
     slot: &dyn Slot,
     pending: &Mutex<Pending>,
@@ -216,8 +204,6 @@ pub(crate) fn trigger(
 ///    and no rescan flag is nothing to act on.
 ///
 /// `private_dir` is already in `plain` form; event paths are folded here.
-// Called from the watcher thread once Task 5 subscribes; the allow leaves with it.
-#[allow(dead_code)]
 pub(crate) fn classify(event: &Result<notify::Event, notify::Error>, private_dir: &Path) -> bool {
     let event = match event {
         Err(_) => return true,
@@ -233,6 +219,326 @@ pub(crate) fn classify(event: &Result<notify::Event, notify::Error>, private_dir
         .paths
         .iter()
         .all(|p| plain(p).starts_with(private_dir))
+}
+
+pub(crate) trait Subscriptions {
+    fn watch(&mut self, root: &Path) -> Result<(), String>;
+    fn unwatch(&mut self, root: &Path) -> Result<(), String>;
+}
+
+impl Subscriptions for notify::RecommendedWatcher {
+    fn watch(&mut self, root: &Path) -> Result<(), String> {
+        notify::Watcher::watch(self, root, notify::RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())
+    }
+    fn unwatch(&mut self, root: &Path) -> Result<(), String> {
+        notify::Watcher::unwatch(self, root).map_err(|e| e.to_string())
+    }
+}
+
+/// The outermost roots. A nested root is covered by its ancestor's recursive
+/// subscription and is never subscribed on its own: on Linux `unwatch` of a
+/// parent removes every watch under it (notify 8.2.0 `inotify.rs:486-494`)
+/// and `unwatch` of a separately-subscribed child punches a hole in the
+/// parent's tree. Subscribing only the cover makes both impossible.
+pub(crate) fn cover(roots: &HashSet<PathBuf>) -> HashSet<PathBuf> {
+    roots
+        .iter()
+        .filter(|r| !roots.iter().any(|o| o != *r && r.starts_with(o)))
+        .cloned()
+        .collect()
+}
+
+/// Bring `watched` in line with `cover(roots)` through `subs`: unwatch what
+/// is gone FIRST, then watch what is new, touch nothing else (plan review
+/// P2-5, P2-7). A refusal is logged and left out of `watched`, so the next
+/// call retries it. Answers whether the whole cover is watched.
+pub(crate) fn reconcile(
+    subs: &mut dyn Subscriptions,
+    watched: &mut HashSet<PathBuf>,
+    roots: &HashSet<PathBuf>,
+) -> bool {
+    let want = cover(roots);
+    let gone: Vec<PathBuf> = watched.difference(&want).cloned().collect();
+    for path in &gone {
+        if let Err(e) = subs.unwatch(path) {
+            eprintln!("mnema: could not stop watching {}: {e}", path.display());
+        }
+        watched.remove(path);
+    }
+    let missing: Vec<PathBuf> = want.difference(watched).cloned().collect();
+    for path in &missing {
+        match subs.watch(path) {
+            Ok(()) => {
+                watched.insert(path.clone());
+            }
+            Err(e) => eprintln!("mnema: not watching {}: {e}", path.display()),
+        }
+    }
+    watched.len() == want.len()
+}
+
+type RootsReader = Box<dyn Fn() -> Result<HashSet<PathBuf>, String> + Send + Sync>;
+
+/// Everything the `notify` callback, the trigger thread and the folder
+/// commands share. The THREAD is the only writer of `watched` and the only
+/// caller of `reconcile` (plan review P2-4, P2-5); commands mark `dirty`.
+pub struct Shared {
+    pub(crate) pending: Mutex<Pending>,
+    pub(crate) cv: Condvar,
+    watched: Mutex<HashSet<PathBuf>>,
+    watcher: Mutex<Option<Box<dyn Subscriptions + Send>>>,
+    roots: Mutex<Option<RootsReader>>,
+    private_dir: Mutex<PathBuf>,
+    dirty: AtomicBool,
+    closed: AtomicBool,
+    tick: AtomicBool,      // test hook: stands in for the REWATCH timeout
+    generation: AtomicU64, // bumped after every reconcile, for tests to wait on
+    exited: AtomicBool,
+}
+
+impl Shared {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Mutex::new(Pending::default()),
+            cv: Condvar::new(),
+            watched: Mutex::new(HashSet::new()),
+            watcher: Mutex::new(None),
+            roots: Mutex::new(None),
+            private_dir: Mutex::new(PathBuf::new()),
+            dirty: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            tick: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            exited: AtomicBool::new(false),
+        }
+    }
+    fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn wake(&self) {
+        Self::lock(&self.pending).wake(Instant::now());
+        self.cv.notify_one();
+    }
+    /// Commands call this and nothing else: mark the desired set dirty and
+    /// nudge the thread. Never wakes `pending`.
+    pub fn request_rewatch(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        self.cv.notify_one();
+    }
+    pub fn watched(&self) -> HashSet<PathBuf> {
+        Self::lock(&self.watched).clone()
+    }
+    /// Stop the thread and drop the OS watches. Idempotent.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        *Self::lock(&self.watcher) = None; // drops the OS watches
+        self.cv.notify_all();
+    }
+
+    /// Builds the OS watcher. The callback holds a `Weak` (no cycle: `Shared`
+    /// → watcher → callback → `Weak<Shared>`), so dropping the last `Arc`
+    /// drops the watcher with it.
+    pub(crate) fn open(self: &Arc<Self>, private_dir: PathBuf, roots: RootsReader) {
+        *Self::lock(&self.private_dir) = private_dir;
+        *Self::lock(&self.roots) = Some(roots);
+        let me: Weak<Shared> = Arc::downgrade(self);
+        match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Some(shared) = me.upgrade() {
+                shared.on_event(&res);
+            }
+        }) {
+            Ok(w) => *Self::lock(&self.watcher) = Some(Box::new(w)),
+            Err(e) => eprintln!("mnema: the folder watcher could not be created: {e}"),
+        }
+    }
+
+    fn on_event(&self, res: &Result<notify::Event, notify::Error>) {
+        if let Ok(ev) = res
+            && matches!(ev.kind, notify::EventKind::Remove(_))
+        {
+            // A root removed from under us: inotify drops the watch itself
+            // (`inotify.rs:305-315`); forget it so the next reconcile
+            // re-subscribes once it exists again. Keys are `plain`.
+            let mut watched = Self::lock(&self.watched);
+            for p in &ev.paths {
+                if watched.remove(&plain(p)) {
+                    self.dirty.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        if classify(res, &Self::lock(&self.private_dir)) {
+            self.wake();
+        }
+    }
+
+    /// The thread's only subscription step. Reads the desired roots and
+    /// reconciles; answers whether the cover is fully watched.
+    fn rewatch(&self) -> bool {
+        self.dirty.store(false, Ordering::SeqCst);
+        let roots = match Self::lock(&self.roots).as_ref() {
+            Some(read) => read(),
+            None => return true,
+        };
+        let roots: HashSet<PathBuf> = match roots {
+            Ok(r) => r.iter().map(|p| plain(p)).collect(),
+            Err(e) => {
+                eprintln!("mnema: the watcher could not read the watched folders: {e}");
+                return true;
+            }
+        };
+        let all = {
+            let mut watcher = Self::lock(&self.watcher);
+            let mut watched = Self::lock(&self.watched);
+            match watcher.as_mut() {
+                Some(w) => reconcile(w.as_mut(), &mut watched, &roots),
+                None => true,
+            }
+        };
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        all
+    }
+
+    /// The thread body. `slot` is the application in production and a
+    /// counting stub in tests.
+    fn run(self: Arc<Self>, slot: Arc<dyn Slot + Send + Sync>) {
+        let mut sleep = |d: Duration| std::thread::sleep(d);
+        let mut all = self.rewatch();
+        let mut seen_last = trigger(&*slot, &self.pending, None, &mut sleep);
+        while !self.closed.load(Ordering::SeqCst) {
+            let taken = {
+                let mut p = Self::lock(&self.pending);
+                loop {
+                    if self.closed.load(Ordering::SeqCst) {
+                        break None;
+                    }
+                    if self.dirty.swap(false, Ordering::SeqCst)
+                        || self.tick.swap(false, Ordering::SeqCst)
+                    {
+                        drop(p);
+                        all = self.rewatch();
+                        p = Self::lock(&self.pending);
+                        continue;
+                    }
+                    match p.due(Instant::now()) {
+                        Some(d) if d.is_zero() => break p.take(),
+                        Some(d) => {
+                            p = self
+                                .cv
+                                .wait_timeout(p, d)
+                                .unwrap_or_else(|e| e.into_inner())
+                                .0
+                        }
+                        None if all => p = self.cv.wait(p).unwrap_or_else(|e| e.into_inner()),
+                        None => {
+                            let (g, r) = self
+                                .cv
+                                .wait_timeout(p, REWATCH)
+                                .unwrap_or_else(|e| e.into_inner());
+                            p = g;
+                            if r.timed_out() {
+                                self.tick.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                }
+            };
+            if self.closed.load(Ordering::SeqCst) {
+                break;
+            }
+            all = self.rewatch();
+            seen_last =
+                trigger(&*slot, &self.pending, taken.max(seen_last), &mut sleep).or(seen_last);
+        }
+        self.exited.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_for_test(self: &Arc<Self>) -> Arc<CountingSlot> {
+        let slot = Arc::new(CountingSlot::default());
+        let me = Arc::clone(self);
+        let s: Arc<dyn Slot + Send + Sync> = slot.clone();
+        std::thread::spawn(move || me.run(s));
+        slot
+    }
+    #[cfg(test)]
+    pub(crate) fn tick_for_test(&self) {
+        self.tick.store(true, Ordering::SeqCst);
+        self.cv.notify_one();
+    }
+    #[cfg(test)]
+    pub(crate) fn rewatch_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    pub(crate) fn thread_exited(&self) -> bool {
+        self.exited.load(Ordering::SeqCst)
+    }
+}
+
+/// `.setup`'s last line. The thread begins with one direct trigger (owner
+/// decision 1: a scan at launch).
+pub fn install<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    let state = app.state::<crate::state::AppState>();
+    let shared = Arc::clone(state.watch());
+    let reader_handle = app.clone();
+    shared.open(
+        plain(state.data_dir()),
+        Box::new(move || {
+            let st = reader_handle.state::<crate::state::AppState>();
+            st.with_index(|db| {
+                Ok(db
+                    .list_watched_roots()?
+                    .into_iter()
+                    .map(|r| PathBuf::from(r.absolute_path))
+                    .collect())
+            })
+            .map_err(|e| e.to_string())
+        }),
+    );
+    let slot_handle = app.clone();
+    std::thread::Builder::new()
+        .name("mnema-watch".into())
+        .spawn(move || shared.run(Arc::new(HandleSlot(slot_handle))))
+        .expect("spawning the watcher thread");
+}
+
+/// `Slot` over an `AppHandle`, so the thread holds the handle and not a reference into state.
+struct HandleSlot<R: tauri::Runtime>(tauri::AppHandle<R>);
+impl<R: tauri::Runtime> Slot for HandleSlot<R> {
+    fn start(&self) -> Result<(), crate::error::Error> {
+        use tauri::Manager;
+        Slot::start(&*self.0.state::<crate::state::AppState>())
+    }
+    fn snapshot(&self) -> crate::scan_state::ScanSnapshot {
+        use tauri::Manager;
+        Slot::snapshot(&*self.0.state::<crate::state::AppState>())
+    }
+    fn stopped_at(&self) -> Option<Instant> {
+        use tauri::Manager;
+        Slot::stopped_at(&*self.0.state::<crate::state::AppState>())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CountingSlot {
+    pub starts: AtomicU64,
+}
+#[cfg(test)]
+impl Slot for CountingSlot {
+    fn start(&self) -> Result<(), crate::error::Error> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn snapshot(&self) -> crate::scan_state::ScanSnapshot {
+        crate::scan_state::ScanSnapshot::Idle
+    }
+    fn stopped_at(&self) -> Option<Instant> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -700,5 +1006,195 @@ mod tests {
         let pending = Mutex::new(Pending::default());
         assert_eq!(trigger(&s, &pending, None, &mut no_sleep()), None);
         assert_eq!(*s.started.borrow(), 1);
+    }
+
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// Records every call; `watch` refuses paths in `refuse`.
+    #[derive(Default)]
+    struct Spy {
+        calls: Vec<(&'static str, PathBuf)>,
+        refuse: HashSet<PathBuf>,
+    }
+    impl Subscriptions for Spy {
+        fn watch(&mut self, root: &Path) -> Result<(), String> {
+            self.calls.push(("watch", root.to_path_buf()));
+            if self.refuse.contains(root) {
+                Err("refused".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn unwatch(&mut self, root: &Path) -> Result<(), String> {
+            self.calls.push(("unwatch", root.to_path_buf()));
+            Ok(())
+        }
+    }
+    fn set(paths: &[&str]) -> HashSet<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn cover_keeps_only_roots_without_a_watched_ancestor() {
+        assert_eq!(
+            cover(&set(&["/docs", "/docs/sub", "/other", "/docs/sub/deep"])),
+            set(&["/docs", "/other"])
+        );
+        assert_eq!(
+            cover(&set(&["/docs-x", "/docs"])),
+            set(&["/docs-x", "/docs"]),
+            "a sibling with a shared prefix is not an ancestor"
+        );
+    }
+
+    #[test]
+    fn reconcile_touches_only_what_changed() {
+        // Plan review P2-7: the rebuild mutant re-subscribes A and the
+        // end state is the same — only the calls tell them apart.
+        let mut spy = Spy::default();
+        let mut watched = set(&["/a", "/b"]);
+        assert!(reconcile(&mut spy, &mut watched, &set(&["/a"])));
+        assert_eq!(spy.calls, vec![("unwatch", PathBuf::from("/b"))]);
+        assert_eq!(watched, set(&["/a"]));
+    }
+
+    #[test]
+    fn removing_a_parent_root_resubscribes_the_child_it_covered() {
+        // Plan review P2-3: Linux unwatch(parent) removes the child's watch too.
+        let mut spy = Spy::default();
+        let mut watched = HashSet::new();
+        reconcile(&mut spy, &mut watched, &set(&["/docs", "/docs/sub"]));
+        assert_eq!(
+            watched,
+            set(&["/docs"]),
+            "the child is covered by the parent, never subscribed on its own"
+        );
+        spy.calls.clear();
+        reconcile(&mut spy, &mut watched, &set(&["/docs/sub"]));
+        assert_eq!(
+            spy.calls,
+            vec![
+                ("unwatch", PathBuf::from("/docs")),
+                ("watch", PathBuf::from("/docs/sub"))
+            ],
+            "unwatch before watch, so the new subscription is not swept away"
+        );
+        assert_eq!(watched, set(&["/docs/sub"]));
+    }
+
+    #[test]
+    fn removing_a_child_root_leaves_the_parent_alone() {
+        let mut spy = Spy::default();
+        let mut watched = set(&["/docs"]);
+        reconcile(&mut spy, &mut watched, &set(&["/docs"]));
+        assert!(
+            spy.calls.is_empty(),
+            "removing a covered child must not unwatch anything — that would punch a hole in the parent"
+        );
+    }
+
+    #[test]
+    fn a_refused_root_is_reported_and_retried_next_time() {
+        let mut spy = Spy {
+            refuse: set(&["/gone"]),
+            ..Default::default()
+        };
+        let mut watched = HashSet::new();
+        assert!(!reconcile(&mut spy, &mut watched, &set(&["/a", "/gone"])));
+        assert_eq!(watched, set(&["/a"]));
+        spy.refuse.clear();
+        assert!(reconcile(&mut spy, &mut watched, &set(&["/a", "/gone"])));
+        assert_eq!(watched, set(&["/a", "/gone"]));
+    }
+
+    fn shared_for(
+        roots: Vec<PathBuf>,
+    ) -> (Arc<Shared>, Arc<Mutex<Vec<PathBuf>>>, Arc<CountingSlot>) {
+        let desired = Arc::new(Mutex::new(roots));
+        let shared = Arc::new(Shared::new());
+        let reader = Arc::clone(&desired);
+        shared.open(
+            plain(Path::new("/nonexistent-private")),
+            Box::new(move || Ok(reader.lock().unwrap().iter().cloned().collect())),
+        );
+        let slot = shared.spawn_for_test(); // the thread with `Slot` = `CountingSlot`
+        shared.request_rewatch();
+        assert!(wait_for(|| shared.rewatch_generation() >= 1));
+        (shared, desired, slot)
+    }
+    fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        f()
+    }
+
+    #[test]
+    fn a_write_under_a_watched_root_wakes_and_close_stops_the_thread() {
+        let root = tempfile::tempdir().unwrap();
+        let (shared, _, slot) = shared_for(vec![root.path().to_path_buf()]);
+        std::fs::write(root.path().join("a.txt"), "x").unwrap();
+        // The thread may already have consumed the wake into a second start.
+        assert!(
+            wait_for(|| shared.pending.lock().unwrap().first.is_some()
+                || slot.starts.load(Ordering::SeqCst) >= 2),
+            "no wake within 5 s"
+        );
+        shared.close();
+        assert!(
+            wait_for(|| shared.thread_exited()),
+            "close must end the thread"
+        );
+        // The thread's own `Arc<Self>` is released only after `run` returns,
+        // just after `exited` is set — so the count can still be 2 for a
+        // moment: wait rather than assert immediately.
+        assert!(
+            wait_for(|| Arc::strong_count(&shared) == 1),
+            "the callback holds only a Weak — no cycle keeps Shared alive: \
+             expected the thread's Arc to be released, found it still held"
+        );
+    }
+
+    #[test]
+    fn a_failed_new_root_is_retried_on_the_tick_after_it_appears() {
+        // Plan review P2-4: the thread, not the command, owns the retry.
+        let parent = tempfile::tempdir().unwrap();
+        let a = parent.path().join("a");
+        let later = parent.path().join("later");
+        std::fs::create_dir(&a).unwrap();
+        let (shared, desired, _slot) = shared_for(vec![a.clone()]);
+        desired.lock().unwrap().push(later.clone());
+        shared.request_rewatch();
+        assert!(wait_for(|| shared.rewatch_generation() >= 2));
+        assert_eq!(
+            shared.watched(),
+            HashSet::from([plain(&a)]),
+            "an absent root cannot be subscribed; keys are in plain form"
+        );
+        std::fs::create_dir(&later).unwrap();
+        shared.tick_for_test(); // stands in for the 60 s REWATCH timeout
+        assert!(wait_for(|| shared.watched().contains(&plain(&later))));
+        std::fs::write(later.join("x.txt"), "x").unwrap();
+        assert!(wait_for(|| shared.pending.lock().unwrap().first.is_some()));
+        shared.close();
+    }
+
+    #[test]
+    fn a_removed_root_leaves_the_watched_set() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("gone");
+        std::fs::create_dir(&root).unwrap();
+        let (shared, _, _slot) = shared_for(vec![root.clone()]);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            wait_for(|| shared.watched().is_empty()),
+            "the root's own Remove must drop it from `watched`"
+        );
+        shared.close();
     }
 }
