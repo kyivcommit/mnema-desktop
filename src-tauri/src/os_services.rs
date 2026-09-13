@@ -18,8 +18,9 @@
 //!   `cargo test` is the **test binary**, left behind after the run.
 //!
 //! So [`ShortcutRegistrar`] and [`Autolaunch`] are traits, [`NoOsServices`] is
-//! the inert default `AppState::new` installs, and the real wrappers are put in
-//! place by `.setup` and by nothing else. That makes "the suite never touches
+//! the inert default `AppState::new` installs, and the real wrappers — or, for
+//! the shortcut in a Wayland session, [`WaylandNoShortcuts`] (D153) — are put
+//! in place by `.setup` and by nothing else. That makes "the suite never touches
 //! the plugins" **structural** rather than a convention somebody has to keep:
 //! the default answers `Err`, and the only constructor of a real wrapper is
 //! called from a closure no test runs. It is the same argument
@@ -172,15 +173,19 @@ impl<R: Runtime> Autolaunch for PluginAutolaunch<R> {
 /// own «the search can still be opened from the tray» — so the reason names
 /// only the cause.
 pub const WAYLAND_REASON: &str =
-    "Wayland session: the system does not deliver global shortcuts to applications.";
+    "Wayland session: this application cannot register a global shortcut.";
 
 /// The registrar `.setup` installs on Linux when the session is Wayland
 /// (D153). `PluginShortcuts` there takes an X11 grab through XWayland that
 /// *succeeds* and never fires — 2026-09-13 stand smoke, F1 — so the section
 /// said «registered with the system» about a shortcut that did nothing.
-/// Refusing up front is the honest state, and it costs nothing: there is no
-/// registration to release, so `unregister` answers `Ok` and `change_hotkey`
-/// reaches its own `register` refusal with THIS sentence, not a stale one.
+/// Refusing up front is the honest state. `unregister` answers `Ok` because
+/// this registrar never registers anything, so there is never anything to
+/// release — the trait's contract for an unregistered shortcut. (Today no
+/// caller reaches it under this registrar: `change_hotkey` only unregisters a
+/// `Registered` current shortcut, and this registrar never produces one —
+/// `a_refused_registration_from_an_unavailable_start_takes_nothing_back` in
+/// `tests/commands.rs` pins exactly that.)
 pub struct WaylandNoShortcuts;
 
 impl ShortcutRegistrar for WaylandNoShortcuts {
@@ -218,15 +223,15 @@ mod tests {
         // session, nothing more: the window already adds «the search can still
         // be opened from the application icon in the tray» under any refusal.
         let reason = WaylandNoShortcuts.register("Alt+Space").unwrap_err();
-        assert!(reason.contains("Wayland"), "{reason}");
         assert_eq!(reason, WAYLAND_REASON);
     }
 
     #[test]
     fn a_wayland_session_has_nothing_to_unregister() {
-        // `change_hotkey` unregisters the current shortcut before registering
-        // the new one; a refusal here would block the change with the WRONG
-        // sentence (the old shortcut's, not the session's).
+        // The trait's contract, not a path any caller takes today: nothing
+        // this registrar ever registered, so nothing is there to release, and
+        // an `Err` here would be a second refusal with no registration behind
+        // it. `change_hotkey` never gets here under it — see the type's doc.
         assert_eq!(WaylandNoShortcuts.unregister("Alt+Space"), Ok(()));
     }
 
