@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
@@ -409,14 +409,28 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
   expect(invoke).toHaveBeenCalledWith('model_settings');
 });
 
-test('the search panel is the drag handle and nothing else is', () => {
-  mockBackend(generated);
-  const { container } = render(Launcher);
-  // "deep": any click inside the panel drags, except on the input, the pin and
-  // the Arms labels, which Tauri's own drag script excludes by tag (D155).
-  const handles = container.querySelectorAll('[data-tauri-drag-region]');
-  expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
-  expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
+test('the search panel is the drag handle and nothing else is', async () => {
+  // `Cards` renders a different component per backend state (review finding
+  // 7): a `data-tauri-drag-region` added to, say, the refusal card would pass
+  // this guard if only the idle state were checked. Submit a question in each
+  // of the two states the fixtures already imported at the top of the file
+  // cover, and wait for that state's own card before checking.
+  for (const reply of [generated, refusedNoCandidates]) {
+    mockBackend(reply);
+    const { container } = render(Launcher);
+    await submit('drag region check');
+    if (reply === generated) {
+      await screen.findByTestId('card-centre');
+    } else {
+      await screen.findByRole('status');
+    }
+    // "deep": any click inside the panel drags, except on the input, the pin
+    // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
+    const handles = container.querySelectorAll('[data-tauri-drag-region]');
+    expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
+    expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
+    cleanup();
+  }
   // The attribute is inert without the permission — guard both in one place.
   const capability = JSON.parse(
     readFileSync(join(HERE, '../../../src-tauri/capabilities/launcher.json'), 'utf8'),

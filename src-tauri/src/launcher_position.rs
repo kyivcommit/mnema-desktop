@@ -82,7 +82,7 @@ pub fn reachable(
     on_some_monitor.then_some(p)
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Default)]
 struct Slots {
     /// Where the application put the window on the last show — read back with
     /// `outer_position` AFTER every placement, so on macOS it is the tray
@@ -90,7 +90,9 @@ struct Slots {
     applied: Option<PhysicalPosition<i32>>,
     /// Where the person left the window: set only when a focus loss finds the
     /// window somewhere other than `applied`. Wins over the file for the rest
-    /// of the session, so a failed write costs only the next restart.
+    /// of the session, so a failed write costs only the next restart — but a
+    /// show that could not restore it (`placed` with `restored: None`) drops
+    /// it again: the window is no longer there, so it is no longer evidence.
     left: Option<PhysicalPosition<i32>>,
 }
 
@@ -114,6 +116,21 @@ impl Memory {
     }
     pub fn set_applied(&self, p: Option<PhysicalPosition<i32>>) {
         self.lock().applied = p;
+    }
+    /// What the show applied. When nothing was restored, the window is no
+    /// longer where the person left it, so that memory goes: the next focus
+    /// loss must compare against this placement, not the stale one. The file
+    /// keeps the key regardless — a monitor that comes back restores it (§7).
+    pub fn placed(
+        &self,
+        restored: Option<PhysicalPosition<i32>>,
+        applied: Option<PhysicalPosition<i32>>,
+    ) {
+        let mut slots = self.lock();
+        slots.applied = applied;
+        if restored.is_none() {
+            slots.left = None;
+        }
     }
     /// The decision of D155: `now` is the person's choice only if it differs
     /// from the last position this process knows — where the person last
@@ -197,15 +214,19 @@ pub fn place<R: tauri::Runtime>(
     }
     let _ = window.set_focus();
     if !wayland {
-        memory.set_applied(window.outer_position().ok());
+        memory.placed(restored, window.outer_position().ok());
     }
 }
 
-/// The `WindowEvent::Focused(false)` arm and the line before `app.exit(0)`:
-/// every way the launcher leaves the screen passes through here. Nothing on
-/// Wayland (the value GTK caches there is not a position — D153's sibling),
-/// nothing when the runtime cannot say where the window is, and a failed write
-/// is reported, not raised: this runs on the event loop.
+/// Called from the `WindowEvent::Focused(false)` arm and the line before
+/// `app.exit(0)`. Both call sites hide or exit a window that holds focus, so
+/// all four dismissals (Esc, blur, the shortcut, a close) are *meant* to
+/// arrive here as a focus loss (tao: `windowDidResignKey:` / `WM_KILLFOCUS`);
+/// the live matrix walks each of the four separately, and a dismissal that
+/// does not arrive would need its own call site instead. Nothing on Wayland
+/// (the value GTK caches there is not a position — D153's sibling), nothing
+/// when the runtime cannot say where the window is, and a failed write is
+/// reported, not raised: this runs on the event loop.
 pub fn remember<R: tauri::Runtime>(
     window: &tauri::Window<R>,
     memory: &Memory,
@@ -354,6 +375,7 @@ mod tests {
             json!({"x": 12}),
             json!({"x": 1.5, "y": 2}),
             json!([12, 34]),
+            json!({"x": 4294967296i64, "y": 0}),
         ] {
             let dir = tempfile::tempdir().unwrap();
             crate::prefs::write_key(dir.path(), KEY, bad.clone()).unwrap();
@@ -399,6 +421,28 @@ mod tests {
         assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
         assert_eq!(memory.moved(PhysicalPosition::new(300, 200)), at(300, 200));
         assert_eq!(memory.left(), at(300, 200));
+    }
+
+    #[test]
+    fn a_show_that_could_not_restore_forgets_where_the_person_left_it() {
+        // A drag is recorded, then a show cannot restore it (undock, DPI
+        // change, whatever `reachable` returned None for) and falls back to
+        // the platform default. The next untouched hide must not treat that
+        // default as a new drag — `left` is stale and must go with it.
+        let memory = Memory::default();
+        memory.set_applied(at(300, 200));
+        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        memory.placed(None, at(460, 220));
+        assert_eq!(memory.left(), None, "a failed restore kept the stale drag");
+        assert_eq!(memory.applied(), at(460, 220));
+        assert_eq!(memory.moved(PhysicalPosition::new(460, 220)), None);
+
+        // Positive control: a show that DID restore the drag keeps `left`.
+        let memory = Memory::default();
+        memory.set_applied(at(300, 200));
+        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        memory.placed(at(640, 80), at(640, 80));
+        assert_eq!(memory.left(), at(640, 80));
     }
 
     #[test]

@@ -44,9 +44,15 @@ case_ "launcher position: y is not read" \
 
 case_ "launcher position: the show does not record where it put the window" \
   src-tauri/src/launcher_position.rs \
-  's~memory\.set_applied\(window\.outer_position\(\)\.ok\(\)\);~let _ = memory;~' \
+  's~memory\.placed\(restored, window\.outer_position\(\)\.ok\(\)\);~let _ = memory;~' \
   'let _ = memory;' \
   mnema-desktop 'place_records_where_it_put_the_launcher' --test shell
+
+case_ "launcher position: a fallback show keeps the stale drag in memory" \
+  src-tauri/src/launcher_position.rs \
+  's~if restored\.is_none\(\) \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'launcher_position::tests::a_show_that_could_not_restore_forgets_where_the_person_left_it' --lib
 
 case_ "launcher: a visible launcher is re-placed by a second show" \
   src-tauri/src/lib.rs \

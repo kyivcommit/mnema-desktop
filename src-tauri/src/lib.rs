@@ -615,10 +615,13 @@ pub fn run() -> anyhow::Result<()> {
                 sync_activation_policy(window.app_handle());
                 api.prevent_close();
             }
-            // D155: every way the launcher leaves the screen — Esc, blur, the
-            // shortcut, a close — passes through a focus loss; one arm records
-            // where the person left it (only if they moved it — see
-            // `launcher_position::remember`).
+            // D155: this window hides or exits without giving up focus first,
+            // so all four dismissals (Esc, blur, the shortcut, a close) are
+            // *meant* to arrive here as a focus loss (tao:
+            // `windowDidResignKey:` / `WM_KILLFOCUS`) — the live matrix walks
+            // each of the four separately and is what actually confirms it.
+            // This arm records where the person left it, only if they moved
+            // it (see `launcher_position::remember`).
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 let memory = app.state::<launcher_position::Memory>();

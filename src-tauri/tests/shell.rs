@@ -13,6 +13,8 @@
 use tauri::WebviewWindowBuilder;
 use tauri::test::{mock_builder, mock_context, noop_assets};
 
+// Not for `focus_launcher`: it reads `Memory` from managed state and panics
+// with "state not managed" without it. Use `mock_app_with_memory` for that.
 fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
     mock_builder()
         .build(mock_context(noop_assets()))
@@ -98,6 +100,49 @@ fn focus_launcher_leaves_a_visible_launcher_where_it_is() {
     assert!(mnema_desktop::focus_launcher(app.handle()));
 
     assert_eq!(memory.applied(), None, "a visible launcher was re-placed");
+}
+
+#[test]
+fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
+    // The mock runtime's `available_monitors` is `[]`, so `reachable` returns
+    // `None` here regardless of what is saved: every `place` call on the mock
+    // is the fallback path. Before D155's fix, the fallback show left the
+    // dragged `left` untouched, and an untouched hide right after compared
+    // the new default against the stale drag, scored it as a move, and
+    // overwrote the file with the default (0, 0) — losing the saved position
+    // with no drag anywhere in the sequence.
+    use mnema_desktop::launcher_position::{self, Memory};
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let memory = app.state::<Memory>();
+    let dir = tempfile::tempdir().unwrap();
+    launcher_position::write(dir.path(), tauri::PhysicalPosition::new(640, 80)).unwrap();
+    let prefs_path = mnema_desktop::paths::prefs_path(dir.path());
+    let before = std::fs::read(&prefs_path).unwrap();
+
+    // A drag recorded earlier in the session, matching the saved value.
+    memory.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
+    memory.moved(tauri::PhysicalPosition::new(640, 80));
+
+    launcher_position::place(&window, &memory, Some(dir.path()), false);
+    launcher_position::remember(&window.as_ref().window(), &memory, dir.path(), false);
+
+    let after = std::fs::read(&prefs_path).unwrap();
+    assert_eq!(
+        before, after,
+        "an untouched hide after a fallback show rewrote prefs.json"
+    );
+    assert_eq!(
+        launcher_position::read(dir.path()),
+        Some(tauri::PhysicalPosition::new(640, 80)),
+        "the saved position was overwritten by the fallback default"
+    );
 }
 
 #[test]
