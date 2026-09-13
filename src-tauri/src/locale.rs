@@ -471,12 +471,15 @@ fn apply_locale<R: Runtime>(app: &AppHandle<R>, lang: Lang) -> Vec<LocaleApplyEr
         },
         // The macOS app menu, rebuilt always — not only while settings is
         // visible (§5.7) — so a change made from the tray with the menu bar
-        // hidden is already applied when it next shows. Off macOS this is the
-        // default menu and the rebuild is a harmless, always-`Ok` no-op —
-        // never counted as a failure.
+        // hidden is already applied when it next shows. Off macOS there is no
+        // app menu at all (D154), so there is nothing to relabel and the
+        // surface answers `Ok` — never counted as a failure.
+        #[cfg(target_os = "macos")]
         LocaleSurface::AppMenu => crate::build_app_menu(app, lang)
             .and_then(|menu| app.set_menu(menu).map(|_| ()))
             .map_err(|e| e.to_string()),
+        #[cfg(not(target_os = "macos"))]
+        LocaleSurface::AppMenu => Ok(()),
         // Broadcasts the new language so any open webview can re-render its
         // own strings; the native chrome above is already relabelled.
         LocaleSurface::LocaleEvent => app
