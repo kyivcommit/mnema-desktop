@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide }) }));
@@ -403,4 +407,71 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
     expect(text.checked).toBe(false); // seed applied: searchTextArm:false flowed to the checkbox
   });
   expect(invoke).toHaveBeenCalledWith('model_settings');
+});
+
+test('the search panel is the drag handle and nothing else is', () => {
+  mockBackend(generated);
+  const { container } = render(Launcher);
+  // "deep": any click inside the panel drags, except on the input, the pin and
+  // the Arms labels, which Tauri's own drag script excludes by tag (D155).
+  const handles = container.querySelectorAll('[data-tauri-drag-region]');
+  expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
+  expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
+  // The attribute is inert without the permission — guard both in one place.
+  const capability = JSON.parse(
+    readFileSync(join(HERE, '../../../src-tauri/capabilities/launcher.json'), 'utf8'),
+  ) as { windows: string[]; permissions: string[] };
+  expect(capability.windows).toContain('launcher');
+  expect(capability.permissions).toContain('core:window:allow-start-dragging');
+  expect(capability.permissions).not.toContain('core:window:allow-internal-toggle-maximize');
+});
+
+test('the handle offset matches the stylesheet', () => {
+  // `launcher_position::HANDLE_CENTRE` is written as seven literals in a fixed
+  // shape; each one is a declaration in launcher.css. Read both sides and
+  // compare numbers, so a change to either without the other goes red — this
+  // is the only place the Rust constant and the stylesheet meet (review P2-4).
+  // The offset also depends on the window width: the constant is only this
+  // fixed value because the three grid tracks plus their gaps exactly fill
+  // the launcher window's content box (see the sum check below).
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  const rust = readFileSync(join(HERE, '../../../src-tauri/src/launcher_position.rs'), 'utf8');
+  const num = (re: RegExp, text: string, what: string) => {
+    const m = text.match(re);
+    if (!m) throw new Error(`${what} not found`);
+    return Number(m[1]);
+  };
+  const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
+  const searchbar = css.match(/\.searchbar\s*\{[^}]*\}/)![0];
+  const pin = css.match(/\.pin\s*\{[^}]*\}/)![0];
+  const fromCss = {
+    padY: num(/padding:\s*(\d+)px \d+px;/, panels, 'main.panels padding-y'),
+    padX: num(/padding:\s*\d+px (\d+)px;/, panels, 'main.panels padding-x'),
+    col1: num(/grid-template-columns:\s*(\d+)px/, panels, 'first column'),
+    col2: num(/minmax\(0, (\d+)px\)/, panels, 'second column'),
+    gap: num(/gap:\s*(\d+)px;/, panels, 'gap'),
+    barPadTop: num(/padding:\s*(\d+)px/, searchbar, '.searchbar padding-top'),
+    pinH: num(/height:\s*(\d+)px/, pin, '.pin height'),
+  };
+  const shape =
+    /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
+  const m = rust.match(shape);
+  if (!m) throw new Error('HANDLE_CENTRE is not written in the guarded shape');
+  const fromRust = m.slice(1, 8).map(Number);
+  expect(fromRust).toEqual([
+    fromCss.padX, fromCss.col1, fromCss.gap, fromCss.col2,
+    fromCss.padY, fromCss.barPadTop, fromCss.pinH,
+  ]);
+  // And the numbers are what the spec says today, so a wrong regex that
+  // captured the wrong declaration cannot pass by coincidence.
+  expect(fromRust).toEqual([32, 190, 16, 470, 24, 11, 26]);
+  // The offset is only this fixed because the tracks plus gaps exactly fill the
+  // content box: then `justify-content: center` and the minmax floor never engage.
+  const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
+    app: { windows: Array<{ label: string; width: number; resizable?: boolean }> };
+  };
+  const launcher = conf.app.windows.find((w) => w.label === 'launcher')!;
+  expect(launcher.resizable).toBe(false);
+  const col3 = num(/grid-template-columns:\s*\d+px minmax\(0, \d+px\) (\d+)px/, panels, 'third column');
+  expect(2 * fromCss.padX + fromCss.col1 + fromCss.col2 + col3 + 2 * fromCss.gap).toBe(launcher.width);
 });

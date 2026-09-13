@@ -68,7 +68,10 @@
 <svelte:window onkeydown={onKeydown} onblur={onBlur} />
 
 <main class="panels">
-  <div class="searchbar">
+  <!-- D155: the search panel is the drag handle. "deep" drags from any
+       click inside it except the input, the pin and the Arms labels — Tauri's
+       own drag script skips clickable tags. The other panels select text. -->
+  <div class="searchbar" data-tauri-drag-region="deep">
     <div class="sb-row">
       <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
       <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's

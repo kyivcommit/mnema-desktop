@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "launcher",
-  "description": "The launcher dismisses itself (Esc, click-outside) by hiding — never closing — so its state survives. Showing it is done from Rust (⌥Space, the tray, single-instance) and needs no capability here.",
+  "description": "The launcher dismisses itself (Esc, click-outside) by hiding — never closing — so its state survives. Showing it is done from Rust (⌥Space, the tray, single-instance) and needs no capability here. Dragging by the search panel (D155) needs start-dragging; double-click maximise is deliberately NOT granted.",
   "windows": ["launcher"],
-  "permissions": ["core:window:allow-hide", "core:event:allow-listen"]
+  "permissions": ["core:window:allow-hide", "core:event:allow-listen", "core:window:allow-start-dragging"]
 }
