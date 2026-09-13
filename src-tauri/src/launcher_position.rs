@@ -84,9 +84,12 @@ pub fn reachable(
 
 #[derive(Default)]
 struct Slots {
-    /// Where the application put the window on the last show — read back with
-    /// `outer_position` AFTER every placement, so on macOS it is the tray
-    /// position, not the point before `TrayCenter` ran.
+    /// What the last show applied — settled on the first focus-in after that
+    /// show, not read synchronously: on GTK, `outer_position` right after
+    /// `show()` is a cache fed only by the compositor's configure event, so a
+    /// read that early is still the position from before this show (measured:
+    /// the first Esc after a show on X11 wrote the platform default as a
+    /// drag). `None` while a show is `awaiting` its settle.
     applied: Option<PhysicalPosition<i32>>,
     /// Where the person left the window: set only when a focus loss finds the
     /// window somewhere other than `applied`. Wins over the file for the rest
@@ -94,6 +97,8 @@ struct Slots {
     /// show that could not restore it (`placed` with `restored: None`) drops
     /// it again: the window is no longer there, so it is no longer evidence.
     left: Option<PhysicalPosition<i32>>,
+    /// A show has happened and its focus-in settle has not arrived yet.
+    awaiting: bool,
 }
 
 /// Managed state (`app.manage(Memory::default())`): one launcher per process.
@@ -117,20 +122,32 @@ impl Memory {
     pub fn set_applied(&self, p: Option<PhysicalPosition<i32>>) {
         self.lock().applied = p;
     }
-    /// What the show applied. When nothing was restored, the window is no
-    /// longer where the person left it, so that memory goes: the next focus
-    /// loss must compare against this placement, not the stale one. The file
-    /// keeps the key regardless — a monitor that comes back restores it (§7).
-    pub fn placed(
-        &self,
-        restored: Option<PhysicalPosition<i32>>,
-        applied: Option<PhysicalPosition<i32>>,
-    ) {
+    /// The show has placed (or, when nothing was reachable, defaulted) the
+    /// window. `applied` is unknown until the window's next focus-in settles
+    /// it: on GTK the position read right after `show()` is a cache the
+    /// window manager has not yet updated, and elsewhere a window manager may
+    /// still move the window. When nothing was restored, the window is no
+    /// longer where the person left it, so `left` goes; the file keeps the
+    /// key — a monitor that comes back restores it.
+    pub fn placed(&self, restored: Option<PhysicalPosition<i32>>) {
         let mut slots = self.lock();
-        slots.applied = applied;
+        slots.applied = None;
+        slots.awaiting = true;
         if restored.is_none() {
             slots.left = None;
         }
+    }
+    /// The launcher's focus-in after a show: what the show actually applied.
+    /// Ignored when no show is awaiting one (a focus-in after an alt-tab).
+    pub fn settled(&self, now: Option<PhysicalPosition<i32>>) {
+        let mut slots = self.lock();
+        if slots.awaiting {
+            slots.applied = now;
+            slots.awaiting = false;
+        }
+    }
+    pub fn awaiting(&self) -> bool {
+        self.lock().awaiting
     }
     /// The decision of D155: `now` is the person's choice only if it differs
     /// from the last position this process knows — where the person last
@@ -165,12 +182,14 @@ pub fn remember_position(
 
 /// The one show path (D155): put the window where the person left it — from
 /// memory first, then the file — if the handle is reachable; otherwise the
-/// platform default. Then show, focus, and read back where it ended up.
+/// platform default. Then show and focus; what it actually applied is not
+/// read back here — the launcher's next focus-in settles it (`Memory::settled`).
 ///
 /// Order matters: `set_position` / `center` BEFORE `show` (no jump from the old
 /// place); the macOS default `TrayCenter` AFTER `show`, as the positioner
-/// wants it; `applied` after everything, or the first blur on macOS would
-/// treat the tray placement as a drag.
+/// wants it; `memory.placed` BEFORE `show`, marking the show as awaiting a
+/// settle — reading `outer_position` here would be the GTK pre-map cache or,
+/// on macOS/Windows, the point before `TrayCenter` ran.
 ///
 /// Only for a HIDDEN launcher: `focus_launcher` sends a visible one to
 /// `set_focus` alone, so a drag no focus loss has recorded yet survives a
@@ -207,15 +226,15 @@ pub fn place<R: tauri::Runtime>(
             let _ = window.center();
         }
     }
+    if !wayland {
+        memory.placed(restored);
+    }
     let _ = window.show();
     if restored.is_none() && !wayland && cfg!(target_os = "macos") {
         // No-ops where the tray position is unknown (mock runtime included).
         let _ = window.move_window(Position::TrayCenter);
     }
     let _ = window.set_focus();
-    if !wayland {
-        memory.placed(restored, window.outer_position().ok());
-    }
 }
 
 /// Called from the `WindowEvent::Focused(false)` arm and the line before
@@ -432,7 +451,8 @@ mod tests {
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
         assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
-        memory.placed(None, at(460, 220));
+        memory.placed(None);
+        memory.settled(at(460, 220));
         assert_eq!(memory.left(), None, "a failed restore kept the stale drag");
         assert_eq!(memory.applied(), at(460, 220));
         assert_eq!(memory.moved(PhysicalPosition::new(460, 220)), None);
@@ -441,8 +461,32 @@ mod tests {
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
         assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
-        memory.placed(at(640, 80), at(640, 80));
+        memory.placed(at(640, 80));
+        memory.settled(at(640, 80));
         assert_eq!(memory.left(), at(640, 80));
+    }
+
+    #[test]
+    fn a_show_leaves_applied_open_until_the_focus_in_settles_it() {
+        let memory = Memory::default();
+        memory.placed(at(640, 80));
+        assert_eq!(memory.applied(), None, "applied before any focus-in");
+        assert!(memory.awaiting());
+        memory.settled(at(640, 80));
+        assert_eq!(memory.applied(), at(640, 80));
+        assert!(!memory.awaiting());
+        // A later focus-in (alt-tab back) settles nothing: applied stays.
+        memory.settled(at(1, 1));
+        assert_eq!(memory.applied(), at(640, 80));
+    }
+
+    #[test]
+    fn a_blur_before_the_focus_in_writes_nothing() {
+        // The stale-read case on GTK, made safe: nothing to compare against.
+        let memory = Memory::default();
+        memory.placed(None);
+        assert_eq!(memory.moved(PhysicalPosition::new(280, 160)), None);
+        assert_eq!(memory.left(), None);
     }
 
     #[test]

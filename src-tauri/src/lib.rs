@@ -633,6 +633,14 @@ pub fn run() -> anyhow::Result<()> {
                     os_services::wayland_session(),
                 );
             }
+            // D155: the show cannot know where the window manager put the
+            // window — on GTK `outer_position` is a cache the configure event
+            // fills in later — so the first focus-in after a show settles it.
+            tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
+                let app = window.app_handle();
+                let memory = app.state::<launcher_position::Memory>();
+                memory.settled(window.outer_position().ok());
+            }
             _ => {}
         })
         .setup(|app| {

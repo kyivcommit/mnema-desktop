@@ -59,10 +59,14 @@ fn focus_launcher_reports_a_missing_launcher() {
 }
 
 #[test]
-fn place_records_where_it_put_the_launcher() {
-    // The production seam behind every show of a hidden launcher: after
-    // `place`, memory holds what the mock runtime reports as the window's
-    // position, (0, 0). Deleting the final `set_applied` leaves it at None.
+fn place_leaves_the_position_to_the_focus_in() {
+    // The production seam behind every show of a hidden launcher: `place`
+    // marks memory as awaiting a settle, not `applied` itself — on GTK the
+    // position `place` could read right after `show()` is a cache the
+    // window manager has not updated yet. The launcher's next focus-in
+    // settles `applied` from what the mock runtime reports as the window's
+    // position, (0, 0). Deleting the `memory.placed(restored)` call from
+    // `place` leaves `awaiting` false here — red.
     use tauri::Manager;
     let app = mock_app_with_memory();
     WebviewWindowBuilder::new(&app, "launcher", Default::default())
@@ -78,8 +82,20 @@ fn place_records_where_it_put_the_launcher() {
 
     assert_eq!(
         memory.applied(),
+        None,
+        "applied settled before any focus-in"
+    );
+    assert!(
+        memory.awaiting(),
+        "place did not mark memory as awaiting a settle"
+    );
+
+    memory.settled(window.outer_position().ok());
+
+    assert_eq!(
+        memory.applied(),
         Some(tauri::PhysicalPosition::new(0, 0)),
-        "place did not record where it put the launcher"
+        "settled did not record what the focus-in found"
     );
 }
 
@@ -131,6 +147,7 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     memory.moved(tauri::PhysicalPosition::new(640, 80));
 
     launcher_position::place(&window, &memory, Some(dir.path()), false);
+    memory.settled(window.outer_position().ok());
     launcher_position::remember(&window.as_ref().window(), &memory, dir.path(), false);
 
     let after = std::fs::read(&prefs_path).unwrap();

@@ -44,9 +44,15 @@ case_ "launcher position: y is not read" \
 
 case_ "launcher position: the show does not record where it put the window" \
   src-tauri/src/launcher_position.rs \
-  's~memory\.placed\(restored, window\.outer_position\(\)\.ok\(\)\);~let _ = memory;~' \
-  'let _ = memory;' \
-  mnema-desktop 'place_records_where_it_put_the_launcher' --test shell
+  's~memory\.placed\(restored\);~let _ = restored;~' \
+  'let _ = restored;' \
+  mnema-desktop 'place_leaves_the_position_to_the_focus_in' --test shell
+
+case_ "launcher position: a focus-in never settles the show" \
+  src-tauri/src/launcher_position.rs \
+  's~if slots\.awaiting \{~if false {~' \
+  'if false {' \
+  mnema-desktop 'launcher_position::tests::a_show_leaves_applied_open_until_the_focus_in_settles_it' --lib
 
 case_ "launcher position: a fallback show keeps the stale drag in memory" \
   src-tauri/src/launcher_position.rs \
