@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod embed_job;
 pub mod error;
 pub mod job;
+pub mod launcher_position;
 pub mod locale;
 pub mod models;
 pub mod os_services;
