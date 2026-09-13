@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use tauri::{PhysicalPosition, PhysicalRect};
+use tauri_plugin_positioner::{Position, WindowExt};
 
 /// The `prefs.json` key: `{"x": <i32>, "y": <i32>}`, physical pixels of
 /// `outer_position`.
@@ -143,6 +144,61 @@ pub fn remember_position(
     match memory.moved(now) {
         Some(p) => write(data_dir, p),
         None => Ok(()),
+    }
+}
+
+/// The one show path (D155): put the window where the person left it — from
+/// memory first, then the file — if the handle is reachable; otherwise the
+/// platform default. Then show, focus, and read back where it ended up.
+///
+/// Order matters: `set_position` / `center` BEFORE `show` (no jump from the old
+/// place); the macOS default `TrayCenter` AFTER `show`, as the positioner
+/// wants it; `applied` after everything, or the first blur on macOS would
+/// treat the tray placement as a drag.
+///
+/// Only for a HIDDEN launcher: `focus_launcher` sends a visible one to
+/// `set_focus` alone, so a drag no focus loss has recorded yet survives a
+/// single-instance callback (Linux: D-Bus, no focus change required).
+///
+/// `data_dir` is `None` where no `AppState` is managed (the shell tests), which
+/// reads as "nothing saved". Wayland: no placement, no `applied` — the
+/// compositor decides and the value GTK reports is not a position.
+pub fn place<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    memory: &Memory,
+    data_dir: Option<&Path>,
+    wayland: bool,
+) {
+    let restored = if wayland {
+        None
+    } else {
+        let saved = memory.left().or_else(|| data_dir.and_then(read));
+        let monitors: Vec<(PhysicalRect<i32, u32>, f64)> = window
+            .available_monitors()
+            .unwrap_or_default()
+            .iter()
+            .map(|m| (*m.work_area(), m.scale_factor()))
+            .collect();
+        reachable(saved, &monitors)
+    };
+    match restored {
+        Some(p) => {
+            let _ = window.set_position(p);
+        }
+        // §6: next to the tray on macOS, placed after `show` below.
+        None if wayland || cfg!(target_os = "macos") => {}
+        None => {
+            let _ = window.center();
+        }
+    }
+    let _ = window.show();
+    if restored.is_none() && !wayland && cfg!(target_os = "macos") {
+        // No-ops where the tray position is unknown (mock runtime included).
+        let _ = window.move_window(Position::TrayCenter);
+    }
+    let _ = window.set_focus();
+    if !wayland {
+        memory.set_applied(window.outer_position().ok());
     }
 }
 

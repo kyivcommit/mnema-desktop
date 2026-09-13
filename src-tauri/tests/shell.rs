@@ -19,9 +19,18 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
         .expect("failed to build the mock application")
 }
 
+fn mock_app_with_memory() -> tauri::App<tauri::test::MockRuntime> {
+    // `focus_launcher` reads the launcher-position memory from managed state
+    // (D155); the production `.setup` manages it, a test does it here.
+    mock_builder()
+        .manage(mnema_desktop::launcher_position::Memory::default())
+        .build(mock_context(noop_assets()))
+        .expect("failed to build the mock application")
+}
+
 #[test]
 fn focus_launcher_targets_the_launcher_window() {
-    let app = mock_app();
+    let app = mock_app_with_memory();
     WebviewWindowBuilder::new(&app, "launcher", Default::default())
         .build()
         .expect("failed to build the launcher webview");
@@ -37,7 +46,7 @@ fn focus_launcher_reports_a_missing_launcher() {
     // The other direction: with no `launcher` window (only some other label),
     // it must report false rather than silently targeting the wrong window —
     // this is what fails while the ported code still looks for `main`.
-    let app = mock_app();
+    let app = mock_app_with_memory();
     WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
         .expect("failed to build the main webview");
@@ -45,6 +54,50 @@ fn focus_launcher_reports_a_missing_launcher() {
         !mnema_desktop::focus_launcher(app.handle()),
         "focus_launcher acted on a window that is not the launcher"
     );
+}
+
+#[test]
+fn place_records_where_it_put_the_launcher() {
+    // The production seam behind every show of a hidden launcher: after
+    // `place`, memory holds what the mock runtime reports as the window's
+    // position, (0, 0). Deleting the final `set_applied` leaves it at None.
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let memory = app.state::<mnema_desktop::launcher_position::Memory>();
+    assert_eq!(memory.applied(), None, "applied before any show?");
+
+    mnema_desktop::launcher_position::place(&window, &memory, None, false);
+
+    assert_eq!(
+        memory.applied(),
+        Some(tauri::PhysicalPosition::new(0, 0)),
+        "place did not record where it put the launcher"
+    );
+}
+
+#[test]
+fn focus_launcher_leaves_a_visible_launcher_where_it_is() {
+    // The mock runtime reports every window as visible, which makes it the
+    // fixture for the other branch of `focus_launcher` (review P2-3): a
+    // launcher that is already up is focused, not re-placed — a drag that no
+    // focus loss has recorded yet must not be undone by a second instance's
+    // callback. Deleting the visibility branch runs `place` and sets applied.
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let memory = app.state::<mnema_desktop::launcher_position::Memory>();
+
+    assert!(mnema_desktop::focus_launcher(app.handle()));
+
+    assert_eq!(memory.applied(), None, "a visible launcher was re-placed");
 }
 
 #[test]
