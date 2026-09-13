@@ -9,6 +9,7 @@
 //! itself, so there the position is neither saved nor restored.
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use tauri::{PhysicalPosition, PhysicalRect};
 
@@ -79,6 +80,92 @@ pub fn reachable(
             && hy < y0 + f64::from(area.size.height)
     });
     on_some_monitor.then_some(p)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Slots {
+    /// Where the application put the window on the last show — read back with
+    /// `outer_position` AFTER every placement, so on macOS it is the tray
+    /// position, not the point before `TrayCenter` ran.
+    applied: Option<PhysicalPosition<i32>>,
+    /// Where the person left the window: set only when a focus loss finds the
+    /// window somewhere other than `applied`. Wins over the file for the rest
+    /// of the session, so a failed write costs only the next restart.
+    left: Option<PhysicalPosition<i32>>,
+}
+
+/// Managed state (`app.manage(Memory::default())`): one launcher per process.
+#[derive(Default)]
+pub struct Memory {
+    slots: Mutex<Slots>,
+}
+
+impl Memory {
+    fn lock(&self) -> MutexGuard<'_, Slots> {
+        // Poisoning absorbed, as `PREFS_LOCK` does: two `Option`s cannot be
+        // left half-written by a panic.
+        self.slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn applied(&self) -> Option<PhysicalPosition<i32>> {
+        self.lock().applied
+    }
+    pub fn left(&self) -> Option<PhysicalPosition<i32>> {
+        self.lock().left
+    }
+    pub fn set_applied(&self, p: Option<PhysicalPosition<i32>>) {
+        self.lock().applied = p;
+    }
+    /// The decision of D155: `now` is the person's choice only if it differs
+    /// from the last position this process knows — where the person last
+    /// left it, or, before any drag, where the application put it. With no
+    /// show recorded at all there is nothing to compare against, and a
+    /// position is not evidence of a drag. Records a move as `left` and
+    /// returns it; `None` means "nothing to write".
+    pub fn moved(&self, now: PhysicalPosition<i32>) -> Option<PhysicalPosition<i32>> {
+        let mut slots = self.lock();
+        let reference = slots.left.or(slots.applied)?;
+        if reference == now {
+            return None;
+        }
+        slots.left = Some(now);
+        Some(now)
+    }
+}
+
+/// `moved` + `write`, with the memory updated BEFORE the write so a write that
+/// fails leaves the session behaving as dragged. Returns the write's result;
+/// `Ok(())` also when there was nothing to write.
+pub fn remember_position(
+    now: PhysicalPosition<i32>,
+    memory: &Memory,
+    data_dir: &Path,
+) -> std::io::Result<()> {
+    match memory.moved(now) {
+        Some(p) => write(data_dir, p),
+        None => Ok(()),
+    }
+}
+
+/// The `WindowEvent::Focused(false)` arm and the line before `app.exit(0)`:
+/// every way the launcher leaves the screen passes through here. Nothing on
+/// Wayland (the value GTK caches there is not a position — D153's sibling),
+/// nothing when the runtime cannot say where the window is, and a failed write
+/// is reported, not raised: this runs on the event loop.
+pub fn remember<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    memory: &Memory,
+    data_dir: &Path,
+    wayland: bool,
+) {
+    if wayland {
+        return;
+    }
+    let Ok(now) = window.outer_position() else {
+        return;
+    };
+    if let Err(e) = remember_position(now, memory, data_dir) {
+        eprintln!("launcher position not saved: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +308,94 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::prefs::write_key(dir.path(), KEY, json!({"x": 12, "y": 34})).unwrap();
         assert_eq!(read(dir.path()), at(12, 34));
+    }
+
+    // --- Memory: a hide without a drag writes nothing; a drag is written ---
+
+    #[test]
+    fn a_hide_without_a_drag_writes_nothing() {
+        // The window is exactly where the application put it: that is not the
+        // person's choice, so neither memory nor the file learns it — and the
+        // next show still applies the platform default.
+        let memory = Memory::default();
+        memory.set_applied(at(300, 200));
+        assert_eq!(memory.moved(PhysicalPosition::new(300, 200)), None);
+        assert_eq!(memory.left(), None);
+    }
+
+    #[test]
+    fn a_drag_is_written_and_kept_in_memory() {
+        let memory = Memory::default();
+        memory.set_applied(at(300, 200));
+        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        assert_eq!(memory.left(), at(640, 80));
+        // A second focus loss at the same dragged place is not a second move:
+        // the reference is now `left`, not `applied`.
+        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), None);
+        assert_eq!(memory.applied(), at(300, 200));
+    }
+
+    #[test]
+    fn dragging_back_to_where_the_app_put_it_is_still_a_move() {
+        // A → B → A (review P2-2): the person's last choice is A, and a rule
+        // that compares with `applied` alone would keep B.
+        let memory = Memory::default();
+        memory.set_applied(at(300, 200));
+        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        assert_eq!(memory.moved(PhysicalPosition::new(300, 200)), at(300, 200));
+        assert_eq!(memory.left(), at(300, 200));
+    }
+
+    #[test]
+    fn nothing_applied_means_nothing_moved() {
+        // No show recorded — the application never placed the window, so a
+        // position is not evidence of a drag (review P2-1: start in the tray,
+        // Quit; Wayland never records one either).
+        let memory = Memory::default();
+        assert_eq!(memory.moved(PhysicalPosition::new(1, 2)), None);
+        assert_eq!(memory.left(), None);
+    }
+
+    #[test]
+    fn a_quit_before_the_first_show_keeps_the_saved_position() {
+        // prefs hold a position from an earlier session; the app starts into
+        // the tray and quits without ever showing the launcher. The key must
+        // be exactly what it was.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), PhysicalPosition::new(640, 80)).unwrap();
+        let memory = Memory::default();
+        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        assert_eq!(read(dir.path()), at(640, 80));
+        // Positive control: the same call after a show at (0, 0) — still not
+        // a move; after a show somewhere else — it is.
+        memory.set_applied(at(0, 0));
+        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        assert_eq!(read(dir.path()), at(640, 80));
+        memory.set_applied(at(5, 5));
+        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        assert_eq!(read(dir.path()), at(0, 0));
+    }
+
+    #[test]
+    fn a_failed_write_still_updates_memory() {
+        // `data_dir` is a FILE, so `create_dir_all` inside `write_key` fails on
+        // every platform. The session must still behave as dragged.
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("prefs-here-is-a-file");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let memory = Memory::default();
+        memory.set_applied(at(0, 0));
+        let outcome = remember_position(PhysicalPosition::new(50, 60), &memory, &not_a_dir);
+        assert!(outcome.is_err(), "the write into a file path succeeded?");
+        assert_eq!(memory.left(), at(50, 60));
+    }
+
+    #[test]
+    fn a_successful_write_lands_the_dragged_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Memory::default();
+        memory.set_applied(at(0, 0));
+        remember_position(PhysicalPosition::new(50, 60), &memory, dir.path()).unwrap();
+        assert_eq!(read(dir.path()), at(50, 60));
     }
 }

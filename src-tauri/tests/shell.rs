@@ -60,3 +60,43 @@ fn the_command_surface_still_builds() {
     // detect a later task *adding* a command; that would still compile.
     let _ = app;
 }
+
+#[test]
+fn remember_writes_the_launcher_position_it_finds() {
+    // The production seam behind the `Focused(false)` arm: the mock runtime
+    // answers `outer_position` with (0, 0); with (5, 5) recorded as applied,
+    // that is a move, and the file must say so. Deleting `remember`'s body —
+    // or its `outer_position` read — leaves the file without the key.
+    use mnema_desktop::launcher_position::{self, Memory};
+    use tauri::Manager;
+    let app = mock_app();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    // `get_window` needs the `unstable` feature, which is off here; go through
+    // the webview window instead — `remember`'s parameter type is the same
+    // `Window<R>` a real `WindowEvent::Focused` handler already holds.
+    let webview_window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let window = webview_window.as_ref().window();
+    let dir = tempfile::tempdir().unwrap();
+    let memory = Memory::default();
+    memory.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
+
+    launcher_position::remember(&window, &memory, dir.path(), false);
+
+    assert_eq!(
+        launcher_position::read(dir.path()),
+        Some(tauri::PhysicalPosition::new(0, 0)),
+        "remember did not write what the window reported"
+    );
+    // Wayland: the same call writes nothing (the value is not a position there).
+    let dir2 = tempfile::tempdir().unwrap();
+    launcher_position::remember(&window, &memory, dir2.path(), true);
+    assert_eq!(
+        launcher_position::read(dir2.path()),
+        None,
+        "wrote under Wayland"
+    );
+}
