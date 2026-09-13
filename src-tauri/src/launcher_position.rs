@@ -163,7 +163,10 @@ mod tests {
         // x = 1600: on the 1× monitor the handle (2073) is off its edge, on the
         // 2× monitor (1600 + 946 = 2546) it is inside — kept. Remove the 2×
         // monitor and it is off everything.
-        let two = [monitor(0, 0, 1920, 1080, 1.0), monitor(1920, 0, 3840, 2160, 2.0)];
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
         let one = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(1600, 100), &two), at(1600, 100));
         assert_eq!(reachable(at(1600, 100), &one), None);
@@ -179,7 +182,10 @@ mod tests {
     fn a_second_monitor_with_negative_origin_counts() {
         // Primary at 0, a second monitor to its left. The point is off the
         // primary and on the second — and with the second removed it is off.
-        let two = [monitor(0, 0, 1920, 1080, 1.0), monitor(-1920, 0, 1920, 1080, 1.0)];
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(-1920, 0, 1920, 1080, 1.0),
+        ];
         let one = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(-1500, 100), &two), at(-1500, 100));
         assert_eq!(reachable(at(-1500, 100), &one), None);
@@ -201,7 +207,12 @@ mod tests {
 
     #[test]
     fn a_value_that_is_not_two_integers_reads_as_nothing() {
-        for bad in [json!("12,34"), json!({"x": 12}), json!({"x": 1.5, "y": 2}), json!([12, 34])] {
+        for bad in [
+            json!("12,34"),
+            json!({"x": 12}),
+            json!({"x": 1.5, "y": 2}),
+            json!([12, 34]),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             crate::prefs::write_key(dir.path(), KEY, bad.clone()).unwrap();
             assert_eq!(read(dir.path()), None, "accepted {bad}");
