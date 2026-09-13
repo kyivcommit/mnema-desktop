@@ -1,13 +1,12 @@
-//! Where the launcher shows, and where the person left it (D155, F3 of the
-//! 2026-09-13 stand smoke).
+//! Where the launcher shows, and where the person left it (D155).
 //!
-//! The search panel is the drag handle (`data-tauri-drag-region="deep"` in
-//! `Launcher.svelte`). Once the person has dragged the window, every later
-//! show — including after a restart — puts it back where they left it, as
-//! long as the *handle* is still on a monitor. Until they drag, nothing is
-//! written and the platform default applies (macOS: next to the tray;
-//! Windows / X11: centred). Wayland places windows itself, so there the
-//! position is neither saved nor restored.
+//! The search panel is to become the drag handle (`data-tauri-drag-region="deep"`
+//! in `Launcher.svelte`, a later commit of this branch). Once the person has
+//! dragged the window, every later show — including after a restart — puts it
+//! back where they left it, as long as the *handle* is still on a monitor.
+//! Until they drag, nothing is written and the platform default applies
+//! (macOS: next to the tray; Windows / X11: centred). Wayland places windows
+//! itself, so there the position is neither saved nor restored.
 
 use std::path::Path;
 
@@ -22,8 +21,18 @@ pub const KEY: &str = "launcher_position";
 /// Every number is a declaration in `ui/src/styles/launcher.css` — `main.panels`
 /// padding `24px 32px`, first column 190, gap 16, second column 470, then the
 /// panel's own padding-top 11 and the pin's height 26.
-/// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` reads
-/// both this line and the stylesheet and fails when they disagree.
+///
+/// The offset is only this fixed because the window is: `"width": 1000` and
+/// `"resizable": false` in `src-tauri/tauri.conf.json`. The three grid tracks
+/// plus their two 16px gaps (190 + 470 + 244 + 2 × 16 = 936) exactly fill the
+/// content box (1000 − 2 × 32 = 936), which is why `main.panels`'
+/// `justify-content: center` and the middle column's `minmax(0, …)` floor never
+/// actually engage — either one becoming live would shift the panel and make
+/// this offset wrong.
+/// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` is to read
+/// both this line and the stylesheet, and check that same sum against the
+/// window width, failing if any of them disagree (a later commit of this
+/// branch).
 pub const HANDLE_CENTRE: (f64, f64) = (32.0 + 190.0 + 16.0 + 470.0 / 2.0, 24.0 + 11.0 + 26.0 / 2.0);
 
 /// The saved position, or `None` for anything that is not two integers under
