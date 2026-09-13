@@ -110,3 +110,16 @@ case_ "launcher: the start-dragging permission is gone" \
   's~, "core:window:allow-start-dragging"\]~]~' \
   '"core:event:allow-listen"]' \
   src/launcher/Launcher.test.ts 'the search panel is the drag handle and nothing else is' runner=vitest
+
+case_ "launcher: the drag's own blur hides the window" \
+  ui/src/launcher/Launcher.svelte \
+  's~if \(Date\.now\(\) - handlePressedAt < DRAG_GRAB_WINDOW_MS\) return;~if (false) return;~' \
+  'if (false) return;' \
+  src/launcher/Launcher.test.ts 'a blur right after a press on the drag handle is the drag, not a dismissal' runner=vitest
+
+case_ "launcher: a press anywhere arms the drag window" \
+  ui/src/launcher/Launcher.svelte \
+  's~if \(onHandle\) handlePressedAt = Date\.now\(\);~handlePressedAt = Date.now();~' \
+  'handlePressedAt = Date.now();
+  }' \
+  src/launcher/Launcher.test.ts 'a press on the input or the pin does not arm the drag window' runner=vitest

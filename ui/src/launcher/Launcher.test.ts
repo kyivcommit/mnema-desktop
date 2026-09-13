@@ -5,6 +5,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
+import { DRAG_GRAB_WINDOW_MS } from './state';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
@@ -360,6 +361,50 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
   hide.mockClear();
   await fireEvent.blur(window);
   expect(hide).not.toHaveBeenCalled();
+});
+
+// D155/L2: mutter's move grab (what Tauri's start_dragging does on X11) takes
+// keyboard focus for the whole drag and hands it back at the end — the
+// webview sees that as a `blur` a few ms after the press on the handle. That
+// blur is the drag, not a dismissal.
+test('a blur right after a press on the drag handle is the drag, not a dismissal', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    const handle = container.querySelector('.arms')!; // inside .searchbar, not clickable
+    fireEvent.pointerDown(handle, { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).not.toHaveBeenCalled();
+    // Later, the same blur is a dismissal again — nothing stays armed.
+    vi.advanceTimersByTime(DRAG_GRAB_WINDOW_MS);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+test('a press on the input or the pin does not arm the drag window', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    render(Launcher);
+    fireEvent.pointerDown(screen.getByRole('textbox'), { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(screen.getByTestId('pin'), { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
+test('a blur with no press at all still hides', () => {
+  mockBackend(generated);
+  render(Launcher);
+  fireEvent.blur(window);
+  expect(hide).toHaveBeenCalledTimes(1);
 });
 
 test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {

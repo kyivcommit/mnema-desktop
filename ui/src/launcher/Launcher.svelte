@@ -3,7 +3,7 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
   import { ask, modelSettings } from '../lib/ipc';
-  import { checkQuery, stateFromAnswer, providerReady, type LauncherState } from './state';
+  import { checkQuery, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -62,10 +62,36 @@
   // gestures, and does not speak about state).
   function hide() { appWindow.hide(); }
   function onKeydown(event: KeyboardEvent) { if (event.key === 'Escape') hide(); }
-  function onBlur() { if (!pinned) hide(); }
+
+  // D155: on some window managers (mutter on X11) the drag of a frameless
+  // window is a pointer+keyboard grab that takes focus for the whole move and
+  // hands it back at the end. The webview sees that as `blur` a few
+  // milliseconds after the press on the handle. A blur that close to a press
+  // on the drag handle is the drag, not a dismissal. The window is short on
+  // purpose: where the drag keeps focus (macOS) no blur arrives, and after
+  // 300 ms a blur is a dismissal again — nothing is left armed.
+  let handlePressedAt = -Infinity;
+  function onPointerDown(event: PointerEvent) {
+    // No `event.button` check: this project's test environment (jsdom has no
+    // real `PointerEvent` constructor — `@testing-library/dom` falls back to
+    // a plain `Event`, which drops `button`) cannot exercise it, and
+    // `JobStrip.svelte`'s own document-level pointerdown listener (the only
+    // other one in this codebase) does not check it either. A right-button
+    // press on the handle can arm the window for nothing, but nothing acts on
+    // it unless a blur follows within 300 ms, and it self-clears either way.
+    const target = event.target as Element | null;
+    const onHandle = !!target?.closest('.searchbar')
+      && !target.closest('button, input, label, a, select, textarea, [role="button"]');
+    if (onHandle) handlePressedAt = Date.now();
+  }
+  function onBlur() {
+    if (pinned) return;
+    if (Date.now() - handlePressedAt < DRAG_GRAB_WINDOW_MS) return;
+    hide();
+  }
 </script>
 
-<svelte:window onkeydown={onKeydown} onblur={onBlur} />
+<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onblur={onBlur} />
 
 <main class="panels">
   <!-- D155: the search panel is the drag handle. "deep" drags from any
