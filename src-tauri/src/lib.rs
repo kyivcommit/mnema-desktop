@@ -402,14 +402,20 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
     Menu::with_items(app, &[&app_menu, &edit_menu, &window_menu])
 }
 
-/// Off macOS the ⌘Q → `terminate:` problem does not arise; keep the default menu
-/// until the cross-platform pass (PR 10).
+/// Puts the application menu on the builder — on macOS only. Off macOS `muda`
+/// draws `.menu(…)` as a menu bar INSIDE every window, the frameless launcher
+/// included (2026-09-13 stand smoke on WebKitGTK and WebView2, F2), and the
+/// only reason the menu exists is §6's ⌘Q, which is a macOS problem. So off
+/// macOS no menu is set at all (D154); the compiler, not a test, keeps it so:
+/// `build_app_menu` has no off-macOS definition any more.
+#[cfg(target_os = "macos")]
+fn with_app_menu<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder.menu(|app| build_app_menu(app, crate::locale::boot_lang()))
+}
+
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn build_app_menu<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    _lang: crate::locale::Lang,
-) -> tauri::Result<tauri::menu::Menu<R>> {
-    tauri::menu::Menu::default(app)
+fn with_app_menu<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
 }
 
 /// Builds and runs the application. Returns only when the tray's «Вийти» calls
@@ -450,7 +456,7 @@ pub fn run() -> anyhow::Result<()> {
         })
         .build();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Registered before anything else, as the plugin requires. Two instances
         // over one SQLite file is a second writer that can only wait, an
         // indexing job running twice over the same folder, and the cloud spend
@@ -475,8 +481,10 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
-        ))
-        .menu(|app| build_app_menu(app, crate::locale::boot_lang()))
+        ));
+    // §6's ⌘Q menu is a macOS thing; off macOS none is set (D154, see
+    // `with_app_menu`).
+    with_app_menu(builder)
         // All menu events — the app menu's ⌘Q AND every tray item — dispatch to
         // this one app-level handler. `muda` registers `Builder::on_menu_event`
         // and the tray's menu into the same app-level listeners, so events fire
@@ -607,6 +615,7 @@ pub fn run() -> anyhow::Result<()> {
             // alone (`boot_lang` — no path resolver yet to read prefs). Rebuild
             // it now from the resolved language so an explicit saved choice that
             // differs from the OS shows the moment the menu bar first appears.
+            #[cfg(target_os = "macos")]
             if let Ok(menu) = build_app_menu(app.handle(), st.effective) {
                 let _ = app.handle().set_menu(menu);
             }
@@ -624,8 +633,17 @@ pub fn run() -> anyhow::Result<()> {
             // «Показати пошук» still opens the launcher.
             {
                 let state = app.state::<state::AppState>();
+                // D153: under Wayland the plugin's grab succeeds through
+                // XWayland and never fires, so the honest registrar is the one
+                // that refuses up front (`os_services::WaylandNoShortcuts`).
+                let shortcuts: Box<dyn os_services::ShortcutRegistrar> =
+                    if os_services::wayland_session() {
+                        Box::new(os_services::WaylandNoShortcuts)
+                    } else {
+                        Box::new(os_services::PluginShortcuts::new(app.handle().clone()))
+                    };
                 state.install_os_services(
-                    Box::new(os_services::PluginShortcuts::new(app.handle().clone())),
+                    shortcuts,
                     Box::new(os_services::PluginAutolaunch::new(app.handle().clone())),
                 );
                 let _ = prefs::install_hotkey(&state);

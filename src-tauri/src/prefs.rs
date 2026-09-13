@@ -393,8 +393,8 @@ pub fn app_prefs<R: tauri::Runtime>(
     AppPrefs {
         hotkey: state.hotkey(),
         autostart: read_autostart(&state),
-        // The same version the About box shows (`build_app_menu`), which is the
-        // one the bundle carries rather than this crate's own constant.
+        // The same version the macOS About box shows (`build_app_menu`), which
+        // is the one the bundle carries rather than this crate's own constant.
         version: app.package_info().version.to_string(),
         platform: crate::models::Platform::of_this_build(),
     }

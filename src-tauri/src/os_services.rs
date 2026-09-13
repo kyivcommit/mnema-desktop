@@ -18,8 +18,9 @@
 //!   `cargo test` is the **test binary**, left behind after the run.
 //!
 //! So [`ShortcutRegistrar`] and [`Autolaunch`] are traits, [`NoOsServices`] is
-//! the inert default `AppState::new` installs, and the real wrappers are put in
-//! place by `.setup` and by nothing else. That makes "the suite never touches
+//! the inert default `AppState::new` installs, and the real wrappers — or, for
+//! the shortcut in a Wayland session, [`WaylandNoShortcuts`] (D153) — are put
+//! in place by `.setup` and by nothing else. That makes "the suite never touches
 //! the plugins" **structural** rather than a convention somebody has to keep:
 //! the default answers `Err`, and the only constructor of a real wrapper is
 //! called from a closure no test runs. It is the same argument
@@ -162,5 +163,83 @@ impl<R: Runtime> Autolaunch for PluginAutolaunch<R> {
             .autolaunch()
             .is_enabled()
             .map_err(|e| e.to_string())
+    }
+}
+
+/// The sentence a Wayland session's registrar answers with. English, like
+/// every other sentence this module hands to a window (see [`NOT_INSTALLED`]'s
+/// doc): it lands in `HotkeyStatus::Unavailable { reason }` and the settings
+/// window shows it under «not registered with the system», followed by its
+/// own «the search can still be opened from the tray» — so the reason carries
+/// no advice of its own, only what this application cannot do and where.
+pub const WAYLAND_REASON: &str =
+    "Wayland session: this application cannot register a global shortcut.";
+
+/// The registrar `.setup` installs on Linux when the session is Wayland
+/// (D153). `PluginShortcuts` there takes an X11 grab through XWayland that
+/// *succeeds* and never fires — 2026-09-13 stand smoke, F1 — so the section
+/// said «registered with the system» about a shortcut that did nothing.
+/// Refusing up front is the honest state. `unregister` answers `Ok` because
+/// this registrar never registers anything, so there is never anything to
+/// release — the trait's contract for an unregistered shortcut. (Today no
+/// caller reaches it under this registrar: `change_hotkey` only unregisters a
+/// `Registered` current shortcut, and this registrar never produces one —
+/// `a_refused_registration_from_an_unavailable_start_takes_nothing_back` in
+/// `tests/commands.rs` pins exactly that.)
+pub struct WaylandNoShortcuts;
+
+impl ShortcutRegistrar for WaylandNoShortcuts {
+    fn register(&self, _shortcut: &str) -> Result<(), String> {
+        Err(WAYLAND_REASON.to_string())
+    }
+
+    fn unregister(&self, _shortcut: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Whether `WAYLAND_DISPLAY` names a Wayland session — the one signal the
+/// compositor leaves in every process it starts. Pure so the rule is testable;
+/// [`wayland_session`] reads the real environment.
+pub fn wayland_session_from(wayland_display: Option<std::ffi::OsString>) -> bool {
+    wayland_display.is_some_and(|d| !d.is_empty())
+}
+
+/// [`wayland_session_from`] on this process's environment. Only Linux has a
+/// Wayland; elsewhere the variable is meaningless and this is `false`.
+pub fn wayland_session() -> bool {
+    cfg!(target_os = "linux") && wayland_session_from(std::env::var_os("WAYLAND_DISPLAY"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wayland_session_registers_nothing_and_says_why() {
+        // Under Wayland the X11 grab `PluginShortcuts` makes through XWayland
+        // "succeeds" and never fires (2026-09-13 stand smoke, F1). The honest
+        // registrar for that session refuses up front. The sentence names the
+        // session, nothing more: the window already adds «the search can still
+        // be opened from the application icon in the tray» under any refusal.
+        let reason = WaylandNoShortcuts.register("Alt+Space").unwrap_err();
+        assert_eq!(reason, WAYLAND_REASON);
+    }
+
+    #[test]
+    fn a_wayland_session_has_nothing_to_unregister() {
+        // The trait's contract, not a path any caller takes today: nothing
+        // this registrar ever registered, so nothing is there to release, and
+        // an `Err` here would be a second refusal with no registration behind
+        // it. `change_hotkey` never gets here under it — see the type's doc.
+        assert_eq!(WaylandNoShortcuts.unregister("Alt+Space"), Ok(()));
+    }
+
+    #[test]
+    fn wayland_is_recognised_from_a_set_display_and_nothing_else() {
+        use std::ffi::OsString;
+        assert!(wayland_session_from(Some(OsString::from("wayland-0"))));
+        assert!(!wayland_session_from(Some(OsString::new())));
+        assert!(!wayland_session_from(None));
     }
 }
