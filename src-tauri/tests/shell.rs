@@ -105,7 +105,9 @@ fn focus_launcher_leaves_a_visible_launcher_where_it_is() {
     // fixture for the other branch of `focus_launcher` (review P2-3): a
     // launcher that is already up is focused, not re-placed — a drag that no
     // focus loss has recorded yet must not be undone by a second instance's
-    // callback. Deleting the visibility branch runs `place` and sets applied.
+    // callback. Deleting the visibility branch runs `place`, which marks
+    // memory as awaiting a settle even before any focus-in arrives — checked
+    // here, since `place` no longer sets `applied` itself.
     use tauri::Manager;
     let app = mock_app_with_memory();
     WebviewWindowBuilder::new(&app, "launcher", Default::default())
@@ -116,6 +118,7 @@ fn focus_launcher_leaves_a_visible_launcher_where_it_is() {
     assert!(mnema_desktop::focus_launcher(app.handle()));
 
     assert_eq!(memory.applied(), None, "a visible launcher was re-placed");
+    assert!(!memory.awaiting(), "a visible launcher was re-placed");
 }
 
 #[test]
