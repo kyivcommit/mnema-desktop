@@ -637,8 +637,9 @@ pub fn run() -> anyhow::Result<()> {
             // D155: what the launcher's last show applied and where the person
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
-            // Immediately after the state exists and before anything else in
-            // this closure, so every later step here meets an index that is
+            // Immediately after the state exists and before any step here
+            // touches the index (managing `Memory::default()` above touches
+            // none), so every later step here meets an index that is
             // already open, and so does every command arriving after start-up —
             // which is as early as a boot can make it, not a promise about a
             // webview that is already invoking while `.setup` runs.
