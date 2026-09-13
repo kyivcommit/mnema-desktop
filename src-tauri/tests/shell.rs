@@ -91,12 +91,17 @@ fn remember_writes_the_launcher_position_it_finds() {
         Some(tauri::PhysicalPosition::new(0, 0)),
         "remember did not write what the window reported"
     );
-    // Wayland: the same call writes nothing (the value is not a position there).
+    // Wayland: the same call writes nothing (the value is not a position there),
+    // and records nothing in memory either. A FRESH memory, so the assertion
+    // rests on the Wayland branch and not on the equality short-circuit above.
     let dir2 = tempfile::tempdir().unwrap();
-    launcher_position::remember(&window, &memory, dir2.path(), true);
+    let fresh = Memory::default();
+    fresh.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
+    launcher_position::remember(&window, &fresh, dir2.path(), true);
     assert_eq!(
         launcher_position::read(dir2.path()),
         None,
         "wrote under Wayland"
     );
+    assert_eq!(fresh.left(), None, "Wayland recorded a move in memory");
 }
