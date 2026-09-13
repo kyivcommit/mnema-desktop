@@ -164,3 +164,77 @@ impl<R: Runtime> Autolaunch for PluginAutolaunch<R> {
             .map_err(|e| e.to_string())
     }
 }
+
+/// The sentence a Wayland session's registrar answers with. English, like
+/// every other sentence this module hands to a window (see [`NOT_INSTALLED`]'s
+/// doc): it lands in `HotkeyStatus::Unavailable { reason }` and the settings
+/// window shows it under «not registered with the system», followed by its
+/// own «the search can still be opened from the tray» — so the reason names
+/// only the cause.
+pub const WAYLAND_REASON: &str =
+    "Wayland session: the system does not deliver global shortcuts to applications.";
+
+/// The registrar `.setup` installs on Linux when the session is Wayland
+/// (D153). `PluginShortcuts` there takes an X11 grab through XWayland that
+/// *succeeds* and never fires — 2026-09-13 stand smoke, F1 — so the section
+/// said «registered with the system» about a shortcut that did nothing.
+/// Refusing up front is the honest state, and it costs nothing: there is no
+/// registration to release, so `unregister` answers `Ok` and `change_hotkey`
+/// reaches its own `register` refusal with THIS sentence, not a stale one.
+pub struct WaylandNoShortcuts;
+
+impl ShortcutRegistrar for WaylandNoShortcuts {
+    fn register(&self, _shortcut: &str) -> Result<(), String> {
+        Err(WAYLAND_REASON.to_string())
+    }
+
+    fn unregister(&self, _shortcut: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Whether `WAYLAND_DISPLAY` names a Wayland session — the one signal the
+/// compositor leaves in every process it starts. Pure so the rule is testable;
+/// [`wayland_session`] reads the real environment.
+pub fn wayland_session_from(wayland_display: Option<std::ffi::OsString>) -> bool {
+    wayland_display.is_some_and(|d| !d.is_empty())
+}
+
+/// [`wayland_session_from`] on this process's environment. Only Linux has a
+/// Wayland; elsewhere the variable is meaningless and this is `false`.
+pub fn wayland_session() -> bool {
+    cfg!(target_os = "linux") && wayland_session_from(std::env::var_os("WAYLAND_DISPLAY"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wayland_session_registers_nothing_and_says_why() {
+        // Under Wayland the X11 grab `PluginShortcuts` makes through XWayland
+        // "succeeds" and never fires (2026-09-13 stand smoke, F1). The honest
+        // registrar for that session refuses up front. The sentence names the
+        // session, nothing more: the window already adds «the search can still
+        // be opened from the application icon in the tray» under any refusal.
+        let reason = WaylandNoShortcuts.register("Alt+Space").unwrap_err();
+        assert!(reason.contains("Wayland"), "{reason}");
+        assert_eq!(reason, WAYLAND_REASON);
+    }
+
+    #[test]
+    fn a_wayland_session_has_nothing_to_unregister() {
+        // `change_hotkey` unregisters the current shortcut before registering
+        // the new one; a refusal here would block the change with the WRONG
+        // sentence (the old shortcut's, not the session's).
+        assert_eq!(WaylandNoShortcuts.unregister("Alt+Space"), Ok(()));
+    }
+
+    #[test]
+    fn wayland_is_recognised_from_a_set_display_and_nothing_else() {
+        use std::ffi::OsString;
+        assert!(wayland_session_from(Some(OsString::from("wayland-0"))));
+        assert!(!wayland_session_from(Some(OsString::new())));
+        assert!(!wayland_session_from(None));
+    }
+}

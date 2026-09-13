@@ -633,8 +633,17 @@ pub fn run() -> anyhow::Result<()> {
             // «Показати пошук» still opens the launcher.
             {
                 let state = app.state::<state::AppState>();
+                // D153: under Wayland the plugin's grab succeeds through
+                // XWayland and never fires, so the honest registrar is the one
+                // that refuses up front (`os_services::WaylandNoShortcuts`).
+                let shortcuts: Box<dyn os_services::ShortcutRegistrar> =
+                    if os_services::wayland_session() {
+                        Box::new(os_services::WaylandNoShortcuts)
+                    } else {
+                        Box::new(os_services::PluginShortcuts::new(app.handle().clone()))
+                    };
                 state.install_os_services(
-                    Box::new(os_services::PluginShortcuts::new(app.handle().clone())),
+                    shortcuts,
                     Box::new(os_services::PluginAutolaunch::new(app.handle().clone())),
                 );
                 let _ = prefs::install_hotkey(&state);
