@@ -170,8 +170,8 @@ impl<R: Runtime> Autolaunch for PluginAutolaunch<R> {
 /// every other sentence this module hands to a window (see [`NOT_INSTALLED`]'s
 /// doc): it lands in `HotkeyStatus::Unavailable { reason }` and the settings
 /// window shows it under «not registered with the system», followed by its
-/// own «the search can still be opened from the tray» — so the reason names
-/// only the cause.
+/// own «the search can still be opened from the tray» — so the reason carries
+/// no advice of its own, only what this application cannot do and where.
 pub const WAYLAND_REASON: &str =
     "Wayland session: this application cannot register a global shortcut.";
 
