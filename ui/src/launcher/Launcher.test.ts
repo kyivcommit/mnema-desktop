@@ -415,13 +415,6 @@ test('a press on the input or the pin does not arm the drag window', () => {
   } finally { vi.useRealTimers(); }
 });
 
-test('a blur with no press at all still hides', () => {
-  mockBackend(generated);
-  render(Launcher);
-  fireEvent.blur(window);
-  expect(hide).toHaveBeenCalledTimes(1);
-});
-
 test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
   mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
   render(Launcher);

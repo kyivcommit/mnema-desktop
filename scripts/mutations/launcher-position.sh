@@ -48,6 +48,13 @@ case_ "launcher position: the show does not record where it put the window" \
   'let _ = restored;' \
   mnema-desktop 'place_leaves_the_position_to_the_focus_in' --test shell
 
+case_ "launcher position: placed runs even on Wayland" \
+  src-tauri/src/launcher_position.rs \
+  's~if !wayland \{\n        memory\.placed\(restored\);\n    \}~memory.placed(restored);\n    if !wayland {\n    }~' \
+  'memory.placed(restored);
+    if !wayland {' \
+  mnema-desktop 'a_wayland_show_leaves_nothing_awaiting' --test shell
+
 case_ "launcher position: a focus-in never settles the show" \
   src-tauri/src/launcher_position.rs \
   's~if slots\.awaiting \{~if false {~' \

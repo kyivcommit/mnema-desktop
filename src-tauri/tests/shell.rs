@@ -117,8 +117,38 @@ fn focus_launcher_leaves_a_visible_launcher_where_it_is() {
 
     assert!(mnema_desktop::focus_launcher(app.handle()));
 
-    assert_eq!(memory.applied(), None, "a visible launcher was re-placed");
+    assert_eq!(
+        memory.applied(),
+        None,
+        "place wrote applied synchronously again"
+    );
     assert!(!memory.awaiting(), "a visible launcher was re-placed");
+}
+
+#[test]
+fn a_wayland_show_leaves_nothing_awaiting() {
+    // The `Focused(true)` arm in `lib.rs` that calls `settled` is not itself
+    // guarded by `wayland` — it does not need to be, because `place` never
+    // calls `placed` on Wayland (the `if !wayland` block below its call
+    // site), so no show there ever marks memory as awaiting a settle in the
+    // first place, and `settled` firing is a no-op.
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let memory = app.state::<mnema_desktop::launcher_position::Memory>();
+
+    mnema_desktop::launcher_position::place(&window, &memory, None, true);
+
+    assert!(
+        !memory.awaiting(),
+        "a Wayland show marked memory as awaiting a settle"
+    );
+    assert_eq!(memory.applied(), None, "a Wayland show wrote applied");
 }
 
 #[test]

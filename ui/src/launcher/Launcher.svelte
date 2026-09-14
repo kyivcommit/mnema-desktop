@@ -70,26 +70,25 @@
   // on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
   // stand: press-to-blur landed at 392 / 516 / 504 ms, so the window stays
   // armed for a full second — a release means it was a click, not a drag,
-  // and disarms it immediately; where the drag keeps focus (macOS/Windows)
-  // the release reaches the webview the same way and a real blur after a
-  // mere click must still hide.
+  // and disarms it immediately. On macOS the release reaches the webview
+  // after the drag; on Windows the modal move loop may consume it — either
+  // way no blur arrives during the move, and a stuck arm simply expires
+  // after one second (the Windows live check confirms which). A real blur
+  // after a mere click must still hide.
   let handlePressedAt = -Infinity;
   function onPointerDown(event: PointerEvent) {
-    // No `event.button` check: this project's test environment (jsdom has no
-    // real `PointerEvent` constructor — `@testing-library/dom` falls back to
-    // a plain `Event`, which drops `button`) cannot exercise it, and
-    // `JobStrip.svelte`'s own document-level pointerdown listener (the only
-    // other one in this codebase) does not check it either. A right-button
-    // press on the handle can arm the window for nothing, but nothing acts on
-    // it unless a blur follows within the window, and it self-clears either
-    // way (a release, or expiry).
+    // No `event.button` check: `@testing-library`'s `fireEvent.pointerDown`
+    // drops `button` (jsdom has no real `PointerEvent` constructor), so the
+    // check is left out for now — a right-button press on the handle arms
+    // the window for nothing and a release disarms it.
     const target = event.target as Element | null;
     const onHandle = !!target?.closest('.searchbar')
       && !target.closest('button, input, label, a, select, textarea, [role="button"]');
     if (onHandle) handlePressedAt = Date.now();
   }
   // A release means it was a click, not a drag: the next blur is a dismissal
-  // again. During a window-manager move grab no release reaches the webview.
+  // again. Once a window-manager move grab is up, no release reaches the
+  // webview until it ends.
   function onPointerUp() { handlePressedAt = -Infinity; }
   function onBlur() {
     if (pinned) return;
