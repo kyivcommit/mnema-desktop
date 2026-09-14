@@ -7,8 +7,8 @@
 
 case_ "launcher position: the monitor's right edge counts as inside" \
   src-tauri/src/launcher_position.rs \
-  's~&& hx < x0 \+ f64::from\(area\.size\.width\)~\&\& hx <= x0 + f64::from(area.size.width)~' \
-  '&& hx <= x0 + f64::from(area.size.width)' \
+  's~hx < area\.x \+ area\.width~hx <= area.x + area.width~' \
+  'hx <= area.x + area.width' \
   mnema-desktop 'launcher_position::tests::the_work_area_edge_is_outside' --lib
 
 case_ "launcher position: the handle offset ignores the monitor's scale" \
@@ -78,8 +78,8 @@ case_ "launcher: a visible launcher is re-placed by a second show" \
 
 case_ "launcher position: a position with nothing applied counts as a drag" \
   src-tauri/src/launcher_position.rs \
-  's~let reference = slots\.left\.or\(slots\.applied\)\?;~let reference = slots.left.or(slots.applied).unwrap_or(PhysicalPosition::new(i32::MIN, i32::MIN));~' \
-  'let reference = slots.left.or(slots.applied).unwrap_or(PhysicalPosition::new(i32::MIN, i32::MIN));' \
+  's~let reference = slots\.left\.or\(slots\.applied\)\?;~let reference = slots.left.or(slots.applied).unwrap_or(Point { x: i32::MIN, y: i32::MIN });~' \
+  'let reference = slots.left.or(slots.applied).unwrap_or(Point { x: i32::MIN, y: i32::MIN });' \
   mnema-desktop 'launcher_position::tests::a_quit_before_the_first_show_keeps_the_saved_position' --lib
 
 case_ "launcher position: a drag back to the applied place is not a move" \
@@ -105,6 +105,30 @@ case_ "launcher position: remember writes nothing" \
   's~if let Err\(e\) = remember_position\(now, memory, data_dir\) \{~if let Err(e) = Ok::<(), std::io::Error>(()) {~' \
   'if let Err(e) = Ok::<(), std::io::Error>(()) {' \
   mnema-desktop 'remember_writes_the_launcher_position_it_finds' --test shell
+
+case_ "launcher position: macOS keeps the physical space" \
+  src-tauri/src/launcher_position.rs \
+  's~Platform::Mac \| Platform::Linux => Self::Logical,~Platform::Mac => Self::Physical, Platform::Linux => Self::Logical,~' \
+  'Platform::Mac => Self::Physical, Platform::Linux => Self::Logical,' \
+  mnema-desktop 'launcher_position::tests::only_windows_keeps_the_physical_space' --lib
+
+case_ "launcher position: the reporter's scale is ignored" \
+  src-tauri/src/launcher_position.rs \
+  's~x: \(f64::from\(p\.x\) / scale\)\.round\(\) as i32,~x: p.x,~' \
+  'x: p.x,' \
+  mnema-desktop 'launcher_position::tests::a_point_read_on_a_2x_monitor_is_saved_in_logical_points' --lib
+
+case_ "launcher position: a logical point is restored as physical" \
+  src-tauri/src/launcher_position.rs \
+  's~Self::Logical => \{\n                Position::Logical\(LogicalPosition::new\(f64::from\(p\.x\), f64::from\(p\.y\)\)\)\n            \}~Self::Logical => Position::Physical(PhysicalPosition::new(p.x, p.y)),~' \
+  'Self::Logical => Position::Physical(PhysicalPosition::new(p.x, p.y)),' \
+  mnema-desktop 'launcher_position::tests::a_logical_point_restores_as_logical_whatever_the_new_windows_scale' --lib
+
+case_ "launcher position: a monitor keeps its physical size in the logical space" \
+  src-tauri/src/launcher_position.rs \
+  's~width: w / scale,\n                    height: h / scale,~width: w, height: h,~' \
+  'width: w, height: h' \
+  mnema-desktop 'launcher_position::tests::a_2x_monitors_area_is_measured_in_logical_points_with_no_handle_factor' --lib
 
 case_ "launcher: the search panel is not a drag region" \
   ui/src/launcher/Launcher.svelte \
