@@ -67,9 +67,12 @@
   // window is a pointer+keyboard grab that takes focus for the whole move and
   // hands it back at the end. The webview sees that as `blur` a few
   // milliseconds after the press on the handle. A blur that close to a press
-  // on the drag handle is the drag, not a dismissal. The window is short on
-  // purpose: where the drag keeps focus (macOS) no blur arrives, and after
-  // 300 ms a blur is a dismissal again — nothing is left armed.
+  // on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
+  // stand: press-to-blur landed at 392 / 516 / 504 ms, so the window stays
+  // armed for a full second — a release means it was a click, not a drag,
+  // and disarms it immediately; where the drag keeps focus (macOS/Windows)
+  // the release reaches the webview the same way and a real blur after a
+  // mere click must still hide.
   let handlePressedAt = -Infinity;
   function onPointerDown(event: PointerEvent) {
     // No `event.button` check: this project's test environment (jsdom has no
@@ -78,12 +81,16 @@
     // `JobStrip.svelte`'s own document-level pointerdown listener (the only
     // other one in this codebase) does not check it either. A right-button
     // press on the handle can arm the window for nothing, but nothing acts on
-    // it unless a blur follows within 300 ms, and it self-clears either way.
+    // it unless a blur follows within the window, and it self-clears either
+    // way (a release, or expiry).
     const target = event.target as Element | null;
     const onHandle = !!target?.closest('.searchbar')
       && !target.closest('button, input, label, a, select, textarea, [role="button"]');
     if (onHandle) handlePressedAt = Date.now();
   }
+  // A release means it was a click, not a drag: the next blur is a dismissal
+  // again. During a window-manager move grab no release reaches the webview.
+  function onPointerUp() { handlePressedAt = -Infinity; }
   function onBlur() {
     if (pinned) return;
     if (Date.now() - handlePressedAt < DRAG_GRAB_WINDOW_MS) return;
@@ -91,7 +98,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onblur={onBlur} />
+<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
 <main class="panels">
   <!-- D155: the search panel is the drag handle. "deep" drags from any

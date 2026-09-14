@@ -374,11 +374,26 @@ test('a blur right after a press on the drag handle is the drag, not a dismissal
     const { container } = render(Launcher);
     const handle = container.querySelector('.arms')!; // inside .searchbar, not clickable
     fireEvent.pointerDown(handle, { button: 0 });
-    vi.advanceTimersByTime(50);
+    vi.advanceTimersByTime(600);
     fireEvent.blur(window);
     expect(hide).not.toHaveBeenCalled();
     // Later, the same blur is a dismissal again — nothing stays armed.
     vi.advanceTimersByTime(DRAG_GRAB_WINDOW_MS);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+test('a release after the press disarms the drag window: a click on the handle, then a blur, hides', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    const handle = container.querySelector('.arms')!;
+    fireEvent.pointerDown(handle);
+    vi.advanceTimersByTime(50);
+    fireEvent.pointerUp(handle);
+    vi.advanceTimersByTime(50);
     fireEvent.blur(window);
     expect(hide).toHaveBeenCalledTimes(1);
   } finally { vi.useRealTimers(); }

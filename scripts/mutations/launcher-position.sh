@@ -119,7 +119,12 @@ case_ "launcher: the drag's own blur hides the window" \
 
 case_ "launcher: a press anywhere arms the drag window" \
   ui/src/launcher/Launcher.svelte \
-  's~if \(onHandle\) handlePressedAt = Date\.now\(\);~handlePressedAt = Date.now();~' \
-  'handlePressedAt = Date.now();
-  }' \
+  's~if \(onHandle\) handlePressedAt = Date\.now\(\);~handlePressedAt = Date.now(); void onHandle;~' \
+  'handlePressedAt = Date.now(); void onHandle;' \
   src/launcher/Launcher.test.ts 'a press on the input or the pin does not arm the drag window' runner=vitest
+
+case_ "launcher: a release does not disarm the drag window" \
+  ui/src/launcher/Launcher.svelte \
+  's~function onPointerUp\(\) \{ handlePressedAt = -Infinity; \}~function onPointerUp() { void handlePressedAt; }~' \
+  'function onPointerUp() { void handlePressedAt; }' \
+  src/launcher/Launcher.test.ts 'a release after the press disarms the drag window: a click on the handle, then a blur, hides' runner=vitest
