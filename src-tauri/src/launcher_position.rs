@@ -169,10 +169,11 @@ pub fn write(data_dir: &Path, p: Point) -> std::io::Result<()> {
 /// `saved` and each area are in `Space::of_this_build()`. Monitors arrive from
 /// [`Space::area`], each paired with the factor the handle offset takes there —
 /// the monitor's scale in the physical space, 1 in the logical one. Each
-/// monitor is tried with its own factor: a window straddling a 1× and a 2×
-/// monitor takes the factor of whichever holds most of it, and the monitor
-/// that holds the handle is the one whose factor put it there — the
-/// approximation errs towards keeping a saved position, and
+/// monitor is tried with its own factor (the physical space only — in the
+/// logical one every factor is 1): a window straddling a 1× and a 2× monitor
+/// takes the factor of whichever holds most of it, and the monitor that holds
+/// the handle is the one whose factor put it there — the approximation errs
+/// towards keeping a saved position, and
 /// `adjacent_monitors_with_different_scales_each_use_their_own` pins it. Otherwise `None`: a monitor that was unplugged,
 /// or a resolution / DPI change that left only the window's corner on screen.
 /// The whole window need not be visible — a window the person left half off

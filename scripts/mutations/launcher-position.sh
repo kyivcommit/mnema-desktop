@@ -115,7 +115,8 @@ case_ "launcher position: macOS keeps the physical space" \
 case_ "launcher position: the reporter's scale is ignored" \
   src-tauri/src/launcher_position.rs \
   's~x: \(f64::from\(p\.x\) / scale\)\.round\(\) as i32,~x: p.x,~' \
-  'x: p.x,' \
+  'x: p.x,
+                y: (f64::from(p.y) / scale).round() as i32,' \
   mnema-desktop 'launcher_position::tests::a_point_read_on_a_2x_monitor_is_saved_in_logical_points' --lib
 
 case_ "launcher position: a logical point is restored as physical" \
@@ -128,6 +129,28 @@ case_ "launcher position: a monitor keeps its physical size in the logical space
   src-tauri/src/launcher_position.rs \
   's~width: w / scale,\n                    height: h / scale,~width: w, height: h,~' \
   'width: w, height: h' \
+  mnema-desktop 'launcher_position::tests::a_2x_monitors_area_is_measured_in_logical_points_with_no_handle_factor' --lib
+
+case_ "launcher position: the reporter's scale is ignored for y" \
+  src-tauri/src/launcher_position.rs \
+  's~y: \(f64::from\(p\.y\) / scale\)\.round\(\) as i32,~y: p.y,~' \
+  'x: (f64::from(p.x) / scale).round() as i32,
+                y: p.y,' \
+  mnema-desktop 'launcher_position::tests::a_point_read_on_a_2x_monitor_is_saved_in_logical_points' --lib
+
+case_ "launcher position: a monitor keeps its physical origin in the logical space" \
+  src-tauri/src/launcher_position.rs \
+  's~x: x / scale,\n                    y: y / scale,~x, y,~' \
+  'Area {
+                    x, y,' \
+  mnema-desktop 'launcher_position::tests::a_2x_monitors_area_is_measured_in_logical_points_with_no_handle_factor' --lib
+
+case_ "launcher position: the handle offset is scaled in the logical space too" \
+  src-tauri/src/launcher_position.rs \
+  's~height: h / scale,\n                \},\n                1\.0,~height: h / scale,\n                },\n                scale,~' \
+  'height: h / scale,
+                },
+                scale,' \
   mnema-desktop 'launcher_position::tests::a_2x_monitors_area_is_measured_in_logical_points_with_no_handle_factor' --lib
 
 case_ "launcher: the search panel is not a drag region" \
