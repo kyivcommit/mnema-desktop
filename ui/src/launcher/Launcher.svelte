@@ -70,8 +70,8 @@
   // on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
   // stand: press-to-blur landed at 392 / 516 / 504 ms, so the window stays
   // armed for a full second — a release means it was a click, not a drag,
-  // and disarms it immediately. On macOS the release reaches the webview
-  // after the drag; on Windows the modal move loop may consume it — either
+  // and disarms it immediately. On macOS the release is expected to reach the
+  // webview after the drag; on Windows the modal move loop may consume it — either
   // way no blur arrives during the move, and a stuck arm simply expires
   // after one second (the Windows live check confirms which). A real blur
   // after a mere click must still hide.
