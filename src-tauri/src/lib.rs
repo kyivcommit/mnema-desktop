@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod embed_job;
 pub mod error;
 pub mod job;
+pub mod launcher_position;
 pub mod locale;
 pub mod models;
 pub mod os_services;
@@ -28,7 +29,6 @@ pub mod watch;
 use anyhow::Context as _;
 use tauri::Emitter as _;
 use tauri::Manager as _;
-use tauri_plugin_positioner::{Position, WindowExt as _};
 
 /// The event every [`crate::scan_state::ScanState`] is pushed to the webview on.
 ///
@@ -253,21 +253,36 @@ pub fn boot_files(state: &state::AppState) -> i64 {
 }
 
 /// Shows the launcher and focuses it, returning whether the launcher window was
-/// there to act on. The single-instance callback and the tray's "show search"
-/// item share this. §6: the launcher *hides*, so it is *shown* — not
-/// unminimized, which never re-opens a hidden window. A test drives this against
-/// the mock runtime, where the real window manager is absent, which is why the
-/// return value is the found-ness of the window and not its resulting focus.
+/// there to act on. The single-instance callback, the tray's "show search"
+/// item and the shortcut share this — it is the ONE show path (D155):
+/// `launcher_position::place` restores where the person left the window, or
+/// applies the platform default. §6: the launcher *hides*, so it is *shown* —
+/// not unminimized, which never re-opens a hidden window. A test drives this
+/// against the mock runtime, where the real window manager is absent, which is
+/// why the return value is the found-ness of the window and not its resulting
+/// focus; a second test drives `place` directly, and a third checks that a
+/// visible launcher (all the mock runtime knows) is focused and not re-placed.
 pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
-            let _ = window.show();
-            // §6: put the launcher where the menu-bar item is, next to the tray,
-            // before focusing it. `move_window` no-ops where the tray position is
-            // unknown, so this is safe against the mock runtime and against
-            // platforms that never record one; exact placement is tuned in PR 10.
-            let _ = window.move_window(Position::TrayCenter);
-            let _ = window.set_focus();
+            // Already up (single-instance while the person is dragging it):
+            // focus, and do not move what no focus loss has recorded yet.
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.set_focus();
+                return true;
+            }
+            let memory = app.state::<launcher_position::Memory>();
+            // `try_state`: the shell tests build no `AppState`; there the
+            // file is simply "nothing saved".
+            let data_dir = app
+                .try_state::<state::AppState>()
+                .map(|s| s.data_dir().to_path_buf());
+            launcher_position::place(
+                &window,
+                &memory,
+                data_dir.as_deref(),
+                os_services::wayland_session(),
+            );
             true
         }
         None => false,
@@ -275,19 +290,15 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 }
 
 /// The global shortcut's action: hide the launcher if it is up, otherwise show
-/// and focus it. The visibility branch is exercised by the live run — the mock
-/// runtime does not track a real window's visibility — so the CI seam is
-/// `focus_launcher`, not this.
+/// and focus it through `focus_launcher`. The visibility branch is exercised by
+/// the live run — the mock runtime does not track a real window's visibility —
+/// so the CI seam is `focus_launcher`, not this.
 pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
         } else {
-            let _ = window.show();
-            // Same as `focus_launcher`'s show path: position at the tray before
-            // focusing (§6). No-ops where the tray position is unknown.
-            let _ = window.move_window(Position::TrayCenter);
-            let _ = window.set_focus();
+            focus_launcher(app);
         }
     }
 }
@@ -564,8 +575,22 @@ pub fn run() -> anyhow::Result<()> {
                 });
             }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
-            // the ExitRequested guard lets through.
-            "quit" => app.exit(0),
+            // the ExitRequested guard lets through. D155: a drag followed by
+            // Quit without a hide would otherwise be lost — record it first.
+            "quit" => {
+                if let Some(webview) = app.get_webview_window("launcher") {
+                    let window = webview.as_ref().window();
+                    let memory = app.state::<launcher_position::Memory>();
+                    let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
+                    launcher_position::remember(
+                        &window,
+                        &memory,
+                        &data_dir,
+                        os_services::wayland_session(),
+                    );
+                }
+                app.exit(0)
+            }
             // §D129's temporary tray language submenu (`lang_auto`/`lang_uk`/
             // `lang_en`) is gone as of Task 3 (PR 10f): the language choice
             // lives in the settings window's Application section now
@@ -576,8 +601,8 @@ pub fn run() -> anyhow::Result<()> {
             // more.
             _ => {}
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 // §6: the tray is the only way to quit. A window close hides the
                 // window and keeps it alive, so a hidden webview keeps its DOM —
                 // an unsaved query or a result set survives dismissal (§7.3,
@@ -590,11 +615,46 @@ pub fn run() -> anyhow::Result<()> {
                 sync_activation_policy(window.app_handle());
                 api.prevent_close();
             }
+            // D155: this window hides or exits without giving up focus first,
+            // so all four dismissals (Esc, blur, the shortcut, a close) are
+            // *meant* to arrive here as a focus loss (tao:
+            // `windowDidResignKey:` / `WM_KILLFOCUS`) — the live matrix walks
+            // each of the four separately and is what actually confirms it.
+            // This arm records where the person left it, only if they moved
+            // it (see `launcher_position::remember`).
+            tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
+                let app = window.app_handle();
+                let memory = app.state::<launcher_position::Memory>();
+                let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
+                launcher_position::remember(
+                    window,
+                    &memory,
+                    &data_dir,
+                    os_services::wayland_session(),
+                );
+            }
+            // D155: the show cannot know where the window manager put the
+            // window — on GTK `outer_position` is a cache the configure event
+            // fills in later — so the first focus-in after a show settles it.
+            // Not Wayland-guarded on purpose: `place` never calls `placed` on
+            // Wayland (`launcher_position::place`'s `if !wayland` block), so
+            // `settled` here is a no-op on that platform. The read goes
+            // through `here` so the settle and the blur convert the same way.
+            tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
+                let app = window.app_handle();
+                let memory = app.state::<launcher_position::Memory>();
+                memory.settled(launcher_position::here(window));
+            }
+            _ => {}
         })
         .setup(|app| {
             manage_state(app.handle())?;
-            // Immediately after the state exists and before anything else in
-            // this closure, so every later step here meets an index that is
+            // D155: what the launcher's last show applied and where the person
+            // left it. Managed before any window can show or lose focus.
+            app.manage(launcher_position::Memory::default());
+            // Immediately after the state exists and before any step here
+            // touches the index (managing `Memory::default()` above touches
+            // none), so every later step here meets an index that is
             // already open, and so does every command arriving after start-up —
             // which is as early as a boot can make it, not a promise about a
             // webview that is already invoking while `.setup` runs.

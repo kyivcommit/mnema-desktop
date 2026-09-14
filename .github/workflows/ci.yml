@@ -511,6 +511,7 @@ jobs:
           - pr10f-tray-locale
           - pr10f-settings
           - watcher
+          - launcher-position
         include:
           - file: pr8-ui-folders
             node: true
@@ -531,6 +532,8 @@ jobs:
           - file: pr10d-launcher
             node: true
           - file: pr10f-settings
+            node: true
+          - file: launcher-position
             node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the

@@ -1,7 +1,12 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
+import { DRAG_GRAB_WINDOW_MS } from './state';
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide }) }));
@@ -358,6 +363,58 @@ test('a pinned launcher ignores click-outside (blur) — the pin disables it', a
   expect(hide).not.toHaveBeenCalled();
 });
 
+// D155/L2: mutter's move grab (what Tauri's start_dragging does on X11) takes
+// keyboard focus for the whole drag and hands it back at the end — the
+// webview sees that as a `blur` a few ms after the press on the handle. That
+// blur is the drag, not a dismissal.
+test('a blur right after a press on the drag handle is the drag, not a dismissal', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    const handle = container.querySelector('.arms')!; // inside .searchbar, not clickable
+    fireEvent.pointerDown(handle, { button: 0 });
+    vi.advanceTimersByTime(600);
+    fireEvent.blur(window);
+    expect(hide).not.toHaveBeenCalled();
+    // Later, the same blur is a dismissal again — nothing stays armed.
+    vi.advanceTimersByTime(DRAG_GRAB_WINDOW_MS);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+test('a release after the press disarms the drag window: a click on the handle, then a blur, hides', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    const handle = container.querySelector('.arms')!;
+    fireEvent.pointerDown(handle);
+    vi.advanceTimersByTime(50);
+    fireEvent.pointerUp(handle);
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+test('a press on the input or the pin does not arm the drag window', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    render(Launcher);
+    fireEvent.pointerDown(screen.getByRole('textbox'), { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(screen.getByTestId('pin'), { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
 test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
   mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
   render(Launcher);
@@ -403,4 +460,85 @@ test('the arms row seeds from model_settings — searchTextArm:false unchecks th
     expect(text.checked).toBe(false); // seed applied: searchTextArm:false flowed to the checkbox
   });
   expect(invoke).toHaveBeenCalledWith('model_settings');
+});
+
+test('the search panel is the drag handle and nothing else is', async () => {
+  // `Cards` renders a different component per backend state (review finding
+  // 7): a `data-tauri-drag-region` added to, say, the refusal card would pass
+  // this guard if only the idle state were checked. Submit a question in each
+  // of the two states the fixtures already imported at the top of the file
+  // cover, and wait for that state's own card before checking.
+  for (const reply of [generated, refusedNoCandidates]) {
+    mockBackend(reply);
+    const { container } = render(Launcher);
+    await submit('drag region check');
+    if (reply === generated) {
+      await screen.findByTestId('card-centre');
+    } else {
+      await screen.findByRole('status');
+    }
+    // "deep": any click inside the panel drags, except on the input, the pin
+    // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
+    const handles = container.querySelectorAll('[data-tauri-drag-region]');
+    expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
+    expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
+    cleanup();
+  }
+  // The attribute is inert without the permission — guard both in one place.
+  const capability = JSON.parse(
+    readFileSync(join(HERE, '../../../src-tauri/capabilities/launcher.json'), 'utf8'),
+  ) as { windows: string[]; permissions: string[] };
+  expect(capability.windows).toContain('launcher');
+  expect(capability.permissions).toContain('core:window:allow-start-dragging');
+  expect(capability.permissions).not.toContain('core:window:allow-internal-toggle-maximize');
+});
+
+test('the handle offset matches the stylesheet', () => {
+  // `launcher_position::HANDLE_CENTRE` is written as seven literals in a fixed
+  // shape; each one is a declaration in launcher.css. Read both sides and
+  // compare numbers, so a change to either without the other goes red — this
+  // is the only place the Rust constant and the stylesheet meet (review P2-4).
+  // The offset also depends on the window width: the constant is only this
+  // fixed value because the three grid tracks plus their gaps exactly fill
+  // the launcher window's content box (see the sum check below).
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  const rust = readFileSync(join(HERE, '../../../src-tauri/src/launcher_position.rs'), 'utf8');
+  const num = (re: RegExp, text: string, what: string) => {
+    const m = text.match(re);
+    if (!m) throw new Error(`${what} not found`);
+    return Number(m[1]);
+  };
+  const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
+  const searchbar = css.match(/\.searchbar\s*\{[^}]*\}/)![0];
+  const pin = css.match(/\.pin\s*\{[^}]*\}/)![0];
+  const fromCss = {
+    padY: num(/padding:\s*(\d+)px \d+px;/, panels, 'main.panels padding-y'),
+    padX: num(/padding:\s*\d+px (\d+)px;/, panels, 'main.panels padding-x'),
+    col1: num(/grid-template-columns:\s*(\d+)px/, panels, 'first column'),
+    col2: num(/minmax\(0, (\d+)px\)/, panels, 'second column'),
+    gap: num(/gap:\s*(\d+)px;/, panels, 'gap'),
+    barPadTop: num(/padding:\s*(\d+)px/, searchbar, '.searchbar padding-top'),
+    pinH: num(/height:\s*(\d+)px/, pin, '.pin height'),
+  };
+  const shape =
+    /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
+  const m = rust.match(shape);
+  if (!m) throw new Error('HANDLE_CENTRE is not written in the guarded shape');
+  const fromRust = m.slice(1, 8).map(Number);
+  expect(fromRust).toEqual([
+    fromCss.padX, fromCss.col1, fromCss.gap, fromCss.col2,
+    fromCss.padY, fromCss.barPadTop, fromCss.pinH,
+  ]);
+  // And the numbers are what the spec says today, so a wrong regex that
+  // captured the wrong declaration cannot pass by coincidence.
+  expect(fromRust).toEqual([32, 190, 16, 470, 24, 11, 26]);
+  // The offset is only this fixed because the tracks plus gaps exactly fill the
+  // content box: then `justify-content: center` and the minmax floor never engage.
+  const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
+    app: { windows: Array<{ label: string; width: number; resizable?: boolean }> };
+  };
+  const launcher = conf.app.windows.find((w) => w.label === 'launcher')!;
+  expect(launcher.resizable).toBe(false);
+  const col3 = num(/grid-template-columns:\s*\d+px minmax\(0, \d+px\) (\d+)px/, panels, 'third column');
+  expect(2 * fromCss.padX + fromCss.col1 + fromCss.col2 + col3 + 2 * fromCss.gap).toBe(launcher.width);
 });

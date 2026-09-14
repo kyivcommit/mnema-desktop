@@ -3,7 +3,7 @@
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
   import { ask, modelSettings } from '../lib/ipc';
-  import { checkQuery, stateFromAnswer, providerReady, type LauncherState } from './state';
+  import { checkQuery, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -62,13 +62,48 @@
   // gestures, and does not speak about state).
   function hide() { appWindow.hide(); }
   function onKeydown(event: KeyboardEvent) { if (event.key === 'Escape') hide(); }
-  function onBlur() { if (!pinned) hide(); }
+
+  // D155: on some window managers (mutter on X11) the drag of a frameless
+  // window is a pointer+keyboard grab that takes focus for the whole move and
+  // hands it back at the end. The webview sees that as `blur` a few
+  // milliseconds after the press on the handle. A blur that close to a press
+  // on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
+  // stand: press-to-blur landed at 392 / 516 / 504 ms, so the window stays
+  // armed for a full second — a release means it was a click, not a drag,
+  // and disarms it immediately. On macOS the release is expected to reach the
+  // webview after the drag; on Windows the modal move loop may consume it — either
+  // way no blur arrives during the move, and a stuck arm simply expires
+  // after one second (the Windows live check confirms which). A real blur
+  // after a mere click must still hide.
+  let handlePressedAt = -Infinity;
+  function onPointerDown(event: PointerEvent) {
+    // No `event.button` check: `@testing-library`'s `fireEvent.pointerDown`
+    // drops `button` (jsdom has no real `PointerEvent` constructor), so the
+    // check is left out for now — a right-button press on the handle arms
+    // the window for nothing and a release disarms it.
+    const target = event.target as Element | null;
+    const onHandle = !!target?.closest('.searchbar')
+      && !target.closest('button, input, label, a, select, textarea, [role="button"]');
+    if (onHandle) handlePressedAt = Date.now();
+  }
+  // A release means it was a click, not a drag: the next blur is a dismissal
+  // again. Once a window-manager move grab is up, no release reaches the
+  // webview until it ends.
+  function onPointerUp() { handlePressedAt = -Infinity; }
+  function onBlur() {
+    if (pinned) return;
+    if (Date.now() - handlePressedAt < DRAG_GRAB_WINDOW_MS) return;
+    hide();
+  }
 </script>
 
-<svelte:window onkeydown={onKeydown} onblur={onBlur} />
+<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
 <main class="panels">
-  <div class="searchbar">
+  <!-- D155: the search panel is the drag handle. "deep" drags from any
+       click inside it except the input, the pin and the Arms labels — Tauri's
+       own drag script skips clickable tags. The other panels select text. -->
+  <div class="searchbar" data-tauri-drag-region="deep">
     <div class="sb-row">
       <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
       <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
