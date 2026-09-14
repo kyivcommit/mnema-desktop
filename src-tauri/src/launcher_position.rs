@@ -11,11 +11,121 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use tauri::{PhysicalPosition, PhysicalRect};
-use tauri_plugin_positioner::{Position, WindowExt};
+use crate::models::Platform;
+use tauri::{LogicalPosition, PhysicalPosition, PhysicalRect, Position};
+use tauri_plugin_positioner::{Position as TrayPosition, WindowExt};
 
-/// The `prefs.json` key: `{"x": <i32>, "y": <i32>}`, physical pixels of
-/// `outer_position`.
+/// A point in [`Space`]: what the file, the memory and `reachable` hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// A monitor's work area in [`Space`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Area {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The coordinate space that survives a change of scale. tao reports a
+/// window's `outer_position` as logical × the *window's* scale on macOS and
+/// on GTK, `set_position` divides by the window's scale *before* the move,
+/// and a monitor's bounds come as logical × the *monitor's* scale — so two
+/// monitors of different scale share no physical space there, and the
+/// logical space is the desktop. On Windows the desktop is physical pixels
+/// (`GetWindowRect`), and it is the logical space that differs per monitor.
+/// A window left on a 1× monitor and restored by a window that starts on a
+/// 2× monitor came back on the wrong monitor before this (review of PR #47).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Space {
+    Physical,
+    Logical,
+}
+
+impl Space {
+    pub fn of(platform: Platform) -> Self {
+        match platform {
+            Platform::Windows => Self::Physical,
+            Platform::Mac | Platform::Linux => Self::Logical,
+        }
+    }
+    pub fn of_this_build() -> Self {
+        Self::of(Platform::of_this_build())
+    }
+    /// A physical point as its reporter gave it, with the scale that reporter
+    /// applied (the window's for `outer_position`, the monitor's for its
+    /// bounds). Logical values round to the nearest point.
+    pub fn point(self, p: PhysicalPosition<i32>, scale: f64) -> Point {
+        match self {
+            Self::Physical => Point { x: p.x, y: p.y },
+            Self::Logical => Point {
+                x: (f64::from(p.x) / scale).round() as i32,
+                y: (f64::from(p.y) / scale).round() as i32,
+            },
+        }
+    }
+    /// A monitor's work area in the space, paired with the factor the handle
+    /// offset (logical, `HANDLE_CENTRE`) takes on that monitor: the monitor's
+    /// scale in the physical space, 1 in the logical one.
+    pub fn area(self, work_area: PhysicalRect<i32, u32>, scale: f64) -> (Area, f64) {
+        let (x, y) = (
+            f64::from(work_area.position.x),
+            f64::from(work_area.position.y),
+        );
+        let (w, h) = (
+            f64::from(work_area.size.width),
+            f64::from(work_area.size.height),
+        );
+        match self {
+            Self::Physical => (
+                Area {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                },
+                scale,
+            ),
+            Self::Logical => (
+                Area {
+                    x: x / scale,
+                    y: y / scale,
+                    width: w / scale,
+                    height: h / scale,
+                },
+                1.0,
+            ),
+        }
+    }
+    /// The point back as what `set_position` takes: a `Position::Physical` in
+    /// the physical space, a `Position::Logical` in the logical one — tao
+    /// divides a physical position by the window's *current* scale, which is
+    /// the wrong scale whenever the saved point is on another monitor.
+    pub fn position(self, p: Point) -> Position {
+        match self {
+            Self::Physical => Position::Physical(PhysicalPosition::new(p.x, p.y)),
+            Self::Logical => {
+                Position::Logical(LogicalPosition::new(f64::from(p.x), f64::from(p.y)))
+            }
+        }
+    }
+}
+
+/// Where the window is now, in the space of this build; `None` when the
+/// runtime cannot say. The one read shared by `remember` and the focus-in
+/// settle — both must convert the same way, or a settle and a blur disagree.
+pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<Point> {
+    let p = window.outer_position().ok()?;
+    let scale = window.scale_factor().ok()?;
+    Some(Space::of_this_build().point(p, scale))
+}
+
+/// The `prefs.json` key: `{"x": <i32>, "y": <i32>}` in [`Space::of_this_build`]
+/// — physical pixels on Windows, logical points on macOS and Linux.
 pub const KEY: &str = "launcher_position";
 
 /// A point on the drag handle, in logical pixels from the window's top-left
@@ -39,45 +149,40 @@ pub const HANDLE_CENTRE: (f64, f64) = (32.0 + 190.0 + 16.0 + 470.0 / 2.0, 24.0 +
 /// The saved position, or `None` for anything that is not two integers under
 /// `KEY`. Tolerant on purpose: this runs on show, with nowhere to report to,
 /// exactly as `theme::read_choice`.
-pub fn read(data_dir: &Path) -> Option<PhysicalPosition<i32>> {
+pub fn read(data_dir: &Path) -> Option<Point> {
     let all = crate::prefs::read_all(data_dir);
     let value = all.get(KEY)?;
     // `as_i64` is `None` for 1.5 and for "12"; `try_from` for anything past i32.
     let x = i32::try_from(value.get("x")?.as_i64()?).ok()?;
     let y = i32::try_from(value.get("y")?.as_i64()?).ok()?;
-    Some(PhysicalPosition::new(x, y))
+    Some(Point { x, y })
 }
 
 /// Writes the position, keeping every other key in the file.
-pub fn write(data_dir: &Path, p: PhysicalPosition<i32>) -> std::io::Result<()> {
+pub fn write(data_dir: &Path, p: Point) -> std::io::Result<()> {
     crate::prefs::write_key(data_dir, KEY, serde_json::json!({ "x": p.x, "y": p.y }))
 }
 
 /// `Some(saved)` when the drag handle's reference point would land inside some
 /// monitor's work area — `(x + HANDLE_CENTRE.0 * scale, y + HANDLE_CENTRE.1 * scale)`
-/// with *that* monitor's scale factor, since the saved point is physical and
-/// the handle offset is logical. Each monitor is tried with its own scale: a
-/// window straddling a 1× and a 2× monitor takes the scale of whichever holds
-/// most of it, and the monitor that holds the handle is the one whose scale
-/// put it there — the approximation errs towards keeping a saved position, and
+/// with *that* monitor's factor, since `HANDLE_CENTRE` is always logical while
+/// `saved` and each area are in `Space::of_this_build()`. Monitors arrive from
+/// [`Space::area`], each paired with the factor the handle offset takes there —
+/// the monitor's scale in the physical space, 1 in the logical one. Each
+/// monitor is tried with its own factor: a window straddling a 1× and a 2×
+/// monitor takes the factor of whichever holds most of it, and the monitor
+/// that holds the handle is the one whose factor put it there — the
+/// approximation errs towards keeping a saved position, and
 /// `adjacent_monitors_with_different_scales_each_use_their_own` pins it. Otherwise `None`: a monitor that was unplugged,
 /// or a resolution / DPI change that left only the window's corner on screen.
 /// The whole window need not be visible — a window the person left half off
 /// the edge comes back half off the edge.
-pub fn reachable(
-    saved: Option<PhysicalPosition<i32>>,
-    monitors: &[(PhysicalRect<i32, u32>, f64)],
-) -> Option<PhysicalPosition<i32>> {
+pub fn reachable(saved: Option<Point>, monitors: &[(Area, f64)]) -> Option<Point> {
     let p = saved?;
     let on_some_monitor = monitors.iter().any(|(area, scale)| {
         let hx = f64::from(p.x) + HANDLE_CENTRE.0 * scale;
         let hy = f64::from(p.y) + HANDLE_CENTRE.1 * scale;
-        let x0 = f64::from(area.position.x);
-        let y0 = f64::from(area.position.y);
-        hx >= x0
-            && hx < x0 + f64::from(area.size.width)
-            && hy >= y0
-            && hy < y0 + f64::from(area.size.height)
+        hx >= area.x && hx < area.x + area.width && hy >= area.y && hy < area.y + area.height
     });
     on_some_monitor.then_some(p)
 }
@@ -90,13 +195,13 @@ struct Slots {
     /// read that early is still the position from before this show (measured:
     /// the first Esc after a show on X11 wrote the platform default as a
     /// drag). `None` while a show is `awaiting` its settle.
-    applied: Option<PhysicalPosition<i32>>,
+    applied: Option<Point>,
     /// Where the person left the window: set only when a focus loss finds the
     /// window somewhere other than `applied`. Wins over the file for the rest
     /// of the session, so a failed write costs only the next restart — but a
     /// show that could not restore it (`placed` with `restored: None`) drops
     /// it again: the window is no longer there, so it is no longer evidence.
-    left: Option<PhysicalPosition<i32>>,
+    left: Option<Point>,
     /// A show has happened and its focus-in settle has not arrived yet.
     awaiting: bool,
 }
@@ -113,13 +218,13 @@ impl Memory {
         // left half-written by a panic.
         self.slots.lock().unwrap_or_else(|e| e.into_inner())
     }
-    pub fn applied(&self) -> Option<PhysicalPosition<i32>> {
+    pub fn applied(&self) -> Option<Point> {
         self.lock().applied
     }
-    pub fn left(&self) -> Option<PhysicalPosition<i32>> {
+    pub fn left(&self) -> Option<Point> {
         self.lock().left
     }
-    pub fn set_applied(&self, p: Option<PhysicalPosition<i32>>) {
+    pub fn set_applied(&self, p: Option<Point>) {
         self.lock().applied = p;
     }
     /// The show has placed (or, when nothing was reachable, defaulted) the
@@ -129,7 +234,7 @@ impl Memory {
     /// still move the window. When nothing was restored, the window is no
     /// longer where the person left it, so `left` goes; the file keeps the
     /// key — a monitor that comes back restores it.
-    pub fn placed(&self, restored: Option<PhysicalPosition<i32>>) {
+    pub fn placed(&self, restored: Option<Point>) {
         let mut slots = self.lock();
         slots.applied = None;
         slots.awaiting = true;
@@ -139,7 +244,7 @@ impl Memory {
     }
     /// The launcher's focus-in after a show: what the show actually applied.
     /// Ignored when no show is awaiting one (a focus-in after an alt-tab).
-    pub fn settled(&self, now: Option<PhysicalPosition<i32>>) {
+    pub fn settled(&self, now: Option<Point>) {
         let mut slots = self.lock();
         if slots.awaiting {
             slots.applied = now;
@@ -155,7 +260,7 @@ impl Memory {
     /// show recorded at all there is nothing to compare against, and a
     /// position is not evidence of a drag. Records a move as `left` and
     /// returns it; `None` means "nothing to write".
-    pub fn moved(&self, now: PhysicalPosition<i32>) -> Option<PhysicalPosition<i32>> {
+    pub fn moved(&self, now: Point) -> Option<Point> {
         let mut slots = self.lock();
         let reference = slots.left.or(slots.applied)?;
         if reference == now {
@@ -169,11 +274,7 @@ impl Memory {
 /// `moved` + `write`, with the memory updated BEFORE the write so a write that
 /// fails leaves the session behaving as dragged. Returns the write's result;
 /// `Ok(())` also when there was nothing to write.
-pub fn remember_position(
-    now: PhysicalPosition<i32>,
-    memory: &Memory,
-    data_dir: &Path,
-) -> std::io::Result<()> {
+pub fn remember_position(now: Point, memory: &Memory, data_dir: &Path) -> std::io::Result<()> {
     match memory.moved(now) {
         Some(p) => write(data_dir, p),
         None => Ok(()),
@@ -204,21 +305,22 @@ pub fn place<R: tauri::Runtime>(
     data_dir: Option<&Path>,
     wayland: bool,
 ) {
+    let space = Space::of_this_build();
     let restored = if wayland {
         None
     } else {
         let saved = memory.left().or_else(|| data_dir.and_then(read));
-        let monitors: Vec<(PhysicalRect<i32, u32>, f64)> = window
+        let monitors: Vec<(Area, f64)> = window
             .available_monitors()
             .unwrap_or_default()
             .iter()
-            .map(|m| (*m.work_area(), m.scale_factor()))
+            .map(|m| space.area(*m.work_area(), m.scale_factor()))
             .collect();
         reachable(saved, &monitors)
     };
     match restored {
         Some(p) => {
-            let _ = window.set_position(p);
+            let _ = window.set_position(space.position(p));
         }
         // §6: next to the tray on macOS, placed after `show` below.
         None if wayland || cfg!(target_os = "macos") => {}
@@ -232,7 +334,7 @@ pub fn place<R: tauri::Runtime>(
     let _ = window.show();
     if restored.is_none() && !wayland && cfg!(target_os = "macos") {
         // No-ops where the tray position is unknown (mock runtime included).
-        let _ = window.move_window(Position::TrayCenter);
+        let _ = window.move_window(TrayPosition::TrayCenter);
     }
     let _ = window.set_focus();
 }
@@ -255,7 +357,7 @@ pub fn remember<R: tauri::Runtime>(
     if wayland {
         return;
     }
-    let Ok(now) = window.outer_position() else {
+    let Some(now) = here(window) else {
         return;
     };
     if let Err(e) = remember_position(now, memory, data_dir) {
@@ -269,17 +371,125 @@ mod tests {
     use serde_json::json;
     use tauri::PhysicalSize;
 
-    fn monitor(x: i32, y: i32, w: u32, h: u32, scale: f64) -> (PhysicalRect<i32, u32>, f64) {
+    fn monitor(x: i32, y: i32, w: u32, h: u32, scale: f64) -> (Area, f64) {
         (
-            PhysicalRect {
-                position: PhysicalPosition::new(x, y),
-                size: PhysicalSize::new(w, h),
+            Area {
+                x: f64::from(x),
+                y: f64::from(y),
+                width: f64::from(w),
+                height: f64::from(h),
             },
             scale,
         )
     }
-    fn at(x: i32, y: i32) -> Option<PhysicalPosition<i32>> {
-        Some(PhysicalPosition::new(x, y))
+    fn at(x: i32, y: i32) -> Option<Point> {
+        Some(Point { x, y })
+    }
+
+    // --- Space: the review's two-monitor scenario, both directions ---
+
+    #[test]
+    fn only_windows_keeps_the_physical_space() {
+        assert_eq!(Space::of(Platform::Windows), Space::Physical);
+        assert_eq!(Space::of(Platform::Mac), Space::Logical);
+        assert_eq!(Space::of(Platform::Linux), Space::Logical);
+    }
+
+    #[test]
+    fn a_point_read_on_a_2x_monitor_is_saved_in_logical_points() {
+        // tao reports logical (850, 50) on a 2× monitor as physical (1700, 100).
+        let p = PhysicalPosition::new(1700, 100);
+        assert_eq!(Space::Logical.point(p, 2.0), Point { x: 850, y: 50 });
+        assert_eq!(Space::Physical.point(p, 2.0), Point { x: 1700, y: 100 });
+        // Rounds to the nearest point, not down.
+        assert_eq!(
+            Space::Logical.point(PhysicalPosition::new(1701, 101), 2.0),
+            Point { x: 851, y: 51 }
+        );
+    }
+
+    #[test]
+    fn a_logical_point_restores_as_logical_whatever_the_new_windows_scale() {
+        // Left on a 1× external at logical (1700, 100), restored by a window
+        // that starts on the 2× primary: tao divides a *physical* position by
+        // that window's scale — (850, 50), the wrong monitor. A logical one it
+        // uses as is.
+        let saved = Space::Logical.point(PhysicalPosition::new(1700, 100), 1.0);
+        assert_eq!(saved, Point { x: 1700, y: 100 });
+        assert!(matches!(
+            Space::Logical.position(saved),
+            Position::Logical(LogicalPosition { x, y }) if x == 1700.0 && y == 100.0
+        ));
+        // The other direction: left on the 2× primary at physical (1700, 100)
+        // = logical (850, 50); restored by a window on the 1× external — still
+        // logical (850, 50).
+        let saved = Space::Logical.point(PhysicalPosition::new(1700, 100), 2.0);
+        assert!(matches!(
+            Space::Logical.position(saved),
+            Position::Logical(LogicalPosition { x, y }) if x == 850.0 && y == 50.0
+        ));
+        // Windows: physical in, physical out.
+        assert!(matches!(
+            Space::Physical.position(Point { x: 1700, y: 100 }),
+            Position::Physical(PhysicalPosition { x: 1700, y: 100 })
+        ));
+    }
+
+    #[test]
+    fn a_2x_monitors_area_is_measured_in_logical_points_with_no_handle_factor() {
+        let work_area = PhysicalRect {
+            position: PhysicalPosition::new(3840, 0),
+            size: PhysicalSize::new(3840, 2160),
+        };
+        assert_eq!(
+            Space::Logical.area(work_area, 2.0),
+            (
+                Area {
+                    x: 1920.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0
+                },
+                1.0
+            )
+        );
+        assert_eq!(
+            Space::Physical.area(work_area, 2.0),
+            (
+                Area {
+                    x: 3840.0,
+                    y: 0.0,
+                    width: 3840.0,
+                    height: 2160.0
+                },
+                2.0
+            )
+        );
+    }
+
+    #[test]
+    fn the_review_scenario_end_to_end_in_the_logical_space() {
+        // macOS: 2× primary 1440×900 at the origin, 1× external 1920×1080 to
+        // its right. tao's monitor bounds are logical × that monitor's scale.
+        let primary = Space::Logical.area(
+            PhysicalRect {
+                position: PhysicalPosition::new(0, 0),
+                size: PhysicalSize::new(2880, 1800),
+            },
+            2.0,
+        );
+        let external = Space::Logical.area(
+            PhysicalRect {
+                position: PhysicalPosition::new(1440, 0),
+                size: PhysicalSize::new(1920, 1080),
+            },
+            1.0,
+        );
+        let saved = Space::Logical.point(PhysicalPosition::new(1700, 100), 1.0);
+        let restored = reachable(Some(saved), &[primary, external]);
+        assert_eq!(restored, Some(Point { x: 1700, y: 100 }));
+        // Unplug the external: the handle (2173, 148) is on no monitor.
+        assert_eq!(reachable(Some(saved), &[primary]), None);
     }
 
     // --- reachable: the two counterexamples from the spec review, then DPI ---
@@ -378,7 +588,7 @@ mod tests {
     #[test]
     fn the_position_survives_a_write_and_a_read() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), PhysicalPosition::new(-120, 45)).unwrap();
+        write(dir.path(), Point { x: -120, y: 45 }).unwrap();
         assert_eq!(read(dir.path()), at(-120, 45));
         // And the raw shape is the documented one, not whatever serde chose.
         assert_eq!(
@@ -415,7 +625,7 @@ mod tests {
         // next show still applies the platform default.
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
-        assert_eq!(memory.moved(PhysicalPosition::new(300, 200)), None);
+        assert_eq!(memory.moved(Point { x: 300, y: 200 }), None);
         assert_eq!(memory.left(), None);
     }
 
@@ -423,11 +633,11 @@ mod tests {
     fn a_drag_is_written_and_kept_in_memory() {
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
-        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        assert_eq!(memory.moved(Point { x: 640, y: 80 }), at(640, 80));
         assert_eq!(memory.left(), at(640, 80));
         // A second focus loss at the same dragged place is not a second move:
         // the reference is now `left`, not `applied`.
-        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), None);
+        assert_eq!(memory.moved(Point { x: 640, y: 80 }), None);
         assert_eq!(memory.applied(), at(300, 200));
     }
 
@@ -437,8 +647,8 @@ mod tests {
         // that compares with `applied` alone would keep B.
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
-        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
-        assert_eq!(memory.moved(PhysicalPosition::new(300, 200)), at(300, 200));
+        assert_eq!(memory.moved(Point { x: 640, y: 80 }), at(640, 80));
+        assert_eq!(memory.moved(Point { x: 300, y: 200 }), at(300, 200));
         assert_eq!(memory.left(), at(300, 200));
     }
 
@@ -450,17 +660,17 @@ mod tests {
         // default as a new drag — `left` is stale and must go with it.
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
-        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        assert_eq!(memory.moved(Point { x: 640, y: 80 }), at(640, 80));
         memory.placed(None);
         memory.settled(at(460, 220));
         assert_eq!(memory.left(), None, "a failed restore kept the stale drag");
         assert_eq!(memory.applied(), at(460, 220));
-        assert_eq!(memory.moved(PhysicalPosition::new(460, 220)), None);
+        assert_eq!(memory.moved(Point { x: 460, y: 220 }), None);
 
         // Positive control: a show that DID restore the drag keeps `left`.
         let memory = Memory::default();
         memory.set_applied(at(300, 200));
-        assert_eq!(memory.moved(PhysicalPosition::new(640, 80)), at(640, 80));
+        assert_eq!(memory.moved(Point { x: 640, y: 80 }), at(640, 80));
         memory.placed(at(640, 80));
         memory.settled(at(640, 80));
         assert_eq!(memory.left(), at(640, 80));
@@ -485,7 +695,7 @@ mod tests {
         // The stale-read case on GTK, made safe: nothing to compare against.
         let memory = Memory::default();
         memory.placed(None);
-        assert_eq!(memory.moved(PhysicalPosition::new(280, 160)), None);
+        assert_eq!(memory.moved(Point { x: 280, y: 160 }), None);
         assert_eq!(memory.left(), None);
     }
 
@@ -495,7 +705,7 @@ mod tests {
         // position is not evidence of a drag (review P2-1: start in the tray,
         // Quit; Wayland never records one either).
         let memory = Memory::default();
-        assert_eq!(memory.moved(PhysicalPosition::new(1, 2)), None);
+        assert_eq!(memory.moved(Point { x: 1, y: 2 }), None);
         assert_eq!(memory.left(), None);
     }
 
@@ -505,17 +715,17 @@ mod tests {
         // the tray and quits without ever showing the launcher. The key must
         // be exactly what it was.
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), PhysicalPosition::new(640, 80)).unwrap();
+        write(dir.path(), Point { x: 640, y: 80 }).unwrap();
         let memory = Memory::default();
-        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        remember_position(Point { x: 0, y: 0 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(640, 80));
         // Positive control: the same call after a show at (0, 0) — still not
         // a move; after a show somewhere else — it is.
         memory.set_applied(at(0, 0));
-        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        remember_position(Point { x: 0, y: 0 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(640, 80));
         memory.set_applied(at(5, 5));
-        remember_position(PhysicalPosition::new(0, 0), &memory, dir.path()).unwrap();
+        remember_position(Point { x: 0, y: 0 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(0, 0));
     }
 
@@ -528,7 +738,7 @@ mod tests {
         std::fs::write(&not_a_dir, b"").unwrap();
         let memory = Memory::default();
         memory.set_applied(at(0, 0));
-        let outcome = remember_position(PhysicalPosition::new(50, 60), &memory, &not_a_dir);
+        let outcome = remember_position(Point { x: 50, y: 60 }, &memory, &not_a_dir);
         assert!(outcome.is_err(), "the write into a file path succeeded?");
         assert_eq!(memory.left(), at(50, 60));
     }
@@ -538,7 +748,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Memory::default();
         memory.set_applied(at(0, 0));
-        remember_position(PhysicalPosition::new(50, 60), &memory, dir.path()).unwrap();
+        remember_position(Point { x: 50, y: 60 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(50, 60));
     }
 }

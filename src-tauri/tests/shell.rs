@@ -90,11 +90,13 @@ fn place_leaves_the_position_to_the_focus_in() {
         "place did not mark memory as awaiting a settle"
     );
 
-    memory.settled(window.outer_position().ok());
+    memory.settled(mnema_desktop::launcher_position::here(
+        &window.as_ref().window(),
+    ));
 
     assert_eq!(
         memory.applied(),
-        Some(tauri::PhysicalPosition::new(0, 0)),
+        Some(mnema_desktop::launcher_position::Point { x: 0, y: 0 }),
         "settled did not record what the focus-in found"
     );
 }
@@ -171,16 +173,16 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
         .expect("no launcher window");
     let memory = app.state::<Memory>();
     let dir = tempfile::tempdir().unwrap();
-    launcher_position::write(dir.path(), tauri::PhysicalPosition::new(640, 80)).unwrap();
+    launcher_position::write(dir.path(), launcher_position::Point { x: 640, y: 80 }).unwrap();
     let prefs_path = mnema_desktop::paths::prefs_path(dir.path());
     let before = std::fs::read(&prefs_path).unwrap();
 
     // A drag recorded earlier in the session, matching the saved value.
-    memory.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
-    memory.moved(tauri::PhysicalPosition::new(640, 80));
+    memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
+    memory.moved(launcher_position::Point { x: 640, y: 80 });
 
     launcher_position::place(&window, &memory, Some(dir.path()), false);
-    memory.settled(window.outer_position().ok());
+    memory.settled(launcher_position::here(&window.as_ref().window()));
     launcher_position::remember(&window.as_ref().window(), &memory, dir.path(), false);
 
     let after = std::fs::read(&prefs_path).unwrap();
@@ -190,7 +192,7 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     );
     assert_eq!(
         launcher_position::read(dir.path()),
-        Some(tauri::PhysicalPosition::new(640, 80)),
+        Some(launcher_position::Point { x: 640, y: 80 }),
         "the saved position was overwritten by the fallback default"
     );
 }
@@ -230,13 +232,13 @@ fn remember_writes_the_launcher_position_it_finds() {
     let window = webview_window.as_ref().window();
     let dir = tempfile::tempdir().unwrap();
     let memory = Memory::default();
-    memory.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
+    memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
 
     launcher_position::remember(&window, &memory, dir.path(), false);
 
     assert_eq!(
         launcher_position::read(dir.path()),
-        Some(tauri::PhysicalPosition::new(0, 0)),
+        Some(launcher_position::Point { x: 0, y: 0 }),
         "remember did not write what the window reported"
     );
     // Wayland: the same call writes nothing (the value is not a position there),
@@ -244,7 +246,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     // rests on the Wayland branch and not on the equality short-circuit above.
     let dir2 = tempfile::tempdir().unwrap();
     let fresh = Memory::default();
-    fresh.set_applied(Some(tauri::PhysicalPosition::new(5, 5)));
+    fresh.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
     launcher_position::remember(&window, &fresh, dir2.path(), true);
     assert_eq!(
         launcher_position::read(dir2.path()),

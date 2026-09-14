@@ -638,11 +638,12 @@ pub fn run() -> anyhow::Result<()> {
             // fills in later — so the first focus-in after a show settles it.
             // Not Wayland-guarded on purpose: `place` never calls `placed` on
             // Wayland (`launcher_position::place`'s `if !wayland` block), so
-            // `settled` here is a no-op on that platform.
+            // `settled` here is a no-op on that platform. The read goes
+            // through `here` so the settle and the blur convert the same way.
             tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 let memory = app.state::<launcher_position::Memory>();
-                memory.settled(window.outer_position().ok());
+                memory.settled(launcher_position::here(window));
             }
             _ => {}
         })
