@@ -187,6 +187,20 @@ main select:focus-visible {
   gap: 6px;
 }
 
+/* the model picker's line: the select takes the room the label and the sort
+   button leave, never its longest option's width, so the button stays on the
+   line whatever the list holds (owner, 2026-09-16) */
+.model-row {
+  flex-wrap: nowrap;
+}
+.model-row select {
+  flex: 1;
+  min-width: 0;
+}
+.model-row button {
+  white-space: nowrap;
+}
+
 /* the phase progress bar (mockup carries none of its own — new to Task 5) */
 .job-details progress {
   width: 100%;

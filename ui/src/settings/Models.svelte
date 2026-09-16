@@ -1180,7 +1180,7 @@
   {#if emptyCatalogueSentence}
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
   {:else if activeCatalogue.entries.length > 0}
-    <div class="row">
+    <div class="row model-row">
       <label class="fl" for="model-selection" data-testid="model-selection-label">{selectionLabel}</label>
       <!-- One native `<select>` for the active role (Task 4, review P1/P2-1/
            P2-2) rather than the frozen list's row of buttons: only `refusal
