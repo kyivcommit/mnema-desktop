@@ -383,7 +383,8 @@ export type ModelRefusal =
   | { kind: 'limitNotUnderstood'; raw: string }
   | { kind: 'noStatedOutputModalities' }
   | { kind: 'noTextOutput' }
-  | { kind: 'batchOnly' };
+  | { kind: 'batchOnly' }
+  | { kind: 'router' };
 
 export type ModelEntry = {
   id: string;

@@ -248,6 +248,14 @@ pub enum Refusal {
     /// tomorrow, and the embedding pass has no state for a pass it handed to
     /// the provider to finish later.
     BatchOnly,
+    /// The stated input price is not a price (`pricing.prompt: "-1"`): the
+    /// provider's own routers — `openrouter/auto`, `fusion`, `pareto-code`,
+    /// `bodybuilder` — which pick the model that answers at request time. What
+    /// answers, and at what price, is not known in advance, so the picker
+    /// cannot state either (owner, 2026-09-16: «зайві варіанти, прибери»).
+    /// Measured on the live list the same day: exactly these five ids, and
+    /// no other, state a negative price.
+    Router,
 }
 
 /// What `models_from_json` hands back: the models it could read, and how many
@@ -618,8 +626,14 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         let output_modalities_stated = output_modalities.is_some();
         let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
+        let unpriced_router = matches!(
+            raw.pricing.as_ref().map(|p| &p.prompt),
+            Some(Price::NotAPrice { .. })
+        );
         let refusal = if raw.id.ends_with(":batch") {
             Some(Refusal::BatchOnly)
+        } else if unpriced_router {
+            Some(Refusal::Router)
         } else {
             match role {
                 Role::Embedding => match &input_limit {

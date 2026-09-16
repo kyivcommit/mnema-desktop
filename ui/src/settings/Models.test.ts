@@ -1722,6 +1722,7 @@ function sampleRefusal(kind: string): ModelRefusal {
     case 'noStatedOutputModalities': return { kind: 'noStatedOutputModalities' };
     case 'noTextOutput': return { kind: 'noTextOutput' };
     case 'batchOnly': return { kind: 'batchOnly' };
+    case 'router': return { kind: 'router' };
     default:
       throw new Error(
         `catalogue.rs now defines a Refusal variant ("${kind}") this test does not know how to ` +
@@ -1777,6 +1778,7 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     noStatedOutputModalities: (count) => `${count} hidden: the provider does not say what the model outputs`,
     noTextOutput: (count) => `${count} hidden: the model outputs no text`,
     batchOnly: (count) => `${count} hidden: batch variants (results within 24 hours), which this application does not use`,
+    router: (count) => `${count} hidden: routers — the provider picks the model and the price at request time`,
   },
   uk: {
     inputTooSmall: (count) => `Приховано ${count}: ліміт входу менший за 2048 токенів`,
@@ -1785,6 +1787,7 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     noStatedOutputModalities: (count) => `Приховано ${count}: постачальник не вказує, що видає модель`,
     noTextOutput: (count) => `Приховано ${count}: модель не видає текст`,
     batchOnly: (count) => `Приховано ${count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує`,
+    router: (count) => `Приховано ${count}: маршрутизатори — модель і ціну обирає постачальник під час запиту`,
   },
 };
 

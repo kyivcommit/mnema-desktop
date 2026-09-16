@@ -822,3 +822,26 @@ fn a_batch_variant_is_hidden_in_every_role_whatever_else_it_states() {
         );
     }
 }
+
+/// A router states `-1` for a price; it is hidden in every role, and a model
+/// that states a real price beside it stays.
+#[test]
+fn a_router_with_a_negative_price_is_hidden_in_every_role() {
+    let json = r#"{"data":[
+        {"id":"openrouter/auto","name":"Auto Router","context_length":2000000,
+         "pricing":{"prompt":"-1","completion":"-1"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
+        {"id":"vendor/model","name":"Model","context_length":8192,
+         "pricing":{"prompt":"0.000002","completion":"0.000004"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}}
+    ]}"#;
+    for role in [Role::Chat, Role::Embedding] {
+        let catalogue = models_from_json(role, json).expect("parses");
+        assert_eq!(
+            find(&catalogue.entries, "openrouter/auto").refusal,
+            Some(Refusal::Router),
+            "{role:?}: a router must be hidden"
+        );
+        assert_eq!(find(&catalogue.entries, "vendor/model").refusal, None);
+    }
+}
