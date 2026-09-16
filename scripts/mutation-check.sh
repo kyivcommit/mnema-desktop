@@ -429,8 +429,9 @@ case_() {
   # a miswritten case that merely increments a counter is one somebody reads
   # past. `mutation-staleness.sh` reads fields five and six too, for its own
   # test-name guard, and refuses a `runner=` written after another argument
-  # itself (MISPLACED RUNNER) — an unknown runner name and the vitest
-  # argument shape below are still checked only here.
+  # itself (MISPLACED RUNNER) — an unknown runner name is reported there too
+  # (UNRECOGNISED RUNNER), but it is only here that it is named correctly, and
+  # the vitest argument shape below is still checked only here.
   local arg
   for arg in "$@"; do
     case "$arg" in

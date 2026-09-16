@@ -451,7 +451,11 @@ jobs:
     # the dependencies at the same time and none can see another's: one cold
     # build's compute per leg, 3:02–3:23 each on run
     # 33671866360, in front of the slowest file. The warm case is the steady
-    # state; the first run of this matrix is the measurement of it.
+    # state; the first run of this matrix is the measurement of it. At 47 legs
+    # (2026-09-16) the account's 20-concurrent-job ceiling makes this three
+    # waves, not one; the 47-leg wall time is unmeasured until this pull
+    # request's first run and is recorded in the timing comment below when it
+    # is.
     #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
     # `sweeps` proves each case still APPLIES; a job here proves a case still
@@ -475,7 +479,9 @@ jobs:
     # file. Running it needs a macOS leg, which is a separate decision about
     # runner minutes — see that file's own header. `pr8-subfolders-linux.sh`
     # is the mirror case and belongs HERE for the same reason it cannot run
-    # on macOS.
+    # on macOS. `linux-resource.sh` is the second absent file, for the reason
+    # in its own header (its five linux cases break the build on this leg);
+    # both carry `# not-in-matrix:` and guard 5 counts them.
     #
     # `pr8-ui-folders.sh` has no such split and needs none: its tests run in
     # jsdom, nothing in them is behind a platform condition, and the whole

@@ -142,7 +142,11 @@
 # PR #4 (`refuse-by-content.sh`). Guard 5 requires every case file to be in
 # exactly one of two states — named in that matrix, or carrying
 # `# not-in-matrix: <reason>` on a line of its own — and reports the two ways of
-# being in neither or both. `--self-test` runs it against fixtures.
+# being in neither or both. `--self-test` runs it against fixtures. The
+# self-test exercises the two functions on fixtures; the call site in the sweep
+# loop and the `unlisted` term of the final assertion are not reachable from it
+# — removing either leaves the self-test green and is caught only by the live
+# sweep.
 #
 # ⚠️ **The whole question this script has to keep asking of itself: is there an
 # input for which it reports success by checking LESS?** Asked deliberately in
@@ -699,7 +703,7 @@ case_() {
   return 0
 }
 
-# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Ten
+# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Twelve
 # controls, each with the line it expects (or expects NOT to see); a control
 # that gets the other answer is named by number on stderr. Three of them are
 # positive ("silent", or "refused for the right reason only") so a guard that
@@ -781,9 +785,19 @@ jobs:
           - tree
 YML
   printf 'case_ "x" a b c d e\n' > "$T/mutations/tree.sh"
-  printf 'case_ "x" a b c d e\n' > "$T/mutations/orphan.sh"
+  # `tre`, not `orphan`: a strict PREFIX of the listed `tree`, so this fixture
+  # is what makes control 2 depend on `grep -qxF`'s `-x`. With any unlisted
+  # name that is not a prefix of a listed one, dropping `-x` leaves all ten
+  # original controls green while `task-1` starts matching `task-10` on the
+  # live tree — an unlisted file silently read as listed.
+  printf 'case_ "x" a b c d e\n' > "$T/mutations/tre.sh"
   printf '# not-in-matrix: needs macOS\ncase_ "x" a b c d e\n' > "$T/mutations/exempt.sh"
   printf '# not-in-matrix:\ncase_ "x" a b c d e\n' > "$T/mutations/empty-reason.sh"
+  # The marker written against the colon: recognised as a marker, and the
+  # reason is read only from a line that has the space, which leaves it empty.
+  printf '# not-in-matrix:reason\ncase_ "x" a b c d e\n' > "$T/mutations/nospace.sh"
+  # The marker indented: not at the start of a line, so not a marker at all.
+  printf '  # not-in-matrix: reason\ncase_ "x" a b c d e\n' > "$T/mutations/indented.sh"
   printf '# not-in-matrix: stale marker\ncase_ "x" a b c d e\n' > "$T/mutations/source.sh"
 
   names="$T/names"
@@ -792,9 +806,10 @@ YML
   # 1. in the matrix → silent
   out=$(matrix_verdict "$names" "$T/mutations/tree.sh"); rc=$?
   { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 1 "a file in matrix.file is silent (got rc=$rc: $out)"
-  # 2. nowhere → NOT IN MATRIX
-  out=$(matrix_verdict "$names" "$T/mutations/orphan.sh"); rc=$?
-  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: orphan.sh'; } || fail 2 "a file in neither state is NOT IN MATRIX (got rc=$rc: $out)"
+  # 2. nowhere → NOT IN MATRIX. The name is a strict prefix of the listed
+  #    `tree`, so this control is also the one that holds `-x` on the lookup.
+  out=$(matrix_verdict "$names" "$T/mutations/tre.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: tre.sh'; } || fail 2 "a file in neither state is NOT IN MATRIX, and a name that is only a prefix of a listed one is not listed (got rc=$rc: $out)"
   # 3. named only in another job → NOT IN MATRIX
   other="$T/names-other"
   matrix_files "$T/ci-other-job-only.yml" > "$other" || fail 3 "the other-job fixture should be readable"
@@ -832,11 +847,26 @@ YML
   #     whitelist of matrix keys refuses it as it refuses `exclude:`
   matrix_files "$T/ci-exclude-space.yml" > /dev/null 2> "$T/err10"; rc=$?
   { [ "$rc" -eq 2 ] && grep -q 'exclude :' "$T/err10"; } || fail 10 "a matrix key this guard does not interpret, however spaced, is refused with exit 2 (got rc=$rc)"
+  # 11. `# not-in-matrix:reason`, no space, not in the matrix → NOT IN MATRIX.
+  #     This is the control that holds the SPACE in the reason grep: drop it
+  #     and this marker starts exempting, while controls 6 (empty reason) and
+  #     7 (a proper reason) stay green either way.
+  out=$(matrix_verdict "$names" "$T/mutations/nospace.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: nospace.sh'; } || fail 11 "a reason written against the colon does not exempt (got rc=$rc: $out)"
+  # 12. `  # not-in-matrix: reason`, indented, not in the matrix → NOT IN
+  #     MATRIX, and specifically as a file with NO marker at all. The hint is
+  #     asserted, not just the verdict: dropping the `^` from the marker
+  #     detector still reports NOT IN MATRIX here (the reason grep keeps its
+  #     own `^`, so the reason comes back empty) and only the hint changes —
+  #     a control that read the verdict alone would stay green on that mutant.
+  out=$(matrix_verdict "$names" "$T/mutations/indented.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: indented.sh' \
+    && printf '%s' "$out" | grep -q 'nothing proves its cases still kill'; } || fail 12 "a marker that is not at the start of a line is not a marker (got rc=$rc: $out)"
 
   if [ "$failed" -ne 0 ]; then
     exit 1
   fi
-  echo "self-test: 10 controls, all as expected"
+  echo "self-test: 12 controls, all as expected"
   exit 0
 fi
 
