@@ -189,6 +189,8 @@
 
   let recording = $state(false);
   let notUsable = $state(false);
+  // Which press the standing not-usable refusal belongs to (Task 1b).
+  let notUsableStamp = $state(0);
   // A rejected `set_hotkey`'s own sentence, shown VERBATIM beside the
   // catalogue lead-in above — never branched on, exactly as every other
   // rejection in this product.
@@ -252,6 +254,16 @@
     if (shortcut === null) {
       e.preventDefault();
       notUsable = true;
+      // 🔴 Task 1b. Every OTHER refusal in this section is heard again on a
+      // repeat because the state that starts the retry clears its own message
+      // first, so the node leaves the live region and comes back. This one
+      // cannot borrow that: the sentence is a constant and both writes land in
+      // the SAME flush, so `false` then `true` produces no DOM event at all.
+      // A second unusable key is a second refusal and has to be heard, so the
+      // announcement carries a stamp saying which press it answers — the same
+      // device `locale-choice.ts` uses for the two language retries, and for
+      // the same reason stated there.
+      notUsableStamp += 1;
       return;
     }
     e.preventDefault();
@@ -482,6 +494,11 @@
   const languageApplication = $derived($localeChoiceState.application);
   const languageReadError = $derived($localeChoiceState.error);
   const languageChangeError = $derived($localeChoiceState.changeError);
+  // Which answer the sentences below belong to (Task 1b) — see the store's own
+  // comment on these two. They reach only the live region's keys: nothing on
+  // screen is drawn from them.
+  const languageReadStamp = $derived($localeChoiceState.readStamp);
+  const languageApplyStamp = $derived($localeChoiceState.applyStamp);
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -564,57 +581,114 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Task 1: one live region for the whole section (spec §2.2, plan Global
-  // Constraints). A single `sr-only` container — `JobStrip.svelte:486`'s own
-  // pattern — sitting OUTSIDE `{#if prefs}` below, so it exists in the DOM
-  // before the very first message a screen reader would need to hear: W3C
-  // ARIA22 requires the container to predate the message, and the first
-  // `appPrefs()` read can itself be refused (`loadError`, `:572`) before any
-  // of the four groups even exist. It carries the FULL text of every refusal
-  // paragraph currently on screen; those paragraphs stay exactly where they
-  // are and only gain `data-announced-by`, so the eye and the screen reader
-  // read the same words from the same state, never a second copy of either.
+  // Task 1b: TWO live regions, and the volume of each never changes (spec
+  // §2.2, redaction 3). Task 1's single region, whose text was one glued
+  // string in one node, was measured wrong twice: every change rewrote the
+  // node whole, so a person heard the standing state again on top of the
+  // refusal they had just pressed for — and heard it `assertive`, because one
+  // node can only carry one volume and a refusal was standing.
+  //
+  // So: `polite` for what the section reports about its own state, `assertive`
+  // for the answer to something a person pressed, both permanent, both
+  // OUTSIDE `{#if prefs}` (W3C ARIA22 — the container must predate the
+  // message, and the first `appPrefs()` read can itself be refused before any
+  // group exists). Each part is its OWN child node, so an engine announces
+  // the node that arrived rather than the region again; `aria-atomic` stays
+  // at its default `false`, which is what makes that true.
+  //
+  // Which region a sentence goes to is decided by WHAT IT IS ABOUT, not by
+  // what happened to trigger it: a state a read reported is polite, a refusal
+  // of an operation this window issued is assertive. One seam is known and
+  // left in the open — `application` turns `unknown` from a failed mount-time
+  // `get_locale` too, with nobody having pressed anything, and that arrives
+  // assertive. The sentence is about an apply either way.
+  //
+  // Visible paragraphs stay where they are and name their region through
+  // `data-announced-by`; none of them is a descendant of either.
   // ---------------------------------------------------------------------------
 
-  const LIVE_REGION_ID = 'application-live-region';
+  const POLITE_ID = 'application-live-polite';
+  const ASSERTIVE_ID = 'application-live-assertive';
 
-  const liveRegionText = $derived.by(() => {
-    const parts: string[] = [];
-    if (loadError !== null) parts.push(loadFailedLabel, loadError);
-    if (prefs !== null) {
-      if (unavailable !== null && shortcutReasonText !== null) parts.push(shortcutReasonText);
-      if (hotkeyError !== null) parts.push(shortcutFailedLabel, hotkeyError);
-      if (themeError !== null) parts.push(themeFailedLabel, themeError);
-      if (languageApplication.kind === 'partial') {
-        parts.push(languagePartialLabel);
-        for (const err of languageApplication.errors) parts.push(`${err.surface}: ${err.message}`);
-      }
-      if (languageChangeError !== null) parts.push(languageChangeUnconfirmedLabel, languageChangeError);
-      if (languageReadError !== null) parts.push(languageFailedLabel, languageReadError);
-      if (autostartUnknown !== null && autostartReasonText !== null) parts.push(autostartReasonText);
-      if (autostartError !== null) parts.push(autostartFailedLabel, autostartError);
+  // `key` is the identity of the announcement, not of its text: a keyed
+  // `{#each}` keeps the node while the key holds, which is exactly what stops
+  // a refusal of one thing from re-reading the state of another.
+  type Announcement = { key: string; text: string };
+
+  const politeAnnouncements = $derived.by<Announcement[]>(() => {
+    const out: Announcement[] = [];
+    if (loadError !== null) {
+      out.push({ key: 'load-failed', text: loadFailedLabel });
+      out.push({ key: 'load-error', text: loadError });
     }
-    return parts.join(' ');
+    if (prefs === null) return out;
+    // The CLAIM and the reason that explains it, together: "this shortcut is
+    // not registered" is the fact, and the backend's sentence below it is only
+    // why. Task 1 announced the why alone, which reads out an explanation of
+    // something the listener was never told. Announced only where there IS a
+    // refusal to explain — a registered shortcut refuses nothing and says
+    // nothing here.
+    if (unavailable !== null && shortcutStatusText !== null && shortcutReasonText !== null) {
+      out.push({ key: 'shortcut-status', text: shortcutStatusText });
+      out.push({ key: 'shortcut-reason', text: shortcutReasonText });
+    }
+    if (languageReadError !== null) {
+      out.push({ key: `language-failed#${languageReadStamp}`, text: languageFailedLabel });
+      out.push({ key: `language-error#${languageReadStamp}`, text: languageReadError });
+    }
+    if (autostartUnknown !== null && autostartStatusText !== null && autostartReasonText !== null) {
+      out.push({ key: 'autostart-status', text: autostartStatusText });
+      out.push({ key: 'autostart-reason', text: autostartReasonText });
+    }
+    return out;
   });
 
-  // `assertive` for a refusal that answers something a person just pressed;
-  // `polite` for a status that simply stands (`unavailable`, `autostartUnknown`
-  // with no attempt behind it) — spec §2.2.
-  const liveRegionAssertive = $derived(
-    hotkeyError !== null || themeError !== null || autostartError !== null || languageChangeError !== null,
-  );
+  const assertiveAnnouncements = $derived.by<Announcement[]>(() => {
+    const out: Announcement[] = [];
+    if (prefs === null) return out;
+    if (notUsable && notUsableText !== null) {
+      out.push({ key: `shortcut-not-usable#${notUsableStamp}`, text: notUsableText });
+    }
+    if (hotkeyError !== null) {
+      out.push({ key: 'shortcut-failed', text: shortcutFailedLabel });
+      out.push({ key: 'shortcut-error', text: hotkeyError });
+    }
+    if (themeError !== null) {
+      out.push({ key: 'theme-failed', text: themeFailedLabel });
+      out.push({ key: 'theme-error', text: themeError });
+    }
+    if (languageApplication.kind === 'partial') {
+      out.push({ key: `language-partial#${languageApplyStamp}`, text: languagePartialLabel });
+      for (const err of languageApplication.errors) {
+        out.push({
+          key: `language-partial-${err.surface}#${languageApplyStamp}`,
+          text: `${err.surface}: ${err.message}`,
+        });
+      }
+    }
+    if (languageApplication.kind === 'unknown') {
+      out.push({ key: `language-unknown#${languageApplyStamp}`, text: languageUnknownLabel });
+    }
+    if (languageChangeError !== null) {
+      out.push({ key: `language-change-unconfirmed#${languageApplyStamp}`, text: languageChangeUnconfirmedLabel });
+      out.push({ key: `language-change-error#${languageApplyStamp}`, text: languageChangeError });
+    }
+    if (autostartError !== null) {
+      out.push({ key: 'autostart-failed', text: autostartFailedLabel });
+      out.push({ key: 'autostart-error', text: autostartError });
+    }
+    return out;
+  });
 </script>
 
-<!-- Task 1: the section's one live region. Always in the DOM — ARIA22 — and
-     empty until there is something to say; every refusal paragraph below
-     names it via `data-announced-by` instead of carrying its own role/live
-     attribute. -->
-<p
-  id={LIVE_REGION_ID}
-  data-testid="application-live-region"
-  class="sr-only"
-  aria-live={liveRegionAssertive ? 'assertive' : 'polite'}
->{liveRegionText}</p>
+<!-- Task 1b: the section's two live regions. Always in the DOM (ARIA22),
+     empty until there is something to say, and each with a volume that never
+     changes. One child node per part — never one glued string — so what an
+     engine reads out is the node that arrived. -->
+<p id={POLITE_ID} data-testid="application-live-polite" class="sr-only" aria-live="polite"
+  >{#each politeAnnouncements as item (item.key)}<span>{item.text}</span>{/each}</p>
+<p id={ASSERTIVE_ID} data-testid="application-live-assertive" class="sr-only" aria-live="assertive"
+  >{#each assertiveAnnouncements as item (item.key)}<span>{item.text}</span>{/each}</p>
 
 <!-- The failed read leads and does not gate what follows: on the FIRST read's
      rejection there is nothing below anyway, because `prefs` is still null. A
@@ -622,8 +696,8 @@
      answer on screen, which is `Settings.svelte`'s ruling for `model_settings`
      and not a new one here. -->
 {#if loadError}
-  <p data-testid="application-load-failed" data-announced-by={LIVE_REGION_ID}>{loadFailedLabel}</p>
-  <p data-testid="application-load-error" data-announced-by={LIVE_REGION_ID}>{loadError}</p>
+  <p data-testid="application-load-failed" data-announced-by={POLITE_ID}>{loadFailedLabel}</p>
+  <p data-testid="application-load-error" data-announced-by={POLITE_ID}>{loadError}</p>
 {/if}
 
 {#if prefs}
@@ -639,14 +713,14 @@
       {shortcutLabelText}
       <span class="kbd" data-testid="application-shortcut">{shortcutText}</span>
     </p>
-    <p data-testid="application-shortcut-status">{shortcutStatusText}</p>
+    <p data-testid="application-shortcut-status" data-announced-by={unavailable ? POLITE_ID : undefined}>{shortcutStatusText}</p>
     {#if unavailable}
-      <p data-testid="application-shortcut-reason" data-announced-by={LIVE_REGION_ID}>{shortcutReasonText}</p>
+      <p data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
       <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
     {/if}
     {#if hotkeyError !== null}
-      <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={LIVE_REGION_ID}>{shortcutFailedLabel}</p>
-      <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={LIVE_REGION_ID}>{hotkeyError}</p>
+      <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={ASSERTIVE_ID}>{shortcutFailedLabel}</p>
+      <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={ASSERTIVE_ID}>{hotkeyError}</p>
     {/if}
     <button
       type="button"
@@ -662,7 +736,7 @@
       <p data-testid="application-shortcut-recording">{recordingText}</p>
     {/if}
     {#if notUsable}
-      <p data-testid="application-shortcut-not-usable">{notUsableText}</p>
+      <p data-testid="application-shortcut-not-usable" data-announced-by={ASSERTIVE_ID}>{notUsableText}</p>
     {/if}
   </div>
 
@@ -670,8 +744,8 @@
     <h3 id="application-group-appearance">{groupAppearanceLabel}</h3>
     <p id="application-theme-label">{themeLabelText}</p>
     {#if themeError !== null}
-      <p id="application-theme-failed" data-testid="application-theme-failed" data-announced-by={LIVE_REGION_ID}>{themeFailedLabel}</p>
-      <p id="application-theme-error" data-testid="application-theme-error" data-announced-by={LIVE_REGION_ID}>{themeError}</p>
+      <p id="application-theme-failed" data-testid="application-theme-failed" data-announced-by={ASSERTIVE_ID}>{themeFailedLabel}</p>
+      <p id="application-theme-error" data-testid="application-theme-error" data-announced-by={ASSERTIVE_ID}>{themeError}</p>
     {/if}
     <!-- Three explicit buttons rather than an `{#each}` over the choices:
          three literal `data-testid` strings stay greppable from the tests,
@@ -730,8 +804,8 @@
       <!-- Confirmed choice/effective, some surfaces did not pick it up —
            never a rejection: `set_locale` resolved, and this is what it
            resolved with. -->
-      <p id="application-language-partial" data-testid="application-language-partial" data-announced-by={LIVE_REGION_ID}>{languagePartialLabel}</p>
-      <ul data-testid="application-language-partial-errors" data-announced-by={LIVE_REGION_ID}>
+      <p id="application-language-partial" data-testid="application-language-partial" data-announced-by={ASSERTIVE_ID}>{languagePartialLabel}</p>
+      <ul data-testid="application-language-partial-errors" data-announced-by={ASSERTIVE_ID}>
         {#each languageApplication.errors as err (err.surface)}
           <!-- `err.message` is the backend's own English sentence, shown as
                text — never as HTML, never parsed for a discriminant of its
@@ -753,7 +827,7 @@
            transport genuinely cannot be told apart from a message alone, so
            this sentence never states more than that, and the messages below
            only ever ADD detail beside it. -->
-      <p id="application-language-unknown" data-testid="application-language-unknown">{languageUnknownLabel}</p>
+      <p id="application-language-unknown" data-testid="application-language-unknown" data-announced-by={ASSERTIVE_ID}>{languageUnknownLabel}</p>
       {#if languageRetryApplyReady}
         <!-- Whole-branch review, Important 1. Spec §7.1: the retry-apply
              control is available after an `unknown` outcome too, once
@@ -792,12 +866,12 @@
            OUTCOME of this call could not be. No retry control of its own:
            picking the select again is the retry, the same as every other
            rejection in this section (shortcut/autostart/theme). -->
-      <p id="application-language-change-unconfirmed" data-testid="application-language-change-unconfirmed" data-announced-by={LIVE_REGION_ID}>{languageChangeUnconfirmedLabel}</p>
-      <p id="application-language-change-error" data-testid="application-language-change-error" data-announced-by={LIVE_REGION_ID}>{languageChangeError}</p>
+      <p id="application-language-change-unconfirmed" data-testid="application-language-change-unconfirmed" data-announced-by={ASSERTIVE_ID}>{languageChangeUnconfirmedLabel}</p>
+      <p id="application-language-change-error" data-testid="application-language-change-error" data-announced-by={ASSERTIVE_ID}>{languageChangeError}</p>
     {/if}
     {#if languageReadError !== null}
-      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={LIVE_REGION_ID}>{languageFailedLabel}</p>
-      <p id="application-language-error" data-testid="application-language-error" data-announced-by={LIVE_REGION_ID}>{languageReadError}</p>
+      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={POLITE_ID}>{languageFailedLabel}</p>
+      <p id="application-language-error" data-testid="application-language-error" data-announced-by={POLITE_ID}>{languageReadError}</p>
       <button
         type="button"
         data-testid="application-language-retry-read"
@@ -810,13 +884,13 @@
   <div role="group" aria-labelledby="application-group-startup">
     <h3 id="application-group-startup">{groupStartupLabel}</h3>
     <p>{autostartLabelText}</p>
-    <p data-testid="application-autostart-status">{autostartStatusText}</p>
+    <p data-testid="application-autostart-status" data-announced-by={autostartUnknown ? POLITE_ID : undefined}>{autostartStatusText}</p>
     {#if autostartUnknown}
-      <p data-testid="application-autostart-reason" data-announced-by={LIVE_REGION_ID}>{autostartReasonText}</p>
+      <p data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
     {/if}
     {#if autostartError !== null}
-      <p id="application-autostart-failed" data-testid="application-autostart-failed" data-announced-by={LIVE_REGION_ID}>{autostartFailedLabel}</p>
-      <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={LIVE_REGION_ID}>{autostartError}</p>
+      <p id="application-autostart-failed" data-testid="application-autostart-failed" data-announced-by={ASSERTIVE_ID}>{autostartFailedLabel}</p>
+      <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={ASSERTIVE_ID}>{autostartError}</p>
     {/if}
     {#if autostartOffersBothDirections}
       <!-- Both disabled by the one flag: a press on either asks the
