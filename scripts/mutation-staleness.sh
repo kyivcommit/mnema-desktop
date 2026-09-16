@@ -702,9 +702,10 @@ case_() {
 # `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Ten
 # controls, each with the line it expects (or expects NOT to see); a control
 # that gets the other answer is named by number on stderr. Three of them are
-# positive ("silent", or "refused for the right reason only") so a guard
-# that always cries fails here as surely as one that never does. Same shape as `check-booked.sh --self-test`, and run
-# the same way: first in `lint.sh` and first in the `sweeps` job.
+# positive ("silent", or "refused for the right reason only") so a guard that
+# always cries fails here as surely as one that never does. Same shape as
+# `check-booked.sh --self-test`, and run the same way: first in `lint.sh` and
+# first in the `sweeps` job.
 if [ "${1:-}" = "--self-test" ]; then
   if [ $# -ne 1 ]; then
     echo "unknown option: $2" >&2
@@ -755,6 +756,12 @@ jobs:
         exclude :
           - file: tree
 YML
+  # `Bundle:` sits AFTER `mutations:` on purpose, and its id is upper-case:
+  # it is the only thing in these fixtures that can tell `[A-Za-z_]` from
+  # `[a-z]` in the job-block terminator. With the correct class the block
+  # ends at `Bundle:` and the matrix is `source` alone; with `[a-z]` it reads
+  # straight on into `Bundle:`'s own list, finds two `file:` lists, and
+  # refuses — which is control 3 going red.
   cat > "$T/ci-other-job-only.yml" <<'YML'
 jobs:
   other:
@@ -767,6 +774,11 @@ jobs:
       matrix:
         file:
           - source
+  Bundle:
+    strategy:
+      matrix:
+        file:
+          - tree
 YML
   printf 'case_ "x" a b c d e\n' > "$T/mutations/tree.sh"
   printf 'case_ "x" a b c d e\n' > "$T/mutations/orphan.sh"
@@ -810,9 +822,12 @@ YML
 
   # 9. runner=vitest in the seventh position is consumed, not refused: the
   #    vitest branch runs and reports the (missing) test file, never MISPLACED
-  before=$stale
+  #    The hint line, not `TEST NOT FOUND`: both branches print that heading,
+  #    so it proves only that the field was consumed. Only the vitest branch
+  #    names `ui/<path>`, and a dispatch that fell back to cargo would look
+  #    for a workspace member instead.
   case_ "placed" "no/such/file.rs" 's/a/b/' 'b' src/no-such.test.ts 'no such title' runner=vitest > "$T/out9"
-  { ! grep -q 'MISPLACED RUNNER' "$T/out9" && grep -q '^TEST NOT FOUND: placed' "$T/out9"; } || fail 9 "a runner= straight after the test name is dispatched as that runner (got: $(cat "$T/out9"))"
+  { ! grep -q 'MISPLACED RUNNER' "$T/out9" && grep -q 'vitest: ui/src/no-such.test.ts does not exist' "$T/out9"; } || fail 9 "a runner= straight after the test name is dispatched as that runner (got: $(cat "$T/out9"))"
   # 10. `exclude :` — a space before the colon is the same key to YAML; the
   #     whitelist of matrix keys refuses it as it refuses `exclude:`
   matrix_files "$T/ci-exclude-space.yml" > /dev/null 2> "$T/err10"; rc=$?
