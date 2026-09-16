@@ -246,10 +246,20 @@ expr_wants_every_match() {
 # one per line. It is not a YAML parser: it reads one block of a fixed shape
 # (`  mutations:` at two spaces, `        file:` at eight, entries at ten as
 # `          - name`) — the shape `mutations`'s own `run:` line relies on by
-# name — and refuses, exit 2 with the reason on stderr, anything else: no
-# such job, no such list, two lists, an empty list, or a `matrix.exclude:`
-# it would have to interpret to answer honestly. Loud on a reformat, never
-# quietly zero.
+# name. The list is bare `          - name` entries and ends at the first line
+# that is not one, so a comment or a quoted entry written between two entries
+# truncates it — those files then land in NOT IN MATRIX, which is red and
+# visible, not a silent pass. What it refuses outright, exit 2 with the reason
+# on stderr, is exactly five things: no such file, no `  mutations:` job, no
+# `      matrix:` under it, a matrix key other than `file:` or `include:`, and
+# a `file:` list that is not there exactly once or comes back empty. Loud on a
+# reformat, never quietly zero.
+#
+# The job-block terminator is spelled `[A-Za-z_]` rather than `[a-z]`: a
+# GitHub Actions job id may begin with a letter of either case or `_`, and a
+# lower-case-only class would read straight past a `Bundle:` job into its
+# keys — a `mutations:` job with no list of its own would then answer with
+# the next job's.
 matrix_files() {
   local yml="$1"
   if [ ! -f "$yml" ]; then
@@ -257,7 +267,7 @@ matrix_files() {
     return 2
   fi
   local block
-  block=$(awk '/^  mutations:$/ { f = 1; print; next } f && /^  [a-z]/ { exit } f' "$yml")
+  block=$(awk '/^  mutations:$/ { f = 1; print; next } f && /^  [A-Za-z_]/ { exit } f' "$yml")
   if [ -z "$block" ]; then
     echo "guard 5 cannot read the matrix: no \`  mutations:\` job in $yml" >&2
     return 2
@@ -303,8 +313,13 @@ matrix_files() {
 
 # `matrix_verdict <names-file> <case-file>`: silent and 0 when the file is in
 # exactly one of the two states; otherwise one verdict line, one hint, and 1.
-# The marker is `# not-in-matrix: <reason>` on a line of its own; a marker
-# with nothing after the colon is not a reason and does not exempt.
+# The marker is `# not-in-matrix: <reason>` on a line of its own, colon then a
+# SPACE then a non-empty reason. `marked` is detected without the space, so
+# `# not-in-matrix:reason` is still recognised as a marker — it just does not
+# exempt: the reason is read only from a line that has the space, which leaves
+# it empty. A marker with no reason, one written against the colon, or one
+# followed by nothing but spaces are the same verdict, NOT IN MATRIX, and the
+# same hint.
 matrix_verdict() {
   local names="$1" file="$2"
   local name
@@ -313,7 +328,7 @@ matrix_verdict() {
   grep -qxF -- "$name" "$names" && listed=1
   if grep -q '^# not-in-matrix:' "$file"; then
     marked=1
-    reason=$(grep -m1 '^# not-in-matrix:' "$file" | sed 's/^# not-in-matrix:[[:space:]]*//')
+    reason=$(grep -m1 '^# not-in-matrix: ' "$file" | sed 's/^# not-in-matrix:[[:space:]]*//')
   fi
   if [ "$listed" -eq 1 ] && [ "$marked" -eq 1 ]; then
     echo "BOTH IN MATRIX AND EXEMPT: $name.sh"
@@ -328,7 +343,7 @@ matrix_verdict() {
   fi
   echo "NOT IN MATRIX: $name.sh"
   if [ "$marked" -eq 1 ]; then
-    echo "   its '# not-in-matrix:' line has no reason after the colon; write one, or add the file to ci.yml's mutations matrix"
+    echo "   its '# not-in-matrix:' line has no reason after a colon and a space; write '# not-in-matrix: <reason>', or add the file to ci.yml's mutations matrix"
   else
     echo "   nothing proves its cases still kill: add '          - $name' to the mutations matrix in .github/workflows/ci.yml, or write '# not-in-matrix: <reason>' in the file"
   fi
