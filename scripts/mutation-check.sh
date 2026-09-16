@@ -427,8 +427,10 @@ case_() {
   # Both of these exit the whole run rather than counting a broken case: they
   # are errors in how the case file is WRITTEN, not results about the code, and
   # a miswritten case that merely increments a counter is one somebody reads
-  # past. `mutation-staleness.sh` reads only the first four fields, so it can
-  # say nothing about either — this is the only place they are checked.
+  # past. `mutation-staleness.sh` reads fields five and six too, for its own
+  # test-name guard, and refuses a `runner=` written after another argument
+  # itself (MISPLACED RUNNER) — an unknown runner name and the vitest
+  # argument shape below are still checked only here.
   local arg
   for arg in "$@"; do
     case "$arg" in

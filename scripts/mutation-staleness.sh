@@ -316,7 +316,7 @@ find_pkg_dir() {
 #      other guard for it (their verdicts would all be about the wrong
 #      runner). Before this, guard 4 read such a case as `cargo`, looked for
 #      a workspace member named after the vitest file, and printed TEST NOT
-#      FOUND — right case, wrong reason. `--self-test` control 8 holds it.
+#      FOUND — right case, wrong reason.
 #   2. Whether the test is GREEN. Guard 4 is a grep for the name, not a
 #      compile or a run — `mutation-check.sh`'s baseline pass is the only
 #      place that requires it to pass.
@@ -626,7 +626,7 @@ if [ -n "$skipped" ]; then
 fi
 echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked   misplaced runner: $misplaced"
 if [ $((names_checked + misplaced)) -ne "$checked" ]; then
-  echo "$((checked - names_checked)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
+  echo "$((checked - names_checked - misplaced)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
 fi
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
