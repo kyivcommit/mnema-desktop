@@ -638,9 +638,8 @@
   // Drawn once under the picker, only when some option carries a price —
   // a note about prices over a list that shows none explains nothing.
   const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
-  const hasPriceNote = $derived(
-    selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0),
-  );
+  // The same question the option text answers: does some option show a price.
+  const hasPriceNote = $derived(selectableEntries.some((entry) => optionText(entry) !== entry.name));
   const infoLabel = $derived.by(() => { void $locale; return t('models_info_label'); });
   // One button, two states (owner, 2026-09-16): the list is sorted by name
   // or by price, and the button says which order it is in now. By price:
