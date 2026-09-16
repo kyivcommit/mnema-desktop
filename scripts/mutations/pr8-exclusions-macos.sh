@@ -1,7 +1,7 @@
 # macOS-only sibling of `pr8-exclusions.sh`. Run with:
-# not-in-matrix: its one test is #[cfg(target_os = "macos")]; on the ubuntu leg the baseline selects 0 tests and the whole file exits 1 — see below and ci.yml's mutations comment
 #
 #   scripts/mutation-check.sh scripts/mutations/pr8-exclusions-macos.sh
+# not-in-matrix: its one test is #[cfg(target_os = "macos")]; on the ubuntu leg the baseline selects 0 tests and the whole file exits 1 — see below and ci.yml's mutations comment
 #
 # One case, and it lives here rather than in `pr8-exclusions.sh` because the
 # test it names — `a_prefix_that_only_matches_the_folders_name_by_case_

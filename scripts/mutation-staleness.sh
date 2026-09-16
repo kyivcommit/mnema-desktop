@@ -141,7 +141,7 @@
 # since PR 9b (`model-config.sh`, `E0063`) and one carrying a live mutant since
 # PR #4 (`refuse-by-content.sh`). Guard 5 requires every case file to be in
 # exactly one of two states — named in that matrix, or carrying
-# `# not-in-matrix: <reason>` in its own header — and reports the two ways of
+# `# not-in-matrix: <reason>` on a line of its own — and reports the two ways of
 # being in neither or both. `--self-test` runs it against fixtures.
 #
 # ⚠️ **The whole question this script has to keep asking of itself: is there an
@@ -239,7 +239,7 @@ expr_wants_every_match() {
 # cases — more than half — and nothing said so, because "the omission is a
 # decision" lived in a comment nothing executed. Now each case file the
 # sweep reads must be in exactly one of two states: named in the matrix, or
-# carrying `# not-in-matrix: <reason>` in its own header. Both at once is
+# carrying `# not-in-matrix: <reason>` on a line of its own. Both at once is
 # a stale marker waiting to excuse a future accidental removal; neither is
 # a file nobody runs.
 #

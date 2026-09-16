@@ -402,10 +402,10 @@ jobs:
       # that keeps it so. Its output is the sweep's own reading matter and is
       # long (2 700 lines), so only the problem list it prints last is shown,
       # and only when it fails — a red step with no output would send whoever
-      # reads it back to a local run to learn which citation moved. Both
-      # sweeps' own self-tests run as steps of their own first, so a red line
-      # names the thing that failed: each self-test writes its failures to
-      # stderr, and only its success line is silenced.
+      # reads it back to a local run to learn which citation moved. The
+      # staleness and obligation sweeps' own self-tests run as steps of their
+      # own first, so a red line names the thing that failed: each self-test
+      # writes its failures to stderr, and only its success line is silenced.
       - name: Self-test the staleness sweep
         run: scripts/mutation-staleness.sh --self-test > /dev/null
       - name: Self-test the obligation sweep
@@ -460,7 +460,7 @@ jobs:
     # until 2026-09-16, one of them broken since PR 9b and one carrying a
     # live mutant since PR #4, because "the omission is a decision" lived only
     # in this comment. Guard 5 of the sweep now requires every case file to
-    # be named here or to carry `# not-in-matrix: <reason>` in its own header
+    # be named here or to carry `# not-in-matrix: <reason>` on a line of its own
     # (exactly one of the two), so a new case file that nobody adds here is a
     # red `sweeps`, not a quiet gap. Every file added on that day was admitted
     # on a local `mutation-check.sh` run reporting `still green: 0` and
