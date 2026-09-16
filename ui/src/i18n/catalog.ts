@@ -763,7 +763,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // off `lastReading` is what lets the sentence survive past the ending.
     indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
     indexing_eta: 'Залишилось приблизно {duration}.',
-    indexing_percent: 'Виконано {percent} %.',
+    indexing_percent: '{percent} %',
     duration_d: '{n} д',
     duration_h: '{n} год',
     duration_min: '{n} хв',
@@ -1246,7 +1246,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
     indexing_eta: 'About {duration} left.',
-    indexing_percent: '{percent} % done.',
+    indexing_percent: '{percent} %',
     duration_d: '{n} d',
     duration_h: '{n} h',
     duration_min: '{n} min',

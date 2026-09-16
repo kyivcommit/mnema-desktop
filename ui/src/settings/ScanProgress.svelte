@@ -87,13 +87,15 @@
 <p data-testid="indexing-pass">{label}</p>
 {#if phase.kind === 'reading' || phase.kind === 'embedding'}
   {@const shape = progressShape(phase.counts)}
-  <progress
-    aria-label={label}
-    max={shape.kind === 'ratio' ? shape.total : undefined}
-    value={shape.kind === 'ratio' ? shape.done : undefined}
-  ></progress>
+  <div class="progress-row">
+    <progress
+      aria-label={label}
+      max={shape.kind === 'ratio' ? shape.total : undefined}
+      value={shape.kind === 'ratio' ? shape.done : undefined}
+    ></progress>
+    {#if percentLabel}<span data-testid="indexing-percent">{percentLabel}</span>{/if}
+  </div>
 {/if}
-{#if percentLabel}<p data-testid="indexing-percent">{percentLabel}</p>{/if}
 {#if embedStartingLabel}
   <p data-testid="indexing-counts">{embedStartingLabel}</p>
 {:else if countsLabel}

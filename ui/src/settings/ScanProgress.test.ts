@@ -159,10 +159,10 @@ test('a ratio pass states its whole per cent; a counting pass states none', () =
     counts: { ...COUNTS, done: 23_328, total: 57_955, secondsLeft: null },
   };
   const { rerender } = render(ScanProgress, { props: { phase: ratio } });
-  expect(visible(screen.getByTestId('indexing-percent'))).toBe('Виконано 40 %.');
+  expect(visible(screen.getByTestId('indexing-percent'))).toBe('40 %');
 
   rerender({ phase: { ...ratio, counts: { ...ratio.counts, done: 57_955 } } });
-  expect(visible(screen.getByTestId('indexing-percent'))).toBe('Виконано 100 %.');
+  expect(visible(screen.getByTestId('indexing-percent'))).toBe('100 %');
 
   rerender({
     phase: {
