@@ -459,6 +459,15 @@ jobs:
     # 2026-09-16): wall 11m31s from the first leg's start to the last leg's
     # end, longest leg `model-config` at 6m07s (60 cases), shortest `task-6`
     # at 1m00s; the whole run 11m34s.
+    # Tried and refuted on 2026-09-17: putting the nine five-minute files
+    # first in the `file:` list (commit 6c43323, run 35161340215) changed
+    # nothing — wall 11m49s against 11m31s and 12m01s with the old order
+    # (runs 35158566979, 35160188764), and the first batch of 16 again mixed
+    # list positions freely (`task-1`, `task-13-xlsx`, `task-2` started at
+    # 0 s; `embedding` at 204 s, `pr8-subfolders` at 397 s). The scheduler
+    # does not honour matrix order, so the list stays in name order. What
+    # would move the wall is a bigger concurrency ceiling (a paid plan or a
+    # self-hosted runner) or splitting the six-minute files.
     #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
     # `sweeps` proves each case still APPLIES; a job here proves a case still
@@ -509,30 +518,18 @@ jobs:
       # run hides.
       fail-fast: false
       matrix:
-        # ⚠️ Order is a hint to the scheduler, not a guarantee. Legs start in
-        # roughly list order as the 20-job ceiling frees slots, so the nine
-        # files that run five minutes or more (measured on runs 35158566979
-        # and 35160188764: `model-config`, `task-8`, `embedding`,
-        # `pr9b-scan`, `source`, `pr9-shell`, `pr8-subfolders`, `pr8-masks`,
-        # `pr8-exclusions`) come first; with them in list order the run's
-        # tail was a five-minute file that got its slot at 3–6 minutes
-        # (wall 11m31s and 12m01s). The rest keep their earlier order. Guard
-        # 5 in `mutation-staleness.sh` checks membership, not order.
         file:
-          - model-config
-          - task-8
-          - embedding
-          - pr9b-scan
           - source
-          - pr9-shell
-          - pr8-subfolders
-          - pr8-masks
+          - embedding
           - pr8-exclusions
+          - pr8-subfolders
           - pr8-subfolders-linux
           - pr8-ui-folders
           - pr8-ui-masks
+          - pr9-shell
           - pr9-index
           - pr9-ui
+          - pr9b-scan
           - pr10b-theme
           - pr10c-fonts
           - pr10e-settings
@@ -543,8 +540,10 @@ jobs:
           - launcher-position
           - branch-review
           - citation-identity
+          - model-config
           - pr7-boot-index
           - pr7-default-models
+          - pr8-masks
           - pr8c-mask-differential
           - refuse-by-content
           - task-1
@@ -554,6 +553,7 @@ jobs:
           - task-5
           - task-6
           - task-7
+          - task-8
           - task-8-pdf
           - task-9
           - task-9-notextlayer
