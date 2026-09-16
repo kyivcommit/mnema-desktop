@@ -7,10 +7,6 @@ use mnema_index::Db;
 
 use crate::error::Error;
 
-/// `prefs.json` key: «Зупинити» was pressed and no scan has started since,
-/// across launches (D157). See [`AppState::cancel_job`].
-pub const SCAN_STOPPED_KEY: &str = "scanStopped";
-
 /// That the job slot has changed hands — a signal to go and look, carrying
 /// NOTHING about which way it went. Named, rather than written out at each of
 /// the three places it appears, because those three have to agree — the field,
@@ -521,10 +517,6 @@ impl AppState {
         initial: crate::scan_state::Phase,
         cancellable: bool,
     ) -> Result<JobSlot, Error> {
-        let is_scan = matches!(
-            initial,
-            crate::scan_state::Phase::Reading { .. } | crate::scan_state::Phase::Embedding { .. }
-        );
         let restore = {
             let mut scan = self
                 .scan
@@ -569,12 +561,6 @@ impl AppState {
         // Cleared only once the slot is ours: doing it earlier would clear a
         // cancellation aimed at the job that is still running.
         self.cancel.store(false, Ordering::SeqCst);
-        // A scan that starts — by any hand — releases the Stop the person
-        // last pressed (D157). Only a scan: a probe or a model adoption is
-        // not the person asking for their folders to be read again.
-        if is_scan {
-            self.write_stop_hold(false);
-        }
         // The CELL, not the observer inside it. A slot that copied the current
         // observer here would be deaf to one installed afterwards, which is the
         // review's first finding — see `job_observer`'s own note. Cloning an
@@ -664,41 +650,12 @@ impl AppState {
     }
 
     /// Asks the running job to stop. A no-op when nothing is running.
-    ///
-    /// The press is also remembered on disk (`SCAN_STOPPED_KEY`), so that it
-    /// outlives this process: the watcher's launch scan (owner decision 1,
-    /// D152) is not started while a Stop is still in force. Owner, 2026-09-16:
-    /// a scan stopped, the application restarted, the scan started itself —
-    /// «треба це виправити». Variant A: the hold is released by the next scan
-    /// that starts for any reason (a press, a disk change the running watcher
-    /// sees), never by a launch on its own (D157).
     pub fn cancel_job(&self) {
         *self
             .stopped_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.cancel.store(true, Ordering::SeqCst);
-        self.write_stop_hold(true);
-    }
-
-    /// Whether a Stop from before this launch is still in force — pressed, and
-    /// no scan has started since (D157). Read from `prefs.json`, so it needs
-    /// no open index: the watcher asks before the index may have opened.
-    pub fn stop_holds(&self) -> bool {
-        crate::prefs::read_all(self.data_dir())
-            .get(SCAN_STOPPED_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    fn write_stop_hold(&self, holds: bool) {
-        if let Err(e) = crate::prefs::write_key(
-            self.data_dir(),
-            SCAN_STOPPED_KEY,
-            serde_json::Value::Bool(holds),
-        ) {
-            eprintln!("mnema: the Stop could not be remembered for the next launch: {e}");
-        }
     }
 
     /// When «Зупинити» was last pressed, or `None` if it never has been.
@@ -1037,47 +994,6 @@ impl Drop for JobSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// D157: a Stop is remembered on disk and released by the next scan that
-    /// claims the slot — not by a probe, which is not a scan.
-    #[test]
-    fn a_stop_holds_on_disk_until_a_scan_claims_the_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(
-            dir.path().to_path_buf(),
-            PathBuf::from("/nonexistent/mnema-stop-hold-worker"),
-            "http://127.0.0.1:0".to_string(),
-            "mnema-desktop-state-stop-hold-test".to_string(),
-        );
-        assert!(!state.stop_holds(), "a fresh data dir holds no Stop");
-        state.cancel_job();
-        assert!(state.stop_holds(), "the press must be remembered on disk");
-
-        let probe = state
-            .claim_job(
-                Phase::Other {
-                    job: OtherJob::Probe,
-                },
-                false,
-            )
-            .expect("probe claim");
-        assert!(
-            state.stop_holds(),
-            "a probe is not a scan and must not release the hold"
-        );
-        probe.finish(Terminal::Idle, None);
-
-        let scan = state
-            .claim_job(
-                Phase::Embedding {
-                    counts: Progress::default(),
-                },
-                true,
-            )
-            .expect("scan claim");
-        assert!(!state.stop_holds(), "a scan that starts releases the hold");
-        scan.finish(Terminal::Idle, None);
-    }
 
     use crate::job::{EndReason, Progress};
     use crate::scan_state::{
