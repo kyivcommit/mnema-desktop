@@ -399,6 +399,42 @@ test('a release after the press disarms the drag window: a click on the handle, 
   } finally { vi.useRealTimers(); }
 });
 
+// D155 deferred minor: Tauri's own drag script (`drag.js`) starts a move only
+// for `button === 0`, so a right- or middle-button press on the handle never
+// becomes a drag — and must not arm the guard, or the next dismissal within a
+// second is swallowed. `fireEvent.pointerDown` drops `button` (jsdom has no
+// `PointerEvent`), so this one is built from `MouseEvent` by hand.
+test('a right-button press on the handle does not arm the drag window', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    const handle = container.querySelector('.arms')!;
+    handle.dispatchEvent(new MouseEvent('pointerdown', { button: 2, bubbles: true }));
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+// D155 deferred minor: on X11 the drag ends with no release reaching the
+// webview, so an arming can outlive its drag. The next press anywhere that
+// is not the handle must disarm it on its own — a click in the input, then a
+// click outside, is a dismissal.
+test('a press off the handle disarms an earlier arming even with no release', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    mockBackend(generated);
+    const { container } = render(Launcher);
+    fireEvent.pointerDown(container.querySelector('.arms')!, { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.pointerDown(screen.getByRole('textbox'), { button: 0 });
+    vi.advanceTimersByTime(50);
+    fireEvent.blur(window);
+    expect(hide).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
 test('a press on the input or the pin does not arm the drag window', () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   try {

@@ -77,14 +77,15 @@
   // after a mere click must still hide.
   let handlePressedAt = -Infinity;
   function onPointerDown(event: PointerEvent) {
-    // No `event.button` check: `@testing-library`'s `fireEvent.pointerDown`
-    // drops `button` (jsdom has no real `PointerEvent` constructor), so the
-    // check is left out for now — a right-button press on the handle arms
-    // the window for nothing and a release disarms it.
+    // Tauri's drag script starts a move only for the primary button; a
+    // right- or middle-button press is never a drag and must not arm.
+    if (event.button) return;
     const target = event.target as Element | null;
     const onHandle = !!target?.closest('.searchbar')
       && !target.closest('button, input, label, a, select, textarea, [role="button"]');
-    if (onHandle) handlePressedAt = Date.now();
+    // A press off the handle disarms on its own: on X11 the drag ends with
+    // no release reaching the webview, so an arming can outlive its drag.
+    handlePressedAt = onHandle ? Date.now() : -Infinity;
   }
   // A release means it was a click, not a drag: the next blur is a dismissal
   // again. Once a window-manager move grab is up, no release reaches the
