@@ -1085,10 +1085,19 @@ test('an option carries the stated price per million tokens beside the name', as
   });
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('chat-like').length).toBe(1));
-  expect(optionFor('chat-like').textContent).toBe('Both Prices — $1.25 in, $10 out per 1M tokens');
-  expect(optionFor('emb').textContent).toBe('Input Only — $0.02 per 1M tokens');
+  expect(optionFor('chat-like').textContent).toBe('Both Prices — $1.25 / $10');
+  expect(optionFor('emb').textContent).toBe('Input Only — $0.02');
   expect(optionFor('free').textContent).toBe('Gratis (free)');
   expect(optionFor('mute').textContent).toBe('Unpriced');
+  expect(screen.getByTestId('model-price-note').textContent)
+    .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
+});
+
+test('the price note is absent when no option carries a price', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('mute', { name: 'Unpriced' })]) });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('mute').length).toBe(1));
+  expect(screen.queryByTestId('model-price-note')).toBeNull();
 });
 
 test('refused_models_are_not_options', async () => {

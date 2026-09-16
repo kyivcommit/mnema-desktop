@@ -631,6 +631,9 @@
     style: 'currency', currency: 'USD', maximumSignificantDigits: 3,
   });
   const perMillion = (amount: number) => dollars.format(amount * 1_000_000);
+  // Drawn once under the picker, only when some option carries a price —
+  // a note about prices over a list that shows none explains nothing.
+  const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
   function optionText(entry: ModelEntry): string {
     void $locale;
     if (entry.price.kind !== 'known') return entry.name;
@@ -1177,6 +1180,9 @@
         {/each}
       </select>
     </div>
+    {#if selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0)}
+      <p data-testid="model-price-note">{priceNote}</p>
+    {/if}
     <!-- One line per DISTINCT reason (owner's ruling above), each naming how
          many entries it folded together — never one line per hidden entry,
          which would repeat the same sentence as many times as this build
