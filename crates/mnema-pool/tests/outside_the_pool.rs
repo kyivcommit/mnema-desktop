@@ -14,8 +14,8 @@
 //! The test here expects a failed write too — into the worker it has just
 //! killed — and holds the property by order rather than by a lock: it is the
 //! only test in this process, its `kill` and `ps` run after that worker was
-//! spawned and before the next one is, so no child of theirs can ever hold a
-//! pipe end of either. The macOS rlimit probe used to live here as well and
+//! spawned and before the next one is, so no child of theirs can hold a pipe
+//! end of either past its exec. The macOS rlimit probe used to live here as well and
 //! now has `rlimit.rs`, because its `pre_exec` fork could overlap this test's
 //! first spawn.
 

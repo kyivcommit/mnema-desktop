@@ -6,7 +6,7 @@
 //! copy of every descriptor the process has — which for a few microseconds
 //! includes the read end of a worker being spawned at that moment — and the
 //! test below hit exactly that once in twenty runs on a four-core Ubuntu
-//! stand. Here every spawn is the pool's, so every spawn is under its lock.
+//! stand, back when it and those two spawns shared `supervision.rs`. Here every spawn is the pool's, so every spawn is under its lock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
