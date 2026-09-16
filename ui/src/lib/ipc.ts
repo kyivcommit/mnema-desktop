@@ -382,7 +382,8 @@ export type ModelRefusal =
   | { kind: 'noStatedLimit' }
   | { kind: 'limitNotUnderstood'; raw: string }
   | { kind: 'noStatedOutputModalities' }
-  | { kind: 'noTextOutput' };
+  | { kind: 'noTextOutput' }
+  | { kind: 'batchOnly' };
 
 export type ModelEntry = {
   id: string;

@@ -18,7 +18,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
   | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
-  | 'models_hidden_no_text_output'
+  | 'models_hidden_no_text_output' | 'models_hidden_batch_only'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -298,6 +298,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_limit_not_understood: 'Приховано {count}: ліміт входу у форматі, який ця збірка не читає',
     models_hidden_no_stated_output_modalities: 'Приховано {count}: постачальник не вказує, що видає модель',
     models_hidden_no_text_output: 'Приховано {count}: модель не видає текст',
+    models_hidden_batch_only: 'Приховано {count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
     // unreadable" points at something (Task 2 review, item 4).
@@ -1112,6 +1113,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_limit_not_understood: '{count} hidden: input limit in a format this build cannot read',
     models_hidden_no_stated_output_modalities: '{count} hidden: the provider does not say what the model outputs',
     models_hidden_no_text_output: '{count} hidden: the model outputs no text',
+    models_hidden_batch_only: '{count} hidden: batch variants (results within 24 hours), which this application does not use',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',

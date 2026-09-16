@@ -795,3 +795,30 @@ fn two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed() 
     );
     assert!(catalogue.unreadable_records.is_empty());
 }
+
+/// D158: a `:batch` id is the provider's asynchronous variant and is hidden in
+/// every role — even one that would otherwise pass every rule for its role.
+#[test]
+fn a_batch_variant_is_hidden_in_every_role_whatever_else_it_states() {
+    let json = r#"{"data":[
+        {"id":"vendor/model:batch","name":"Model (batch)","context_length":8192,
+         "pricing":{"prompt":"0.000001","completion":"0.000002"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
+        {"id":"vendor/model","name":"Model","context_length":8192,
+         "pricing":{"prompt":"0.000002","completion":"0.000004"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}}
+    ]}"#;
+    for role in [Role::Chat, Role::Embedding] {
+        let catalogue = models_from_json(role, json).expect("parses");
+        assert_eq!(
+            find(&catalogue.entries, "vendor/model:batch").refusal,
+            Some(Refusal::BatchOnly),
+            "{role:?}: the batch variant must be hidden"
+        );
+        assert_eq!(
+            find(&catalogue.entries, "vendor/model").refusal,
+            None,
+            "{role:?}: the synchronous twin must stay selectable"
+        );
+    }
+}

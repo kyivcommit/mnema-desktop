@@ -240,6 +240,14 @@ pub enum Refusal {
     NoStatedOutputModalities,
     /// `output_modalities` was stated, and text is not among them.
     NoTextOutput,
+    /// The id ends in `:batch`: the provider's asynchronous Batch API variant,
+    /// answered within a 24-hour window at half the token price, through an
+    /// endpoint of its own (`/api/beta/batches`). This application speaks
+    /// only the synchronous shapes, so the variant is hidden for every role
+    /// (owner, 2026-09-16, D158): an answer a person waits for cannot come
+    /// tomorrow, and the embedding pass has no state for a pass it handed to
+    /// the provider to finish later.
+    BatchOnly,
 }
 
 /// What `models_from_json` hands back: the models it could read, and how many
@@ -610,23 +618,27 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         let output_modalities_stated = output_modalities.is_some();
         let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
-        let refusal = match role {
-            Role::Embedding => match &input_limit {
-                InputLimit::Known { tokens } if *tokens < MIN_CONTEXT_TOKENS => {
-                    Some(Refusal::InputTooSmall {
-                        limit: *tokens,
-                        floor: MIN_CONTEXT_TOKENS,
-                    })
-                }
-                InputLimit::Known { .. } => None,
-                InputLimit::NotStated => Some(Refusal::NoStatedLimit),
-                InputLimit::NotUnderstood { raw } => {
-                    Some(Refusal::LimitNotUnderstood { raw: raw.clone() })
-                }
-            },
-            Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
-            Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
-            Role::Chat | Role::Rerank => None,
+        let refusal = if raw.id.ends_with(":batch") {
+            Some(Refusal::BatchOnly)
+        } else {
+            match role {
+                Role::Embedding => match &input_limit {
+                    InputLimit::Known { tokens } if *tokens < MIN_CONTEXT_TOKENS => {
+                        Some(Refusal::InputTooSmall {
+                            limit: *tokens,
+                            floor: MIN_CONTEXT_TOKENS,
+                        })
+                    }
+                    InputLimit::Known { .. } => None,
+                    InputLimit::NotStated => Some(Refusal::NoStatedLimit),
+                    InputLimit::NotUnderstood { raw } => {
+                        Some(Refusal::LimitNotUnderstood { raw: raw.clone() })
+                    }
+                },
+                Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
+                Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
+                Role::Chat | Role::Rerank => None,
+            }
         };
 
         let (price, output_price) = raw

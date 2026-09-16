@@ -559,6 +559,8 @@
         return t('models_hidden_no_stated_output_modalities', { count });
       case 'noTextOutput':
         return t('models_hidden_no_text_output', { count });
+      case 'batchOnly':
+        return t('models_hidden_batch_only', { count });
       default: {
         const exhaustive: never = r;
         throw new Error(`unhandled model refusal kind: ${(exhaustive as { kind: string }).kind}`);

@@ -1789,6 +1789,7 @@ mod tests {
                 }
                 Refusal::NoStatedOutputModalities => json!({"kind": "noStatedOutputModalities"}),
                 Refusal::NoTextOutput => json!({"kind": "noTextOutput"}),
+                Refusal::BatchOnly => json!({"kind": "batchOnly"}),
             }
         };
         for r in [
@@ -1802,6 +1803,7 @@ mod tests {
             },
             Refusal::NoStatedOutputModalities,
             Refusal::NoTextOutput,
+            Refusal::BatchOnly,
         ] {
             assert_eq!(
                 serde_json::to_value(&r).unwrap(),
