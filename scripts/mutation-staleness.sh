@@ -141,7 +141,7 @@
 # PR #4 (`refuse-by-content.sh`). Guard 5 requires every case file to be in
 # exactly one of two states — named in that matrix, or carrying
 # `# not-in-matrix: <reason>` in its own header — and reports the two ways of
-# being in neither or both. `--self-test` runs it against fixtures.
+# being in neither or both.
 #
 # ⚠️ **The whole question this script has to keep asking of itself: is there an
 # input for which it reports success by checking LESS?** Asked deliberately in
@@ -241,9 +241,6 @@ expr_wants_every_match() {
 # carrying `# not-in-matrix: <reason>` in its own header. Both at once is
 # a stale marker waiting to excuse a future accidental removal; neither is
 # a file nobody runs.
-#
-# Both functions take their inputs as arguments so `--self-test` can point
-# them at fixtures; nothing here reads `$REPO` directly.
 #
 # `matrix_files <ci.yml>` prints the names in `jobs.mutations.strategy.matrix.file`,
 # one per line. It is not a YAML parser: it reads one block of a fixed shape
