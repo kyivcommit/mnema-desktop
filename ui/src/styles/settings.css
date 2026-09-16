@@ -194,6 +194,12 @@ main select:focus-visible {
   align-items: center;
   gap: 10px;
 }
+.progress-row progress {
+  min-width: 0;
+}
+.progress-row span {
+  white-space: nowrap;
+}
 .job-details progress {
   width: 100%;
   height: 8px;
