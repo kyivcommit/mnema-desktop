@@ -24,7 +24,57 @@ fn worker_answering(dir: &Path, name: &str, line: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{line}'\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wait_until_it_will_run(&path);
     path
+}
+
+/// Runs the script once before handing it over, retrying while Linux says the
+/// file is still open for writing somewhere.
+///
+/// The same function as `crates/mnema-ingest/tests/support/mod.rs` has, for the
+/// same reason: `fs::write` has closed its own descriptor, but a child that
+/// another test's thread forked during that write still holds a copy until its
+/// `exec`, and running the file inside that window fails with "Text file busy".
+/// Seen once in CI here (`an_extension_naming_no_reader_is_refused_too`,
+/// ubuntu-24.04, run 35088290024) and measured 2026-09-16 on the Ubuntu stand:
+/// 105 and 122 refusals in 2,000 write-then-exec rounds against three threads
+/// spawning `/bin/true`, 0 without them. Nothing opens the file for writing
+/// again after this, so one successful run means every such child has passed
+/// its `exec` and the file is free for good.
+///
+/// The pre-run is itself a spawn outside the pool's lock, so its child can hold
+/// the pipe ends of a `Pool::manifest` spawned at the same moment — for the
+/// millisecond `/bin/sh` takes to print one line and exit, which `manifest`
+/// then waits out as part of `wait_with_output`. Accepted: it delays, it does
+/// not lose, and nothing in this binary writes to a departed worker.
+fn wait_until_it_will_run(path: &Path) {
+    use std::process::{Command, Stdio};
+
+    for _ in 0..400 {
+        match Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => panic!(
+                "the stand-in at {} will not run at all: {e}",
+                path.display()
+            ),
+        }
+    }
+    panic!(
+        "{} was still reported as busy after two seconds of retrying, which is far longer \
+         than a fork-to-exec window: something holds it open for writing",
+        path.display()
+    );
 }
 
 fn pool_over(worker: PathBuf) -> Pool {
