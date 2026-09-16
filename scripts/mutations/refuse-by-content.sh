@@ -207,7 +207,7 @@ case_ "wire: the worker sends the digest for a format it has no reader for" \
   'file_type.mime, file_type.reader
                 ),
                 sha256: None,' \
-  mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
+  mnema-extract 'a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported' --test worker_cli
 
 # `binary_tail` never displaces, so this field cannot cost a document through
 # `displaces` today — which is exactly why it needs a case at the boundary
