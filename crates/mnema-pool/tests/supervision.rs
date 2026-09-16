@@ -29,8 +29,6 @@ use mnema_pool::{Document, Failure, Pool, PoolConfig, PoolError, Skip};
 #[cfg(not(target_os = "linux"))]
 use mnema_pool::{MemoryCeiling, memory_ceiling};
 
-/// The stand-in worker (`src/bin/test_worker.rs`), whose behaviour is selected
-/// by the prefix on the requested path.
 /// Every block of a document, pages flattened away. For the tests that only
 /// care that text came back at all — which page it sat on is another test's
 /// question.

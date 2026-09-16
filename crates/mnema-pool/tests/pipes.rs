@@ -1,7 +1,7 @@
 //! A worker's pipe ends must never reach a sibling's child.
 //!
 //! Its own binary, on purpose. The property is that no two spawns **in this
-//! process** overlap, and `tests/supervision.rs` also spawns `ps` and `kill`
+//! process** overlap, and `tests/outside_the_pool.rs` spawns `ps` and `kill`
 //! outside the pool; a child of those, between its fork and its exec, holds a
 //! copy of every descriptor the process has — which for a few microseconds
 //! includes the read end of a worker being spawned at that moment — and the

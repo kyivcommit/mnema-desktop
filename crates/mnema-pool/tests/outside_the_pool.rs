@@ -1,13 +1,23 @@
-//! Tests that spawn processes **outside** the pool — `ps`, `kill`, and on macOS
-//! `/usr/bin/true` under `pre_exec` — in a binary of their own.
+//! An idle worker's death, and the `ps` and `kill` that observing it takes —
+//! in a binary of its own.
 //!
-//! A child of such a spawn holds a copy of every descriptor this process has
-//! between its fork and its exec, the read end of a worker's request pipe
-//! included if a worker is being spawned at that moment; the pool's lock covers
-//! only the pool's own spawns. `supervision.rs` is where a departed worker must
-//! be detected by a failed write, so nothing in that process may spawn behind
-//! the lock's back. Measured 2026-09-16 on a four-core Ubuntu stand: the pipe
-//! test hit exactly this once in twenty runs while these lived beside it.
+//! The property every binary in this crate has to keep is this: a process that
+//! writes to a departed worker and expects the write to fail must never let a
+//! spawn outside the pool overlap a spawn inside it. A child of any spawn holds
+//! a copy of every descriptor the process has between its fork and its exec,
+//! the read end of a worker's request pipe included if that worker is being
+//! spawned at the moment; the pool's lock covers the pool's own spawns and
+//! nothing else. Measured 2026-09-16 on a four-core Ubuntu stand: the test in
+//! `pipes.rs` hit exactly this once in twenty runs while it shared a process
+//! with the `ps` loop below.
+//!
+//! The test here expects a failed write too — into the worker it has just
+//! killed — and holds the property by order rather than by a lock: it is the
+//! only test in this process, its `kill` and `ps` run after that worker was
+//! spawned and before the next one is, so no child of theirs can ever hold a
+//! pipe end of either. The macOS rlimit probe used to live here as well and
+//! now has `rlimit.rs`, because its `pre_exec` fork could overlap this test's
+//! first spawn.
 
 use std::time::{Duration, Instant};
 
@@ -77,40 +87,5 @@ fn a_worker_that_died_while_idle_costs_the_next_file_nothing() {
         pool.worker_generation(),
         2,
         "the dead worker was replaced, not written to"
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn this_macos_still_refuses_an_address_space_rlimit() {
-    // Measured 2026-07-26 on Darwin 25.5.0/arm64: setrlimit(RLIMIT_AS) fails
-    // with EINVAL, and `ulimit -v` agrees. The pool's Linux-only ceiling rests
-    // on that, so the fact is pinned here rather than trusted to a comment: if
-    // a future macOS starts honouring the call, this test goes red and the
-    // ceiling can be switched on for a platform that has one.
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let mut command = Command::new("/usr/bin/true");
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        command.pre_exec(|| {
-            let limit = libc::rlimit {
-                rlim_cur: 512 << 20,
-                rlim_max: 512 << 20,
-            };
-            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let error = command
-        .status()
-        .expect_err("macOS is expected to reject an address-space limit");
-    assert_eq!(
-        error.raw_os_error(),
-        Some(libc::EINVAL),
-        "expected EINVAL from setrlimit(RLIMIT_AS), got {error:?}"
     );
 }

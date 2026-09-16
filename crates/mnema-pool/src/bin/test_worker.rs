@@ -1,4 +1,4 @@
-//! A stand-in extraction worker, for `tests/supervision.rs` only. **Not a
+//! A stand-in extraction worker, for this crate's integration tests only. **Not a
 //! product binary** — nothing outside this crate's tests should ever run it.
 //!
 //! It speaks the real protocol (`mnema_core::wire`) so the supervisor under

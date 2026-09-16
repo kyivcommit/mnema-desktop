@@ -1,8 +1,6 @@
 //! Shared by the test binaries of this crate. Each binary is its own process,
 //! and which spawns share a process is the whole point of there being several:
-//! see `pipes.rs` and `outside_the_pool.rs`.
-
-#![allow(dead_code)]
+//! see `pipes.rs`, `outside_the_pool.rs` and `rlimit.rs`.
 
 use std::path::Path;
 use std::sync::Arc;

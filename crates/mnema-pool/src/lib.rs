@@ -432,7 +432,7 @@ pub enum MemoryCeiling {
 /// Deliberately decided at compile time per platform rather than probed at
 /// runtime: the only way to probe `setrlimit` is to call it, and calling it on
 /// ourselves would limit the application. The macOS answer is measured, not
-/// assumed — `crates/mnema-pool/tests/supervision.rs` pins it, so the day the
+/// assumed — `crates/mnema-pool/tests/rlimit.rs` pins it, so the day the
 /// platform grows the call, a test goes red instead of a comment going stale.
 pub fn memory_ceiling() -> MemoryCeiling {
     #[cfg(target_os = "linux")]
