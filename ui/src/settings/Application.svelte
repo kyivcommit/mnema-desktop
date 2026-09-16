@@ -598,10 +598,19 @@
   //
   // Which region a sentence goes to is decided by WHAT IT IS ABOUT, not by
   // what happened to trigger it: a state a read reported is polite, a refusal
-  // of an operation this window issued is assertive. One seam is known and
-  // left in the open — `application` turns `unknown` from a failed mount-time
-  // `get_locale` too, with nobody having pressed anything, and that arrives
-  // assertive. The sentence is about an apply either way.
+  // of an operation this window issued is assertive.
+  //
+  // 🔴 That is NOT the spec's criterion, which says assertive means "a person
+  // just pressed, the answer is urgent" (§2.2). The two disagree in both
+  // directions, and both disagreements are left standing deliberately:
+  // a re-read refused after a press on "Retry reading" is drawn polite, and
+  // two paths reach assertive with nobody having pressed anything — a failed
+  // mount-time `get_locale`, and a REMOUNT, because `localeChoiceState` is
+  // module-level and `Settings.svelte` rebuilds this section on every switch,
+  // so a standing `partial`/`unknown`/`changeError` is inserted into the
+  // assertive region again. Whether that is right is the owner's call, booked
+  // rather than decided here; the live check's scenario 5 is where the
+  // remount case gets heard rather than reasoned about.
   //
   // Visible paragraphs stay where they are and name their region through
   // `data-announced-by`; none of them is a descendant of either.

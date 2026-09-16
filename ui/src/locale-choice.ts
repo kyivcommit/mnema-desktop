@@ -177,8 +177,12 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
       application: reply.applyErrors.length > 0
         ? { kind: 'partial', errors: reply.applyErrors }
         : { kind: 'applied' },
-      // Carried through rather than reset: `state.set` used to drop both, and
-      // a reset stamp is a stamp that repeats.
+      // Carried through rather than reset, because `state.set` used to drop
+      // both and a dropped stamp is a silent one. The VALUE here guards
+      // nothing on its own — `error: null` above already takes the read's
+      // failure nodes off the region, so the next failure inserts them fresh
+      // whatever the stamp says. Both mutants (reset it, bump it) leave the
+      // suite green; this line keeps the field's meaning, not a behaviour.
       readStamp: s.readStamp,
       applyStamp: s.applyStamp + 1,
     }));
@@ -192,6 +196,11 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
     // read whichever way that read goes.
     state.update((s) => ({
       ...s, busy: false, changeError: errorMessage(e), application: { kind: 'unknown' },
+      // Same as the success path: the bump keeps "moves on every answer" true,
+      // but the repeat on THIS path is already audible without it, because
+      // `changeError: null` at the start of every change takes both nodes off
+      // the region first. Mutating this to `s.applyStamp` leaves the suite
+      // green, and no fixture distinguishing the two could be constructed.
       applyStamp: s.applyStamp + 1,
     }));
     await loadLocaleChoice();

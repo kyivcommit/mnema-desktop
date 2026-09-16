@@ -1336,7 +1336,7 @@ test('a partial reply keeps the select on the confirmed choice and lists the sur
   // Confirmed, not rejected: the select stays on the choice the reply named.
   expect(languageSelect().value).toBe('en');
   expect(at('application-language-partial')).toBe('Language saved, but not applied everywhere');
-  expect(pageText()).toContain('tray: tray not open');
+  expect(visiblePageText()).toContain('tray: tray not open');
   expect(screen.queryByTestId('application-language-failed')).toBeNull(); // this is not a rejection
 });
 
@@ -1356,7 +1356,7 @@ test('loading_locale_keeps_partial_application_warning', async () => {
   renderSection();
   await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
   expect(languageSelect().value).toBe('en');
-  expect(pageText()).toContain('menu not open');
+  expect(visiblePageText()).toContain('menu not open');
 });
 
 test('busy survives unmount and remount, so a remounted select stays disabled until the in-flight change settles', async () => {
