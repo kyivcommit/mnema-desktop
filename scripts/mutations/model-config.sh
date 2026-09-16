@@ -80,9 +80,9 @@ case_ "the input floor stops refusing anything" \
 # second survives a later "the floor is not doing anything, delete it".
 case_ "the input floor is not consulted at all" \
   crates/mnema-provider/src/catalogue.rs \
-  's~                InputLimit::Known \{ tokens \} if \*tokens < MIN_CONTEXT_TOKENS => \{\n                    Some\(Refusal::InputTooSmall \{\n                        limit: \*tokens,\n                        floor: MIN_CONTEXT_TOKENS,\n                    \}\)\n                \}\n                InputLimit::Known \{ \.\. \} => None,~                InputLimit::Known { .. } => None,~' \
-  '            Role::Embedding => match &input_limit {
-                InputLimit::Known { .. } => None,' \
+  's~                    InputLimit::Known \{ tokens \} if \*tokens < MIN_CONTEXT_TOKENS => \{\n                        Some\(Refusal::InputTooSmall \{\n                            limit: \*tokens,\n                            floor: MIN_CONTEXT_TOKENS,\n                        \}\)\n                    \}\n                    InputLimit::Known \{ \.\. \} => None,~                    InputLimit::Known { .. } => None,~' \
+  '                Role::Embedding => match &input_limit {
+                    InputLimit::Known { .. } => None,' \
   mnema-provider 'a_model_that_takes_512_tokens_is_refused_and_says_both_numbers' --test catalogue
 
 # The other direction of the same rule, and the expensive one: the floor is an
@@ -100,9 +100,9 @@ case_ "the input floor is applied to rerank as well" \
 
 case_ "the chat rule ignores output_modalities" \
   crates/mnema-provider/src/catalogue.rs \
-  's~            Role::Chat if !output_modalities_stated => Some\(Refusal::NoStatedOutputModalities\),\n            Role::Chat if !writes_text => Some\(Refusal::NoTextOutput\),\n            Role::Chat \| Role::Rerank => None,~            Role::Chat | Role::Rerank => None,~' \
-  '            },
-            Role::Chat | Role::Rerank => None,' \
+  's~                Role::Chat if !output_modalities_stated => Some\(Refusal::NoStatedOutputModalities\),\n                Role::Chat if !writes_text => Some\(Refusal::NoTextOutput\),\n                Role::Chat \| Role::Rerank => None,~                Role::Chat | Role::Rerank => None,~' \
+  '                },
+                Role::Chat | Role::Rerank => None,' \
   mnema-provider 'a_chat_model_that_does_not_write_text_is_refused' --test catalogue
 
 # The cycle's own defect class, in the place it was first found here: "the
