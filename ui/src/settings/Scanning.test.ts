@@ -185,6 +185,24 @@ test('a filled index says how many files it holds, the date it last grew, and ho
   expect(screen.queryByText('Ще нічого не проіндексовано.')).toBeNull();
 });
 
+// The phrase is an assertion about NOW. Drawn from a clock read inside the
+// derivation it froze at the minute the panel first appeared: «7 хвилин тому»
+// beside a menu bar 23 minutes on (owner, 2026-09-16).
+test('how long ago keeps up with the clock while the panel stays open', async () => {
+  vi.useFakeTimers();
+  try {
+    const at = Math.floor(Date.now() / 1000) - 7 * 60;
+    renderSection(read({ indexedFiles: 12, lastIndexedAt: at }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('Це було 7 хвилин тому.');
+
+    await vi.advanceTimersByTimeAsync(16 * 60_000);
+    expect(visible(screen.getByTestId('indexing-index-ago'))).toBe('Це було 23 хвилини тому.');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('the date follows the language, not the machine', async () => {
   const at = HOUR_AGO();
   renderSection(read({ indexedFiles: 12, lastIndexedAt: at }));

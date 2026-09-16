@@ -187,7 +187,19 @@ main select:focus-visible {
   gap: 6px;
 }
 
-/* the phase progress bar (mockup carries none of its own — new to Task 5) */
+/* the phase progress bar (mockup carries none of its own — new to Task 5),
+   with the per cent to its right (owner, 2026-09-16) */
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.progress-row progress {
+  min-width: 0;
+}
+.progress-row span {
+  white-space: nowrap;
+}
 .job-details progress {
   width: 100%;
   height: 8px;

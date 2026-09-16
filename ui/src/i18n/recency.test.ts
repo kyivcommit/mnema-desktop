@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { formatIndexedAt, formatIndexedDate } from './recency';
+import { formatDuration, formatIndexedAt, formatIndexedDate } from './recency';
 import { setLocale } from './index';
 
 // `locale` is a module-level store shared by every test in this file; restore
@@ -130,5 +130,19 @@ describe('formatIndexedDate', () => {
     expect(expected('en').endsWith('.')).toBe(false);
     expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk'));
     expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
+  });
+});
+
+describe('formatDuration', () => {
+  it('reads as days, hours, minutes and seconds, dropping the zero units', () => {
+    setLocale('uk');
+    expect(formatDuration(0)).toBe('0 с');
+    expect(formatDuration(59)).toBe('59 с');
+    expect(formatDuration(2100)).toBe('35 хв');
+    expect(formatDuration(2130)).toBe('35 хв 30 с');
+    expect(formatDuration(90_061)).toBe('1 д 1 год 1 хв 1 с');
+    expect(formatDuration(86_400 + 5)).toBe('1 д 5 с');
+    setLocale('en');
+    expect(formatDuration(2130)).toBe('35 min 30 s');
   });
 });

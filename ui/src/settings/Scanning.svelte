@@ -80,10 +80,20 @@
   // alone because a filename sits beside it supplying the subject. Last on this
   // panel it had neither subject nor full stop while every line above it had
   // both, and read as a fragment somebody forgot to finish.
+  //
+  // `now` is STATE, not `Date.now()` read inside the derivation: a derivation
+  // re-runs only when something it read changes, and a clock read is not a
+  // dependency — the sentence froze at whatever minute the panel first drew
+  // (owner, 2026-09-16: "7 minutes ago" beside a menu bar 23 minutes later).
+  let now = $state(Date.now());
+  $effect(() => {
+    const id = setInterval(() => { now = Date.now(); }, 30_000);
+    return () => clearInterval(id);
+  });
   const agoLine = $derived.by(() => {
     void $locale;
     if (lastIndexedAt === null) return null;
-    return t('indexing_index_updated_ago', { ago: formatIndexedAt(lastIndexedAt, Date.now()) });
+    return t('indexing_index_updated_ago', { ago: formatIndexedAt(lastIndexedAt, now) });
   });
   const neverLine = $derived.by(() => {
     void $locale;

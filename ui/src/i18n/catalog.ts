@@ -83,7 +83,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_embed_starting_zero' | 'indexing_embed_running' | 'indexing_removing'
   | 'indexing_probe_running' | 'indexing_model_adoption_running' | 'indexing_summary_fallback'
   | 'indexing_counts_ratio' | 'indexing_counts_counting' | 'indexing_counts_contended'
-  | 'indexing_eta' | 'indexing_eta_unknown'
+  | 'indexing_eta' | 'indexing_eta_unknown' | 'indexing_percent'
+  | 'duration_d' | 'duration_h' | 'duration_min' | 'duration_s'
   | 'indexing_walk_ended_completed' | 'indexing_walk_ended_partly_read'
   | 'indexing_walk_ended_cancelled' | 'indexing_walk_ended_failed'
   | 'indexing_walk_ended_broken_worker' | 'indexing_walk_ended_rules_not_applied'
@@ -761,7 +762,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // it explains ("Пропущено") is the same fact either way, and reading it
     // off `lastReading` is what lets the sentence survive past the ending.
     indexing_counts_contended: 'Індекс саме зайнятий іншим записом, тож частину файлів цей скан не записав. Наступне сканування спробує їх знову.',
-    indexing_eta: 'Залишилось приблизно {seconds} с.',
+    indexing_eta: 'Залишилось приблизно {duration}.',
+    indexing_percent: '{percent} %',
+    duration_d: '{n} д',
+    duration_h: '{n} год',
+    duration_min: '{n} хв',
+    duration_s: '{n} с',
     // `secondsLeft` is `Option<u64>`: "ще не відомо" is a real state, and it is
     // the ordinary one at the start of every run.
     indexing_eta_unknown: 'Скільки ще лишилось часу, поки не відомо.',
@@ -1239,7 +1245,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexing_counts_ratio: 'Processed {done} of {total}. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_counting: 'Processed {done}. How many there are in total is not known yet. Skipped: {skipped}. Given up on: {refused}.',
     indexing_counts_contended: 'The index is busy with another write, so this scan did not write some files. The next scan will try them again.',
-    indexing_eta: 'About {seconds} s left.',
+    indexing_eta: 'About {duration} left.',
+    indexing_percent: '{percent} %',
+    duration_d: '{n} d',
+    duration_h: '{n} h',
+    duration_min: '{n} min',
+    duration_s: '{n} s',
     indexing_eta_unknown: 'How much time is left is not known yet.',
     indexing_walk_ended_completed: 'The folders were indexed in full.',
     indexing_walk_ended_partly_read: 'The folders were only partly indexed: some subfolders could not be entered. Nothing in these folders was checked against the index, so both deleted files and files your exclusion rules now cover are still found by search — not only inside those subfolders.',
