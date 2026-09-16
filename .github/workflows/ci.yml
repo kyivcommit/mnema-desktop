@@ -402,10 +402,10 @@ jobs:
       # that keeps it so. Its output is the sweep's own reading matter and is
       # long (2 700 lines), so only the problem list it prints last is shown,
       # and only when it fails — a red step with no output would send whoever
-      # reads it back to a local run to learn which citation moved. The sweep's
-      # own self-test runs as a step of its own first, so a red line names
-      # the thing that failed: the self-test writes its failures to stderr,
-      # and only its success line is silenced.
+      # reads it back to a local run to learn which citation moved. Both
+      # sweeps' own self-tests run as steps of their own first, so a red line
+      # names the thing that failed: each self-test writes its failures to
+      # stderr, and only its success line is silenced.
       - name: Self-test the staleness sweep
         run: scripts/mutation-staleness.sh --self-test > /dev/null
       - name: Self-test the obligation sweep
@@ -453,13 +453,19 @@ jobs:
     # 33671866360, in front of the slowest file. The warm case is the steady
     # state; the first run of this matrix is the measurement of it.
     #
-    # ⚠️ **This list is not every case file, and the omission is a decision
-    # rather than an oversight.** `mutation-staleness.sh` in `sweeps` proves
-    # each case still APPLIES; a job here proves a case still KILLS, and only
-    # for what is named here. A file left out is local evidence and nothing
-    # more — which is what PR 8a's four files were until they were added, and
-    # what `source.sh`/`embedding.sh` alone made this job's old name ("this
-    # cycle's mutation cases") untrue two cycles ago.
+    # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
+    # `sweeps` proves each case still APPLIES; a job here proves a case still
+    # KILLS, and only for what is named here. A file left out is local
+    # evidence and nothing more — which is what 30 files and 520 cases were
+    # until 2026-09-16, one of them broken since PR 9b and one carrying a
+    # live mutant since PR #4, because "the omission is a decision" lived only
+    # in this comment. Guard 5 of the sweep now requires every case file to
+    # be named here or to carry `# not-in-matrix: <reason>` in its own header
+    # (exactly one of the two), so a new case file that nobody adds here is a
+    # red `sweeps`, not a quiet gap. Every file added on that day was admitted
+    # on a local `mutation-check.sh` run reporting `still green: 0` and
+    # `broken cases: 0`; the logs are in the private repository's SDD
+    # directory for that cycle.
     #
     # ⚠️ **`pr8-exclusions-macos.sh` is deliberately absent and cannot be
     # added here.** The matrix is over files, not operating systems: every
@@ -514,6 +520,34 @@ jobs:
           - pr10f-settings
           - watcher
           - launcher-position
+          - branch-review
+          - citation-identity
+          - model-config
+          - pr7-boot-index
+          - pr7-default-models
+          - pr8-masks
+          - pr8c-mask-differential
+          - refuse-by-content
+          - task-1
+          - task-2
+          - task-3
+          - task-4
+          - task-5
+          - task-6
+          - task-7
+          - task-8
+          - task-8-pdf
+          - task-9
+          - task-9-notextlayer
+          - task-10
+          - task-11
+          - task-12
+          - task-13
+          - task-13-xlsx
+          - task-14
+          - task-d61
+          - task-d64
+          - tree
         include:
           - file: pr8-ui-folders
             node: true

@@ -1,4 +1,5 @@
 # Mutation cases for the per-platform Pdfium resource declaration. Run with:
+# not-in-matrix: each case breaks ONE platform's bundle config (5 linux, 1 windows, 1 macOS, 2 script); tauri_build::build() reads the target platform's config before any test runs, so no single-OS leg can run all nine — measured red: 9 on macOS, 2026-09-16
 #
 #   scripts/mutation-check.sh scripts/mutations/linux-resource.sh
 #
