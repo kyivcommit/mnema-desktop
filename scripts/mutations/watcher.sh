@@ -94,23 +94,14 @@ case_ "watch: the OS watcher is built by rewatch at all" \
   'if false {' \
   mnema-desktop 'watch::tests::a_watcher_the_os_refused_at_startup_is_created_on_a_later_tick' --lib
 
-case_ "watch: a refused start-up scan is never retried" \
+# D157 (owner, 2026-09-16): nothing is scanned at launch. The mutant puts the
+# old launch trigger back; the test counts zero starts after launch and after
+# a tick, then one after a file lands in the root.
+case_ "watch: a launch scan comes back" \
   src-tauri/src/watch.rs \
-  's~if !startup_done \{~if false {~' \
-  'if false {' \
-  mnema-desktop 'watch::tests::a_startup_scan_refused_by_a_closed_index_is_retried_on_the_tick' --lib
-
-# Task 11 review (round 1, item 1) added the pre-check; this case pins it
-# on its own — case 12 covers the enclosing `if !startup_done`, not this
-# inner branch. Anchored on the full `if slot.stopped_at().is_some() {`
-# line so it hits only the pre-check site, not `trigger`'s own read of
-# `stopped_at` or the two post-hoc `startup_done = seen_last.is_some() ||
-# slot.stopped_at().is_some();` assignments elsewhere in the same function.
-case_ "watch: a Stop pressed before the retry no longer discharges the owed start-up scan" \
-  src-tauri/src/watch.rs \
-  's~if slot\.stopped_at\(\)\.is_some\(\) \{~if false {~' \
-  'if false {' \
-  mnema-desktop 'watch::tests::a_stop_while_the_startup_scan_is_still_owed_cancels_the_obligation' --lib
+  's~let mut seen_last: Option<Instant> = None;~let mut seen_last = trigger(\&*slot, \&self.pending, Some(Instant::now()), \&mut sleep);~' \
+  'let mut seen_last = trigger(&*slot, &self.pending, Some(Instant::now()), &mut sleep);' \
+  mnema-desktop 'watch::tests::nothing_is_scanned_at_launch_but_a_disk_change_still_is' --lib
 
 # Task 12 (independent review, P2): the `forget` drain removes a root from
 # `watched` before the liveness pass runs; without also feeding `lost`, a
