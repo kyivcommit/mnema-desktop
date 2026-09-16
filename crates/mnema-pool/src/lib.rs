@@ -70,6 +70,28 @@ use mnema_index::SkipRule;
 /// back.
 const READ_AHEAD: usize = 64;
 
+/// Every spawn this crate makes, one at a time.
+///
+/// A child inherits every descriptor that is not `FD_CLOEXEC` at the moment it
+/// is created, and on macOS the standard library makes a pipe in two calls —
+/// `pipe()`, then `fcntl(FD_CLOEXEC)` on each end — so a spawn on another
+/// thread between them puts both ends of a worker's pipes into a stranger's
+/// child, which keeps them for as long as it lives. Two things then stop
+/// working: a write into a departed worker's request pipe is buffered instead
+/// of refused, and the file waits out `timeout` for an answer that never comes;
+/// and a retired worker's reader thread never sees end-of-file, so `Drop`
+/// blocks on the join until the stranger exits. Measured 2026-09-16, Apple M2
+/// Max: 6 and 10 writes in 2,000 accepted by a pipe with no reader against a
+/// concurrent spawner, 0 without one, and 0 in 2,000 with every spawn under
+/// this lock. `tests/supervision.rs` pins it with pools as the spawners.
+///
+/// Process-wide, because the window is process-wide: it only closes if no
+/// two spawns in this process overlap. Spawns made elsewhere in the process
+/// are not covered — a short-lived one holds the ends for milliseconds.
+// ponytail: serialises ~4 ms per spawn; a private posix_spawn with
+// POSIX_SPAWN_CLOEXEC_DEFAULT would close the other direction too.
+static SPAWN: Mutex<()> = Mutex::new(());
+
 // ---------------------------------------------------------------- what fails
 
 /// Declares [`Failure`] and, from the same list, the slice
@@ -845,17 +867,28 @@ impl Pool {
     /// freshness of every file in the index from a value nothing measured, and
     /// it would do it silently.
     pub fn manifest(&self) -> Result<Manifest, PoolError> {
-        let out = Command::new(&self.config.worker)
+        let mut command = Command::new(&self.config.worker);
+        command
             .arg("--manifest")
             // Nothing is written to this child: it answers an argument, not a
             // request. Null rather than inherited, so a worker built to read
             // stdin cannot sit waiting on the parent's own terminal.
             .stdin(Stdio::null())
-            .output()
-            .map_err(|source| PoolError::Spawn {
-                worker: self.config.worker.clone(),
-                source,
-            })?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = {
+            let _one_at_a_time = SPAWN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            command.spawn()
+        }
+        .map_err(|source| PoolError::Spawn {
+            worker: self.config.worker.clone(),
+            source,
+        })?;
+        let out = child
+            .wait_with_output()
+            .map_err(|source| PoolError::Wait { source })?;
         if !out.status.success() {
             return Err(protocol(
                 &String::from_utf8_lossy(&out.stderr),
@@ -953,7 +986,13 @@ impl Pool {
             apply_memory_ceiling(&mut command, bytes);
         }
 
-        let mut child = command.spawn().map_err(|source| PoolError::Spawn {
+        let mut child = {
+            let _one_at_a_time = SPAWN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            command.spawn()
+        }
+        .map_err(|source| PoolError::Spawn {
             worker: self.config.worker.clone(),
             source,
         })?;

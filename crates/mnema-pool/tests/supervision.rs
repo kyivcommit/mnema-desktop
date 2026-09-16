@@ -1087,3 +1087,81 @@ fn a_refusal_under_an_unknown_rule_stops_the_job() {
     // mismatch is the job's problem, not this pool's permanent state.
     document(extract(&pool, "ok:after.txt").unwrap());
 }
+
+// --- Pipe ends must not leak into a sibling's child --------------------------
+
+/// A departed worker is detected by the write into its request pipe failing.
+/// That holds only while nobody else holds the pipe's read end — and on macOS
+/// the standard library creates a pipe with `pipe()` and sets `FD_CLOEXEC` in a
+/// second call, so a `spawn` on another thread in between inherits both ends
+/// into a child that then keeps them for as long as it lives. Measured
+/// 2026-09-16 with a standalone probe on Apple M2 Max: 6 and 10 writes in 2000
+/// succeeded into a pipe whose only reader had closed it, against 0 in 2000
+/// without a concurrent spawner; with every spawn under one process-wide lock,
+/// 0 in 2000 twice over 140,000 background spawns.
+///
+/// Here the spawners are pools too — a `batch` of one retires a worker after
+/// every file, so each `extract` is a spawn — and the deaf worker's second
+/// request must still be answered on a fresh worker, not time out. A hit costs
+/// `timeout` and arrives as a skip, which is what the assertion names.
+#[cfg(unix)]
+#[test]
+fn a_concurrent_spawn_does_not_keep_a_departed_workers_pipe_open() {
+    let _watchdog = Watchdog::new("pipe inheritance", Duration::from_secs(300));
+    let rounds: usize = std::env::var("MNEMA_PIPE_RACE_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let spawners: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let pool = Pool::new(PoolConfig {
+                    workers: 1,
+                    batch: 1,
+                    ..config()
+                })
+                .unwrap();
+                while !stop.load(Ordering::SeqCst) {
+                    document(extract(&pool, "ok:churn.txt").unwrap());
+                }
+            })
+        })
+        .collect();
+
+    let probes: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(move || {
+                for round in 0..rounds {
+                    let pool = Pool::new(PoolConfig {
+                        workers: 1,
+                        batch: 100,
+                        timeout: Duration::from_secs(1),
+                        ..config()
+                    })
+                    .unwrap();
+                    document(extract(&pool, "deaf:first.txt").unwrap());
+                    match extract(&pool, "ok:second.txt").unwrap() {
+                        mnema_pool::Outcome::Extracted(_) => {}
+                        mnema_pool::Outcome::Skipped(skip) => panic!(
+                            "round {round}: the request to a departed worker was buffered \
+                             instead of refused — its pipe was inherited by a sibling's \
+                             child — and the file timed out: {skip:?}"
+                        ),
+                    }
+                    assert_eq!(pool.worker_generation(), 2);
+                }
+            })
+        })
+        .collect();
+
+    for probe in probes {
+        probe.join().expect("a probe thread panicked");
+    }
+    stop.store(true, Ordering::SeqCst);
+    for spawner in spawners {
+        spawner.join().unwrap();
+    }
+}
