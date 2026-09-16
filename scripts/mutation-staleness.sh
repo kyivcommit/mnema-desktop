@@ -111,6 +111,7 @@
 # Usage:
 #   scripts/mutation-staleness.sh                 # every case file, the default
 #   scripts/mutation-staleness.sh <case-file>…    # only these
+#   scripts/mutation-staleness.sh --self-test    # guard 5 and MISPLACED RUNNER against fixtures
 #
 # **Sweeping is the default because a green line about one file gets read as a
 # green line about the directory.** The first honest run of this script reported
@@ -141,7 +142,7 @@
 # PR #4 (`refuse-by-content.sh`). Guard 5 requires every case file to be in
 # exactly one of two states — named in that matrix, or carrying
 # `# not-in-matrix: <reason>` in its own header — and reports the two ways of
-# being in neither or both.
+# being in neither or both. `--self-test` runs it against fixtures.
 #
 # ⚠️ **The whole question this script has to keep asking of itself: is there an
 # input for which it reports success by checking LESS?** Asked deliberately in
@@ -260,6 +261,10 @@ expr_wants_every_match() {
 # lower-case-only class would read straight past a `Bundle:` job into its
 # keys — a `mutations:` job with no list of its own would then answer with
 # the next job's.
+#
+# Both functions below take their inputs as arguments — the workflow file,
+# the names file, the case file — so `--self-test` can point them at
+# fixtures; neither reads `$REPO` directly.
 matrix_files() {
   local yml="$1"
   if [ ! -f "$yml" ]; then
@@ -445,7 +450,7 @@ find_pkg_dir() {
 #      other guard for it (their verdicts would all be about the wrong
 #      runner). Before this, guard 4 read such a case as `cargo`, looked for
 #      a workspace member named after the vitest file, and printed TEST NOT
-#      FOUND — right case, wrong reason.
+#      FOUND — right case, wrong reason. `--self-test` control 8 holds it.
 #   2. Whether the test is GREEN. Guard 4 is a grep for the name, not a
 #      compile or a run — `mutation-check.sh`'s baseline pass is the only
 #      place that requires it to pass.
@@ -693,6 +698,132 @@ case_() {
   # the sourcing and never about whichever branch the last case took.
   return 0
 }
+
+# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Ten
+# controls, each with the line it expects (or expects NOT to see); a control
+# that gets the other answer is named by number on stderr. Three of them are
+# positive ("silent", or "refused for the right reason only") so a guard that always cries fails here as surely as
+# one that never does. Same shape as `check-booked.sh --self-test`, and run
+# the same way: first in `lint.sh` and first in the `sweeps` job.
+if [ "${1:-}" = "--self-test" ]; then
+  if [ $# -ne 1 ]; then
+    echo "unknown option: $2" >&2
+    exit 2
+  fi
+  T="$WORK/self-test"
+  mkdir -p "$T/mutations"
+  failed=0
+  fail() { echo "self-test FAILED control $1: $2" >&2; failed=$((failed + 1)); }
+
+  # A minimal workflow with the real shape: another job that also names
+  # `tree`, then the mutations job with a `file:` list and an `include:`.
+  cat > "$T/ci.yml" <<'YML'
+jobs:
+  sweeps:
+    steps:
+      - run: echo tree
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        include:
+          - file: source
+            node: true
+    runs-on: ubuntu-24.04
+YML
+  cat > "$T/ci-exclude.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        exclude:
+          - file: tree
+YML
+  cat > "$T/ci-exclude-space.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        exclude :
+          - file: tree
+YML
+  cat > "$T/ci-other-job-only.yml" <<'YML'
+jobs:
+  other:
+    strategy:
+      matrix:
+        file:
+          - tree
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+YML
+  printf 'case_ "x" a b c d e\n' > "$T/mutations/tree.sh"
+  printf 'case_ "x" a b c d e\n' > "$T/mutations/orphan.sh"
+  printf '# not-in-matrix: needs macOS\ncase_ "x" a b c d e\n' > "$T/mutations/exempt.sh"
+  printf '# not-in-matrix:\ncase_ "x" a b c d e\n' > "$T/mutations/empty-reason.sh"
+  printf '# not-in-matrix: stale marker\ncase_ "x" a b c d e\n' > "$T/mutations/source.sh"
+
+  names="$T/names"
+  matrix_files "$T/ci.yml" > "$names" || fail 0 "the fixture matrix should be readable"
+
+  # 1. in the matrix → silent
+  out=$(matrix_verdict "$names" "$T/mutations/tree.sh"); rc=$?
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 1 "a file in matrix.file is silent (got rc=$rc: $out)"
+  # 2. nowhere → NOT IN MATRIX
+  out=$(matrix_verdict "$names" "$T/mutations/orphan.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: orphan.sh'; } || fail 2 "a file in neither state is NOT IN MATRIX (got rc=$rc: $out)"
+  # 3. named only in another job → NOT IN MATRIX
+  other="$T/names-other"
+  matrix_files "$T/ci-other-job-only.yml" > "$other" || fail 3 "the other-job fixture should be readable"
+  out=$(matrix_verdict "$other" "$T/mutations/tree.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: tree.sh'; } || fail 3 "a name in another job's matrix does not count (got rc=$rc: $out)"
+  # 4. exclude: present → matrix_files refuses with 2
+  matrix_files "$T/ci-exclude.yml" > /dev/null 2> "$T/err4"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'exclude:' "$T/err4"; } || fail 4 "a matrix with exclude: is refused with exit 2 (got rc=$rc)"
+  # 5. in the matrix AND marked → BOTH
+  out=$(matrix_verdict "$names" "$T/mutations/source.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BOTH IN MATRIX AND EXEMPT: source.sh'; } || fail 5 "matrix entry plus marker is BOTH IN MATRIX AND EXEMPT (got rc=$rc: $out)"
+  # 6. marker with an empty reason, not in the matrix → NOT IN MATRIX
+  out=$(matrix_verdict "$names" "$T/mutations/empty-reason.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: empty-reason.sh'; } || fail 6 "an empty reason does not exempt (got rc=$rc: $out)"
+  # 7. marker with a reason, not in the matrix → silent
+  out=$(matrix_verdict "$names" "$T/mutations/exempt.sh"); rc=$?
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 7 "a marker with a reason is silent (got rc=$rc: $out)"
+  # 8. runner= after another argument → MISPLACED RUNNER, counted stale.
+  #    Through a file, never `$(…)`: a command substitution runs `case_` in a
+  #    subshell and the counters it increments there die with it, leaving the
+  #    parent's `$stale` unchanged and this control green on a broken guard.
+  before=$stale
+  case_ "probe" "no/such/file.rs" 's/a/b/' 'b' mnema-desktop 'no_such_test_zz' --lib runner=vitest > "$T/out8"
+  { grep -q '^MISPLACED RUNNER: probe' "$T/out8" && [ "$stale" -eq $((before + 1)) ] && [ "$misplaced" -eq 1 ]; } || fail 8 "runner= after another argument is MISPLACED RUNNER and stale (got: $(cat "$T/out8"); stale $before -> $stale)"
+
+  # 9. runner=vitest in the seventh position is consumed, not refused: the
+  #    vitest branch runs and reports the (missing) test file, never MISPLACED
+  before=$stale
+  case_ "placed" "no/such/file.rs" 's/a/b/' 'b' src/no-such.test.ts 'no such title' runner=vitest > "$T/out9"
+  { ! grep -q 'MISPLACED RUNNER' "$T/out9" && grep -q '^TEST NOT FOUND: placed' "$T/out9"; } || fail 9 "a runner= straight after the test name is dispatched as that runner (got: $(cat "$T/out9"))"
+  # 10. `exclude :` — a space before the colon is the same key to YAML; the
+  #     whitelist of matrix keys refuses it as it refuses `exclude:`
+  matrix_files "$T/ci-exclude-space.yml" > /dev/null 2> "$T/err10"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'exclude :' "$T/err10"; } || fail 10 "a matrix key this guard does not interpret, however spaced, is refused with exit 2 (got rc=$rc)"
+
+  if [ "$failed" -ne 0 ]; then
+    exit 1
+  fi
+  echo "self-test: 10 controls, all as expected"
+  exit 0
+fi
 
 # Guard 5 reads the matrix once; a matrix it cannot read is exit 2 here,
 # before any file is judged against it.
