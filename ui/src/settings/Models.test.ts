@@ -1093,6 +1093,33 @@ test('an option carries the stated price per million tokens beside the name', as
     .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
 });
 
+// Owner, 2026-09-16: one button, two states. The list opens by name; the
+// button names the order it is in, and a press swaps both the order and the
+// name. By price the unpriced entry goes last, whatever its name.
+test('the sort toggle swaps the picker between name order and price order', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('c', { name: 'Cheap C', price: { kind: 'known', amount: 0.000001 } }),
+      entry('a', { name: 'Aardvark A' }), // unpriced
+      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.0000005 } }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('a').length).toBe(1));
+  const order = () => [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
+
+  expect(screen.getByTestId('model-sort').textContent).toBe('By name');
+  expect(order()).toEqual(['a', 'b', 'c']);
+
+  await fireEvent.click(screen.getByTestId('model-sort'));
+  expect(screen.getByTestId('model-sort').textContent).toBe('By price');
+  expect(order()).toEqual(['b', 'c', 'a']);
+
+  await fireEvent.click(screen.getByTestId('model-sort'));
+  expect(screen.getByTestId('model-sort').textContent).toBe('By name');
+  expect(order()).toEqual(['a', 'b', 'c']);
+});
+
 test('the price note is absent when no option carries a price', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('mute', { name: 'Unpriced' })]) });
   await renderWith(settings());

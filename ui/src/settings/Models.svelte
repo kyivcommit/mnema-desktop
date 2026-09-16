@@ -6,7 +6,7 @@
     modelSettings, setKey, forgetKey, providerModels, setChatModel,
     setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
-    type ModelEntry, type ModelRefusal, type UnreadableRecord,
+    type ModelEntry, type ModelRefusal, type Price, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
   import type { JobController } from './jobs';
@@ -636,6 +636,24 @@
   // Drawn once under the picker, only when some option carries a price —
   // a note about prices over a list that shows none explains nothing.
   const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
+  // One button, two states (owner, 2026-09-16): the list is sorted by name
+  // or by price, and the button says which order it is in now. By price:
+  // input then output, the unpriced last — a person comparing costs wants
+  // the numbers together and the unknowns out of the way. Not persisted: a
+  // sort is a way of looking, not a setting.
+  let sortBy: 'name' | 'price' = $state('name');
+  const priceKey = (p: Price) => (p.kind === 'known' ? p.amount : Number.POSITIVE_INFINITY);
+  const sortedEntries = $derived.by(() => {
+    const entries = [...selectableEntries];
+    return sortBy === 'name'
+      ? entries.sort((a, b) => a.name.localeCompare(b.name))
+      : entries.sort((a, b) =>
+          priceKey(a.price) - priceKey(b.price) || priceKey(a.outputPrice) - priceKey(b.outputPrice));
+  });
+  const sortLabel = $derived.by(() => {
+    void $locale;
+    return t(sortBy === 'name' ? 'models_sort_name' : 'models_sort_price');
+  });
   function optionText(entry: ModelEntry): string {
     void $locale;
     if (entry.price.kind !== 'known') return entry.name;
@@ -1177,10 +1195,15 @@
         {#if selectPlaceholder}
           <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
         {/if}
-        {#each selectableEntries as entry}
+        {#each sortedEntries as entry}
           <option value={entry.id}>{optionText(entry)}</option>
         {/each}
       </select>
+      <button
+        type="button"
+        data-testid="model-sort"
+        onclick={() => { sortBy = sortBy === 'name' ? 'price' : 'name'; }}
+      >{sortLabel}</button>
     </div>
     {#if selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0)}
       <p data-testid="model-price-note">{priceNote}</p>
