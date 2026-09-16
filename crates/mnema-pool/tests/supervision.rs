@@ -1146,9 +1146,10 @@ fn a_concurrent_spawn_does_not_keep_a_departed_workers_pipe_open() {
                     match extract(&pool, "ok:second.txt").unwrap() {
                         mnema_pool::Outcome::Extracted(_) => {}
                         mnema_pool::Outcome::Skipped(skip) => panic!(
-                            "round {round}: the request to a departed worker was buffered \
-                             instead of refused — its pipe was inherited by a sibling's \
-                             child — and the file timed out: {skip:?}"
+                            "round {round}, worker generation {}: the request to a departed \
+                             worker was buffered instead of refused — its pipe was inherited \
+                             by a sibling's child — and the file timed out: {skip:?}",
+                            pool.worker_generation()
                         ),
                     }
                     assert_eq!(pool.worker_generation(), 2);
