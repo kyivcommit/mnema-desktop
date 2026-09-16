@@ -75,11 +75,34 @@ export type LocaleChoiceState = {
   // that read answered whether the EARLIER change applied everywhere.
   changeError: string | null;
   application: LocaleApplicationState;
+  // 🔴 Task 1b, spec §2.2 "a repeat must be heard". A refusal that repeats
+  // VERBATIM writes an identical string, and an identical string moves nothing
+  // in the DOM — so a live region announces nothing and a person who pressed
+  // "Retry reading" or "Retry applying" hears silence. Measured on Task 1: 0
+  // DOM changes on both buttons. These count WRITES, not values: they change
+  // on every answer, equal or not, and `Application.svelte` keys the
+  // announcement by them, so the second answer is a new node.
+  //
+  // `readStamp` moves when a read ANSWERS, not when it starts, so pressing
+  // retry does not first replay the previous failure.
+  //
+  // Deliberately not the spec's other candidate, "clear the message before
+  // asking again". The two writers that already do that (`changeError` here,
+  // `hotkeyError`/`themeError`/`autostartError` in the component) can afford
+  // it because their controls sit OUTSIDE the `{#if}` the message gates.
+  // These two cannot: `application-language-retry-read` lives inside
+  // `{#if languageReadError !== null}`, so clearing would delete the button
+  // under the finger that just pressed it and drop focus to the body — and
+  // clearing `application` would take the partial warning off screen while
+  // the retry is still in flight, which `Application.test.ts`'s own "clears
+  // only once it comes back clean" forbids.
+  readStamp: number;
+  applyStamp: number;
 };
 
 const INITIAL: LocaleChoiceState = {
   snapshot: null, snapshotConfirmed: false, busy: false, error: null, changeError: null,
-  application: { kind: 'initial' },
+  application: { kind: 'initial' }, readStamp: 0, applyStamp: 0,
 };
 
 const state = writable<LocaleChoiceState>({ ...INITIAL });
@@ -112,7 +135,9 @@ export async function loadLocaleChoice(): Promise<void> {
     state.update((s) => ({ ...s, snapshot: reply, error: null, snapshotConfirmed: true }));
   } catch (e) {
     if (mine !== opSeq) return;
-    state.update((s) => ({ ...s, error: errorMessage(e), application: { kind: 'unknown' } }));
+    state.update((s) => ({
+      ...s, error: errorMessage(e), application: { kind: 'unknown' }, readStamp: s.readStamp + 1,
+    }));
   }
 }
 
@@ -143,7 +168,7 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
     // `bootLocale` uses — never guessed from `choice`, the request this
     // window sent, which is not necessarily what a persist step wrote.
     applyEffectiveLocale(reply.effective);
-    state.set({
+    state.update((s) => ({
       snapshot: { choice: reply.choice, effective: reply.effective },
       snapshotConfirmed: true,
       busy: false,
@@ -152,7 +177,15 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
       application: reply.applyErrors.length > 0
         ? { kind: 'partial', errors: reply.applyErrors }
         : { kind: 'applied' },
-    });
+      // Carried through rather than reset, because `state.set` used to drop
+      // both and a dropped stamp is a silent one. The VALUE here guards
+      // nothing on its own — `error: null` above already takes the read's
+      // failure nodes off the region, so the next failure inserts them fresh
+      // whatever the stamp says. Both mutants (reset it, bump it) leave the
+      // suite green; this line keeps the field's meaning, not a behaviour.
+      readStamp: s.readStamp,
+      applyStamp: s.applyStamp + 1,
+    }));
   } catch (e) {
     // A rejected `set_locale` is `Error::Prefs`: the choice was never
     // persisted. But persist-vs-transport is not recoverable from the
@@ -161,7 +194,15 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
     // itself is kept in `changeError`, never in `error`: `loadLocaleChoice`
     // below only ever touches `error`, so this one survives the recovery
     // read whichever way that read goes.
-    state.update((s) => ({ ...s, busy: false, changeError: errorMessage(e), application: { kind: 'unknown' } }));
+    state.update((s) => ({
+      ...s, busy: false, changeError: errorMessage(e), application: { kind: 'unknown' },
+      // Same as the success path: the bump keeps "moves on every answer" true,
+      // but the repeat on THIS path is already audible without it, because
+      // `changeError: null` at the start of every change takes both nodes off
+      // the region first. Mutating this to `s.applyStamp` leaves the suite
+      // green, and no fixture distinguishing the two could be constructed.
+      applyStamp: s.applyStamp + 1,
+    }));
     await loadLocaleChoice();
   }
 }

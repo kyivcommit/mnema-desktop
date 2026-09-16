@@ -1336,7 +1336,7 @@ test('a partial reply keeps the select on the confirmed choice and lists the sur
   // Confirmed, not rejected: the select stays on the choice the reply named.
   expect(languageSelect().value).toBe('en');
   expect(at('application-language-partial')).toBe('Language saved, but not applied everywhere');
-  expect(pageText()).toContain('tray: tray not open');
+  expect(visiblePageText()).toContain('tray: tray not open');
   expect(screen.queryByTestId('application-language-failed')).toBeNull(); // this is not a rejection
 });
 
@@ -1356,7 +1356,7 @@ test('loading_locale_keeps_partial_application_warning', async () => {
   renderSection();
   await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
   expect(languageSelect().value).toBe('en');
-  expect(pageText()).toContain('menu not open');
+  expect(visiblePageText()).toContain('menu not open');
 });
 
 test('busy survives unmount and remount, so a remounted select stays disabled until the in-flight change settles', async () => {
@@ -1706,4 +1706,530 @@ test('a failed language read links the select to the sentence and the retry it o
   expect(ids).toContain('application-language-failed');
   expect(ids).toContain('application-language-error');
   for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Task 1b — two live regions, static volume, one child node per part
+// (spec §2.2, plan Global Constraints, redaction 3).
+//
+// Task 1's single region was measured wrong twice over. Its text was ONE
+// glued string in ONE node, so every change rewrote the node whole and a
+// person heard the standing state again on top of the refusal they had just
+// pressed for. And nothing guarded the mechanism itself: stripping
+// `aria-live`, pinning it to `polite`, or dropping `sr-only` each left the
+// whole suite green.
+//
+// The form here: two permanent regions whose volume NEVER changes — `polite`
+// for what the section reports about its own state, `assertive` for the
+// answer to something a person pressed — and each part as its own child node,
+// so an engine announces the node that arrived, not the region again.
+// ---------------------------------------------------------------------------
+
+const POLITE = 'application-live-polite';
+const ASSERTIVE = 'application-live-assertive';
+const politeRegion = () => screen.getByTestId(POLITE);
+const assertiveRegion = () => screen.getByTestId(ASSERTIVE);
+
+// What a region says, one entry per child — the form itself, not the glued
+// text. A composer that goes back to one string fails every use of this.
+const announced = (el: Element) => Array.from(el.children).map((c) => visible(c));
+
+// `pageText()` reads `textContent` of the whole body, live regions included,
+// so an assertion about VISIBLE text is satisfied by the hidden copy: on Task
+// 1, deleting the visible list of language reasons left all 78 tests green.
+// This strips the regions first, so what it returns is what a person sees.
+const visiblePageText = () => {
+  const copy = document.body.cloneNode(true) as HTMLElement;
+  for (const region of copy.querySelectorAll('[aria-live]')) region.remove();
+  return visible(copy);
+};
+
+// A DOM event is the proof that something was announced; the final text is
+// not. A refusal repeated VERBATIM leaves the text exactly right and the
+// person hearing nothing at all — measured on Task 1, both language retry
+// buttons.
+const watchAnnouncements = (el: Element) => {
+  let events = 0;
+  const observer = new MutationObserver((records) => { events += records.length; });
+  observer.observe(el, { childList: true, characterData: true, subtree: true });
+  return { count: () => events, stop: () => observer.disconnect() };
+};
+
+const REASON = 'Wayland session: this application cannot register a global shortcut';
+
+// A section whose shortcut status stands at `unavailable`, ready for a press.
+const withUnavailableShortcut = async (reason = REASON) => {
+  appPrefs.mockResolvedValue(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason } },
+  }));
+  renderSection();
+  await shown('application-shortcut-status');
+};
+
+// --- RED 1b.1: this is a live region, and it is the one it claims to be -----
+
+test('the polite region is a polite live region', async () => {
+  renderSection();
+  await shown('application-shortcut-status');
+  expect(politeRegion().getAttribute('aria-live')).toBe('polite');
+});
+
+test('the assertive region is an assertive live region', async () => {
+  renderSection();
+  await shown('application-shortcut-status');
+  expect(assertiveRegion().getAttribute('aria-live')).toBe('assertive');
+});
+
+test('both live regions are for the ear only', async () => {
+  renderSection();
+  await shown('application-shortcut-status');
+  expect(politeRegion().classList.contains('sr-only')).toBe(true);
+  expect(assertiveRegion().classList.contains('sr-only')).toBe(true);
+});
+
+test('both live regions are in the DOM before the first appPrefs() answer, and both start empty', async () => {
+  const first = deferred<AppPrefs>();
+  appPrefs.mockImplementationOnce(() => first.promise);
+  renderSection();
+
+  await screen.findByTestId(POLITE);
+  expect(announced(politeRegion())).toEqual([]);
+  expect(announced(assertiveRegion())).toEqual([]);
+
+  first.resolve(prefs());
+  await waitFor(() => expect(screen.getByTestId('application-shortcut')).toBeTruthy());
+});
+
+// --- RED 1b.2: the volume is right, and it is not a constant ---------------
+
+test('a status that simply stands is announced politely, and never assertively', async () => {
+  await withUnavailableShortcut();
+
+  await waitFor(() => expect(announced(politeRegion())).toContain(`Програма повідомила: ${REASON}`));
+  expect(announced(assertiveRegion())).toEqual([]);
+});
+
+test('a refusal that answers a press is announced assertively, and never politely', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  expect(announced(politeRegion())).not.toContain(SENTENCE);
+  expect(announced(politeRegion())).toEqual([]);
+});
+
+// --- RED 1b.3: a repeat must be heard --------------------------------------
+//
+// The assertion is about a CHANGE, not about the final text: the final text is
+// identical in both worlds, which is exactly why Task 1 shipped this defect.
+
+test('pressing "Retry reading" on the same language read failure is heard again', async () => {
+  const SENTENCE = 'IPC closed';
+  getLocale.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-language-error');
+  const watcher = watchAnnouncements(politeRegion());
+
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(2));
+  await tick();
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+  expect(announced(politeRegion())).toContain(SENTENCE);
+});
+
+test('pressing "Retry applying" on the same partial application is heard again', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'uk', effective: 'uk', applyErrors: [{ surface: 'tray', message: 'menu not rebuilt' }],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await shown('application-language-partial');
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await fireEvent.click(screen.getByTestId('application-language-retry-apply'));
+  await waitFor(() => expect(setLocaleChoice).toHaveBeenCalledTimes(2));
+  await tick();
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+  expect(announced(assertiveRegion())).toContain('tray: menu not rebuilt');
+});
+
+// --- RED 1b.4: every other path that writes a refusal, repeated ------------
+
+test('recording the same refused combination twice is heard twice', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(setHotkey).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
+test('pressing an unusable key twice is heard twice', async () => {
+  renderSection();
+  await record();
+  await pressKey({ key: 'F24', code: 'F24', ctrlKey: true });
+  await waitFor(() => expect(screen.getByTestId('application-shortcut-not-usable')).toBeTruthy());
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await pressKey({ key: 'F23', code: 'F23', ctrlKey: true });
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
+test('the same theme refusal, pressed twice, is heard twice', async () => {
+  const SENTENCE = 'prefs.json is read-only';
+  setTheme.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await waitFor(() => expect(setTheme).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
+test('the same autostart refusal, pressed twice, is heard twice', async () => {
+  const SENTENCE = 'the login item could not be written';
+  setAutostart.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-autostart-toggle');
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(setAutostart).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
+test('the same rejected language change, picked twice, is heard twice', async () => {
+  const SENTENCE = 'set_locale was refused';
+  setLocaleChoice.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(setLocaleChoice).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
+// The load failure has no retry control of its own: it is only ever written by
+// the corrective read a REJECTED change starts, and that change's own refusal
+// is what answers the press. So the press is always heard — through the
+// refusal beside it — and the standing load sentence is not repeated on top.
+test('a press whose corrective read also fails is still heard, and the standing load failure is not repeated', async () => {
+  const REFUSED = 'the operating system refused the combination';
+  const UNREADABLE = 'prefs.json could not be read';
+  setHotkey.mockRejectedValue(new Error(REFUSED));
+  renderSection();
+  await record();
+  appPrefs.mockRejectedValue(new Error(UNREADABLE));
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  const politeWatcher = watchAnnouncements(politeRegion());
+  const assertiveWatcher = watchAnnouncements(assertiveRegion());
+
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(setHotkey).toHaveBeenCalledTimes(2));
+  await tick();
+  await tick();
+
+  expect(assertiveWatcher.count()).toBeGreaterThan(0);
+  expect(politeWatcher.count()).toBe(0);
+  politeWatcher.stop();
+  assertiveWatcher.stop();
+});
+
+// --- RED 1b.5: a refusal must not make the standing state be read again ----
+
+test('a refused press leaves the standing status untouched in the polite region', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  await withUnavailableShortcut();
+  await waitFor(() => expect(announced(politeRegion())).toContain(`Програма повідомила: ${REASON}`));
+  const before = announced(politeRegion());
+  const watcher = watchAnnouncements(politeRegion());
+
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  await tick();
+
+  expect(watcher.count()).toBe(0);
+  expect(announced(politeRegion())).toEqual(before);
+  watcher.stop();
+});
+
+// --- RED 1b.6: the four paragraphs Task 1 left silent ----------------------
+
+test('the announced shortcut state carries the CLAIM, not only the reason that explains it', async () => {
+  await withUnavailableShortcut();
+
+  await waitFor(() => expect(announced(politeRegion())).toContain('Це скорочення не зареєстровано в системі.'));
+});
+
+test('the announced autostart state carries the CLAIM, not only the reason that explains it', async () => {
+  const WHY = 'the login item database could not be opened';
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'unknown', reason: WHY } }));
+  renderSection();
+  await shown('application-autostart-status');
+
+  await waitFor(() => expect(announced(politeRegion()))
+    .toContain('Не вдалося дізнатися, чи запускається Mnema під час входу в систему.'));
+  expect(announced(politeRegion())).toContain(`Програма повідомила: ${WHY}`);
+});
+
+test('the refusal of an unusable key is announced', async () => {
+  renderSection();
+  await record();
+
+  await pressKey({ key: 'F24', code: 'F24', ctrlKey: true });
+
+  await waitFor(() => expect(announced(assertiveRegion()).join(' ')).toContain('Цю клавішу не можна використати'));
+});
+
+test('an unconfirmed language application is announced', async () => {
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  renderSection();
+  await shown('application-language-select');
+
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain('Застосування мови не підтверджено.'));
+});
+
+// --- RED 1b.7: the VISIBLE list of reasons is still guarded ----------------
+
+test('the reasons a partial language application names are on screen, not only in the ear', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'uk',
+    effective: 'uk',
+    applyErrors: [
+      { surface: 'tray', message: 'menu not rebuilt' },
+      { surface: 'settingsTitle', message: 'title not updated' },
+    ],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await shown('application-language-partial');
+
+  expect(visiblePageText()).toContain('tray: menu not rebuilt');
+  expect(visiblePageText()).toContain('settingsTitle: title not updated');
+});
+
+// --- RED 1b.8: every visible refusal names the region that speaks for it ---
+
+// Every paragraph this section can put on screen because something refused,
+// and which of the two regions carries it. Named one by one on purpose: a
+// count would let one site be swapped for another, and a spot check let
+// fourteen of twenty go unguarded on Task 1.
+//
+// Three tables, because three of the twenty cannot be on screen beside the
+// rest: `not-usable` is cleared by the very press that produces a refused
+// `set_hotkey`, and a `partial` outcome is what a `set_locale` that RESOLVED
+// produces, so it never stands beside the rejection sentences.
+const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
+  ['application-load-failed', POLITE],
+  ['application-load-error', POLITE],
+  ['application-shortcut-status', POLITE],
+  ['application-shortcut-reason', POLITE],
+  ['application-shortcut-failed', ASSERTIVE],
+  ['application-shortcut-error', ASSERTIVE],
+  ['application-theme-failed', ASSERTIVE],
+  ['application-theme-error', ASSERTIVE],
+  ['application-language-unknown', ASSERTIVE],
+  ['application-language-change-unconfirmed', ASSERTIVE],
+  ['application-language-change-error', ASSERTIVE],
+  ['application-language-failed', POLITE],
+  ['application-language-error', POLITE],
+  ['application-autostart-status', POLITE],
+  ['application-autostart-reason', POLITE],
+  ['application-autostart-failed', ASSERTIVE],
+  ['application-autostart-error', ASSERTIVE],
+];
+const ANNOUNCED_BY_PARTIAL: ReadonlyArray<readonly [string, string]> = [
+  ['application-language-partial', ASSERTIVE],
+  ['application-language-partial-errors', ASSERTIVE],
+];
+const ANNOUNCED_BY_NOT_USABLE: ReadonlyArray<readonly [string, string]> = [
+  ['application-shortcut-not-usable', ASSERTIVE],
+];
+
+const namesItsRegion = (table: ReadonlyArray<readonly [string, string]>) => {
+  for (const [testid, regionId] of table) {
+    const el = screen.getByTestId(testid);
+    // The testid rides along in the assertion so a failure names the site.
+    expect([testid, el.getAttribute('data-announced-by')]).toEqual([testid, regionId]);
+    expect(document.getElementById(regionId)).toBeTruthy();
+  }
+};
+
+// Seventeen of the twenty on screen at once, so one fixture can ask about all
+// of them: a load failure does not stop the groups rendering once a read has
+// already succeeded.
+const everythingRefused = async () => {
+  appPrefs.mockResolvedValue(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } },
+    autostart: { kind: 'unknown', reason: 'the login item database could not be opened' },
+  }));
+  setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  setTheme.mockRejectedValue(new Error('prefs.json is read-only'));
+  // The mount's read succeeds, so the select is usable; every read after it
+  // fails, which is what puts the read refusal on screen.
+  getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' });
+  getLocale.mockRejectedValue(new Error('get_locale is unreachable'));
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  renderSection();
+  await shown('application-shortcut-status');
+
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await shown('application-theme-error');
+  await fireEvent.click(screen.getByTestId('application-autostart-enable'));
+  await shown('application-autostart-error');
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await shown('application-language-change-error');
+  await shown('application-language-error');
+  // Only now: the corrective read a refused `set_hotkey` starts is what writes
+  // the load failure, and the groups stay because the first read succeeded.
+  appPrefs.mockRejectedValue(new Error('prefs.json could not be read'));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await shown('application-shortcut-error');
+  await shown('application-load-error');
+};
+
+test('every visible refusal paragraph names the region that speaks for it, and that region exists', async () => {
+  await everythingRefused();
+
+  namesItsRegion(ANNOUNCED_BY);
+});
+
+test('the partial language warning and its list of reasons name their region too', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'uk', effective: 'uk', applyErrors: [{ surface: 'tray', message: 'menu not rebuilt' }],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await shown('application-language-partial');
+
+  namesItsRegion(ANNOUNCED_BY_PARTIAL);
+});
+
+test('the unusable-key refusal names its region too', async () => {
+  renderSection();
+  await record();
+  await pressKey({ key: 'F24', code: 'F24', ctrlKey: true });
+  await shown('application-shortcut-not-usable');
+
+  namesItsRegion(ANNOUNCED_BY_NOT_USABLE);
+});
+
+// A status line is drawn whether or not anything refused, so it names a region
+// only while it HAS a refusal in it — otherwise it would point the guard, and
+// a reader, at an announcement that was never made.
+test('a status line with nothing refused in it names no region', async () => {
+  renderSection();
+  await shown('application-shortcut-status');
+
+  expect(screen.getByTestId('application-shortcut-status').getAttribute('data-announced-by')).toBeNull();
+  expect(screen.getByTestId('application-autostart-status').getAttribute('data-announced-by')).toBeNull();
+});
+
+// --- The whole message, verbatim, as separate nodes ------------------------
+//
+// Task 1's RED 1.7 pinned an INCOMPLETE message as correct: it stated the
+// expected text whole and left out the four paragraphs above. This states it
+// whole again, over the complete set, and as the list of children the form
+// requires — one string back in one node fails here.
+
+test('the polite region says the standing state, node by node, and nothing else', async () => {
+  await withUnavailableShortcut();
+
+  await waitFor(() => expect(announced(politeRegion())).toEqual([
+    'Це скорочення не зареєстровано в системі.',
+    `Програма повідомила: ${REASON}`,
+  ]));
+  expect(announced(assertiveRegion())).toEqual([]);
+});
+
+test('the assertive region says the refusal, node by node, and nothing else', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(announced(assertiveRegion())).toEqual([
+    'Скорочення не змінено. Ось що відповів застосунок:',
+    SENTENCE,
+  ]));
+  expect(announced(politeRegion())).toEqual([
+    'Це скорочення не зареєстровано в системі.',
+    `Програма повідомила: ${REASON}`,
+  ]);
+});
+
+test('a rejected first read leaves no groups, but the polite region carries the load refusal', async () => {
+  const SENTENCE = 'disk unreadable';
+  appPrefs.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('application-load-failed')).toBeTruthy());
+  expect(screen.queryByRole('group')).toBeNull();
+  expect(announced(politeRegion())).toEqual([
+    'Не вдалося прочитати налаштування застосунку.',
+    SENTENCE,
+  ]);
+});
+
+test('a visible refusal paragraph is not a descendant of either region', async () => {
+  const SENTENCE = 'disk unreadable';
+  appPrefs.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('application-load-failed')).toBeTruthy());
+  const failed = screen.getByTestId('application-load-failed');
+  expect(politeRegion().contains(failed)).toBe(false);
+  expect(assertiveRegion().contains(failed)).toBe(false);
 });
