@@ -562,7 +562,59 @@
     if (languageReadError !== null) ids.push('application-language-failed', 'application-language-error');
     return ids.length === 0 ? undefined : ids.join(' ');
   });
+
+  // ---------------------------------------------------------------------------
+  // Task 1: one live region for the whole section (spec §2.2, plan Global
+  // Constraints). A single `sr-only` container — `JobStrip.svelte:486`'s own
+  // pattern — sitting OUTSIDE `{#if prefs}` below, so it exists in the DOM
+  // before the very first message a screen reader would need to hear: W3C
+  // ARIA22 requires the container to predate the message, and the first
+  // `appPrefs()` read can itself be refused (`loadError`, `:572`) before any
+  // of the four groups even exist. It carries the FULL text of every refusal
+  // paragraph currently on screen; those paragraphs stay exactly where they
+  // are and only gain `data-announced-by`, so the eye and the screen reader
+  // read the same words from the same state, never a second copy of either.
+  // ---------------------------------------------------------------------------
+
+  const LIVE_REGION_ID = 'application-live-region';
+
+  const liveRegionText = $derived.by(() => {
+    const parts: string[] = [];
+    if (loadError !== null) parts.push(loadFailedLabel, loadError);
+    if (prefs !== null) {
+      if (unavailable !== null && shortcutReasonText !== null) parts.push(shortcutReasonText);
+      if (hotkeyError !== null) parts.push(shortcutFailedLabel, hotkeyError);
+      if (themeError !== null) parts.push(themeFailedLabel, themeError);
+      if (languageApplication.kind === 'partial') {
+        parts.push(languagePartialLabel);
+        for (const err of languageApplication.errors) parts.push(`${err.surface}: ${err.message}`);
+      }
+      if (languageChangeError !== null) parts.push(languageChangeUnconfirmedLabel, languageChangeError);
+      if (languageReadError !== null) parts.push(languageFailedLabel, languageReadError);
+      if (autostartUnknown !== null && autostartReasonText !== null) parts.push(autostartReasonText);
+      if (autostartError !== null) parts.push(autostartFailedLabel, autostartError);
+    }
+    return parts.join(' ');
+  });
+
+  // `assertive` for a refusal that answers something a person just pressed;
+  // `polite` for a status that simply stands (`unavailable`, `autostartUnknown`
+  // with no attempt behind it) — spec §2.2.
+  const liveRegionAssertive = $derived(
+    hotkeyError !== null || themeError !== null || autostartError !== null || languageChangeError !== null,
+  );
 </script>
+
+<!-- Task 1: the section's one live region. Always in the DOM — ARIA22 — and
+     empty until there is something to say; every refusal paragraph below
+     names it via `data-announced-by` instead of carrying its own role/live
+     attribute. -->
+<p
+  id={LIVE_REGION_ID}
+  data-testid="application-live-region"
+  class="sr-only"
+  aria-live={liveRegionAssertive ? 'assertive' : 'polite'}
+>{liveRegionText}</p>
 
 <!-- The failed read leads and does not gate what follows: on the FIRST read's
      rejection there is nothing below anyway, because `prefs` is still null. A
@@ -570,8 +622,8 @@
      answer on screen, which is `Settings.svelte`'s ruling for `model_settings`
      and not a new one here. -->
 {#if loadError}
-  <p data-testid="application-load-failed">{loadFailedLabel}</p>
-  <p data-testid="application-load-error">{loadError}</p>
+  <p data-testid="application-load-failed" data-announced-by={LIVE_REGION_ID}>{loadFailedLabel}</p>
+  <p data-testid="application-load-error" data-announced-by={LIVE_REGION_ID}>{loadError}</p>
 {/if}
 
 {#if prefs}
@@ -589,12 +641,12 @@
     </p>
     <p data-testid="application-shortcut-status">{shortcutStatusText}</p>
     {#if unavailable}
-      <p data-testid="application-shortcut-reason">{shortcutReasonText}</p>
+      <p data-testid="application-shortcut-reason" data-announced-by={LIVE_REGION_ID}>{shortcutReasonText}</p>
       <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
     {/if}
     {#if hotkeyError !== null}
-      <p id="application-shortcut-failed" data-testid="application-shortcut-failed">{shortcutFailedLabel}</p>
-      <p id="application-shortcut-error" data-testid="application-shortcut-error">{hotkeyError}</p>
+      <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={LIVE_REGION_ID}>{shortcutFailedLabel}</p>
+      <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={LIVE_REGION_ID}>{hotkeyError}</p>
     {/if}
     <button
       type="button"
@@ -618,8 +670,8 @@
     <h3 id="application-group-appearance">{groupAppearanceLabel}</h3>
     <p id="application-theme-label">{themeLabelText}</p>
     {#if themeError !== null}
-      <p id="application-theme-failed" data-testid="application-theme-failed">{themeFailedLabel}</p>
-      <p id="application-theme-error" data-testid="application-theme-error">{themeError}</p>
+      <p id="application-theme-failed" data-testid="application-theme-failed" data-announced-by={LIVE_REGION_ID}>{themeFailedLabel}</p>
+      <p id="application-theme-error" data-testid="application-theme-error" data-announced-by={LIVE_REGION_ID}>{themeError}</p>
     {/if}
     <!-- Three explicit buttons rather than an `{#each}` over the choices:
          three literal `data-testid` strings stay greppable from the tests,
@@ -678,8 +730,8 @@
       <!-- Confirmed choice/effective, some surfaces did not pick it up —
            never a rejection: `set_locale` resolved, and this is what it
            resolved with. -->
-      <p id="application-language-partial" role="alert" data-testid="application-language-partial">{languagePartialLabel}</p>
-      <ul data-testid="application-language-partial-errors">
+      <p id="application-language-partial" data-testid="application-language-partial" data-announced-by={LIVE_REGION_ID}>{languagePartialLabel}</p>
+      <ul data-testid="application-language-partial-errors" data-announced-by={LIVE_REGION_ID}>
         {#each languageApplication.errors as err (err.surface)}
           <!-- `err.message` is the backend's own English sentence, shown as
                text — never as HTML, never parsed for a discriminant of its
@@ -740,12 +792,12 @@
            OUTCOME of this call could not be. No retry control of its own:
            picking the select again is the retry, the same as every other
            rejection in this section (shortcut/autostart/theme). -->
-      <p id="application-language-change-unconfirmed" data-testid="application-language-change-unconfirmed">{languageChangeUnconfirmedLabel}</p>
-      <p id="application-language-change-error" data-testid="application-language-change-error">{languageChangeError}</p>
+      <p id="application-language-change-unconfirmed" data-testid="application-language-change-unconfirmed" data-announced-by={LIVE_REGION_ID}>{languageChangeUnconfirmedLabel}</p>
+      <p id="application-language-change-error" data-testid="application-language-change-error" data-announced-by={LIVE_REGION_ID}>{languageChangeError}</p>
     {/if}
     {#if languageReadError !== null}
-      <p id="application-language-failed" data-testid="application-language-failed">{languageFailedLabel}</p>
-      <p id="application-language-error" data-testid="application-language-error">{languageReadError}</p>
+      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={LIVE_REGION_ID}>{languageFailedLabel}</p>
+      <p id="application-language-error" data-testid="application-language-error" data-announced-by={LIVE_REGION_ID}>{languageReadError}</p>
       <button
         type="button"
         data-testid="application-language-retry-read"
@@ -760,11 +812,11 @@
     <p>{autostartLabelText}</p>
     <p data-testid="application-autostart-status">{autostartStatusText}</p>
     {#if autostartUnknown}
-      <p data-testid="application-autostart-reason">{autostartReasonText}</p>
+      <p data-testid="application-autostart-reason" data-announced-by={LIVE_REGION_ID}>{autostartReasonText}</p>
     {/if}
     {#if autostartError !== null}
-      <p id="application-autostart-failed" data-testid="application-autostart-failed">{autostartFailedLabel}</p>
-      <p id="application-autostart-error" data-testid="application-autostart-error">{autostartError}</p>
+      <p id="application-autostart-failed" data-testid="application-autostart-failed" data-announced-by={LIVE_REGION_ID}>{autostartFailedLabel}</p>
+      <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={LIVE_REGION_ID}>{autostartError}</p>
     {/if}
     {#if autostartOffersBothDirections}
       <!-- Both disabled by the one flag: a press on either asks the

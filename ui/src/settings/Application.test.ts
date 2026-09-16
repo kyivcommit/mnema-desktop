@@ -1707,3 +1707,127 @@ test('a failed language read links the select to the sentence and the retry it o
   expect(ids).toContain('application-language-error');
   for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
 });
+
+// ---------------------------------------------------------------------------
+// Task 1 — one live region for the whole section (spec §2.2). A single
+// `sr-only` container, `JobStrip.svelte:486`'s own pattern, sitting OUTSIDE
+// `{#if prefs}` so it exists before the first message a screen reader would
+// need to hear (ARIA22) — the first `appPrefs()` read can itself be refused
+// before any group exists at all. Every visible refusal paragraph stays where
+// it is and only gains `data-announced-by`, naming the region instead of
+// speaking for itself.
+// ---------------------------------------------------------------------------
+
+test('the live region carries the refusal heading, the status reason, and the rejection together', async () => {
+  const REASON = 'HotKey already registered by another application';
+  appPrefs.mockResolvedValue(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } },
+  }));
+  const SENTENCE = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(screen.getByTestId('application-shortcut-error')).toBeTruthy());
+  const region = at('application-live-region');
+  expect(region).toContain('Скорочення не змінено. Ось що відповів застосунок:');
+  expect(region).toContain(REASON);
+  expect(region).toContain(SENTENCE);
+});
+
+test('the live region container exists before the first appPrefs() answer, and starts empty', async () => {
+  const first = deferred<AppPrefs>();
+  appPrefs.mockImplementationOnce(() => first.promise);
+  renderSection();
+
+  const region = await screen.findByTestId('application-live-region');
+  expect(region.textContent).toBe('');
+
+  first.resolve(prefs());
+  await waitFor(() => expect(screen.getByTestId('application-shortcut')).toBeTruthy());
+});
+
+test('the live region is empty until the first read answers, then fills with the unavailable reason', async () => {
+  const first = deferred<AppPrefs>();
+  appPrefs.mockImplementationOnce(() => first.promise);
+  renderSection();
+  const region = await screen.findByTestId('application-live-region');
+  expect(region.textContent).toBe('');
+
+  const REASON = 'HotKey already registered by another application';
+  first.resolve(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } },
+  }));
+
+  await waitFor(() => expect(at('application-live-region')).toContain(REASON));
+});
+
+test('a rejected first read leaves no groups, but the live region carries the load refusal', async () => {
+  const SENTENCE = 'disk unreadable';
+  appPrefs.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('application-load-failed')).toBeTruthy());
+  expect(screen.queryByRole('group')).toBeNull();
+  const region = at('application-live-region');
+  expect(region).toContain('Не вдалося прочитати налаштування застосунку.');
+  expect(region).toContain(SENTENCE);
+});
+
+test('a visible refusal paragraph is not a descendant of the live region, but names it', async () => {
+  const SENTENCE = 'disk unreadable';
+  appPrefs.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+
+  await waitFor(() => expect(screen.getByTestId('application-load-failed')).toBeTruthy());
+  const region = screen.getByTestId('application-live-region');
+  const failed = screen.getByTestId('application-load-failed');
+  expect(region.contains(failed)).toBe(false);
+  const announcedId = failed.getAttribute('data-announced-by');
+  expect(announcedId).toBeTruthy();
+  expect(document.getElementById(announcedId!)).toBe(region);
+});
+
+test('the live region carries every reason in a partial language application, not just the lead-in', async () => {
+  setLocaleChoice.mockResolvedValue(localeReply({
+    choice: 'uk',
+    effective: 'uk',
+    applyErrors: [
+      { surface: 'tray', message: 'menu not rebuilt' },
+      { surface: 'settingsTitle', message: 'title not updated' },
+    ],
+  }));
+  renderSection();
+  await shown('application-language-select');
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+
+  await waitFor(() => expect(screen.getByTestId('application-language-partial')).toBeTruthy());
+  const region = at('application-live-region');
+  expect(region).toContain('tray: menu not rebuilt');
+  expect(region).toContain('settingsTitle: title not updated');
+});
+
+// The full text, verbatim — `toBe`, not `toContain`. A composer that glues
+// heading + reason + error in a different order, or drops a separator so two
+// words run together, passes every `toContain` above and fails only here.
+test('the live region text is the full composed sentence, verbatim', async () => {
+  const REASON = 'HotKey already registered by another application';
+  appPrefs.mockResolvedValue(prefs({
+    hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } },
+  }));
+  const SENTENCE = 'the operating system refused the combination';
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  const EXPECTED = [
+    `Програма повідомила: ${REASON}`,
+    'Скорочення не змінено. Ось що відповів застосунок:',
+    SENTENCE,
+  ].join(' ');
+  await waitFor(() => expect(at('application-live-region')).toBe(EXPECTED));
+});
