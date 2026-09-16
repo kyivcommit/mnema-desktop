@@ -702,8 +702,8 @@ case_() {
 # `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Ten
 # controls, each with the line it expects (or expects NOT to see); a control
 # that gets the other answer is named by number on stderr. Three of them are
-# positive ("silent", or "refused for the right reason only") so a guard that always cries fails here as surely as
-# one that never does. Same shape as `check-booked.sh --self-test`, and run
+# positive ("silent", or "refused for the right reason only") so a guard
+# that always cries fails here as surely as one that never does. Same shape as `check-booked.sh --self-test`, and run
 # the same way: first in `lint.sh` and first in the `sweeps` job.
 if [ "${1:-}" = "--self-test" ]; then
   if [ $# -ne 1 ]; then
