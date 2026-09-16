@@ -218,7 +218,33 @@ pub fn run(
     cancel: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(EmbedProgress),
 ) -> Result<EmbedTally, Error> {
-    if batch == 0 {
+    run_with(db, base, key, batch, 1, cancel, on_progress)
+}
+
+/// [`run`], with `workers` requests in flight at once.
+///
+/// **Measured (D156, 2026-09-16):** one request costs ~1.0 s of round trip
+/// plus ~12 ms per chunk, so a single stream tops out near 85 chunks/s
+/// however wide the batch; only concurrent requests get past it. Each round
+/// takes `batch × workers` chunks off the queue, sends them as `workers`
+/// requests on `std::thread::scope`, then settles every reply **on this
+/// thread, in queue order** — the index still has one writer, and every rule
+/// in [`run`]'s list holds per request exactly as it did: an attributable
+/// refusal over a slice is re-sent one text at a time, sequentially; a
+/// failure that cannot be about the texts ends the run — after the replies
+/// that did come back are written, so a paid-for vector is never dropped,
+/// and without re-sending anything further. `cancel` is asked between rounds,
+/// so Stop waits out at most one round of concurrent requests.
+pub fn run_with(
+    db: &Db,
+    base: &str,
+    key: &str,
+    batch: usize,
+    workers: usize,
+    cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(EmbedProgress),
+) -> Result<EmbedTally, Error> {
+    if batch == 0 || workers == 0 {
         return Err(Error::EmptyBatch);
     }
     let space = db.active_space()?.ok_or(Error::NoActiveSpace)?;
@@ -261,7 +287,7 @@ pub fn run(
         if cancel() {
             break;
         }
-        let pending = db.chunks_needing_embedding(space, batch)?;
+        let pending = db.chunks_needing_embedding(space, batch * workers)?;
         if pending.is_empty() {
             // The queue is genuinely empty, and only here is that true: a
             // `cancel` before this point never reaches this branch, so a
@@ -274,7 +300,7 @@ pub fn run(
             }
             break;
         }
-        let outcome = one_batch(&call, &pending, cancel, on_progress, &mut tally);
+        let outcome = one_round(&call, &pending, batch, cancel, on_progress, &mut tally);
         // **Reported before the outcome is propagated, not after.** On every
         // path that ends the run, the counts here are already true of the
         // database — vectors from this batch are written and rows from a split
@@ -306,7 +332,67 @@ fn one_batch(
     tally: &mut EmbedTally,
 ) -> Result<(), Error> {
     let texts: Vec<String> = pending.iter().map(|c| c.text.clone()).collect();
-    match mnema_provider::embed(call.base, call.key, call.model, &texts) {
+    let reply = mnema_provider::embed(call.base, call.key, call.model, &texts);
+    settle(call, pending, reply, cancel, on_progress, tally)
+}
+
+/// One round of up to `workers` requests: `pending` sliced by `batch`, every
+/// slice sent at once, every reply settled here in order. A single slice is
+/// [`one_batch`] unchanged — no thread, no change in behaviour for a queue
+/// shorter than a batch or for `workers == 1`.
+fn one_round(
+    call: &Call<'_>,
+    pending: &[PendingChunk],
+    batch: usize,
+    cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(EmbedProgress),
+    tally: &mut EmbedTally,
+) -> Result<(), Error> {
+    let slices: Vec<&[PendingChunk]> = pending.chunks(batch).collect();
+    if slices.len() == 1 {
+        return one_batch(call, pending, cancel, on_progress, tally);
+    }
+    // Only the request's inputs cross into the threads: `Call` holds the
+    // database, which stays on this one.
+    let (base, key, model) = (call.base, call.key, call.model);
+    let replies: Vec<Result<Vec<Vec<f32>>, mnema_provider::Error>> = std::thread::scope(|s| {
+        let handles: Vec<_> = slices
+            .iter()
+            .map(|slice| {
+                let texts: Vec<String> = slice.iter().map(|c| c.text.clone()).collect();
+                s.spawn(move || mnema_provider::embed(base, key, model, &texts))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("an embedding request thread panicked"))
+            .collect()
+    });
+    let mut first_failure: Option<Error> = None;
+    for (slice, reply) in slices.iter().zip(replies) {
+        // Once the run is ending, a refused slice is not worth a one-at-a-time
+        // retry — but a slice that came back is still written.
+        if first_failure.is_some() && reply.is_err() {
+            continue;
+        }
+        if let Err(e) = settle(call, slice, reply, cancel, on_progress, tally) {
+            first_failure.get_or_insert(e);
+        }
+    }
+    first_failure.map_or(Ok(()), Err)
+}
+
+/// What [`one_batch`] does with a reply — split out so a reply gathered on
+/// another thread is dealt with by the very same rules.
+fn settle(
+    call: &Call<'_>,
+    pending: &[PendingChunk],
+    reply: Result<Vec<Vec<f32>>, mnema_provider::Error>,
+    cancel: &dyn Fn() -> bool,
+    on_progress: &mut dyn FnMut(EmbedProgress),
+    tally: &mut EmbedTally,
+) -> Result<(), Error> {
+    match reply {
         Ok(vectors) => store(call, pending, &vectors, tally),
         Err(refusal) => {
             // Asked first, and of every batch size: a failure that cannot be

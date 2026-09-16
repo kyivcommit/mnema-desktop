@@ -1054,13 +1054,26 @@ mod tests {
         assert!(state.stop_holds(), "the press must be remembered on disk");
 
         let probe = state
-            .claim_job(Phase::Other { job: OtherJob::Probe }, false)
+            .claim_job(
+                Phase::Other {
+                    job: OtherJob::Probe,
+                },
+                false,
+            )
             .expect("probe claim");
-        assert!(state.stop_holds(), "a probe is not a scan and must not release the hold");
+        assert!(
+            state.stop_holds(),
+            "a probe is not a scan and must not release the hold"
+        );
         probe.finish(Terminal::Idle, None);
 
         let scan = state
-            .claim_job(Phase::Embedding { counts: Progress::default() }, true)
+            .claim_job(
+                Phase::Embedding {
+                    counts: Progress::default(),
+                },
+                true,
+            )
             .expect("scan claim");
         assert!(!state.stop_holds(), "a scan that starts releases the hold");
         scan.finish(Terminal::Idle, None);

@@ -1304,3 +1304,72 @@ fn a_ready_space_is_retracted_by_chunks_behind_an_unindexed_document_too() {
     );
     assert_eq!(fixture::space_state(&db, space), "building");
 }
+
+// ---------------------------------------------------------------------------
+// `run_with`: concurrent requests, one writer (D156 follow-up).
+// ---------------------------------------------------------------------------
+
+/// Three workers over a queue of six with a batch of two: three requests, all
+/// six vectors written. The mock serves connections one at a time, so this
+/// proves the round's accounting, not that the requests overlapped.
+#[test]
+fn a_round_of_concurrent_requests_writes_every_vector_once() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock((0..3).map(|_| fixture::reply_with(2)).collect());
+
+    let out =
+        mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {}).expect("run");
+
+    assert_eq!(out.embedded, 6);
+    assert_eq!(out.failed, 0);
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 6);
+    for _ in 0..3 {
+        assert!(
+            mock.request_if_any().is_some(),
+            "three requests, one per slice"
+        );
+    }
+    assert!(mock.request_if_any().is_none(), "and not a fourth");
+}
+
+/// One slice of the round comes back with a failure that cannot be about the
+/// texts. The run ends with that error — after the slices that did come back
+/// are written, so nothing paid for is dropped.
+#[test]
+fn a_failed_slice_ends_the_run_after_the_other_slices_are_written() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![
+        fixture::reply_with(2),
+        Reply::status(500, "upstream fell over"),
+        fixture::reply_with(2),
+    ]);
+
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {});
+
+    assert!(
+        out.is_err(),
+        "a 500 is not about the texts and must end the run"
+    );
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        4,
+        "the two slices that answered must be in the index"
+    );
+    assert!(mock.request_if_any().is_some());
+    assert!(mock.request_if_any().is_some());
+    assert!(mock.request_if_any().is_some());
+    assert!(
+        mock.request_if_any().is_none(),
+        "nothing re-sent once the run is ending"
+    );
+}
+
+#[test]
+fn zero_workers_is_refused_like_a_zero_batch() {
+    let db = fixture::db_with_chunks(1);
+    let mock = fixture::mock(vec![]);
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 0, &|| false, &mut |_| {});
+    assert!(matches!(out, Err(mnema_embed::Error::EmptyBatch)));
+}

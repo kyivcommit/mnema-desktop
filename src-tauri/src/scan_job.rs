@@ -117,7 +117,15 @@ impl ScanDeps {
         Self {
             key: std::sync::Arc::new(move || Ok(mnema_secrets::load(&credential_ref)?)),
             embed: std::sync::Arc::new(|db, base, key, cancel, on_progress| {
-                mnema_embed::run(db, base, key, crate::embed_job::BATCH, cancel, on_progress)
+                mnema_embed::run_with(
+                    db,
+                    base,
+                    key,
+                    crate::embed_job::BATCH,
+                    crate::embed_job::WORKERS,
+                    cancel,
+                    on_progress,
+                )
             }),
         }
     }

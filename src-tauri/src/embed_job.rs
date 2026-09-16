@@ -65,6 +65,15 @@ use crate::job::{self, EndReason, Ended, Progress};
 /// silently dropped, which is about one text and not about how many.
 pub(crate) const BATCH: usize = 128;
 
+/// How many requests of [`BATCH`] chunks are in flight at once.
+///
+/// D156's model of one request — ~1.0 s of round trip plus ~12 ms per chunk —
+/// puts a single stream's ceiling near 85 chunks/s whatever the batch; only
+/// concurrent requests get past it (`mnema_embed::run_with`). Four is a
+/// guess to be measured, not a measurement: the provider's rate limit is the
+/// unknown, and a `429` ends the run as any other non-text failure does.
+pub(crate) const WORKERS: usize = 4;
+
 /// One report from the pass, as the window receives it.
 ///
 /// `failed` becomes `refused` and nothing else moves. The rename is the whole
