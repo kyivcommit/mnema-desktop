@@ -657,12 +657,20 @@
     try { localStorage.setItem(SORT_KEY, sortBy); } catch { /* not remembered, still sorted */ }
   }
   const priceKey = (p: Price) => (p.kind === 'known' ? p.amount : Number.POSITIVE_INFINITY);
+  // "Unpriced" is what `optionText` shows as unpriced — no known INPUT price —
+  // and it goes last as a group, before output and input are compared
+  // (owner's independent review of PR #51, P2: a known output of nought
+  // beside an unknown input sorted ahead of every priced model).
+  const unpriced = (entry: ModelEntry) => (entry.price.kind === 'known' ? 0 : 1);
   const sortedEntries = $derived.by(() => {
     const entries = [...selectableEntries];
     return sortBy === 'name'
       ? entries.sort((a, b) => a.name.localeCompare(b.name))
       : entries.sort((a, b) =>
-          priceKey(a.outputPrice) - priceKey(b.outputPrice) || priceKey(a.price) - priceKey(b.price));
+          unpriced(a) - unpriced(b)
+            || (unpriced(a)
+              ? a.name.localeCompare(b.name) // the unpriced group keeps name order
+              : priceKey(a.outputPrice) - priceKey(b.outputPrice) || priceKey(a.price) - priceKey(b.price)));
   });
   const sortLabel = $derived.by(() => {
     void $locale;

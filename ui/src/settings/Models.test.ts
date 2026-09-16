@@ -1120,6 +1120,9 @@ test('the sort toggle swaps the picker between name order and price order', asyn
       entry('c', { name: 'Cheap C', price: { kind: 'known', amount: 0.0000001 }, outputPrice: { kind: 'known', amount: 0.00003 } }),
       entry('a', { name: 'Aardvark A' }), // unpriced
       entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.000001 }, outputPrice: { kind: 'known', amount: 0.00001 } }),
+      // Review P2: a known output of nought beside an UNKNOWN input is
+      // unpriced — the option shows no price — and must not sort first.
+      entry('d', { name: 'Dark D', outputPrice: { kind: 'known', amount: 0 } }),
     ]),
   });
   const storage = memoryStorage();
@@ -1129,16 +1132,16 @@ test('the sort toggle swaps the picker between name order and price order', asyn
   const order = () => [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
 
   expect(screen.getByTestId('model-sort').textContent).toBe('By name');
-  expect(order()).toEqual(['a', 'b', 'c']);
+  expect(order()).toEqual(['a', 'b', 'c', 'd']);
 
   await fireEvent.click(screen.getByTestId('model-sort'));
   expect(screen.getByTestId('model-sort').textContent).toBe('By price');
-  expect(order()).toEqual(['b', 'c', 'a']);
+  expect(order()).toEqual(['b', 'c', 'a', 'd']);
   expect(storage.getItem('models.sortBy')).toBe('price');
 
   await fireEvent.click(screen.getByTestId('model-sort'));
   expect(screen.getByTestId('model-sort').textContent).toBe('By name');
-  expect(order()).toEqual(['a', 'b', 'c']);
+  expect(order()).toEqual(['a', 'b', 'c', 'd']);
   vi.unstubAllGlobals();
 });
 

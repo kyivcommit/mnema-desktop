@@ -845,3 +845,28 @@ fn a_router_with_a_negative_price_is_hidden_in_every_role() {
         assert_eq!(find(&catalogue.entries, "vendor/model").refusal, None);
     }
 }
+
+/// Owner's independent review of PR #51, P2: `NotAPrice` also holds `NaN` and
+/// the infinities, and none of those is the router's signal. A model that
+/// states one stays selectable, with its price simply not known.
+#[test]
+fn a_non_finite_price_does_not_hide_a_model_as_a_router() {
+    for stated in ["NaN", "inf", "-inf"] {
+        let json = format!(
+            r#"{{"data":[
+                {{"id":"vendor/model","name":"Model","context_length":8192,
+                 "pricing":{{"prompt":"{stated}","completion":"{stated}"}},
+                 "architecture":{{"input_modalities":["text"],"output_modalities":["text"]}}}}
+            ]}}"#
+        );
+        for role in [Role::Chat, Role::Embedding] {
+            let catalogue = models_from_json(role, &json).expect("parses");
+            let entry = find(&catalogue.entries, "vendor/model");
+            assert!(
+                matches!(entry.price, Price::NotAPrice { .. }),
+                "{stated}: the price is still not a price"
+            );
+            assert_eq!(entry.refusal, None, "{role:?}, {stated}: not a router");
+        }
+    }
+}

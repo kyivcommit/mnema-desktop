@@ -626,9 +626,14 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         let output_modalities_stated = output_modalities.is_some();
         let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
+        // The router's signal is a NEGATIVE stated price (`"-1"`), not any
+        // `NotAPrice`: that variant also holds `NaN` and the infinities, and a
+        // model that states one of those is unpriced, not routed (owner's
+        // independent review of PR #51, P2 — a finite, text-writing model
+        // with `"NaN"` vanished as a router).
         let unpriced_router = matches!(
             raw.pricing.as_ref().map(|p| &p.prompt),
-            Some(Price::NotAPrice { .. })
+            Some(Price::NotAPrice { raw }) if raw.parse::<f64>().is_ok_and(|v| v.is_finite() && v < 0.0)
         );
         let refusal = if raw.id.ends_with(":batch") {
             Some(Refusal::BatchOnly)
