@@ -636,6 +636,10 @@
   // Drawn once under the picker, only when some option carries a price —
   // a note about prices over a list that shows none explains nothing.
   const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
+  const hasPriceNote = $derived(
+    selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0),
+  );
+  const infoLabel = $derived.by(() => { void $locale; return t('models_info_label'); });
   // One button, two states (owner, 2026-09-16): the list is sorted by name
   // or by price, and the button says which order it is in now. By price:
   // OUTPUT then input (owner: the output token is the dear one; embedding
@@ -709,6 +713,8 @@
       .sort(([, a], [, b]) => b.count - a.count)
       .map(([key, g]) => ({ key, label: hiddenReasonLabel(g.refusal, g.count) }));
   });
+  // The ⓘ and its popover exist only when there is a note to show.
+  const hasNotes = $derived(hasPriceNote || hiddenReasons.length > 0);
 
   const activeUnreadableRecords = $derived.by(() => {
     void $locale;
@@ -1213,17 +1219,34 @@
         data-testid="model-sort"
         onclick={toggleSort}
       >{sortLabel}</button>
+      <!-- The notes about the list — the price unit, what was hidden and why
+           — behind one ⓘ (owner, 2026-09-16), as a native popover: the
+           sentences are the same, they no longer sit under the picker on
+           every visit. Drawn only when there is a note to show. -->
+      {#if hasNotes}
+        <button
+          type="button"
+          class="info"
+          data-testid="model-info"
+          popovertarget="model-notes"
+          aria-label={infoLabel}
+        >i</button>
+      {/if}
     </div>
-    {#if selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0)}
-      <p data-testid="model-price-note">{priceNote}</p>
+    {#if hasNotes}
+      <div id="model-notes" class="notes" popover="auto" data-testid="model-notes">
+        {#if hasPriceNote}
+          <p data-testid="model-price-note">{priceNote}</p>
+        {/if}
+        <!-- One line per DISTINCT reason (owner's ruling above), each naming how
+             many entries it folded together — never one line per hidden entry,
+             which would repeat the same sentence as many times as this build
+             happened to refuse the same thing. -->
+        {#each hiddenReasons as { key, label } (key)}
+          <p data-testid="model-hidden-reason">{label}</p>
+        {/each}
+      </div>
     {/if}
-    <!-- One line per DISTINCT reason (owner's ruling above), each naming how
-         many entries it folded together — never one line per hidden entry,
-         which would repeat the same sentence as many times as this build
-         happened to refuse the same thing. -->
-    {#each hiddenReasons as { key, label } (key)}
-      <p data-testid="model-hidden-reason">{label}</p>
-    {/each}
   {/if}
 {/if}
 

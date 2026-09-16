@@ -14,7 +14,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_status_ready' | 'models_status_not_ready'
   | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
   | 'models_selection_absent' | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
-  | 'models_sort_name' | 'models_sort_price'
+  | 'models_sort_name' | 'models_sort_price' | 'models_info_label'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
@@ -275,6 +275,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // (owner, 2026-09-16: one button, two states).
     models_sort_name: 'За алфавітом',
     models_sort_price: 'За ціною',
+    models_info_label: 'Про цей список',
     // The per-role configured dot (review P2-1). Task 9 moved the dot inside
     // its own tab button, so one of these three words is now the SECOND half
     // of the TAB BUTTON's accessible name ("Ембединг, Налаштовано"), sr-only
@@ -1110,6 +1111,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_price_note: 'Prices are per 1M tokens: input / output, as the provider states them.',
     models_sort_name: 'By name',
     models_sort_price: 'By price',
+    models_info_label: 'About this list',
     models_dot_configured: 'Configured',
     models_dot_not_configured: 'Not configured',
     models_dot_unknown: 'Unknown',

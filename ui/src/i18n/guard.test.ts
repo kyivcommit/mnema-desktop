@@ -45,7 +45,7 @@ const MACHINE_ATTRS = new Set([
   'shape', 'preload', 'sandbox', 'as', 'blocking', 'capture', 'decoding',
   'loading', 'fetchpriority', 'referrerpolicy', 'crossorigin', 'wrap',
   'autocomplete', 'inputmode', 'enterkeyhint', 'autocapitalize', 'spellcheck',
-  'translate', 'contenteditable', 'draggable', 'popover', 'popovertargetaction',
+  'translate', 'contenteditable', 'draggable', 'popover', 'popovertarget', 'popovertargetaction',
   'formmethod', 'formtarget', 'formenctype', 'dir', 'lang', 'hreflang',
   // Numbers and machine-readable dates: no prose can hide in them.
   'width', 'height', 'size', 'rows', 'cols', 'span', 'colspan', 'rowspan',

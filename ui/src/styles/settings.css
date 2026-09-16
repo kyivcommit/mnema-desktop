@@ -200,6 +200,23 @@ main select:focus-visible {
 .model-row button {
   white-space: nowrap;
 }
+/* the ⓘ beside the sort button, and the popover it opens (owner, 2026-09-16) */
+.model-row .info {
+  width: 37px;
+  padding: 0;
+  border-radius: 50%;
+}
+.notes {
+  max-width: 520px;
+  padding: 14px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.notes::backdrop {
+  background: rgba(0, 0, 0, .25);
+}
 
 /* the phase progress bar (mockup carries none of its own — new to Task 5) */
 .job-details progress {

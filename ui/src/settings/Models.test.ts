@@ -1091,6 +1091,10 @@ test('an option carries the stated price per million tokens beside the name', as
   expect(optionFor('mute').textContent).toBe('Unpriced');
   expect(screen.getByTestId('model-price-note').textContent)
     .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
+  // Behind the ⓘ (owner, 2026-09-16): the note lives in the popover the
+  // button opens, not under the picker.
+  expect(screen.getByTestId('model-info').getAttribute('popovertarget')).toBe('model-notes');
+  expect(screen.getByTestId('model-notes').contains(screen.getByTestId('model-price-note'))).toBe(true);
 });
 
 // jsdom under vitest hands out a `localStorage` with no working methods (an
@@ -1163,6 +1167,7 @@ test('the price note is absent when no option carries a price', async () => {
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('mute').length).toBe(1));
   expect(screen.queryByTestId('model-price-note')).toBeNull();
+  expect(screen.queryByTestId('model-info')).toBeNull();
 });
 
 test('refused_models_are_not_options', async () => {
