@@ -95,11 +95,10 @@
 #
 # What it does **not** check: that the mutation compiles, or that anything
 # goes red — those need a compiler and a test run. Nor, for the test-name
-# guard just described, whether the test is green, or whether a `runner=`
-# field was written somewhere other than straight after the test name — see
-# the note above `case_` for why those two stay `mutation-check.sh`'s job
-# alone. A misspelled runner name is no longer in this list: see the same
-# note for what catches it instead.
+# guard just described, whether the test is green — see the note above
+# `case_` for why that stays `mutation-check.sh`'s job alone. A misspelled
+# runner name and a `runner=` written in the wrong position are no longer in
+# this list: see the same note for what catches each.
 #
 # ⚠️ **Read the exit code from this script, not from a pipeline.**
 # `scripts/mutation-staleness.sh cases | tail` reports `tail`'s status, not this
@@ -238,6 +237,7 @@ unreadable=0
 # its own exclusions visible.
 every_match_count=0
 names_checked=0
+misplaced=0
 
 # Resolves a cargo package name to the directory holding its Cargo.toml, by
 # grepping for the FIRST `name = "…"` line in every workspace member's
@@ -304,20 +304,19 @@ find_pkg_dir() {
 # `<test-name>`; everything after the test name — the runner's own trailing
 # arguments — still belongs to the harness and is still ignored here.
 #
-# ⚠️ **Two things guard 4 still cannot see, one loose thing it accepts on
+# ⚠️ **One thing guard 4 still cannot see, one loose thing it accepts on
 # purpose, and one divergence from the tool it is standing in for.**
 # `mutation-check.sh` grew an optional `runner=` field so a case can name a
 # vitest test instead of a cargo one:
 #
-#   1. A `runner=` field written anywhere but straight after the test name is
-#      never seen as a runner at all — guard 4 only inspects the seventh
-#      field. Verified by hand: `case_ … target test extra-arg runner=vitest`
-#      leaves guard 4 treating it as `cargo` (the default), which then asks
-#      whether some workspace member is named `target` — the vitest test
-#      file's path — finds none, and reports `TEST NOT FOUND` for the right
-#      case but the wrong reason. `mutation-check.sh` refuses this shape
-#      outright (`puts runner=… after another argument`, exit 2), which is
-#      the only place the reason is stated correctly.
+#   1. ~~A `runner=` field written anywhere but straight after the test name~~
+#      Closed: `case_` now scans the trailing arguments and reports
+#      MISPLACED RUNNER with the same sentence `mutation-check.sh` uses in
+#      its exit-2 refusal, counting the case as stale and skipping every
+#      other guard for it (their verdicts would all be about the wrong
+#      runner). Before this, guard 4 read such a case as `cargo`, looked for
+#      a workspace member named after the vitest file, and printed TEST NOT
+#      FOUND — right case, wrong reason. `--self-test` control 8 holds it.
 #   2. Whether the test is GREEN. Guard 4 is a grep for the name, not a
 #      compile or a run — `mutation-check.sh`'s baseline pass is the only
 #      place that requires it to pass.
@@ -369,9 +368,33 @@ case_() {
   # that was renamed or deleted out from under it.
   local runner=cargo
   shift 6
+  # `shift` here as `mutation-check.sh:424` does: the seventh field is
+  # consumed once it is read, so the scan below sees only what FOLLOWS it.
+  # Without the shift the scan would find the correctly placed field again
+  # and refuse every one of the 153 valid `runner=vitest` cases in the tree
+  # (plan review, P1 — the draft had exactly that defect).
   case "${1-}" in
-    runner=*) runner="${1#runner=}" ;;
+    runner=*) runner="${1#runner=}"; shift ;;
   esac
+  # A `runner=` field anywhere but the seventh position is not a runner: the
+  # dispatch above has already defaulted to `cargo`, guard 4 would then look
+  # for a workspace member named after a vitest test file, and report TEST
+  # NOT FOUND — the right case, the wrong reason. `mutation-check.sh` refuses
+  # this shape with exit 2 (`puts runner=… after another argument`); here it
+  # is a stale case with its reason named, and the guards below are skipped
+  # because every verdict they could give would be about the wrong runner.
+  local extra
+  for extra in "$@"; do
+    case "$extra" in
+      runner=*)
+        echo "MISPLACED RUNNER: $label"
+        echo "   $extra is written after another argument; the runner has to come straight after the test name"
+        stale=$((stale + 1))
+        misplaced=$((misplaced + 1))
+        return 0
+        ;;
+    esac
+  done
   case "$runner" in
     cargo)
       names_checked=$((names_checked + 1))
@@ -601,8 +624,8 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked"
-if [ "$names_checked" -ne "$checked" ]; then
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked   misplaced runner: $misplaced"
+if [ $((names_checked + misplaced)) -ne "$checked" ]; then
   echo "$((checked - names_checked)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
 fi
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
@@ -627,4 +650,4 @@ fi
 # script's whole reason to exist is that such gaps are found here, not read
 # past.
 [ "$stale" -eq 0 ] && [ "$empty" -eq 0 ] && [ "$hidden" -eq 0 ] && [ "$unreadable" -eq 0 ] \
-  && [ "$names_checked" -eq "$checked" ]
+  && [ $((names_checked + misplaced)) -eq "$checked" ]
