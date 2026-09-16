@@ -1230,7 +1230,7 @@
           data-testid="model-info"
           popovertarget="model-notes"
           aria-label={infoLabel}
-        >i</button>
+        >ⓘ</button>
       {/if}
     </div>
     {#if hasNotes}
