@@ -95,11 +95,10 @@
 #
 # What it does **not** check: that the mutation compiles, or that anything
 # goes red — those need a compiler and a test run. Nor, for the test-name
-# guard just described, whether the test is green, or whether a `runner=`
-# field was written somewhere other than straight after the test name — see
-# the note above `case_` for why those two stay `mutation-check.sh`'s job
-# alone. A misspelled runner name is no longer in this list: see the same
-# note for what catches it instead.
+# guard just described, whether the test is green — see the note above
+# `case_` for why that stays `mutation-check.sh`'s job alone. A misspelled
+# runner name and a `runner=` written in the wrong position are no longer in
+# this list: see the same note for what catches each.
 #
 # ⚠️ **Read the exit code from this script, not from a pipeline.**
 # `scripts/mutation-staleness.sh cases | tail` reports `tail`'s status, not this
@@ -112,6 +111,7 @@
 # Usage:
 #   scripts/mutation-staleness.sh                 # every case file, the default
 #   scripts/mutation-staleness.sh <case-file>…    # only these
+#   scripts/mutation-staleness.sh --self-test    # guard 5 and MISPLACED RUNNER against fixtures
 #
 # **Sweeping is the default because a green line about one file gets read as a
 # green line about the directory.** The first honest run of this script reported
@@ -133,6 +133,20 @@
 # That test is deliberately not "does it contain any cases", because then a case
 # file emptied by an edit would classify itself out of the sweep and be reported
 # as nothing at all. A file with no shebang and no cases is a **failure** here.
+#
+# **And a fifth guard, for the file the matrix never runs.** `mutation-check.sh`
+# is what proves a case KILLS, and CI runs it only over the files named in
+# `ci.yml`'s `mutations` matrix. On 2026-09-16 that was 19 files out of 49:
+# 30 case files, 520 of 962 cases, had never run in CI, one of them broken
+# since PR 9b (`model-config.sh`, `E0063`) and one carrying a live mutant since
+# PR #4 (`refuse-by-content.sh`). Guard 5 requires every case file to be in
+# exactly one of two states — named in that matrix, or carrying
+# `# not-in-matrix: <reason>` on a line of its own — and reports the two ways of
+# being in neither or both. `--self-test` runs it against fixtures. The
+# self-test exercises the two functions on fixtures; the call site in the sweep
+# loop and the `unlisted` term of the final assertion are not reachable from it
+# — removing either leaves the self-test green and is caught only by the live
+# sweep.
 #
 # ⚠️ **The whole question this script has to keep asking of itself: is there an
 # input for which it reports success by checking LESS?** Asked deliberately in
@@ -223,6 +237,128 @@ expr_wants_every_match() {
   printf '%s' "$1" | perl -ne 'exit(/([a-zA-Z]*)$/ && $1 =~ /g/ ? 0 : 1)'
 }
 
+# Guard 5: a case file is proved to KILL only by `mutation-check.sh`, and CI
+# runs that only over the files named in `ci.yml`'s `mutations` matrix. Every
+# other file is local evidence. For weeks that was true of 30 files and 520
+# cases — more than half — and nothing said so, because "the omission is a
+# decision" lived in a comment nothing executed. Now each case file the
+# sweep reads must be in exactly one of two states: named in the matrix, or
+# carrying `# not-in-matrix: <reason>` on a line of its own. Both at once is
+# a stale marker waiting to excuse a future accidental removal; neither is
+# a file nobody runs.
+#
+# `matrix_files <ci.yml>` prints the names in `jobs.mutations.strategy.matrix.file`,
+# one per line. It is not a YAML parser: it reads one block of a fixed shape
+# (`  mutations:` at two spaces, `        file:` at eight, entries at ten as
+# `          - name`) — the shape `mutations`'s own `run:` line relies on by
+# name. The list is bare `          - name` entries and ends at the first line
+# that is not one, so a comment or a quoted entry written between two entries
+# truncates it — those files then land in NOT IN MATRIX, which is red and
+# visible, not a silent pass. What it refuses outright, exit 2 with the reason
+# on stderr, is exactly five things: no such file, no `  mutations:` job, no
+# `      matrix:` under it, a matrix key other than `file:` or `include:`, and
+# a `file:` list that is not there exactly once or comes back empty. Loud on a
+# reformat, never quietly zero.
+#
+# The job-block terminator is spelled `[A-Za-z_]` rather than `[a-z]`: a
+# GitHub Actions job id may begin with a letter of either case or `_`, and a
+# lower-case-only class would read straight past a `Bundle:` job into its
+# keys — a `mutations:` job with no list of its own would then answer with
+# the next job's.
+#
+# Both functions below take their inputs as arguments — the workflow file,
+# the names file, the case file — so `--self-test` can point them at
+# fixtures; neither reads `$REPO` directly.
+matrix_files() {
+  local yml="$1"
+  if [ ! -f "$yml" ]; then
+    echo "guard 5 cannot read the matrix: $yml does not exist" >&2
+    return 2
+  fi
+  local block
+  block=$(awk '/^  mutations:$/ { f = 1; print; next } f && /^  [A-Za-z_]/ { exit } f' "$yml")
+  if [ -z "$block" ]; then
+    echo "guard 5 cannot read the matrix: no \`  mutations:\` job in $yml" >&2
+    return 2
+  fi
+  # Under `matrix:` this guard knows two keys, `file:` and `include:`, and
+  # interprets only the first. Any OTHER key is refused by name rather than
+  # matched by name: a blacklist of `exclude:` would be satisfied by
+  # `exclude :` (a space before the colon is the same key to YAML — measured
+  # with Ruby's parser in the plan review), so the question asked is "is
+  # every key one of the two", not "is the one I fear absent". The matrix
+  # sub-block runs from `      matrix:` to the next line indented less than
+  # eight columns that is neither blank nor a comment; keys are the lines
+  # indented exactly eight.
+  local matrix keys
+  # (No `{0,7}` interval in the awk pattern: Apple's awk and gawk differ on
+  # interval support; "indented less than eight" is spelled as "not eight
+  # spaces, not blank, not a comment".)
+  matrix=$(printf '%s\n' "$block" | awk '/^      matrix:$/ { f = 1; next } f && $0 !~ /^        / && $0 !~ /^ *#/ && $0 !~ /^ *$/ { exit } f')
+  if [ -z "$matrix" ]; then
+    echo "guard 5 cannot read the matrix: no \`      matrix:\` under the mutations job" >&2
+    return 2
+  fi
+  keys=$(printf '%s\n' "$matrix" | grep -E '^ {8}[^ #]' | grep -vE '^        (file|include):$' || true)
+  if [ -n "$keys" ]; then
+    echo "guard 5 cannot read the matrix: the mutations matrix has a key this guard does not interpret:" >&2
+    printf '%s\n' "$keys" | sed 's/^/   /' >&2
+    return 2
+  fi
+  local lists
+  lists=$(printf '%s\n' "$block" | grep -c '^        file:$')
+  if [ "$lists" -ne 1 ]; then
+    echo "guard 5 cannot read the matrix: expected exactly one \`        file:\` list in the mutations job, found $lists" >&2
+    return 2
+  fi
+  local names
+  names=$(printf '%s\n' "$block" | awk '/^        file:$/ { f = 1; next } f && /^          - / { sub(/^          - /, ""); print; next } f { exit }')
+  if [ -z "$names" ]; then
+    echo "guard 5 cannot read the matrix: the \`file:\` list under the mutations job is empty" >&2
+    return 2
+  fi
+  printf '%s\n' "$names"
+}
+
+# `matrix_verdict <names-file> <case-file>`: silent and 0 when the file is in
+# exactly one of the two states; otherwise one verdict line, one hint, and 1.
+# The marker is `# not-in-matrix: <reason>` on a line of its own, colon then a
+# SPACE then a non-empty reason. `marked` is detected without the space, so
+# `# not-in-matrix:reason` is still recognised as a marker — it just does not
+# exempt: the reason is read only from a line that has the space, which leaves
+# it empty. A marker with no reason, one written against the colon, or one
+# followed by nothing but spaces are the same verdict, NOT IN MATRIX, and the
+# same hint.
+matrix_verdict() {
+  local names="$1" file="$2"
+  local name
+  name=$(basename "$file" .sh)
+  local listed=0 marked=0 reason=""
+  grep -qxF -- "$name" "$names" && listed=1
+  if grep -q '^# not-in-matrix:' "$file"; then
+    marked=1
+    reason=$(grep -m1 '^# not-in-matrix: ' "$file" | sed 's/^# not-in-matrix:[[:space:]]*//')
+  fi
+  if [ "$listed" -eq 1 ] && [ "$marked" -eq 1 ]; then
+    echo "BOTH IN MATRIX AND EXEMPT: $name.sh"
+    echo "   it is named in ci.yml's mutations matrix AND carries '# not-in-matrix:' — one or the other; a marker left behind would excuse the next accidental removal"
+    return 1
+  fi
+  if [ "$listed" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$marked" -eq 1 ] && [ -n "$reason" ]; then
+    return 0
+  fi
+  echo "NOT IN MATRIX: $name.sh"
+  if [ "$marked" -eq 1 ]; then
+    echo "   its '# not-in-matrix:' line has no reason after a colon and a space; write '# not-in-matrix: <reason>', or add the file to ci.yml's mutations matrix"
+  else
+    echo "   nothing proves its cases still kill: add '          - $name' to the mutations matrix in .github/workflows/ci.yml, or write '# not-in-matrix: <reason>' in the file"
+  fi
+  return 1
+}
+
 checked=0
 stale=0
 files_read=0
@@ -238,6 +374,8 @@ unreadable=0
 # its own exclusions visible.
 every_match_count=0
 names_checked=0
+misplaced=0
+unlisted=0
 
 # Resolves a cargo package name to the directory holding its Cargo.toml, by
 # grepping for the FIRST `name = "…"` line in every workspace member's
@@ -304,20 +442,19 @@ find_pkg_dir() {
 # `<test-name>`; everything after the test name — the runner's own trailing
 # arguments — still belongs to the harness and is still ignored here.
 #
-# ⚠️ **Two things guard 4 still cannot see, one loose thing it accepts on
+# ⚠️ **One thing guard 4 still cannot see, one loose thing it accepts on
 # purpose, and one divergence from the tool it is standing in for.**
 # `mutation-check.sh` grew an optional `runner=` field so a case can name a
 # vitest test instead of a cargo one:
 #
-#   1. A `runner=` field written anywhere but straight after the test name is
-#      never seen as a runner at all — guard 4 only inspects the seventh
-#      field. Verified by hand: `case_ … target test extra-arg runner=vitest`
-#      leaves guard 4 treating it as `cargo` (the default), which then asks
-#      whether some workspace member is named `target` — the vitest test
-#      file's path — finds none, and reports `TEST NOT FOUND` for the right
-#      case but the wrong reason. `mutation-check.sh` refuses this shape
-#      outright (`puts runner=… after another argument`, exit 2), which is
-#      the only place the reason is stated correctly.
+#   1. ~~A `runner=` field written anywhere but straight after the test name~~
+#      Closed: `case_` now scans the trailing arguments and reports
+#      MISPLACED RUNNER with the same sentence `mutation-check.sh` uses in
+#      its exit-2 refusal, counting the case as stale and skipping every
+#      other guard for it (their verdicts would all be about the wrong
+#      runner). Before this, guard 4 read such a case as `cargo`, looked for
+#      a workspace member named after the vitest file, and printed TEST NOT
+#      FOUND — right case, wrong reason. `--self-test` control 8 holds it.
 #   2. Whether the test is GREEN. Guard 4 is a grep for the name, not a
 #      compile or a run — `mutation-check.sh`'s baseline pass is the only
 #      place that requires it to pass.
@@ -369,9 +506,33 @@ case_() {
   # that was renamed or deleted out from under it.
   local runner=cargo
   shift 6
+  # `shift` here as `mutation-check.sh:424` does: the seventh field is
+  # consumed once it is read, so the scan below sees only what FOLLOWS it.
+  # Without the shift the scan would find the correctly placed field again
+  # and refuse every one of the 153 valid `runner=vitest` cases in the tree
+  # (plan review, P1 — the draft had exactly that defect).
   case "${1-}" in
-    runner=*) runner="${1#runner=}" ;;
+    runner=*) runner="${1#runner=}"; shift ;;
   esac
+  # A `runner=` field anywhere but the seventh position is not a runner: the
+  # dispatch above has already defaulted to `cargo`, guard 4 would then look
+  # for a workspace member named after a vitest test file, and report TEST
+  # NOT FOUND — the right case, the wrong reason. `mutation-check.sh` refuses
+  # this shape with exit 2 (`puts runner=… after another argument`); here it
+  # is a stale case with its reason named, and the guards below are skipped
+  # because every verdict they could give would be about the wrong runner.
+  local extra
+  for extra in "$@"; do
+    case "$extra" in
+      runner=*)
+        echo "MISPLACED RUNNER: $label"
+        echo "   $extra is written after another argument; the runner has to come straight after the test name"
+        stale=$((stale + 1))
+        misplaced=$((misplaced + 1))
+        return 0
+        ;;
+    esac
+  done
   case "$runner" in
     cargo)
       names_checked=$((names_checked + 1))
@@ -542,6 +703,178 @@ case_() {
   return 0
 }
 
+# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Twelve
+# controls, each with the line it expects (or expects NOT to see); a control
+# that gets the other answer is named by number on stderr. Three of them are
+# positive ("silent", or "refused for the right reason only") so a guard that
+# always cries fails here as surely as one that never does. Same shape as
+# `check-booked.sh --self-test`, and run the same way: first in `lint.sh` and
+# first in the `sweeps` job.
+if [ "${1:-}" = "--self-test" ]; then
+  if [ $# -ne 1 ]; then
+    echo "unknown option: $2" >&2
+    exit 2
+  fi
+  T="$WORK/self-test"
+  mkdir -p "$T/mutations"
+  failed=0
+  fail() { echo "self-test FAILED control $1: $2" >&2; failed=$((failed + 1)); }
+
+  # A minimal workflow with the real shape: another job that also names
+  # `tree`, then the mutations job with a `file:` list and an `include:`.
+  cat > "$T/ci.yml" <<'YML'
+jobs:
+  sweeps:
+    steps:
+      - run: echo tree
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        include:
+          - file: source
+            node: true
+    runs-on: ubuntu-24.04
+YML
+  cat > "$T/ci-exclude.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        exclude:
+          - file: tree
+YML
+  cat > "$T/ci-exclude-space.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+          - tree
+        exclude :
+          - file: tree
+YML
+  # `Bundle:` sits AFTER `mutations:` on purpose, and its id is upper-case:
+  # it is the only thing in these fixtures that can tell `[A-Za-z_]` from
+  # `[a-z]` in the job-block terminator. With the correct class the block
+  # ends at `Bundle:` and the matrix is `source` alone; with `[a-z]` it reads
+  # straight on into `Bundle:`'s own list, finds two `file:` lists, and
+  # refuses — which is control 3 going red.
+  cat > "$T/ci-other-job-only.yml" <<'YML'
+jobs:
+  other:
+    strategy:
+      matrix:
+        file:
+          - tree
+  mutations:
+    strategy:
+      matrix:
+        file:
+          - source
+  Bundle:
+    strategy:
+      matrix:
+        file:
+          - tree
+YML
+  printf 'case_ "x" a b c d e\n' > "$T/mutations/tree.sh"
+  # `tre`, not `orphan`: a strict PREFIX of the listed `tree`, so this fixture
+  # is what makes control 2 depend on `grep -qxF`'s `-x`. With any unlisted
+  # name that is not a prefix of a listed one, dropping `-x` leaves all ten
+  # original controls green while `task-1` starts matching `task-10` on the
+  # live tree — an unlisted file silently read as listed.
+  printf 'case_ "x" a b c d e\n' > "$T/mutations/tre.sh"
+  printf '# not-in-matrix: needs macOS\ncase_ "x" a b c d e\n' > "$T/mutations/exempt.sh"
+  printf '# not-in-matrix:\ncase_ "x" a b c d e\n' > "$T/mutations/empty-reason.sh"
+  # The marker written against the colon: recognised as a marker, and the
+  # reason is read only from a line that has the space, which leaves it empty.
+  printf '# not-in-matrix:reason\ncase_ "x" a b c d e\n' > "$T/mutations/nospace.sh"
+  # The marker indented: not at the start of a line, so not a marker at all.
+  printf '  # not-in-matrix: reason\ncase_ "x" a b c d e\n' > "$T/mutations/indented.sh"
+  printf '# not-in-matrix: stale marker\ncase_ "x" a b c d e\n' > "$T/mutations/source.sh"
+
+  names="$T/names"
+  matrix_files "$T/ci.yml" > "$names" || fail 0 "the fixture matrix should be readable"
+
+  # 1. in the matrix → silent
+  out=$(matrix_verdict "$names" "$T/mutations/tree.sh"); rc=$?
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 1 "a file in matrix.file is silent (got rc=$rc: $out)"
+  # 2. nowhere → NOT IN MATRIX. The name is a strict prefix of the listed
+  #    `tree`, so this control is also the one that holds `-x` on the lookup.
+  out=$(matrix_verdict "$names" "$T/mutations/tre.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: tre.sh'; } || fail 2 "a file in neither state is NOT IN MATRIX, and a name that is only a prefix of a listed one is not listed (got rc=$rc: $out)"
+  # 3. named only in another job → NOT IN MATRIX
+  other="$T/names-other"
+  matrix_files "$T/ci-other-job-only.yml" > "$other" || fail 3 "the other-job fixture should be readable"
+  out=$(matrix_verdict "$other" "$T/mutations/tree.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: tree.sh'; } || fail 3 "a name in another job's matrix does not count (got rc=$rc: $out)"
+  # 4. exclude: present → matrix_files refuses with 2
+  matrix_files "$T/ci-exclude.yml" > /dev/null 2> "$T/err4"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'exclude:' "$T/err4"; } || fail 4 "a matrix with exclude: is refused with exit 2 (got rc=$rc)"
+  # 5. in the matrix AND marked → BOTH
+  out=$(matrix_verdict "$names" "$T/mutations/source.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^BOTH IN MATRIX AND EXEMPT: source.sh'; } || fail 5 "matrix entry plus marker is BOTH IN MATRIX AND EXEMPT (got rc=$rc: $out)"
+  # 6. marker with an empty reason, not in the matrix → NOT IN MATRIX
+  out=$(matrix_verdict "$names" "$T/mutations/empty-reason.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: empty-reason.sh'; } || fail 6 "an empty reason does not exempt (got rc=$rc: $out)"
+  # 7. marker with a reason, not in the matrix → silent
+  out=$(matrix_verdict "$names" "$T/mutations/exempt.sh"); rc=$?
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 7 "a marker with a reason is silent (got rc=$rc: $out)"
+  # 8. runner= after another argument → MISPLACED RUNNER, counted stale.
+  #    Through a file, never `$(…)`: a command substitution runs `case_` in a
+  #    subshell and the counters it increments there die with it, leaving the
+  #    parent's `$stale` unchanged and this control green on a broken guard.
+  before=$stale
+  case_ "probe" "no/such/file.rs" 's/a/b/' 'b' mnema-desktop 'no_such_test_zz' --lib runner=vitest > "$T/out8"
+  { grep -q '^MISPLACED RUNNER: probe' "$T/out8" && [ "$stale" -eq $((before + 1)) ] && [ "$misplaced" -eq 1 ]; } || fail 8 "runner= after another argument is MISPLACED RUNNER and stale (got: $(cat "$T/out8"); stale $before -> $stale)"
+
+  # 9. runner=vitest in the seventh position is consumed, not refused: the
+  #    vitest branch runs and reports the (missing) test file, never MISPLACED
+  #    The hint line, not `TEST NOT FOUND`: both branches print that heading,
+  #    so it proves only that the field was consumed. Only the vitest branch
+  #    names `ui/<path>`, and a dispatch that fell back to cargo would look
+  #    for a workspace member instead.
+  case_ "placed" "no/such/file.rs" 's/a/b/' 'b' src/no-such.test.ts 'no such title' runner=vitest > "$T/out9"
+  { ! grep -q 'MISPLACED RUNNER' "$T/out9" && grep -q 'vitest: ui/src/no-such.test.ts does not exist' "$T/out9"; } || fail 9 "a runner= straight after the test name is dispatched as that runner (got: $(cat "$T/out9"))"
+  # 10. `exclude :` — a space before the colon is the same key to YAML; the
+  #     whitelist of matrix keys refuses it as it refuses `exclude:`
+  matrix_files "$T/ci-exclude-space.yml" > /dev/null 2> "$T/err10"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'exclude :' "$T/err10"; } || fail 10 "a matrix key this guard does not interpret, however spaced, is refused with exit 2 (got rc=$rc)"
+  # 11. `# not-in-matrix:reason`, no space, not in the matrix → NOT IN MATRIX.
+  #     This is the control that holds the SPACE in the reason grep: drop it
+  #     and this marker starts exempting, while controls 6 (empty reason) and
+  #     7 (a proper reason) stay green either way.
+  out=$(matrix_verdict "$names" "$T/mutations/nospace.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: nospace.sh'; } || fail 11 "a reason written against the colon does not exempt (got rc=$rc: $out)"
+  # 12. `  # not-in-matrix: reason`, indented, not in the matrix → NOT IN
+  #     MATRIX, and specifically as a file with NO marker at all. The hint is
+  #     asserted, not just the verdict: dropping the `^` from the marker
+  #     detector still reports NOT IN MATRIX here (the reason grep keeps its
+  #     own `^`, so the reason comes back empty) and only the hint changes —
+  #     a control that read the verdict alone would stay green on that mutant.
+  out=$(matrix_verdict "$names" "$T/mutations/indented.sh"); rc=$?
+  { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: indented.sh' \
+    && printf '%s' "$out" | grep -q 'nothing proves its cases still kill'; } || fail 12 "a marker that is not at the start of a line is not a marker (got rc=$rc: $out)"
+
+  if [ "$failed" -ne 0 ]; then
+    exit 1
+  fi
+  echo "self-test: 12 controls, all as expected"
+  exit 0
+fi
+
+# Guard 5 reads the matrix once; a matrix it cannot read is exit 2 here,
+# before any file is judged against it.
+MATRIX_NAMES="$WORK/matrix-names"
+matrix_files "$REPO/.github/workflows/ci.yml" > "$MATRIX_NAMES" || exit 2
+
 for file in "${FILES[@]}"; do
   if [ ! -f "$file" ]; then
     echo "no case file at $file" >&2
@@ -592,6 +925,7 @@ for file in "${FILES[@]}"; do
     echo "NO CASES: $name declares no interpreter, so it is a case file, and it holds none"
     empty=$((empty + 1))
   fi
+  matrix_verdict "$MATRIX_NAMES" "$file" || unlisted=$((unlisted + 1))
 done
 
 # **Say what was read, by name.** A bare "stale: 0" is the sentence that got
@@ -601,9 +935,9 @@ echo "read $files_read case file(s), $checked cases:$read_names"
 if [ -n "$skipped" ]; then
   echo "skipped, not case files (they declare an interpreter — stand-in workers):$skipped"
 fi
-echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked"
-if [ "$names_checked" -ne "$checked" ]; then
-  echo "$((checked - names_checked)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
+echo "stale: $stale   holding no cases: $empty   hidden by a shebang: $hidden   unreadable: $unreadable   exempted by /g: $every_match_count   test names checked: $names_checked of $checked   misplaced runner: $misplaced   not in matrix and not exempt: $unlisted"
+if [ $((names_checked + misplaced)) -ne "$checked" ]; then
+  echo "$((checked - names_checked - misplaced)) case(s) named a runner guard 4 does not recognise and were not checked for guard 4 at all — see UNRECOGNISED RUNNER above"
 fi
 echo "nothing was compiled and no test was run — that is scripts/mutation-check.sh"
 
@@ -616,7 +950,7 @@ if [ "$files_read" -eq 0 ] || [ "$checked" -eq 0 ]; then
   echo "no cases anywhere in what was asked for — a result derived from nothing is not a result"
   exit 1
 fi
-# Five conditions, and four of them are the same one: **a green line must not
+# Six conditions, and five of them are the same one: **a green line must not
 # be reachable by checking less.** `stale` is the finding this script is for;
 # `empty`, `hidden` and `unreadable` are three ways it could otherwise report
 # success over cases it never looked at, and `names_checked == checked` is a
@@ -625,6 +959,7 @@ fi
 # towards `checked` while guard 4 said nothing about it at all — a `stale: 0`
 # that is true only because one case's test name went unchecked, and this
 # script's whole reason to exist is that such gaps are found here, not read
-# past.
+# past. `unlisted` is the fifth of the same kind: a case file the matrix does
+# not run and no marker explains is green only because nothing ever ran it.
 [ "$stale" -eq 0 ] && [ "$empty" -eq 0 ] && [ "$hidden" -eq 0 ] && [ "$unreadable" -eq 0 ] \
-  && [ "$names_checked" -eq "$checked" ]
+  && [ $((names_checked + misplaced)) -eq "$checked" ] && [ "$unlisted" -eq 0 ]

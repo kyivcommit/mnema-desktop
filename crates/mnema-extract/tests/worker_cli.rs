@@ -156,6 +156,13 @@ fn a_photo_is_refused_by_the_real_worker() {
 /// dropping `sha256` from the `unsupported` branch left the whole workspace
 /// green — 0 failed, `--no-fail-fast`.
 ///
+/// That `unsupported` row has since moved: the PDF reader (PR #4) reads
+/// `one-page-text.pdf`, and the only path left to `unsupported` is a zip
+/// without a recognised member (a corrupt one included) — so the
+/// `unsupported` half of this claim is
+/// held by `a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported`
+/// below, which `scripts/mutations/refuse-by-content.sh` names for it.
+///
 /// What that costs if it is ever dropped is the defect the branch before this
 /// one was written to close, arriving from the other end. `displaces` reads a
 /// missing digest as "the bytes are unknown, so displace", so a folder of PDFs
@@ -863,7 +870,24 @@ fn a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported() {
     let frames = frames_of(&out);
     assert_eq!(frames.len(), 1);
     match &frames[0] {
-        Frame::Refused { rule, .. } => assert_eq!(rule, "unsupported"),
+        Frame::Refused { rule, sha256, .. } => {
+            assert_eq!(rule, "unsupported");
+            // The worker read the whole archive to reach this verdict, so it
+            // owes the digest it read — `displaces` treats a missing one as
+            // "bytes unknown, displace". Against the file's own digest, not
+            // `is_some()`, as the table test above does: a worker sending a
+            // constant, or the digest of some other buffer, would satisfy the
+            // weaker check and lose exactly the documents this field exists
+            // to keep. That table used to hold this row through
+            // `one-page-text.pdf`; the PDF reader took that path away, and
+            // this is the only one left to `unsupported`.
+            assert_eq!(
+                sha256.as_deref(),
+                Some(digest_of(path.to_str().expect("a temp path is UTF-8")).as_str()),
+                "refused as unsupported without the digest it was refused on: {:?}",
+                frames[0]
+            );
+        }
         other => panic!("expected Refused, got {other:?}"),
     }
 }
