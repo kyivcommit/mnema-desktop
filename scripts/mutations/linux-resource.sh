@@ -1,7 +1,7 @@
 # Mutation cases for the per-platform Pdfium resource declaration. Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/linux-resource.sh
-# not-in-matrix: each case breaks ONE platform's bundle config (5 linux, 1 windows, 1 macOS, 2 script); tauri_build::build() reads the target platform's config before any test runs, so on the ubuntu-only matrix the five linux cases would break the build before any test (read from src-tauri/build.rs, not run there). All nine run on macOS (measured red: 9, 2026-09-16); a macOS leg is the same runner-minutes decision as for pr8-exclusions-macos.sh
+# not-in-matrix: each case breaks ONE platform's bundle config (5 linux, 1 windows, 1 macOS, 2 script); tauri_build::build() reads the target platform's config before any test runs, so on the ubuntu-only matrix the five linux cases would break that build itself (read from src-tauri/build.rs, not run there). All nine run on macOS (measured red: 9, 2026-09-16); a macOS leg is the same runner-minutes decision as for pr8-exclusions-macos.sh
 #
 # The subject is src-tauri/tests/vendored_library_resource.rs, and none of the
 # four files it reads is Rust: two platform configs, the base config, and the
