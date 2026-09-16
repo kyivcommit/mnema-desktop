@@ -374,18 +374,29 @@ fn one_round(
                 .collect();
             handles.into_iter().map(|h| h.join().ok()).collect()
         });
+    // Looked for FIRST, over every reply, before any slice is settled: a
+    // failure that cannot be about the texts anywhere in the round ends the
+    // run, and no slice ahead of it in queue order may be re-sent one text at
+    // a time in the meantime (owner's independent review of PR #50, P2,
+    // reproduced: 413 then 429 then 200 across three slices sent five
+    // requests, not three). The replies that did come back are still written.
+    let ending = replies.iter().any(|r| match r {
+        None => true,
+        Some(Err(e)) => !speaks_only_about_these_texts(e),
+        Some(Ok(_)) => false,
+    });
     let mut first_failure: Option<Error> = None;
     for (slice, reply) in slices.iter().zip(replies) {
-        let Some(reply) = reply else {
-            first_failure.get_or_insert(Error::RequestThreadPanicked);
-            continue;
+        let outcome = match reply {
+            None => Err(Error::RequestThreadPanicked),
+            Some(Ok(vectors)) => store(call, slice, &vectors, tally),
+            // A refusal that could be about the texts is re-sent one text at a
+            // time only while the run goes on; once it is ending, the terminal
+            // failure is the answer and the refusal is dropped unretried.
+            Some(Err(refusal)) if ending && speaks_only_about_these_texts(&refusal) => Ok(()),
+            Some(Err(refusal)) => settle(call, slice, Err(refusal), cancel, on_progress, tally),
         };
-        // Once the run is ending, a refused slice is not worth a one-at-a-time
-        // retry — but a slice that came back is still written.
-        if first_failure.is_some() && reply.is_err() {
-            continue;
-        }
-        if let Err(e) = settle(call, slice, reply, cancel, on_progress, tally) {
+        if let Err(e) = outcome {
             first_failure.get_or_insert(e);
         }
     }

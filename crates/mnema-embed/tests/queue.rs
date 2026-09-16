@@ -1380,3 +1380,45 @@ fn zero_workers_is_refused_like_a_zero_batch() {
     let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 0, &|| false, &mut |_| {});
     assert!(matches!(out, Err(mnema_embed::Error::EmptyBatch)));
 }
+
+/// Owner's independent review of PR #50, P2, reproduced by probe: with the
+/// slices answered 413, 429, 200 in queue order, the 413 slice was re-sent one
+/// text at a time BEFORE the loop reached the 429 — five requests for a run
+/// that was already over. A failure that cannot be about the texts, anywhere
+/// in the round, is found first: the slice that answered is written, the
+/// refused one is not retried, and the run ends with the rate limit. The
+/// replies are pinned to the texts they answer, so the order the kernel
+/// accepts three concurrent connections in cannot decide the outcome.
+#[test]
+fn a_rate_limit_anywhere_in_the_round_stops_every_retry_of_the_slices_before_it() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let text = |ord: usize| format!("{}{ord}", fixture::CHUNK_TEXT_PREFIX);
+    let mock = fixture::mock(vec![
+        Reply::status(413, r#"{"error":{"message":"batch too large"}}"#).only_for(&text(0)),
+        Reply::status(429, r#"{"error":{"message":"rate limited"}}"#).only_for(&text(2)),
+        fixture::reply_with(2).only_for(&text(4)),
+    ]);
+
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {});
+
+    assert!(
+        matches!(out, Err(mnema_embed::Error::Provider(_))),
+        "the round must end with the provider's failure, got {out:?}"
+    );
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        2,
+        "the slice that answered must be written"
+    );
+    for _ in 0..3 {
+        assert!(
+            mock.request_if_any().is_some(),
+            "three requests, one per slice"
+        );
+    }
+    assert!(
+        mock.request_if_any().is_none(),
+        "the refused slice must not be re-sent once the run is ending"
+    );
+}
