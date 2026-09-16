@@ -41,6 +41,12 @@ fn worker_answering(dir: &Path, name: &str, line: &str) -> PathBuf {
 /// spawning `/bin/true`, 0 without them. Nothing opens the file for writing
 /// again after this, so one successful run means every such child has passed
 /// its `exec` and the file is free for good.
+///
+/// The pre-run is itself a spawn outside the pool's lock, so its child can hold
+/// the pipe ends of a `Pool::manifest` spawned at the same moment — for the
+/// millisecond `/bin/sh` takes to print one line and exit, which `manifest`
+/// then waits out as part of `wait_with_output`. Accepted: it delays, it does
+/// not lose, and nothing in this binary writes to a departed worker.
 fn wait_until_it_will_run(path: &Path) {
     use std::process::{Command, Stdio};
 

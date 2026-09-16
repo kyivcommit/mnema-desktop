@@ -32,7 +32,7 @@ fn config() -> PoolConfig {
 /// every file, so each `extract` is a spawn — and the deaf worker's second
 /// request must still be answered on a fresh worker, not time out. A hit costs
 /// `timeout` and arrives as a skip, which is what the assertion names. Without
-/// the lock this failed 6 of 6 runs at the default rounds on the machine above.
+/// the lock this failed 4 of 4 runs at the default rounds on the machine above.
 #[cfg(unix)]
 #[test]
 fn a_concurrent_spawn_does_not_keep_a_departed_workers_pipe_open() {
@@ -49,6 +49,7 @@ fn a_concurrent_spawn_does_not_keep_a_departed_workers_pipe_open() {
                 let pool = Pool::new(PoolConfig {
                     workers: 1,
                     batch: 1,
+                    timeout: Duration::from_secs(1),
                     ..config()
                 })
                 .unwrap();

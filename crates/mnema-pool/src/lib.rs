@@ -83,7 +83,7 @@ const READ_AHEAD: usize = 64;
 /// blocks on the join until the stranger exits. Measured 2026-09-16, Apple M2
 /// Max: 6 and 10 writes in 2,000 accepted by a pipe with no reader against a
 /// concurrent spawner, 0 without one, and 0 in 2,000 with every spawn under
-/// this lock. `tests/supervision.rs` pins it with pools as the spawners.
+/// this lock. `tests/pipes.rs` pins it with pools as the spawners.
 ///
 /// Process-wide, because the window is process-wide: it only closes if no
 /// two spawns in this process overlap. Spawns made elsewhere in the process
@@ -853,7 +853,7 @@ impl Pool {
     /// since been replaced.
     ///
     /// The pipe this one *does* use is safe where the ones in `spawn` are not:
-    /// `Command::output` drains stdout and stderr concurrently, so the
+    /// `wait_with_output` drains stdout and stderr concurrently, so the
     /// 65,536-byte deadlock the module doc describes has nothing to fill. The
     /// worker's own stderr is folded into the error below rather than sent to
     /// the diagnostics file, because a binary that cannot state its readers is

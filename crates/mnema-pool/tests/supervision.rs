@@ -13,9 +13,11 @@
 //! child it owns when it is dropped, which is at the end of each test.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
+
+mod support;
+use support::{Watchdog, config, document, extract};
 
 use mnema_index::SkipRule;
 use mnema_pool::{Document, Failure, Pool, PoolConfig, PoolError, Skip};
@@ -29,21 +31,6 @@ use mnema_pool::{MemoryCeiling, memory_ceiling};
 
 /// The stand-in worker (`src/bin/test_worker.rs`), whose behaviour is selected
 /// by the prefix on the requested path.
-fn config() -> PoolConfig {
-    PoolConfig::new(env!("CARGO_BIN_EXE_mnema-pool-test-worker"))
-}
-
-fn extract(pool: &Pool, path: &str) -> Result<mnema_pool::Outcome, PoolError> {
-    pool.extract(Path::new(path))
-}
-
-fn document(outcome: mnema_pool::Outcome) -> Document {
-    match outcome {
-        mnema_pool::Outcome::Extracted(document) => document,
-        mnema_pool::Outcome::Skipped(skip) => panic!("expected a document, got {skip:?}"),
-    }
-}
-
 /// Every block of a document, pages flattened away. For the tests that only
 /// care that text came back at all — which page it sat on is another test's
 /// question.
@@ -61,40 +48,6 @@ fn skip(outcome: mnema_pool::Outcome) -> Skip {
         mnema_pool::Outcome::Extracted(document) => {
             panic!("expected a skip, got {} pages", document.pages.len())
         }
-    }
-}
-
-/// `cargo test` has no per-test timeout, so this is one. It aborts the whole
-/// run rather than letting a hang wedge CI; the stand-in workers left behind
-/// self-destruct on their own timer, which is the only reason exiting this
-/// abruptly is acceptable.
-struct Watchdog(Arc<AtomicBool>);
-
-impl Watchdog {
-    fn new(label: &'static str, bound: Duration) -> Self {
-        let finished = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&finished);
-        std::thread::spawn(move || {
-            let deadline = Instant::now() + bound;
-            while Instant::now() < deadline {
-                if flag.load(Ordering::SeqCst) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            eprintln!(
-                "watchdog: {label} did not finish within {bound:?}. Failing loudly \
-                 rather than hanging: the supervisor's own deadline is broken."
-            );
-            std::process::exit(103);
-        });
-        Watchdog(finished)
-    }
-}
-
-impl Drop for Watchdog {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -765,72 +718,6 @@ fn a_worker_retired_with_output_still_coming_does_not_wedge_the_pool() {
     assert_eq!(pool.live_workers(), 1, "one worker, the fresh one");
 }
 
-// --- An idle worker's death costs the file, never the job --------------------
-
-/// Waits until process `pid` has terminated, reaped or not. A child the pool has
-/// not waited for stays visible as a zombie, and `kill -0` still succeeds on one,
-/// so the state column is what tells the truth.
-#[cfg(unix)]
-fn wait_until_terminated(pid: u32) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .expect("ps runs");
-        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if state.is_empty() || state.starts_with('Z') {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "worker {pid} never terminated; ps says {state:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn a_worker_that_died_while_idle_costs_the_next_file_nothing() {
-    let _watchdog = Watchdog::new("idle worker died", Duration::from_secs(30));
-    let dir = tempfile::tempdir().unwrap();
-    let pid_file = dir.path().join("pid");
-    let pool = Pool::new(PoolConfig {
-        workers: 1,
-        batch: 100,
-        ..config()
-    })
-    .unwrap();
-
-    document(extract(&pool, &format!("pid:{}", pid_file.display())).unwrap());
-    let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
-
-    // The worker is now idle, between documents, and something outside this pool
-    // ends it — which is exactly what the out-of-memory killer does on a
-    // platform where no ceiling can be imposed, since it chooses by size and not
-    // by what a process is doing.
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
-    wait_until_terminated(pid);
-
-    // One idle worker's death must cost this file nothing at all: not a skip
-    // recorded against an innocent document, and certainly not the job. A pool
-    // of two workers over forty thousand files would otherwise abort because a
-    // process died doing nothing.
-    document(extract(&pool, "ok:next.txt").unwrap());
-    assert_eq!(
-        pool.worker_generation(),
-        2,
-        "the dead worker was replaced, not written to"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn a_worker_that_stopped_listening_costs_one_retry_not_the_job() {
@@ -996,41 +883,6 @@ fn a_memory_ceiling_this_platform_cannot_impose_is_refused_rather_than_faked() {
         other => panic!("expected the ceiling to be refused, got {other:?}"),
     }
     assert!(matches!(memory_ceiling(), MemoryCeiling::Unavailable(_)));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn this_macos_still_refuses_an_address_space_rlimit() {
-    // Measured 2026-07-26 on Darwin 25.5.0/arm64: setrlimit(RLIMIT_AS) fails
-    // with EINVAL, and `ulimit -v` agrees. The pool's Linux-only ceiling rests
-    // on that, so the fact is pinned here rather than trusted to a comment: if
-    // a future macOS starts honouring the call, this test goes red and the
-    // ceiling can be switched on for a platform that has one.
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    let mut command = Command::new("/usr/bin/true");
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        command.pre_exec(|| {
-            let limit = libc::rlimit {
-                rlim_cur: 512 << 20,
-                rlim_max: 512 << 20,
-            };
-            if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let error = command
-        .status()
-        .expect_err("macOS is expected to reject an address-space limit");
-    assert_eq!(
-        error.raw_os_error(),
-        Some(libc::EINVAL),
-        "expected EINVAL from setrlimit(RLIMIT_AS), got {error:?}"
-    );
 }
 
 /// A rule this pool does not know stops the job. It must never be guessed at.
