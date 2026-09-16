@@ -80,7 +80,10 @@
     if (counts === null || embedStartingZero) return null;
     const shape = progressShape(counts);
     if (shape.kind !== 'ratio' || shape.total === 0) return null;
-    return t('indexing_percent', { percent: Math.floor((100 * shape.done) / shape.total) });
+    // Clamped: `job.rs` documents `done` above `total` (a folder that grew
+    // while it was walked), and `<progress>` clips to `max` where a sentence
+    // would say "110 %".
+    return t('indexing_percent', { percent: Math.min(100, Math.floor((100 * shape.done) / shape.total)) });
   });
 </script>
 
