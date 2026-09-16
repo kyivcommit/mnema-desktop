@@ -36,10 +36,14 @@ use crate::job::{self, EndReason, Ended, Progress};
 
 /// How many chunks go to the provider in one request.
 ///
-/// ⚠️ **Nobody has measured this, and the spec says so** (§8, "the batch size —
-/// not measured; the default goes into the plan as an assumption, the live run
-/// names the number"). It is an assumption with an argument behind it, not a
-/// measurement, and the acceptance run is what replaces it:
+/// **Measured, 2026-09-16, on the owner's own index (57 955 chunks, macOS,
+/// remote provider), by counting `vec_emb_1_rowids` every 30 s while the pass
+/// ran** (D156). At 32 the pass did ~19 chunks/s, ~1.7 s per request; at 128 it
+/// did 51.2 chunks/s, ~2.5 s per request — 2.7× faster, because the round trip
+/// dominates and the provider's own time grows only weakly with the batch. The
+/// spec had said "not measured; the live run names the number" (§8), and the
+/// number it named is this one. The shape of the argument the old value was
+/// chosen by still holds, and still bounds how far this may grow:
 ///
 /// - **Above one, and that is load-bearing rather than a preference.**
 ///   `mnema_embed::one_at_a_time`'s corroboration rule attributes a refusal to a
@@ -59,7 +63,7 @@ use crate::job::{self, EndReason, Ended, Progress};
 /// and the one number anybody measured about long inputs is D25's observation
 /// that an over-long input to `bge-m3` returns `200` with a third of the text
 /// silently dropped, which is about one text and not about how many.
-pub(crate) const BATCH: usize = 32;
+pub(crate) const BATCH: usize = 128;
 
 /// One report from the pass, as the window receives it.
 ///
