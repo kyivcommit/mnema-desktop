@@ -65,6 +65,11 @@ pub struct EmbedTally {
 pub enum Error {
     #[error("index: {0}")]
     Index(#[from] mnema_index::Error),
+    /// A request thread of a concurrent round panicked. Its slice has no
+    /// reply and the run ends — after the other slices' replies are written,
+    /// the same as any failure that is not about the texts.
+    #[error("an embedding request thread panicked")]
+    RequestThreadPanicked,
     #[error("provider: {0}")]
     Provider(#[from] mnema_provider::Error),
     /// Nobody has chosen an embedding model, so there is nowhere to put a
@@ -225,7 +230,7 @@ pub fn run(
 ///
 /// **Measured (D156, 2026-09-16):** one request costs ~1.0 s of round trip
 /// plus ~12 ms per chunk, so a single stream tops out near 85 chunks/s
-/// however wide the batch; only concurrent requests get past it. Each round
+/// however wide the batch; concurrent requests get past it. Each round
 /// takes `batch × workers` chunks off the queue, sends them as `workers`
 /// requests on `std::thread::scope`, then settles every reply **on this
 /// thread, in queue order** — the index still has one writer, and every rule
@@ -355,21 +360,26 @@ fn one_round(
     // Only the request's inputs cross into the threads: `Call` holds the
     // database, which stays on this one.
     let (base, key, model) = (call.base, call.key, call.model);
-    let replies: Vec<Result<Vec<Vec<f32>>, mnema_provider::Error>> = std::thread::scope(|s| {
-        let handles: Vec<_> = slices
-            .iter()
-            .map(|slice| {
-                let texts: Vec<String> = slice.iter().map(|c| c.text.clone()).collect();
-                s.spawn(move || mnema_provider::embed(base, key, model, &texts))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("an embedding request thread panicked"))
-            .collect()
-    });
+    // `None` is a thread that panicked: not a reply, and not a refusal to be
+    // attributed to a text either — the other slices' replies are still
+    // written below, and the run ends with `RequestThreadPanicked`.
+    let replies: Vec<Option<Result<Vec<Vec<f32>>, mnema_provider::Error>>> =
+        std::thread::scope(|s| {
+            let handles: Vec<_> = slices
+                .iter()
+                .map(|slice| {
+                    let texts: Vec<String> = slice.iter().map(|c| c.text.clone()).collect();
+                    s.spawn(move || mnema_provider::embed(base, key, model, &texts))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().ok()).collect()
+        });
     let mut first_failure: Option<Error> = None;
     for (slice, reply) in slices.iter().zip(replies) {
+        let Some(reply) = reply else {
+            first_failure.get_or_insert(Error::RequestThreadPanicked);
+            continue;
+        };
         // Once the run is ending, a refused slice is not worth a one-at-a-time
         // retry — but a slice that came back is still written.
         if first_failure.is_some() && reply.is_err() {

@@ -694,8 +694,8 @@ impl Shared {
         // No scan at launch (owner, 2026-09-16, D157 — withdrawing D152's
         // decision 1 after two runs in one day started themselves: a stopped
         // embedding resumed on a `cargo tauri dev` restart, then a fresh model's
-        // whole queue — 57 955 chunks, real money — embedded on the next restart
-        // with nothing pressed). What starts a scan is the person (the Scan
+        // whole queue — tens of thousands of chunks, paid per token — embedded
+        // on the next restart with nothing pressed). What starts a scan is the person (the Scan
         // control, the tray) or a change the RUNNING watcher sees on disk, which
         // reaches `trigger` through `pending` below like any other. A change
         // made while the application was closed waits for the button; the
@@ -751,16 +751,7 @@ impl Shared {
 
     #[cfg(test)]
     pub(crate) fn spawn_for_test(self: &Arc<Self>) -> Arc<CountingSlot> {
-        self.spawn_for_test_refusing(0)
-    }
-    /// Like `spawn_for_test`, but the slot's first `n` `start()` calls
-    /// answer `Err(IndexNotOpen)` instead of counting (Task 11).
-    #[cfg(test)]
-    pub(crate) fn spawn_for_test_refusing(self: &Arc<Self>, n: u32) -> Arc<CountingSlot> {
-        let slot = Arc::new(CountingSlot {
-            refuse_starts: AtomicU32::new(n),
-            ..Default::default()
-        });
+        let slot = Arc::new(CountingSlot::default());
         let me = Arc::clone(self);
         let s: Arc<dyn Slot + Send + Sync> = slot.clone();
         std::thread::spawn(move || me.run(s));
@@ -837,9 +828,6 @@ impl<R: tauri::Runtime> Slot for HandleSlot<R> {
 #[derive(Default)]
 pub(crate) struct CountingSlot {
     pub starts: AtomicU64,
-    /// Task 11: the first this-many calls to `start()` answer as though
-    /// the index were still closed, instead of counting.
-    pub refuse_starts: AtomicU32,
     /// Task 11 review (round 1, item 1): settable `stopped_at()` answer,
     /// `None` by default — a test sets it to simulate Stop being pressed
     /// while a start-up retry is still owed.
@@ -848,10 +836,6 @@ pub(crate) struct CountingSlot {
 #[cfg(test)]
 impl Slot for CountingSlot {
     fn start(&self) -> Result<(), crate::error::Error> {
-        if self.refuse_starts.load(Ordering::SeqCst) > 0 {
-            self.refuse_starts.fetch_sub(1, Ordering::SeqCst);
-            return Err(crate::error::Error::IndexNotOpen);
-        }
         self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -1621,6 +1605,30 @@ mod tests {
             wait_for(|| slot.starts.load(Ordering::SeqCst) == 1),
             "a change on disk must still start a scan"
         );
+        shared.close();
+    }
+
+    #[test]
+    fn a_failed_new_root_is_retried_on_the_tick_after_it_appears() {
+        // Plan review P2-4: the thread, not the command, owns the retry.
+        let parent = tempfile::tempdir().unwrap();
+        let a = parent.path().join("a");
+        let later = parent.path().join("later");
+        std::fs::create_dir(&a).unwrap();
+        let (shared, desired, _slot) = shared_for(vec![a.clone()]);
+        desired.lock().unwrap().push(later.clone());
+        shared.request_rewatch();
+        assert!(wait_for(|| shared.rewatch_generation() >= 2));
+        assert_eq!(
+            shared.watched(),
+            HashSet::from([plain(&a)]),
+            "an absent root cannot be subscribed; keys are in plain form"
+        );
+        std::fs::create_dir(&later).unwrap();
+        shared.tick_for_test(); // stands in for the 60 s REWATCH timeout
+        assert!(wait_for(|| shared.watched().contains(&plain(&later))));
+        std::fs::write(later.join("x.txt"), "x").unwrap();
+        assert!(wait_for(|| shared.pending.lock().unwrap().first.is_some()));
         shared.close();
     }
 

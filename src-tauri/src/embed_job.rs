@@ -36,9 +36,9 @@ use crate::job::{self, EndReason, Ended, Progress};
 
 /// How many chunks go to the provider in one request.
 ///
-/// **Measured, 2026-09-16, on the owner's own index (57 955 chunks, macOS,
-/// remote provider), by counting `vec_emb_1_rowids` every 30 s while the pass
-/// ran** (D156). At 32 the pass did ~19 chunks/s, ~1.7 s per request; at 128 it
+/// **Measured, 2026-09-16, on a real index of tens of thousands of chunks
+/// (macOS, remote provider), by counting the vector table's rows every 30 s
+/// while the pass ran** (D156). At 32 the pass did ~19 chunks/s, ~1.7 s per request; at 128 it
 /// did 51.2 chunks/s, ~2.5 s per request — 2.7× faster, because the round trip
 /// dominates and the provider's own time grows only weakly with the batch. The
 /// spec had said "not measured; the live run names the number" (§8), and the
@@ -68,9 +68,12 @@ pub(crate) const BATCH: usize = 128;
 /// How many requests of [`BATCH`] chunks are in flight at once.
 ///
 /// D156's model of one request — ~1.0 s of round trip plus ~12 ms per chunk —
-/// puts a single stream's ceiling near 85 chunks/s whatever the batch; only
-/// concurrent requests get past it (`mnema_embed::run_with`). Four is a
-/// guess to be measured, not a measurement: the provider's rate limit is the
+/// puts a single stream's ceiling near 85 chunks/s whatever the batch;
+/// concurrent requests get past it (`mnema_embed::run_with`, measured at
+/// ~154 chunks/s with four). Not the only lever left unmeasured: `http.rs`
+/// builds a new `ureq::Agent` per request, so each pays its own TLS
+/// handshake, and a reused agent might move the same ceiling on its own.
+/// Four is a guess that held, not a limit: the provider's rate limit is the
 /// unknown, and a `429` ends the run as any other non-text failure does.
 pub(crate) const WORKERS: usize = 4;
 
