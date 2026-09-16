@@ -63,6 +63,9 @@ pub struct ModelEntry {
     /// What the provider said about the price of one input token — see
     /// [`Price`] for why it is not an `Option<f64>`.
     pub price: Price,
+    /// One OUTPUT token, `pricing.completion` — read the same way, with the
+    /// same states (owner, 2026-09-16: the pickers show both prices).
+    pub output_price: Price,
     /// `None` means selectable. Anything else is shown, greyed, with its reason
     /// (spec §2.5): a model the provider lists and we hide sends the user
     /// looking for a fault in this application.
@@ -338,6 +341,8 @@ struct Pricing {
     /// and two of the shapes that *are* numbers are not prices.
     #[serde(default)]
     prompt: Price,
+    #[serde(default)]
+    completion: Price,
 }
 
 #[derive(Deserialize)]
@@ -624,9 +629,14 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
             Role::Chat | Role::Rerank => None,
         };
 
+        let (price, output_price) = raw
+            .pricing
+            .map(|p| (p.prompt, p.completion))
+            .unwrap_or_default();
         entries.push(ModelEntry {
             name: raw.name.clone().unwrap_or_else(|| raw.id.clone()),
-            price: raw.pricing.map(|p| p.prompt).unwrap_or_default(),
+            price,
+            output_price,
             id: raw.id,
             input_limit,
             refusal,

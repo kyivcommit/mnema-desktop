@@ -13,7 +13,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_tab_embedding' | 'models_tab_chat'
   | 'models_status_ready' | 'models_status_not_ready'
   | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
-  | 'models_selection_absent'
+  | 'models_selection_absent' | 'models_option_priced' | 'models_option_priced_both'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
@@ -263,6 +263,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_not_chosen: 'Модель ще не обрано.',
     models_selection_unknown: 'Поточна модель невідома.',
     models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
+    // The picker's option text: the price per million tokens beside the
+    // name, as the provider stated it (owner, 2026-09-16). Input only when
+    // the output price is nought or not stated — an embedding model.
+    models_option_priced: '{name} — {input} за 1M токенів',
+    models_option_priced_both: '{name} — вхід {input}, вихід {output} за 1M токенів',
     // The per-role configured dot (review P2-1). Task 9 moved the dot inside
     // its own tab button, so one of these three words is now the SECOND half
     // of the TAB BUTTON's accessible name ("Ембединг, Налаштовано"), sr-only
@@ -1092,6 +1097,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_not_chosen: 'No model chosen yet.',
     models_selection_unknown: 'The current model is unknown.',
     models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
+    models_option_priced: '{name} — {input} per 1M tokens',
+    models_option_priced_both: '{name} — {input} in, {output} out per 1M tokens',
     models_dot_configured: 'Configured',
     models_dot_not_configured: 'Not configured',
     models_dot_unknown: 'Unknown',

@@ -388,7 +388,10 @@ export type ModelEntry = {
   id: string;
   name: string;
   inputLimit: InputLimit;
+  /** One input token (`pricing.prompt`). */
   price: Price;
+  /** One output token (`pricing.completion`). */
+  outputPrice: Price;
   refusal: ModelRefusal | null;
 };
 

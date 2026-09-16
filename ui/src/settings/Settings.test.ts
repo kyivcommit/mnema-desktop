@@ -1475,8 +1475,8 @@ test('mutation_outcome_survives_a_section_switch', async () => {
     role === 'embedding'
       ? {
         entries: [
-          { id: 'emb-1', name: 'emb-1', inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, refusal: null },
-          { id: 'emb-2', name: 'emb-2', inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, refusal: null },
+          { id: 'emb-1', name: 'emb-1', inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' }, refusal: null },
+          { id: 'emb-2', name: 'emb-2', inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' }, refusal: null },
         ],
         unreadable: 0, unreadableRecords: [],
       }

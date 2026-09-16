@@ -899,7 +899,7 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
 function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
   return {
     id, name: id,
-    inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' },
+    inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' },
     refusal: null,
     ...overrides,
   };
@@ -1058,6 +1058,38 @@ test('two provider records sharing one id render two options and leave the secti
 // one line per DISTINCT refusal reason names how many entries it folded
 // together, below the select.
 // ---------------------------------------------------------------------------
+
+// Owner, 2026-09-16: the price per million tokens beside the name. Three
+// shapes on purpose — a chat model with both prices, an embedding model whose
+// completion price is nought (input only), and a free one (name alone).
+test('an option carries the stated price per million tokens beside the name', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('chat-like', {
+        name: 'Both Prices',
+        price: { kind: 'known', amount: 0.00000125 },
+        outputPrice: { kind: 'known', amount: 0.00001 },
+      }),
+      entry('emb', {
+        name: 'Input Only',
+        price: { kind: 'known', amount: 0.00000002 },
+        outputPrice: { kind: 'known', amount: 0 },
+      }),
+      entry('free', {
+        name: 'Gratis (free)',
+        price: { kind: 'known', amount: 0 },
+        outputPrice: { kind: 'known', amount: 0 },
+      }),
+      entry('mute', { name: 'Unpriced' }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('chat-like').length).toBe(1));
+  expect(optionFor('chat-like').textContent).toBe('Both Prices — $1.25 in, $10 out per 1M tokens');
+  expect(optionFor('emb').textContent).toBe('Input Only — $0.02 per 1M tokens');
+  expect(optionFor('free').textContent).toBe('Gratis (free)');
+  expect(optionFor('mute').textContent).toBe('Unpriced');
+});
 
 test('refused_models_are_not_options', async () => {
   mockCatalogues({

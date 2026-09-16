@@ -618,6 +618,32 @@
     return cat.entries.filter((entry: ModelEntry) => !isRefused(entry));
   });
 
+  // The option's text: the name, and the price per million tokens when the
+  // provider stated one (owner, 2026-09-16). Dollars formatted the same way
+  // in both languages — a price is read, not translated — and to three
+  // significant digits, which is what the providers' own price pages print.
+  // Both prices only when the output one is a number above nought: an
+  // embedding model states `completion: "0"`, and "$0 out" beside it would
+  // read as a claim about billing this build cannot make (see `Price`'s
+  // doc in `catalogue.rs`). Nought in AND out — a free model — is the name
+  // alone; the catalogue already says "(free)" there.
+  const dollars = new Intl.NumberFormat('en', {
+    style: 'currency', currency: 'USD', maximumSignificantDigits: 3,
+  });
+  const perMillion = (amount: number) => dollars.format(amount * 1_000_000);
+  function optionText(entry: ModelEntry): string {
+    void $locale;
+    if (entry.price.kind !== 'known') return entry.name;
+    const out = entry.outputPrice.kind === 'known' ? entry.outputPrice.amount : 0;
+    if (out > 0) {
+      return t('models_option_priced_both', {
+        name: entry.name, input: perMillion(entry.price.amount), output: perMillion(out),
+      });
+    }
+    if (entry.price.amount === 0) return entry.name;
+    return t('models_option_priced', { name: entry.name, input: perMillion(entry.price.amount) });
+  }
+
   // `void $locale` here, not on `hiddenReasonLabel`/`unreadableRecordLabel`
   // themselves: those are plain functions called from markup, and Svelte's
   // fine-grained reactivity only re-runs an expression when a signal IT reads
@@ -1147,7 +1173,7 @@
           <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
         {/if}
         {#each selectableEntries as entry}
-          <option value={entry.id}>{entry.name}</option>
+          <option value={entry.id}>{optionText(entry)}</option>
         {/each}
       </select>
     </div>

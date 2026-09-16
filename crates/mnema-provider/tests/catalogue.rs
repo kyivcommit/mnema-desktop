@@ -41,6 +41,11 @@ fn the_default_model_survives_every_rule_and_keeps_its_price() {
     assert_eq!(bge.refusal, None, "the default choice must be selectable");
     assert_eq!(bge.input_limit, InputLimit::Known { tokens: 8194 });
     assert_eq!(bge.price, Price::Known { amount: 0.00000001 });
+    assert_eq!(
+        bge.output_price,
+        Price::Known { amount: 0.0 },
+        "an embedding model states a completion price of nought, and nought is a number"
+    );
 }
 
 #[test]
