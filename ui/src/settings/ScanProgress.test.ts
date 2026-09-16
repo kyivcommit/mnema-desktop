@@ -145,4 +145,30 @@ test('nought seconds left is an estimate, and an absent one says it is not known
 
   rerender({ phase: { ...zero, counts: { ...zero.counts, secondsLeft: null } } });
   expect(visible(screen.getByTestId('indexing-eta'))).toBe('Скільки ще лишилось часу, поки не відомо.');
+
+  rerender({ phase: { ...zero, counts: { ...zero.counts, secondsLeft: 2130 } } });
+  expect(visible(screen.getByTestId('indexing-eta'))).toBe('Залишилось приблизно 35 хв 30 с.');
+});
+
+// The share is of the WHOLE total and floored, so 23328 of 57955 says 40, not 41
+// — and a pass still counting has no total to be a share of.
+test('a ratio pass states its whole per cent; a counting pass states none', () => {
+  setLocale('uk');
+  const ratio: Phase = {
+    kind: 'embedding',
+    counts: { ...COUNTS, done: 23_328, total: 57_955, secondsLeft: null },
+  };
+  const { rerender } = render(ScanProgress, { props: { phase: ratio } });
+  expect(visible(screen.getByTestId('indexing-percent'))).toBe('Виконано 40 %.');
+
+  rerender({ phase: { ...ratio, counts: { ...ratio.counts, done: 57_955 } } });
+  expect(visible(screen.getByTestId('indexing-percent'))).toBe('Виконано 100 %.');
+
+  rerender({
+    phase: {
+      kind: 'reading', rootIndex: 1, rootCount: 1, rootPath: '/a',
+      counts: { ...COUNTS, done: 4, total: 0, secondsLeft: null },
+    },
+  });
+  expect(screen.queryByTestId('indexing-percent')).toBeNull();
 });

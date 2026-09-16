@@ -103,3 +103,21 @@ export function formatIndexedDate(indexedAt: number, locale: Loc): string {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'long', timeStyle: 'short' })
     .format(new Date(indexedAt * 1000));
 }
+
+/**
+ * A remaining time as units a person reads at a glance — `2130` reads as "35 min 30 s",
+ * not "2130 s" (owner, screenshot 2026-09-16). Zero units are dropped; a bare
+ * `0` still says "0 s", because nought seconds left is an estimate, not silence.
+ */
+export function formatDuration(seconds: number): string {
+  const parts: string[] = [];
+  const d = Math.floor(seconds / DAY);
+  const h = Math.floor((seconds % DAY) / HOUR);
+  const m = Math.floor((seconds % HOUR) / MINUTE);
+  const s = seconds % MINUTE;
+  if (d) parts.push(t('duration_d', { n: d }));
+  if (h) parts.push(t('duration_h', { n: h }));
+  if (m) parts.push(t('duration_min', { n: m }));
+  if (s || parts.length === 0) parts.push(t('duration_s', { n: s }));
+  return parts.join(' ');
+}
