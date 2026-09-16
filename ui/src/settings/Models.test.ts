@@ -1093,17 +1093,33 @@ test('an option carries the stated price per million tokens beside the name', as
     .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
 });
 
+// jsdom under vitest hands out a `localStorage` with no working methods (an
+// opaque origin), so the two sort tests stub one in memory and take it away
+// again — the component itself treats a refusing storage as the default.
+function memoryStorage(seed: Record<string, string> = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => { map.set(k, v); },
+    removeItem: (k: string) => { map.delete(k); },
+  };
+}
+
 // Owner, 2026-09-16: one button, two states. The list opens by name; the
 // button names the order it is in, and a press swaps both the order and the
 // name. By price the unpriced entry goes last, whatever its name.
 test('the sort toggle swaps the picker between name order and price order', async () => {
   mockCatalogues({
     embedding: catalogueOf([
-      entry('c', { name: 'Cheap C', price: { kind: 'known', amount: 0.000001 } }),
+      // Cheapest INPUT but the dearest OUTPUT: by price it must sort last of
+      // the priced — the output token is the one the owner ranks by.
+      entry('c', { name: 'Cheap C', price: { kind: 'known', amount: 0.0000001 }, outputPrice: { kind: 'known', amount: 0.00003 } }),
       entry('a', { name: 'Aardvark A' }), // unpriced
-      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.0000005 } }),
+      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.000001 }, outputPrice: { kind: 'known', amount: 0.00001 } }),
     ]),
   });
+  const storage = memoryStorage();
+  vi.stubGlobal('localStorage', storage);
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('a').length).toBe(1));
   const order = () => [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
@@ -1114,10 +1130,32 @@ test('the sort toggle swaps the picker between name order and price order', asyn
   await fireEvent.click(screen.getByTestId('model-sort'));
   expect(screen.getByTestId('model-sort').textContent).toBe('By price');
   expect(order()).toEqual(['b', 'c', 'a']);
+  expect(storage.getItem('models.sortBy')).toBe('price');
 
   await fireEvent.click(screen.getByTestId('model-sort'));
   expect(screen.getByTestId('model-sort').textContent).toBe('By name');
   expect(order()).toEqual(['a', 'b', 'c']);
+  vi.unstubAllGlobals();
+});
+
+// Owner, 2026-09-16: the choice survives a restart. A fresh mount reads it.
+test('the sort order chosen last time is the one the picker opens in', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('a', { name: 'Aardvark A' }),
+      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.000001 } }),
+    ]),
+  });
+  vi.stubGlobal('localStorage', memoryStorage({ 'models.sortBy': 'price' }));
+  try {
+    await renderWith(settings());
+    await waitFor(() => expect(optionsFor('a').length).toBe(1));
+    expect(screen.getByTestId('model-sort').textContent).toBe('By price');
+    const order = [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
+    expect(order).toEqual(['b', 'a']);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test('the price note is absent when no option carries a price', async () => {

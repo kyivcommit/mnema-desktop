@@ -638,17 +638,26 @@
   const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
   // One button, two states (owner, 2026-09-16): the list is sorted by name
   // or by price, and the button says which order it is in now. By price:
-  // input then output, the unpriced last — a person comparing costs wants
-  // the numbers together and the unknowns out of the way. Not persisted: a
-  // sort is a way of looking, not a setting.
-  let sortBy: 'name' | 'price' = $state('name');
+  // OUTPUT then input (owner: the output token is the dear one; embedding
+  // models all state nought out, so for them it falls to input), the unpriced
+  // last. Remembered in the webview's own storage across restarts (owner) —
+  // a convenience, so a storage that is missing or refuses is the default.
+  const SORT_KEY = 'models.sortBy';
+  const readSort = (): 'name' | 'price' => {
+    try { return localStorage.getItem(SORT_KEY) === 'price' ? 'price' : 'name'; } catch { return 'name'; }
+  };
+  let sortBy: 'name' | 'price' = $state(readSort());
+  function toggleSort() {
+    sortBy = sortBy === 'name' ? 'price' : 'name';
+    try { localStorage.setItem(SORT_KEY, sortBy); } catch { /* not remembered, still sorted */ }
+  }
   const priceKey = (p: Price) => (p.kind === 'known' ? p.amount : Number.POSITIVE_INFINITY);
   const sortedEntries = $derived.by(() => {
     const entries = [...selectableEntries];
     return sortBy === 'name'
       ? entries.sort((a, b) => a.name.localeCompare(b.name))
       : entries.sort((a, b) =>
-          priceKey(a.price) - priceKey(b.price) || priceKey(a.outputPrice) - priceKey(b.outputPrice));
+          priceKey(a.outputPrice) - priceKey(b.outputPrice) || priceKey(a.price) - priceKey(b.price));
   });
   const sortLabel = $derived.by(() => {
     void $locale;
@@ -1202,7 +1211,7 @@
       <button
         type="button"
         data-testid="model-sort"
-        onclick={() => { sortBy = sortBy === 'name' ? 'price' : 'name'; }}
+        onclick={toggleSort}
       >{sortLabel}</button>
     </div>
     {#if selectableEntries.some((entry) => entry.price.kind === 'known' && entry.price.amount > 0)}
