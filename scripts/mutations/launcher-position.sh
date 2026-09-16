@@ -173,9 +173,21 @@ case_ "launcher: the drag's own blur hides the window" \
 
 case_ "launcher: a press anywhere arms the drag window" \
   ui/src/launcher/Launcher.svelte \
-  's~if \(onHandle\) handlePressedAt = Date\.now\(\);~handlePressedAt = Date.now(); void onHandle;~' \
+  's~handlePressedAt = onHandle \? Date\.now\(\) : -Infinity;~handlePressedAt = Date.now(); void onHandle;~' \
   'handlePressedAt = Date.now(); void onHandle;' \
   src/launcher/Launcher.test.ts 'a press on the input or the pin does not arm the drag window' runner=vitest
+
+case_ "launcher: a press off the handle leaves an earlier arming in place" \
+  ui/src/launcher/Launcher.svelte \
+  's~handlePressedAt = onHandle \? Date\.now\(\) : -Infinity;~if (onHandle) handlePressedAt = Date.now();~' \
+  'if (onHandle) handlePressedAt = Date.now();' \
+  src/launcher/Launcher.test.ts 'a press off the handle disarms an earlier arming even with no release' runner=vitest
+
+case_ "launcher: a secondary-button press arms the drag window" \
+  ui/src/launcher/Launcher.svelte \
+  's~const onHandle = !event\.button && !!target~const onHandle = !!target~' \
+  "const onHandle = !!target?.closest('.searchbar')" \
+  src/launcher/Launcher.test.ts 'a right-button press on the handle does not arm the drag window' runner=vitest
 
 case_ "launcher: a release does not disarm the drag window" \
   ui/src/launcher/Launcher.svelte \
