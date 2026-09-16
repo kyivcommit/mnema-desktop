@@ -187,6 +187,39 @@ main select:focus-visible {
   gap: 6px;
 }
 
+/* the model picker's line: the select takes the room the label and the sort
+   button leave, never its longest option's width, so the button stays on the
+   line whatever the list holds (owner, 2026-09-16) */
+.model-row {
+  flex-wrap: nowrap;
+}
+.model-row select {
+  flex: 1;
+  min-width: 0;
+}
+.model-row button {
+  white-space: nowrap;
+}
+/* the ⓘ beside the sort button, and the popover it opens (owner, 2026-09-16) */
+.model-row .info {
+  padding: 0 4px;
+  border: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ink-soft);
+}
+.notes {
+  max-width: 520px;
+  padding: 14px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.notes::backdrop {
+  background: rgba(0, 0, 0, .25);
+}
+
 /* the phase progress bar (mockup carries none of its own — new to Task 5),
    with the per cent to its right (owner, 2026-09-16) */
 .progress-row {

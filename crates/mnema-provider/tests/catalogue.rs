@@ -41,6 +41,11 @@ fn the_default_model_survives_every_rule_and_keeps_its_price() {
     assert_eq!(bge.refusal, None, "the default choice must be selectable");
     assert_eq!(bge.input_limit, InputLimit::Known { tokens: 8194 });
     assert_eq!(bge.price, Price::Known { amount: 0.00000001 });
+    assert_eq!(
+        bge.output_price,
+        Price::Known { amount: 0.0 },
+        "an embedding model states a completion price of nought, and nought is a number"
+    );
 }
 
 #[test]
@@ -789,4 +794,79 @@ fn two_records_sharing_one_id_both_reach_the_catalogue_and_neither_is_renamed() 
         "a duplicate id is not a read failure: nothing here was refused or counted away"
     );
     assert!(catalogue.unreadable_records.is_empty());
+}
+
+/// D158: a `:batch` id is the provider's asynchronous variant and is hidden in
+/// every role — even one that would otherwise pass every rule for its role.
+#[test]
+fn a_batch_variant_is_hidden_in_every_role_whatever_else_it_states() {
+    let json = r#"{"data":[
+        {"id":"vendor/model:batch","name":"Model (batch)","context_length":8192,
+         "pricing":{"prompt":"0.000001","completion":"0.000002"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
+        {"id":"vendor/model","name":"Model","context_length":8192,
+         "pricing":{"prompt":"0.000002","completion":"0.000004"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}}
+    ]}"#;
+    for role in [Role::Chat, Role::Embedding] {
+        let catalogue = models_from_json(role, json).expect("parses");
+        assert_eq!(
+            find(&catalogue.entries, "vendor/model:batch").refusal,
+            Some(Refusal::BatchOnly),
+            "{role:?}: the batch variant must be hidden"
+        );
+        assert_eq!(
+            find(&catalogue.entries, "vendor/model").refusal,
+            None,
+            "{role:?}: the synchronous twin must stay selectable"
+        );
+    }
+}
+
+/// A router states `-1` for a price; it is hidden in every role, and a model
+/// that states a real price beside it stays.
+#[test]
+fn a_router_with_a_negative_price_is_hidden_in_every_role() {
+    let json = r#"{"data":[
+        {"id":"openrouter/auto","name":"Auto Router","context_length":2000000,
+         "pricing":{"prompt":"-1","completion":"-1"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
+        {"id":"vendor/model","name":"Model","context_length":8192,
+         "pricing":{"prompt":"0.000002","completion":"0.000004"},
+         "architecture":{"input_modalities":["text"],"output_modalities":["text"]}}
+    ]}"#;
+    for role in [Role::Chat, Role::Embedding] {
+        let catalogue = models_from_json(role, json).expect("parses");
+        assert_eq!(
+            find(&catalogue.entries, "openrouter/auto").refusal,
+            Some(Refusal::Router),
+            "{role:?}: a router must be hidden"
+        );
+        assert_eq!(find(&catalogue.entries, "vendor/model").refusal, None);
+    }
+}
+
+/// Owner's independent review of PR #51, P2: `NotAPrice` also holds `NaN` and
+/// the infinities, and none of those is the router's signal. A model that
+/// states one stays selectable, with its price simply not known.
+#[test]
+fn a_non_finite_price_does_not_hide_a_model_as_a_router() {
+    for stated in ["NaN", "inf", "-inf"] {
+        let json = format!(
+            r#"{{"data":[
+                {{"id":"vendor/model","name":"Model","context_length":8192,
+                 "pricing":{{"prompt":"{stated}","completion":"{stated}"}},
+                 "architecture":{{"input_modalities":["text"],"output_modalities":["text"]}}}}
+            ]}}"#
+        );
+        for role in [Role::Chat, Role::Embedding] {
+            let catalogue = models_from_json(role, &json).expect("parses");
+            let entry = find(&catalogue.entries, "vendor/model");
+            assert!(
+                matches!(entry.price, Price::NotAPrice { .. }),
+                "{stated}: the price is still not a price"
+            );
+            assert_eq!(entry.refusal, None, "{role:?}, {stated}: not a router");
+        }
+    }
 }

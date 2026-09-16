@@ -899,7 +899,7 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
 function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
   return {
     id, name: id,
-    inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' },
+    inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' },
     refusal: null,
     ...overrides,
   };
@@ -1058,6 +1058,120 @@ test('two provider records sharing one id render two options and leave the secti
 // one line per DISTINCT refusal reason names how many entries it folded
 // together, below the select.
 // ---------------------------------------------------------------------------
+
+// Owner, 2026-09-16: the price per million tokens beside the name. Three
+// shapes on purpose — a chat model with both prices, an embedding model whose
+// completion price is nought (input only), and a free one (name alone).
+test('an option carries the stated price per million tokens beside the name', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('chat-like', {
+        name: 'Both Prices',
+        price: { kind: 'known', amount: 0.00000125 },
+        outputPrice: { kind: 'known', amount: 0.00001 },
+      }),
+      entry('emb', {
+        name: 'Input Only',
+        price: { kind: 'known', amount: 0.00000002 },
+        outputPrice: { kind: 'known', amount: 0 },
+      }),
+      entry('free', {
+        name: 'Gratis (free)',
+        price: { kind: 'known', amount: 0 },
+        outputPrice: { kind: 'known', amount: 0 },
+      }),
+      entry('mute', { name: 'Unpriced' }),
+    ]),
+  });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('chat-like').length).toBe(1));
+  expect(optionFor('chat-like').textContent).toBe('Both Prices — $1.25 / $10');
+  expect(optionFor('emb').textContent).toBe('Input Only — $0.02');
+  expect(optionFor('free').textContent).toBe('Gratis (free)');
+  expect(optionFor('mute').textContent).toBe('Unpriced');
+  expect(screen.getByTestId('model-price-note').textContent)
+    .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
+  // Behind the ⓘ (owner, 2026-09-16): the note lives in the popover the
+  // button opens, not under the picker.
+  expect(screen.getByTestId('model-info').getAttribute('popovertarget')).toBe('model-notes');
+  expect(screen.getByTestId('model-notes').contains(screen.getByTestId('model-price-note'))).toBe(true);
+});
+
+// jsdom under vitest hands out a `localStorage` with no working methods (an
+// opaque origin), so the two sort tests stub one in memory and take it away
+// again — the component itself treats a refusing storage as the default.
+function memoryStorage(seed: Record<string, string> = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => { map.set(k, v); },
+    removeItem: (k: string) => { map.delete(k); },
+  };
+}
+
+// Owner, 2026-09-16: one button, two states. The list opens by name; the
+// button names the order it is in, and a press swaps both the order and the
+// name. By price the unpriced entry goes last, whatever its name.
+test('the sort toggle swaps the picker between name order and price order', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      // Cheapest INPUT but the dearest OUTPUT: by price it must sort last of
+      // the priced — the output token is the one the owner ranks by.
+      entry('c', { name: 'Cheap C', price: { kind: 'known', amount: 0.0000001 }, outputPrice: { kind: 'known', amount: 0.00003 } }),
+      entry('a', { name: 'Aardvark A' }), // unpriced
+      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.000001 }, outputPrice: { kind: 'known', amount: 0.00001 } }),
+      // Review P2: a known output of nought beside an UNKNOWN input is
+      // unpriced — the option shows no price — and must not sort first.
+      entry('d', { name: 'Dark D', outputPrice: { kind: 'known', amount: 0 } }),
+    ]),
+  });
+  const storage = memoryStorage();
+  vi.stubGlobal('localStorage', storage);
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('a').length).toBe(1));
+  const order = () => [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
+
+  expect(screen.getByTestId('model-sort').textContent).toBe('By name');
+  expect(order()).toEqual(['a', 'b', 'c', 'd']);
+
+  await fireEvent.click(screen.getByTestId('model-sort'));
+  expect(screen.getByTestId('model-sort').textContent).toBe('By price');
+  expect(order()).toEqual(['b', 'c', 'a', 'd']);
+  expect(storage.getItem('models.sortBy')).toBe('price');
+
+  await fireEvent.click(screen.getByTestId('model-sort'));
+  expect(screen.getByTestId('model-sort').textContent).toBe('By name');
+  expect(order()).toEqual(['a', 'b', 'c', 'd']);
+  vi.unstubAllGlobals();
+});
+
+// Owner, 2026-09-16: the choice survives a restart. A fresh mount reads it.
+test('the sort order chosen last time is the one the picker opens in', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('a', { name: 'Aardvark A' }),
+      entry('b', { name: 'Bargain B', price: { kind: 'known', amount: 0.000001 } }),
+    ]),
+  });
+  vi.stubGlobal('localStorage', memoryStorage({ 'models.sortBy': 'price' }));
+  try {
+    await renderWith(settings());
+    await waitFor(() => expect(optionsFor('a').length).toBe(1));
+    expect(screen.getByTestId('model-sort').textContent).toBe('By price');
+    const order = [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
+    expect(order).toEqual(['b', 'a']);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('the price note is absent when no option carries a price', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('mute', { name: 'Unpriced' })]) });
+  await renderWith(settings());
+  await waitFor(() => expect(optionsFor('mute').length).toBe(1));
+  expect(screen.queryByTestId('model-price-note')).toBeNull();
+  expect(screen.queryByTestId('model-info')).toBeNull();
+});
 
 test('refused_models_are_not_options', async () => {
   mockCatalogues({
@@ -1610,6 +1724,8 @@ function sampleRefusal(kind: string): ModelRefusal {
     case 'limitNotUnderstood': return { kind: 'limitNotUnderstood', raw: RAW_LEAK_TOKEN };
     case 'noStatedOutputModalities': return { kind: 'noStatedOutputModalities' };
     case 'noTextOutput': return { kind: 'noTextOutput' };
+    case 'batchOnly': return { kind: 'batchOnly' };
+    case 'router': return { kind: 'router' };
     default:
       throw new Error(
         `catalogue.rs now defines a Refusal variant ("${kind}") this test does not know how to ` +
@@ -1664,6 +1780,8 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     limitNotUnderstood: (count) => `${count} hidden: input limit in a format this build cannot read`,
     noStatedOutputModalities: (count) => `${count} hidden: the provider does not say what the model outputs`,
     noTextOutput: (count) => `${count} hidden: the model outputs no text`,
+    batchOnly: (count) => `${count} hidden: batch variants (results within 24 hours), which this application does not use`,
+    router: (count) => `${count} hidden: routers — the provider picks the model and the price at request time`,
   },
   uk: {
     inputTooSmall: (count) => `Приховано ${count}: ліміт входу менший за 2048 токенів`,
@@ -1671,6 +1789,8 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     limitNotUnderstood: (count) => `Приховано ${count}: ліміт входу у форматі, який ця збірка не читає`,
     noStatedOutputModalities: (count) => `Приховано ${count}: постачальник не вказує, що видає модель`,
     noTextOutput: (count) => `Приховано ${count}: модель не видає текст`,
+    batchOnly: (count) => `Приховано ${count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує`,
+    router: (count) => `Приховано ${count}: маршрутизатори — модель і ціну обирає постачальник під час запиту`,
   },
 };
 

@@ -13,12 +13,13 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_tab_embedding' | 'models_tab_chat'
   | 'models_status_ready' | 'models_status_not_ready'
   | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
-  | 'models_selection_absent'
+  | 'models_selection_absent' | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
+  | 'models_sort_name' | 'models_sort_price' | 'models_info_label'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
   | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
-  | 'models_hidden_no_text_output'
+  | 'models_hidden_no_text_output' | 'models_hidden_batch_only' | 'models_hidden_router'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -264,6 +265,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_not_chosen: 'Модель ще не обрано.',
     models_selection_unknown: 'Поточна модель невідома.',
     models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
+    // The picker's option text: the price per million tokens beside the
+    // name, as the provider stated it (owner, 2026-09-16). Input only when
+    // the output price is nought or not stated — an embedding model.
+    models_option_priced: '{name} — {input}',
+    models_option_priced_both: '{name} — {input} / {output}',
+    // The footnote under the picker, once for every option (owner, 2026-09-16).
+    models_price_note: 'Ціни — за 1 млн токенів: вхід / вихід, як їх називає постачальник.',
+    // The one sort toggle beside the picker names the order the list IS in
+    // (owner, 2026-09-16: one button, two states).
+    models_sort_name: 'За алфавітом',
+    models_sort_price: 'За ціною',
+    models_info_label: 'Про цей список',
     // The per-role configured dot (review P2-1). Task 9 moved the dot inside
     // its own tab button, so one of these three words is now the SECOND half
     // of the TAB BUTTON's accessible name ("Ембединг, Налаштовано"), sr-only
@@ -292,6 +305,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_limit_not_understood: 'Приховано {count}: ліміт входу у форматі, який ця збірка не читає',
     models_hidden_no_stated_output_modalities: 'Приховано {count}: постачальник не вказує, що видає модель',
     models_hidden_no_text_output: 'Приховано {count}: модель не видає текст',
+    models_hidden_batch_only: 'Приховано {count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує',
+    models_hidden_router: 'Приховано {count}: маршрутизатори — модель і ціну обирає постачальник під час запиту',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
     // unreadable" points at something (Task 2 review, item 4).
@@ -1098,6 +1113,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_not_chosen: 'No model chosen yet.',
     models_selection_unknown: 'The current model is unknown.',
     models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
+    models_option_priced: '{name} — {input}',
+    models_option_priced_both: '{name} — {input} / {output}',
+    models_price_note: 'Prices are per 1M tokens: input / output, as the provider states them.',
+    models_sort_name: 'By name',
+    models_sort_price: 'By price',
+    models_info_label: 'About this list',
     models_dot_configured: 'Configured',
     models_dot_not_configured: 'Not configured',
     models_dot_unknown: 'Unknown',
@@ -1108,6 +1129,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_limit_not_understood: '{count} hidden: input limit in a format this build cannot read',
     models_hidden_no_stated_output_modalities: '{count} hidden: the provider does not say what the model outputs',
     models_hidden_no_text_output: '{count} hidden: the model outputs no text',
+    models_hidden_batch_only: '{count} hidden: batch variants (results within 24 hours), which this application does not use',
+    models_hidden_router: '{count} hidden: routers — the provider picks the model and the price at request time',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
     models_catalogue_unreadable_record_known: 'Record at position {index}, id "{id}": this build could not read the rest of the record.',

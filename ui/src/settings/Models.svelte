@@ -6,7 +6,7 @@
     modelSettings, setKey, forgetKey, providerModels, setChatModel,
     setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
-    type ModelEntry, type ModelRefusal, type UnreadableRecord,
+    type ModelEntry, type ModelRefusal, type Price, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
   import type { JobController } from './jobs';
@@ -559,6 +559,10 @@
         return t('models_hidden_no_stated_output_modalities', { count });
       case 'noTextOutput':
         return t('models_hidden_no_text_output', { count });
+      case 'batchOnly':
+        return t('models_hidden_batch_only', { count });
+      case 'router':
+        return t('models_hidden_router', { count });
       default: {
         const exhaustive: never = r;
         throw new Error(`unhandled model refusal kind: ${(exhaustive as { kind: string }).kind}`);
@@ -618,6 +622,73 @@
     return cat.entries.filter((entry: ModelEntry) => !isRefused(entry));
   });
 
+  // The option's text: the name, and the price per million tokens when the
+  // provider stated one (owner, 2026-09-16). Dollars formatted the same way
+  // in both languages — a price is read, not translated — and to three
+  // significant digits, which is what the providers' own price pages print.
+  // Both prices only when the output one is a number above nought: an
+  // embedding model states `completion: "0"`, and "$0 out" beside it would
+  // read as a claim about billing this build cannot make (see `Price`'s
+  // doc in `catalogue.rs`). Nought in AND out — a free model — is the name
+  // alone; the catalogue already says "(free)" there.
+  const dollars = new Intl.NumberFormat('en', {
+    style: 'currency', currency: 'USD', maximumSignificantDigits: 3,
+  });
+  const perMillion = (amount: number) => dollars.format(amount * 1_000_000);
+  // Drawn once under the picker, only when some option carries a price —
+  // a note about prices over a list that shows none explains nothing.
+  const priceNote = $derived.by(() => { void $locale; return t('models_price_note'); });
+  // The same question the option text answers: does some option show a price.
+  const hasPriceNote = $derived(selectableEntries.some((entry) => optionText(entry) !== entry.name));
+  const infoLabel = $derived.by(() => { void $locale; return t('models_info_label'); });
+  // One button, two states (owner, 2026-09-16): the list is sorted by name
+  // or by price, and the button says which order it is in now. By price:
+  // OUTPUT then input (owner: the output token is the dear one; embedding
+  // models all state nought out, so for them it falls to input), the unpriced
+  // last. Remembered in the webview's own storage across restarts (owner) —
+  // a convenience, so a storage that is missing or refuses is the default.
+  const SORT_KEY = 'models.sortBy';
+  const readSort = (): 'name' | 'price' => {
+    try { return localStorage.getItem(SORT_KEY) === 'price' ? 'price' : 'name'; } catch { return 'name'; }
+  };
+  let sortBy: 'name' | 'price' = $state(readSort());
+  function toggleSort() {
+    sortBy = sortBy === 'name' ? 'price' : 'name';
+    try { localStorage.setItem(SORT_KEY, sortBy); } catch { /* not remembered, still sorted */ }
+  }
+  const priceKey = (p: Price) => (p.kind === 'known' ? p.amount : Number.POSITIVE_INFINITY);
+  // "Unpriced" is what `optionText` shows as unpriced — no known INPUT price —
+  // and it goes last as a group, before output and input are compared
+  // (owner's independent review of PR #51, P2: a known output of nought
+  // beside an unknown input sorted ahead of every priced model).
+  const unpriced = (entry: ModelEntry) => (entry.price.kind === 'known' ? 0 : 1);
+  const sortedEntries = $derived.by(() => {
+    const entries = [...selectableEntries];
+    return sortBy === 'name'
+      ? entries.sort((a, b) => a.name.localeCompare(b.name))
+      : entries.sort((a, b) =>
+          unpriced(a) - unpriced(b)
+            || (unpriced(a)
+              ? a.name.localeCompare(b.name) // the unpriced group keeps name order
+              : priceKey(a.outputPrice) - priceKey(b.outputPrice) || priceKey(a.price) - priceKey(b.price)));
+  });
+  const sortLabel = $derived.by(() => {
+    void $locale;
+    return t(sortBy === 'name' ? 'models_sort_name' : 'models_sort_price');
+  });
+  function optionText(entry: ModelEntry): string {
+    void $locale;
+    if (entry.price.kind !== 'known') return entry.name;
+    const out = entry.outputPrice.kind === 'known' ? entry.outputPrice.amount : 0;
+    if (out > 0) {
+      return t('models_option_priced_both', {
+        name: entry.name, input: perMillion(entry.price.amount), output: perMillion(out),
+      });
+    }
+    if (entry.price.amount === 0) return entry.name;
+    return t('models_option_priced', { name: entry.name, input: perMillion(entry.price.amount) });
+  }
+
   // `void $locale` here, not on `hiddenReasonLabel`/`unreadableRecordLabel`
   // themselves: those are plain functions called from markup, and Svelte's
   // fine-grained reactivity only re-runs an expression when a signal IT reads
@@ -651,6 +722,8 @@
       .sort(([, a], [, b]) => b.count - a.count)
       .map(([key, g]) => ({ key, label: hiddenReasonLabel(g.refusal, g.count) }));
   });
+  // The ⓘ and its popover exist only when there is a note to show.
+  const hasNotes = $derived(hasPriceNote || hiddenReasons.length > 0);
 
   const activeUnreadableRecords = $derived.by(() => {
     void $locale;
@@ -1122,7 +1195,7 @@
   {#if emptyCatalogueSentence}
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
   {:else if activeCatalogue.entries.length > 0}
-    <div class="row">
+    <div class="row model-row">
       <label class="fl" for="model-selection" data-testid="model-selection-label">{selectionLabel}</label>
       <!-- One native `<select>` for the active role (Task 4, review P1/P2-1/
            P2-2) rather than the frozen list's row of buttons: only `refusal
@@ -1146,18 +1219,43 @@
         {#if selectPlaceholder}
           <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
         {/if}
-        {#each selectableEntries as entry}
-          <option value={entry.id}>{entry.name}</option>
+        {#each sortedEntries as entry}
+          <option value={entry.id}>{optionText(entry)}</option>
         {/each}
       </select>
+      <button
+        type="button"
+        data-testid="model-sort"
+        onclick={toggleSort}
+      >{sortLabel}</button>
+      <!-- The notes about the list — the price unit, what was hidden and why
+           — behind one ⓘ (owner, 2026-09-16), as a native popover: the
+           sentences are the same, they no longer sit under the picker on
+           every visit. Drawn only when there is a note to show. -->
+      {#if hasNotes}
+        <button
+          type="button"
+          class="info"
+          data-testid="model-info"
+          popovertarget="model-notes"
+          aria-label={infoLabel}
+        >ⓘ</button>
+      {/if}
     </div>
-    <!-- One line per DISTINCT reason (owner's ruling above), each naming how
-         many entries it folded together — never one line per hidden entry,
-         which would repeat the same sentence as many times as this build
-         happened to refuse the same thing. -->
-    {#each hiddenReasons as { key, label } (key)}
-      <p data-testid="model-hidden-reason">{label}</p>
-    {/each}
+    {#if hasNotes}
+      <div id="model-notes" class="notes" popover="auto" data-testid="model-notes">
+        {#if hasPriceNote}
+          <p data-testid="model-price-note">{priceNote}</p>
+        {/if}
+        <!-- One line per DISTINCT reason (owner's ruling above), each naming how
+             many entries it folded together — never one line per hidden entry,
+             which would repeat the same sentence as many times as this build
+             happened to refuse the same thing. -->
+        {#each hiddenReasons as { key, label } (key)}
+          <p data-testid="model-hidden-reason">{label}</p>
+        {/each}
+      </div>
+    {/if}
   {/if}
 {/if}
 

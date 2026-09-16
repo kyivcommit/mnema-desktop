@@ -63,6 +63,9 @@ pub struct ModelEntry {
     /// What the provider said about the price of one input token — see
     /// [`Price`] for why it is not an `Option<f64>`.
     pub price: Price,
+    /// One OUTPUT token, `pricing.completion` — read the same way, with the
+    /// same states (owner, 2026-09-16: the pickers show both prices).
+    pub output_price: Price,
     /// `None` means selectable. Anything else is shown, greyed, with its reason
     /// (spec §2.5): a model the provider lists and we hide sends the user
     /// looking for a fault in this application.
@@ -237,6 +240,22 @@ pub enum Refusal {
     NoStatedOutputModalities,
     /// `output_modalities` was stated, and text is not among them.
     NoTextOutput,
+    /// The id ends in `:batch`: the provider's asynchronous Batch API variant,
+    /// answered within a 24-hour window at half the token price, through an
+    /// endpoint of its own (`/api/beta/batches`). This application speaks
+    /// only the synchronous shapes, so the variant is hidden for every role
+    /// (owner, 2026-09-16, D158): an answer a person waits for cannot come
+    /// tomorrow, and the embedding pass has no state for a pass it handed to
+    /// the provider to finish later.
+    BatchOnly,
+    /// The stated input price is not a price (`pricing.prompt: "-1"`): the
+    /// provider's own routers — `openrouter/auto`, `fusion`, `pareto-code`,
+    /// `bodybuilder` — which pick the model that answers at request time. What
+    /// answers, and at what price, is not known in advance, so the picker
+    /// cannot state either (owner, 2026-09-16: «зайві варіанти, прибери»).
+    /// Measured on the live list the same day: exactly these five ids, and
+    /// no other, state a negative price.
+    Router,
 }
 
 /// What `models_from_json` hands back: the models it could read, and how many
@@ -338,6 +357,8 @@ struct Pricing {
     /// and two of the shapes that *are* numbers are not prices.
     #[serde(default)]
     prompt: Price,
+    #[serde(default)]
+    completion: Price,
 }
 
 #[derive(Deserialize)]
@@ -605,28 +626,48 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
         let output_modalities_stated = output_modalities.is_some();
         let writes_text = output_modalities.is_some_and(|m| m.iter().any(|x| x == "text"));
 
-        let refusal = match role {
-            Role::Embedding => match &input_limit {
-                InputLimit::Known { tokens } if *tokens < MIN_CONTEXT_TOKENS => {
-                    Some(Refusal::InputTooSmall {
-                        limit: *tokens,
-                        floor: MIN_CONTEXT_TOKENS,
-                    })
-                }
-                InputLimit::Known { .. } => None,
-                InputLimit::NotStated => Some(Refusal::NoStatedLimit),
-                InputLimit::NotUnderstood { raw } => {
-                    Some(Refusal::LimitNotUnderstood { raw: raw.clone() })
-                }
-            },
-            Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
-            Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
-            Role::Chat | Role::Rerank => None,
+        // The router's signal is a NEGATIVE stated price (`"-1"`), not any
+        // `NotAPrice`: that variant also holds `NaN` and the infinities, and a
+        // model that states one of those is unpriced, not routed (owner's
+        // independent review of PR #51, P2 — a finite, text-writing model
+        // with `"NaN"` vanished as a router).
+        let unpriced_router = matches!(
+            raw.pricing.as_ref().map(|p| &p.prompt),
+            Some(Price::NotAPrice { raw }) if raw.parse::<f64>().is_ok_and(|v| v.is_finite() && v < 0.0)
+        );
+        let refusal = if raw.id.ends_with(":batch") {
+            Some(Refusal::BatchOnly)
+        } else if unpriced_router {
+            Some(Refusal::Router)
+        } else {
+            match role {
+                Role::Embedding => match &input_limit {
+                    InputLimit::Known { tokens } if *tokens < MIN_CONTEXT_TOKENS => {
+                        Some(Refusal::InputTooSmall {
+                            limit: *tokens,
+                            floor: MIN_CONTEXT_TOKENS,
+                        })
+                    }
+                    InputLimit::Known { .. } => None,
+                    InputLimit::NotStated => Some(Refusal::NoStatedLimit),
+                    InputLimit::NotUnderstood { raw } => {
+                        Some(Refusal::LimitNotUnderstood { raw: raw.clone() })
+                    }
+                },
+                Role::Chat if !output_modalities_stated => Some(Refusal::NoStatedOutputModalities),
+                Role::Chat if !writes_text => Some(Refusal::NoTextOutput),
+                Role::Chat | Role::Rerank => None,
+            }
         };
 
+        let (price, output_price) = raw
+            .pricing
+            .map(|p| (p.prompt, p.completion))
+            .unwrap_or_default();
         entries.push(ModelEntry {
             name: raw.name.clone().unwrap_or_else(|| raw.id.clone()),
-            price: raw.pricing.map(|p| p.prompt).unwrap_or_default(),
+            price,
+            output_price,
             id: raw.id,
             input_limit,
             refusal,
