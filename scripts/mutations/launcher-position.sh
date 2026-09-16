@@ -185,8 +185,8 @@ case_ "launcher: a press off the handle leaves an earlier arming in place" \
 
 case_ "launcher: a secondary-button press arms the drag window" \
   ui/src/launcher/Launcher.svelte \
-  's~if \(event\.button\) return;~void event.button;~' \
-  'void event.button;' \
+  's~const onHandle = !event\.button && !!target~const onHandle = !!target~' \
+  "const onHandle = !!target?.closest('.searchbar')" \
   src/launcher/Launcher.test.ts 'a right-button press on the handle does not arm the drag window' runner=vitest
 
 case_ "launcher: a release does not disarm the drag window" \

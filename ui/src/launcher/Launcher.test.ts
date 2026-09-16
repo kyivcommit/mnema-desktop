@@ -419,8 +419,8 @@ test('a right-button press on the handle does not arm the drag window', () => {
 
 // D155 deferred minor: on X11 the drag ends with no release reaching the
 // webview, so an arming can outlive its drag. The next press anywhere that
-// is not the handle must disarm it on its own — a click in the input, then a
-// click outside, is a dismissal.
+// is not the handle must disarm it on its own, with no release to help — a
+// press held in the input, then a blur, is a dismissal.
 test('a press off the handle disarms an earlier arming even with no release', () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   try {
