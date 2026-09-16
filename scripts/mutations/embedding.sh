@@ -548,7 +548,7 @@ case_ "index: storing a vector must clear the row that gave up on the chunk (D95
 # the pass reports a finished archive it never touched.
 case_ "embed: a batch size of zero must be refused rather than reported as done" \
   crates/mnema-embed/src/lib.rs \
-  's{    if batch == 0 \{\n        return Err\(Error::EmptyBatch\);\n    \}\n}{}' \
+  's{    if batch == 0 \|\| workers == 0 \{\n        return Err\(Error::EmptyBatch\);\n    \}\n}{}' \
   ') -> Result<EmbedTally, Error> {
     let space = db.active_space()' \
   mnema-embed 'a_batch_size_of_zero_is_refused_rather_than_looped_on' --test queue
@@ -566,7 +566,7 @@ case_ "embed: the request must name the model the space was built for" \
 # the run then fails on the first call it makes.
 case_ "embed: the batch size must reach the query that fills the batch" \
   crates/mnema-embed/src/lib.rs \
-  's{db\.chunks_needing_embedding\(space, batch\)\?}{db.chunks_needing_embedding(space, usize::MAX)?}' \
+  's{db\.chunks_needing_embedding\(space, batch \* workers\)\?}{db.chunks_needing_embedding(space, usize::MAX)?}' \
   'db.chunks_needing_embedding(space, usize::MAX)?' \
   mnema-embed 'chunks_go_out_in_batches_of_the_size_asked_for' --test queue
 
@@ -771,8 +771,8 @@ case_ "embed: a split must report progress as it goes, not once at the end (I2)"
 # shell's last number short by up to a batch of embeddings that really are there.
 case_ "embed: an aborting run must report its true counts before returning (I3)" \
   crates/mnema-embed/src/lib.rs \
-  's{        let outcome = one_batch\(&call, &pending, cancel, on_progress, &mut tally\);}{        one_batch(&call, \&pending, cancel, on_progress, \&mut tally)?;\n        let outcome: Result<(), Error> = Ok(());}' \
-  'one_batch(&call, &pending, cancel, on_progress, &mut tally)?;
+  's{        let outcome = one_round\(&call, &pending, batch, cancel, on_progress, &mut tally\);}{        one_round(&call, \&pending, batch, cancel, on_progress, \&mut tally)?;\n        let outcome: Result<(), Error> = Ok(());}' \
+  'one_round(&call, &pending, batch, cancel, on_progress, &mut tally)?;
         let outcome: Result<(), Error> = Ok(());' \
   mnema-embed 'the_last_number_is_true_even_when_the_run_stops' --test queue
 

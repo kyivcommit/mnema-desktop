@@ -26,9 +26,21 @@ pub struct Reply {
     /// only then releases it. `None` for every reply that answers as soon as
     /// it is dequeued — which is all of them but [`Reply::gated`].
     gate: Option<std::sync::Arc<std::sync::Barrier>>,
+    /// Answer only a request whose body contains this text; `None` answers
+    /// whichever request comes next. Concurrent requests reach the server in
+    /// whatever order the kernel accepts them, so a test that must know which
+    /// request got which reply pins each reply to a text the request carries.
+    only_for: Option<String>,
 }
 
 impl Reply {
+    /// This reply answers only a request whose body contains `text`. Replies
+    /// without a text answer in order, as before, but only the requests no
+    /// pinned reply claims.
+    pub fn only_for(mut self, text: &str) -> Self {
+        self.only_for = Some(text.to_string());
+        self
+    }
     pub fn ok(body: &str) -> Self {
         Self {
             status: 200,
@@ -36,6 +48,7 @@ impl Reply {
             delay: Duration::ZERO,
             declared_extra: 0,
             gate: None,
+            only_for: None,
         }
     }
     pub fn status(status: u16, body: &str) -> Self {
@@ -45,6 +58,7 @@ impl Reply {
             delay: Duration::ZERO,
             declared_extra: 0,
             gate: None,
+            only_for: None,
         }
     }
     pub fn slow(seconds: u64) -> Self {
@@ -54,6 +68,7 @@ impl Reply {
             delay: Duration::from_secs(seconds),
             declared_extra: 0,
             gate: None,
+            only_for: None,
         }
     }
 
@@ -77,6 +92,7 @@ impl Reply {
             delay: Duration::from_secs(seconds),
             declared_extra: 0,
             gate: None,
+            only_for: None,
         }
     }
 
@@ -92,6 +108,7 @@ impl Reply {
             delay: Duration::from_secs(0),
             declared_extra: 0,
             gate: Some(barrier),
+            only_for: None,
         }
     }
 
@@ -121,6 +138,7 @@ impl Reply {
             delay: Duration::ZERO,
             declared_extra: 64,
             gate: None,
+            only_for: None,
         }
     }
 }
@@ -158,15 +176,22 @@ impl MockServer {
         let (tx, seen): (Sender<String>, Receiver<String>) = channel();
 
         thread::spawn(move || {
-            let mut replies = replies.into_iter();
+            let mut replies = replies;
             let mut tx = Some(tx);
             for (index, stream) in listener.incoming().enumerate() {
                 let mut stream = stream.expect("accept");
                 let request = read_request(&mut stream);
+                // A pinned reply whose text this request carries wins; failing
+                // that, the first reply pinned to nothing, in order.
+                let chosen = replies
+                    .iter()
+                    .position(|r| r.only_for.as_deref().is_some_and(|t| request.contains(t)))
+                    .or_else(|| replies.iter().position(|r| r.only_for.is_none()))
+                    .map(|i| replies.remove(i));
                 if let Some(sender) = &tx {
                     let _ = sender.send(request);
                 }
-                match replies.next() {
+                match chosen {
                     Some(reply) => {
                         // The request is already on `seen` (above), so a test
                         // watching for it knows this reply is in flight; hold it

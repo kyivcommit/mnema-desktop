@@ -1,5 +1,6 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
+  import { formatDuration } from '../i18n/recency';
   import type { Phase } from '../lib/ipc';
   import { phaseLabel, progressShape } from './jobs';
 
@@ -70,18 +71,33 @@
     // check is the one this field's `Option<u64>` actually asks for.
     return counts.secondsLeft === null
       ? t('indexing_eta_unknown')
-      : t('indexing_eta', { seconds: counts.secondsLeft });
+      : t('indexing_eta', { duration: formatDuration(counts.secondsLeft) });
+  });
+
+  // The share done, whole per cent, only where there is a total to be a share of.
+  const percentLabel = $derived.by(() => {
+    void $locale;
+    if (counts === null || embedStartingZero) return null;
+    const shape = progressShape(counts);
+    if (shape.kind !== 'ratio' || shape.total === 0) return null;
+    // Clamped: `job.rs` documents `done` above `total` (a folder that grew
+    // while it was walked), and `<progress>` clips to `max` where a sentence
+    // would say "110 %".
+    return t('indexing_percent', { percent: Math.min(100, Math.floor((100 * shape.done) / shape.total)) });
   });
 </script>
 
 <p data-testid="indexing-pass">{label}</p>
 {#if phase.kind === 'reading' || phase.kind === 'embedding'}
   {@const shape = progressShape(phase.counts)}
-  <progress
-    aria-label={label}
-    max={shape.kind === 'ratio' ? shape.total : undefined}
-    value={shape.kind === 'ratio' ? shape.done : undefined}
-  ></progress>
+  <div class="progress-row">
+    <progress
+      aria-label={label}
+      max={shape.kind === 'ratio' ? shape.total : undefined}
+      value={shape.kind === 'ratio' ? shape.done : undefined}
+    ></progress>
+    {#if percentLabel}<span data-testid="indexing-percent">{percentLabel}</span>{/if}
+  </div>
 {/if}
 {#if embedStartingLabel}
   <p data-testid="indexing-counts">{embedStartingLabel}</p>

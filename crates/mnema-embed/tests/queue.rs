@@ -915,9 +915,16 @@ fn chunks_go_out_in_batches_of_the_size_asked_for() {
         fixture::reply_with(2),
     ]);
 
-    let out = mnema_embed::run(&db, mock.base(), "k", 5, &|| false, &mut |_| {}).expect("run");
+    // One report per round, one round per batch: a pass that took the whole
+    // queue at once and only sliced it afterwards would still send requests
+    // of the asked size — concurrently, in whatever order the mock met them —
+    // but it would report once. The count is what tells the two apart.
+    let mut reports = 0;
+    let out =
+        mnema_embed::run(&db, mock.base(), "k", 5, &|| false, &mut |_| reports += 1).expect("run");
 
     assert_eq!(out.embedded, 12);
+    assert_eq!(reports, 3, "one round per batch of the size asked for");
     let sizes: Vec<usize> = (0..3).map(|_| fixture::texts_in(&mock.request())).collect();
     assert_eq!(
         sizes,
@@ -1303,4 +1310,115 @@ fn a_ready_space_is_retracted_by_chunks_behind_an_unindexed_document_too() {
         "the provider was asked about a document that is not indexed"
     );
     assert_eq!(fixture::space_state(&db, space), "building");
+}
+
+// ---------------------------------------------------------------------------
+// `run_with`: concurrent requests, one writer (D156 follow-up).
+// ---------------------------------------------------------------------------
+
+/// Three workers over a queue of six with a batch of two: three requests, all
+/// six vectors written. The mock serves connections one at a time, so this
+/// proves the round's accounting, not that the requests overlapped.
+#[test]
+fn a_round_of_concurrent_requests_writes_every_vector_once() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock((0..3).map(|_| fixture::reply_with(2)).collect());
+
+    let out =
+        mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {}).expect("run");
+
+    assert_eq!(out.embedded, 6);
+    assert_eq!(out.failed, 0);
+    assert_eq!(db.embedded_chunk_count(space).expect("count"), 6);
+    for _ in 0..3 {
+        assert!(
+            mock.request_if_any().is_some(),
+            "three requests, one per slice"
+        );
+    }
+    assert!(mock.request_if_any().is_none(), "and not a fourth");
+}
+
+/// One slice of the round comes back with a failure that cannot be about the
+/// texts. The run ends with that error — after the slices that did come back
+/// are written, so nothing paid for is dropped.
+#[test]
+fn a_failed_slice_ends_the_run_after_the_other_slices_are_written() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let mock = fixture::mock(vec![
+        fixture::reply_with(2),
+        Reply::status(500, "upstream fell over"),
+        fixture::reply_with(2),
+    ]);
+
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {});
+
+    assert!(
+        out.is_err(),
+        "a 500 is not about the texts and must end the run"
+    );
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        4,
+        "the two slices that answered must be in the index"
+    );
+    assert!(mock.request_if_any().is_some());
+    assert!(mock.request_if_any().is_some());
+    assert!(mock.request_if_any().is_some());
+    assert!(
+        mock.request_if_any().is_none(),
+        "nothing re-sent once the run is ending"
+    );
+}
+
+#[test]
+fn zero_workers_is_refused_like_a_zero_batch() {
+    let db = fixture::db_with_chunks(1);
+    let mock = fixture::mock(vec![]);
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 0, &|| false, &mut |_| {});
+    assert!(matches!(out, Err(mnema_embed::Error::EmptyBatch)));
+}
+
+/// Owner's independent review of PR #50, P2, reproduced by probe: with the
+/// slices answered 413, 429, 200 in queue order, the 413 slice was re-sent one
+/// text at a time BEFORE the loop reached the 429 — five requests for a run
+/// that was already over. A failure that cannot be about the texts, anywhere
+/// in the round, is found first: the slice that answered is written, the
+/// refused one is not retried, and the run ends with the rate limit. The
+/// replies are pinned to the texts they answer, so the order the kernel
+/// accepts three concurrent connections in cannot decide the outcome.
+#[test]
+fn a_rate_limit_anywhere_in_the_round_stops_every_retry_of_the_slices_before_it() {
+    let db = fixture::db_with_chunks(6);
+    let space = fixture::active_space_1024(&db);
+    let text = |ord: usize| format!("{}{ord}", fixture::CHUNK_TEXT_PREFIX);
+    let mock = fixture::mock(vec![
+        Reply::status(413, r#"{"error":{"message":"batch too large"}}"#).only_for(&text(0)),
+        Reply::status(429, r#"{"error":{"message":"rate limited"}}"#).only_for(&text(2)),
+        fixture::reply_with(2).only_for(&text(4)),
+    ]);
+
+    let out = mnema_embed::run_with(&db, mock.base(), "k", 2, 3, &|| false, &mut |_| {});
+
+    assert!(
+        matches!(out, Err(mnema_embed::Error::Provider(_))),
+        "the round must end with the provider's failure, got {out:?}"
+    );
+    assert_eq!(
+        db.embedded_chunk_count(space).expect("count"),
+        2,
+        "the slice that answered must be written"
+    );
+    for _ in 0..3 {
+        assert!(
+            mock.request_if_any().is_some(),
+            "three requests, one per slice"
+        );
+    }
+    assert!(
+        mock.request_if_any().is_none(),
+        "the refused slice must not be re-sent once the run is ending"
+    );
 }

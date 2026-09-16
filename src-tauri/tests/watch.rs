@@ -119,8 +119,8 @@ fn hits(webview: &tauri::WebviewWindow<tauri::test::MockRuntime>, q: &str) -> bo
         .unwrap_or(false)
 }
 
-/// Index open, roots added, observer set, THEN the watcher — and its startup
-/// scan waited for, so the test's own counting starts from a known state.
+/// Index open, roots added, observer set, THEN the watcher. Nothing is
+/// scanned at launch (D157), so the count starts at nought on its own.
 fn app_watching(
     data: &std::path::Path,
     roots: &[&std::path::Path],
@@ -142,12 +142,16 @@ fn app_watching(
     }
     let ended = count_ended(&app);
     mnema_desktop::watch::install(app.handle());
-    assert!(
-        wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
-            >= 1),
-        "the startup scan never ended"
-    );
-    ended.store(0, Ordering::SeqCst);
+    // Measured (macOS, 2026-09-16, while removing the launch scan): a file
+    // written within milliseconds of `install` produced NO event at all —
+    // FSEvents starts its stream asynchronously after `watch()` returns, and
+    // `watched()` already listing the root does not mean the stream is live.
+    // The launch scan used to cover that window by accident; every test here
+    // wrote its files after it ended. Without one, the tests wait for the
+    // stream themselves. Nothing observable marks the moment, so this is a
+    // settle, not a condition; 3 s passed where 0 failed four times out of
+    // four.
+    std::thread::sleep(Duration::from_secs(3));
     (app, webview, ended)
 }
 
@@ -206,9 +210,21 @@ fn a_root_that_vanishes_ends_the_auto_scan_as_root_unavailable_and_keeps_its_doc
     std::fs::write(root.join("a.txt"), "the quick brown fox").unwrap();
     let (app, webview, ended) = app_watching(dir.path(), &[&root]);
     let _close = CloseOnDrop(app.handle().clone());
+    // Nothing is scanned at launch (D157): the person's own Scan puts the
+    // file in the index, and that is what the vanishing root must not lose.
+    // Through the command, not `run_scan_capturing_snapshots` — that helper
+    // installs its own job observer and would silence `ended` for the rest of
+    // the test.
+    call(&webview, "start_scan_job", json!({ "entry": "full" })).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
+            >= 1),
+        "the hand-started scan never ended"
+    );
+    ended.store(0, Ordering::SeqCst);
     assert!(
         hits(&webview, "fox"),
-        "the startup scan must have indexed it, or there is nothing to protect"
+        "the scan must have indexed it, or there is nothing to protect"
     );
     std::fs::remove_dir_all(&root).unwrap();
     assert!(

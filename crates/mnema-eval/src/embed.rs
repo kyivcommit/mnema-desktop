@@ -13,9 +13,9 @@ pub const EVAL_MODEL: &str = "baai/bge-m3";
 /// parameter a caller could pass a real key through in its place.
 const CREDENTIAL_REF: &str = "env:MNEMA_EVAL_KEY";
 
-/// The product's own batch size (`src-tauri/src/embed_job.rs:55`) — this
+/// The product's own batch size (`src-tauri/src/embed_job.rs:62`, D156) — this
 /// harness measures the product, not a number of its own choosing.
-const BATCH: usize = 32;
+const BATCH: usize = 128;
 
 /// What the run that just completed did to the index.
 /// Pinned by `the_space_is_built_at_the_width_the_provider_measured`.
