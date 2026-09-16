@@ -915,9 +915,16 @@ fn chunks_go_out_in_batches_of_the_size_asked_for() {
         fixture::reply_with(2),
     ]);
 
-    let out = mnema_embed::run(&db, mock.base(), "k", 5, &|| false, &mut |_| {}).expect("run");
+    // One report per round, one round per batch: a pass that took the whole
+    // queue at once and only sliced it afterwards would still send requests
+    // of the asked size — concurrently, in whatever order the mock met them —
+    // but it would report once. The count is what tells the two apart.
+    let mut reports = 0;
+    let out =
+        mnema_embed::run(&db, mock.base(), "k", 5, &|| false, &mut |_| reports += 1).expect("run");
 
     assert_eq!(out.embedded, 12);
+    assert_eq!(reports, 3, "one round per batch of the size asked for");
     let sizes: Vec<usize> = (0..3).map(|_| fixture::texts_in(&mock.request())).collect();
     assert_eq!(
         sizes,
