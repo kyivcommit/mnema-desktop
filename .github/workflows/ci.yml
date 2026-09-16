@@ -406,6 +406,8 @@ jobs:
       # own self-test runs as a step of its own first, so a red line names
       # the thing that failed: the self-test writes its failures to stderr,
       # and only its success line is silenced.
+      - name: Self-test the staleness sweep
+        run: scripts/mutation-staleness.sh --self-test > /dev/null
       - name: Self-test the obligation sweep
         run: scripts/check-booked.sh --self-test > /dev/null
       - name: Check that no obligation is still written into the code

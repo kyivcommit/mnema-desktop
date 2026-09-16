@@ -54,7 +54,10 @@ cd "$(dirname "$0")/.."
 # header has the current figure and what moves it) — not "about a second"
 # for all three, which this line used to claim before guard 4 made the third
 # one the dominant cost. `ci.yml` runs all three of these — same order,
-# same scripts — in its `sweeps` job.
+# same scripts — in its `sweeps` job. The staleness sweep's own self-test
+# (guard 5, MISPLACED RUNNER) runs first for the same reason as the
+# obligation sweep's.
+scripts/mutation-staleness.sh --self-test > /dev/null
 scripts/check-booked.sh --self-test > /dev/null
 scripts/check-booked.sh
 # The citation sweep prints every citation it checked (2 700 lines) and its
