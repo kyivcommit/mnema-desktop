@@ -566,6 +566,7 @@ jobs:
           - task-d61
           - task-d64
           - tree
+          - debt-ui-blind-tests
         include:
           - file: pr8-ui-folders
             node: true
@@ -588,6 +589,8 @@ jobs:
           - file: pr10f-settings
             node: true
           - file: launcher-position
+            node: true
+          - file: debt-ui-blind-tests
             node: true
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
