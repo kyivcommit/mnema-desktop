@@ -9,6 +9,11 @@ const h = vi.hoisted(() => {
   const state: { handler: ((e: { payload: 'uk' | 'en' }) => void) | null } = { handler: null };
   const invoke = vi.fn();
   const listen = vi.fn(async (_name: string, cb: (e: { payload: 'uk' | 'en' }) => void) => {
+    // Deferred, as `theme.test.ts` defers it (55efa35): with the assignment
+    // synchronous, a `bootLocale` that dropped its `await listen(...)` still
+    // pushed 'listen' before 'invoke' in the ordering test below, so the
+    // test could not tell the two apart (§15.5).
+    await Promise.resolve();
     state.handler = cb;
     return () => {};
   });
@@ -31,6 +36,7 @@ describe('bootLocale ordering (reviewer F1)', () => {
   it('registers the locale-changed listener before taking the snapshot', async () => {
     const order: string[] = [];
     h.listen.mockImplementationOnce(async (_n: string, cb: (e: { payload: 'uk' | 'en' }) => void) => {
+      await Promise.resolve();
       order.push('listen');
       h.state.handler = cb;
       return () => {};

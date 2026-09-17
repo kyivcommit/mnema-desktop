@@ -598,7 +598,7 @@ test('appPrefs invokes app_prefs and takes no arguments at all', async () => {
   expect(prefs).toEqual(REGISTERED);
 });
 
-test('setHotkey invokes set_hotkey with the shortcut under its camelCase name', async () => {
+test('setHotkey invokes set_hotkey with the shortcut under the key the command declares', async () => {
   const reply: HotkeyState = { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } };
   invoke.mockResolvedValue(reply);
 
