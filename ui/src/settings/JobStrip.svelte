@@ -102,6 +102,13 @@
     volumeMissing: 'indexing_embed_ended_unexpected',
   };
 
+  // One place for the sentence, so both call sites carry `reason`:
+  // `indexing_embed_ended_unexpected` interpolates it and the three real
+  // endings ignore it (`intl-messageformat` reads only the variables its
+  // message names). Drawn without it, the four wire-only reasons threw
+  // `MissingValueError` inside this `$derived` (§15.5).
+  const embedSentence = (reason: EndReason) => t(EMBED_ENDED[reason], { reason });
+
   const FROZEN_WHY: Record<FrozenReason, Key> = {
     symlinkedSubtree: 'indexing_frozen_symlinked_subtree',
     emptyDirectory: 'indexing_frozen_empty_directory',
@@ -216,7 +223,7 @@
     // unconditionally and said so; this is that sentence, restored for the
     // one phase whose ending would otherwise go unstated.
     if (embedding.kind === 'notReached') {
-      return { sentence: t(EMBED_ENDED[report.reason]), result: null as string | null };
+      return { sentence: embedSentence(report.reason), result: null as string | null };
     }
     if (embedding.kind === 'skipped') {
       const why = embedding.why;
@@ -229,7 +236,7 @@
     }
     // `ran`.
     return {
-      sentence: t(EMBED_ENDED[report.reason]),
+      sentence: embedSentence(report.reason),
       result: t('indexing_embed_result', {
         done: embedding.done, total: embedding.total, refused: embedding.refused,
       }),
