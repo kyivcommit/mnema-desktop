@@ -9,6 +9,10 @@ const h = vi.hoisted(() => {
   const state: { handler: ((e: { payload: 'uk' | 'en' }) => void) | null } = { handler: null };
   const invoke = vi.fn();
   const listen = vi.fn(async (_name: string, cb: (e: { payload: 'uk' | 'en' }) => void) => {
+    // The deferral here mirrors `theme.test.ts:14`; it is NOT what the
+    // ordering test below relies on — that test installs its own
+    // implementation via `mockImplementationOnce` and never runs this body.
+    await Promise.resolve();
     state.handler = cb;
     return () => {};
   });
@@ -31,6 +35,13 @@ describe('bootLocale ordering (reviewer F1)', () => {
   it('registers the locale-changed listener before taking the snapshot', async () => {
     const order: string[] = [];
     h.listen.mockImplementationOnce(async (_n: string, cb: (e: { payload: 'uk' | 'en' }) => void) => {
+      // This `await` is what makes a dropped `await listen(...)` in
+      // `bootLocale` visible: without it, 'listen' is pushed synchronously
+      // and lands first regardless. The mutant dies only because the
+      // `invoke` mock just below (`mockImplementationOnce` on `h.invoke`)
+      // pushes 'invoke' synchronously — as `theme.test.ts:11-13`
+      // records.
+      await Promise.resolve();
       order.push('listen');
       h.state.handler = cb;
       return () => {};

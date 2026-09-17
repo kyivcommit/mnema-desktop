@@ -1,11 +1,11 @@
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
-import { tick } from 'svelte';
+import { flushSync, tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale, type Loc } from '../i18n';
 import { END_REASONS } from '../lib/ipc';
 import type {
-  Counts, EndReason, Entry, ModelSettings, ReadingOutcome, RootOutcome, ScanReport, ScanState,
+  Counts, EmbedOutcome, EndReason, Entry, ModelSettings, ReadingOutcome, RootOutcome, ScanReport, ScanState,
 } from '../lib/ipc';
 
 // Task 7 — the reading outcome from `scan.lastReading` (the per-root rows,
@@ -785,6 +785,47 @@ test('the partly-read sentence survives a successful embedding', async () => {
   expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe('Вбудовування всього індексу завершено.');
   expect(visible(screen.getByTestId('indexing-embed-result'))).toBe('Вбудовано фрагментів: 4 з 4. Відхилено: 0.');
   expect(screen.queryByTestId('indexing-continue')).toBeNull();
+});
+
+// The four `walk_job.rs`-only reasons cannot end an embedding today
+// (`scan_job.rs` ends it with completed / cancelled / failed), but
+// `EMBED_ENDED` maps them to `indexing_embed_ended_unexpected`, whose text
+// interpolates `{reason}`. A sentence drawn without that value throws
+// `MissingValueError` inside a `$derived` — a throw there breaks the render,
+// it does not blank a line.
+// Both `embedding` shapes render the outcome sentence, for each reason; only
+// `ran` also renders `indexing-embed-result`, which is what tells the two
+// frames apart.
+test('a wire-only reason that ends the embedding phase is named in the sentence, not thrown', async () => {
+  await openWindow();
+  const wireOnly = END_REASONS.filter((r) => r !== 'completed' && r !== 'cancelled' && r !== 'failed');
+  expect(wireOnly).toEqual(['brokenWorker', 'rulesNotApplied', 'rootUnavailable', 'volumeMissing']);
+  const shapes: EmbedOutcome[] = [
+    { kind: 'notReached' },
+    { kind: 'ran', done: 1, total: 3, refused: 0 },
+  ];
+  for (const reason of wireOnly) {
+    for (const embedding of shapes) {
+      // Not `emit`: that helper hands the state over and awaits `tick()`, and
+      // a `$derived` that throws would do so in Svelte's own microtask flush,
+      // outside this test — vitest scores that as an unhandled error, and
+      // `mutation-check.sh` scores any `Errors` line as a BROKEN CASE, not a
+      // kill. `flushSync` runs the effects on this call stack, so a throw is
+      // this test's own failure.
+      deliver!(ended({ reason, endedIn: 'embedding', embedding, resume: null }));
+      flushSync();
+      // The strip's own element, not the page: `failureLabel` and the reading
+      // block can carry a reason name of their own.
+      expect(visible(screen.getByTestId('indexing-embed-outcome')))
+        .toBe(`Вбудовування спинилося з причини, якої тут не очікували (${reason}).`);
+      if (embedding.kind === 'ran') {
+        // `indexing-embed-result` is rendered only under `{#if embedBlock.result}`,
+        // so this fails on a stale `notReached` frame.
+        expect(visible(screen.getByTestId('indexing-embed-result')))
+          .toBe('Вбудовано фрагментів: 1 з 3. Відхилено: 0.');
+      }
+    }
+  }
 });
 
 test('an embedding skipped for no key, no model, or a store that did not answer gets its own sentence', async () => {

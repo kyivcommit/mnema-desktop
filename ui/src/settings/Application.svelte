@@ -892,7 +892,7 @@
 
   <div role="group" aria-labelledby="application-group-startup">
     <h3 id="application-group-startup">{groupStartupLabel}</h3>
-    <p>{autostartLabelText}</p>
+    <p data-testid="application-autostart-label">{autostartLabelText}</p>
     <p data-testid="application-autostart-status" data-announced-by={autostartUnknown ? POLITE_ID : undefined}>{autostartStatusText}</p>
     {#if autostartUnknown}
       <p data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
