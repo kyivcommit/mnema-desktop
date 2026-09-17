@@ -106,7 +106,7 @@
   // `indexing_embed_ended_unexpected` interpolates it and the three real
   // endings ignore it (`intl-messageformat` reads only the variables its
   // message names). Drawn without it, the four wire-only reasons threw
-  // `MissingValueError` inside this `$derived` (§15.5).
+  // `MissingValueError` inside the `$derived` that calls it (§15.5).
   const embedSentence = (reason: EndReason) => t(EMBED_ENDED[reason], { reason });
 
   const FROZEN_WHY: Record<FrozenReason, Key> = {

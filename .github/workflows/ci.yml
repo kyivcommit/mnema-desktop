@@ -451,7 +451,7 @@ jobs:
     # the dependencies at the same time and none can see another's: one cold
     # build's compute per leg, 3:02–3:23 each on run
     # 33671866360, in front of the slowest file. The warm case is the steady
-    # state; the first run of this matrix is the measurement of it. At 47 legs
+    # state; the first run of this matrix is the measurement of it. At 48 legs
     # the account's 20-concurrent-job ceiling caps how many run at once (18
     # here — `check`, `sweeps` and `bundle` hold the rest); the scheduler
     # backfills a slot the moment a leg ends, so it is not three waves but a

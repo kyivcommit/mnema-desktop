@@ -2239,7 +2239,10 @@ test('a visible refusal paragraph is not a descendant of either region', async (
 // label (06dbfbe); nothing pinned it, so the reverse move was silent (§15.5).
 // One assertion per adjacent pair, on the DOM's own order — `*-failed` and
 // `*-error` are two nodes, and either alone could be moved past the control
-// with the other left in place, so both are in the chain.
+// with the other left in place, so both are in the chain. `precedes` is also
+// true for containment (`compareDocumentPosition` returns
+// `FOLLOWING | CONTAINED_BY`), which is why every chain ends at a button,
+// never at a container.
 // ---------------------------------------------------------------------------
 const precedes = (a: Element, b: Element) =>
   (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
@@ -2261,9 +2264,9 @@ test('the shortcut block reads label, status, failure, error, control — in tha
   await shown('application-shortcut-error');
 
   inDocumentOrder([
-    // The label is the `<p>` holding `shortcutLabelText` (`Application.svelte:721`);
-    // `application-shortcut` is the `<span>` with the combination inside it,
-    // and a moved label text would leave the span where it was (plan review, P2).
+    // The label is the `<p>` that wraps `shortcutLabelText` and the
+    // `application-shortcut` span; the label is the paragraph, the span is
+    // the value inside it (plan review, P2).
     ['shortcut label <p>', screen.getByTestId('application-shortcut').closest('p')!],
     byId('application-shortcut-status'),
     byId('application-shortcut-failed'),
@@ -2283,6 +2286,7 @@ test('the appearance block reads label, failure, error, control — in that orde
     ['#application-theme-label', document.getElementById('application-theme-label')!],
     byId('application-theme-failed'),
     byId('application-theme-error'),
+    byId('application-theme-light'),
     byId('application-theme-dark'),
   ]);
 });

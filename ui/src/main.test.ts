@@ -49,8 +49,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // `unmount` returns a Promise in this Svelte (types/index.d.ts:581); an
-  // un-awaited one lets the next test start before the listeners are gone.
+  // `unmount` is declared returning `Promise<void>` in this Svelte's
+  // `types/index.d.ts`; an un-awaited one lets the next test start before
+  // the listeners are gone.
   if (app !== null) await unmount(app);
   app = null;
   document.body.innerHTML = '';
@@ -60,6 +61,8 @@ test('the launcher entry point boots the locale and the theme once each', async 
   app = (await import('./launcher/main')).default as Record<string, unknown>;
   expect(h.bootLocale).toHaveBeenCalledTimes(1);
   expect(h.bootTheme).toHaveBeenCalledTimes(1);
+  // Ceiling: proves something mounted at #app, not which component —
+  // `mount(Launcher)` in place of `mount(Settings)` would still pass this.
   expect(document.getElementById('app')!.childElementCount).toBeGreaterThan(0);
 });
 
@@ -67,5 +70,6 @@ test('the settings entry point boots the locale and the theme once each', async 
   app = (await import('./settings/main')).default as Record<string, unknown>;
   expect(h.bootLocale).toHaveBeenCalledTimes(1);
   expect(h.bootTheme).toHaveBeenCalledTimes(1);
+  // Same ceiling as above: proves mount, not which component.
   expect(document.getElementById('app')!.childElementCount).toBeGreaterThan(0);
 });

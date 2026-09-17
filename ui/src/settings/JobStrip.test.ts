@@ -791,10 +791,11 @@ test('the partly-read sentence survives a successful embedding', async () => {
 // (`scan_job.rs` ends it with completed / cancelled / failed), but
 // `EMBED_ENDED` maps them to `indexing_embed_ended_unexpected`, whose text
 // interpolates `{reason}`. A sentence drawn without that value throws
-// `MissingValueError` inside a `$derived` — and the day the wire grows a
-// fourth real reason, the strip would go blank instead of saying which.
-// Both `embedding` shapes that reach the sentence are rendered, for each
-// reason: one table, not eight mechanisms.
+// `MissingValueError` inside a `$derived` — a throw there breaks the render,
+// it does not blank a line.
+// Both `embedding` shapes render the outcome sentence, for each reason; only
+// `ran` also renders `indexing-embed-result`, which is what tells the two
+// frames apart.
 test('a wire-only reason that ends the embedding phase is named in the sentence, not thrown', async () => {
   await openWindow();
   const wireOnly = END_REASONS.filter((r) => r !== 'completed' && r !== 'cancelled' && r !== 'failed');
@@ -817,6 +818,12 @@ test('a wire-only reason that ends the embedding phase is named in the sentence,
       // block can carry a reason name of their own.
       expect(visible(screen.getByTestId('indexing-embed-outcome')))
         .toBe(`Вбудовування спинилося з причини, якої тут не очікували (${reason}).`);
+      if (embedding.kind === 'ran') {
+        // `indexing-embed-result` only exists under `{#if embedBlock.result}`
+        // (`JobStrip.svelte:533`), so this fails on a stale `notReached` frame.
+        expect(visible(screen.getByTestId('indexing-embed-result')))
+          .toBe('Вбудовано фрагментів: 1 з 3. Відхилено: 0.');
+      }
     }
   }
 });
