@@ -2233,3 +2233,94 @@ test('a visible refusal paragraph is not a descendant of either region', async (
   expect(politeRegion().contains(failed)).toBe(false);
   expect(assertiveRegion().contains(failed)).toBe(false);
 });
+
+// ---------------------------------------------------------------------------
+// Block order. PR 10b's final review moved each failure block under its own
+// label (06dbfbe); nothing pinned it, so the reverse move was silent (§15.5).
+// One assertion per adjacent pair, on the DOM's own order — `*-failed` and
+// `*-error` are two nodes, and either alone could be moved past the control
+// with the other left in place, so both are in the chain.
+// ---------------------------------------------------------------------------
+const precedes = (a: Element, b: Element) =>
+  (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+const inDocumentOrder = (named: Array<[string, Element]>) => {
+  for (let i = 1; i < named.length; i++) {
+    const [aName, a] = named[i - 1];
+    const [bName, b] = named[i];
+    expect(precedes(a, b), `${aName} must precede ${bName}`).toBe(true);
+  }
+};
+const byId = (id: string) => [id, screen.getByTestId(id)] as [string, Element];
+
+test('the shortcut block reads label, status, failure, error, control — in that order', async () => {
+  appPrefs.mockResolvedValue(prefs());
+  setHotkey.mockRejectedValueOnce(new Error('refused once'));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await shown('application-shortcut-error');
+
+  inDocumentOrder([
+    // The label is the `<p>` holding `shortcutLabelText` (`Application.svelte:721`);
+    // `application-shortcut` is the `<span>` with the combination inside it,
+    // and a moved label text would leave the span where it was (plan review, P2).
+    ['shortcut label <p>', screen.getByTestId('application-shortcut').closest('p')!],
+    byId('application-shortcut-status'),
+    byId('application-shortcut-failed'),
+    byId('application-shortcut-error'),
+    byId('application-shortcut-record'),
+  ]);
+});
+
+test('the appearance block reads label, failure, error, control — in that order', async () => {
+  setTheme.mockRejectedValueOnce(new Error('nope'));
+  renderSection();
+  await shown('application-theme-dark');
+  await fireEvent.click(screen.getByTestId('application-theme-dark'));
+  await shown('application-theme-error');
+
+  inDocumentOrder([
+    ['#application-theme-label', document.getElementById('application-theme-label')!],
+    byId('application-theme-failed'),
+    byId('application-theme-error'),
+    byId('application-theme-dark'),
+  ]);
+});
+
+test('the startup block reads label, status, failure, error, control — in that order, with one toggle', async () => {
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'disabled' } }));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await shown('application-autostart-toggle');
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await shown('application-autostart-error');
+
+  inDocumentOrder([
+    byId('application-autostart-label'),
+    byId('application-autostart-status'),
+    byId('application-autostart-failed'),
+    byId('application-autostart-error'),
+    byId('application-autostart-toggle'),
+  ]);
+});
+
+test('the startup block reads label, status, reason, failure, error, control — in that order, with enable and disable', async () => {
+  appPrefs.mockResolvedValue(prefs({
+    autostart: { kind: 'unknown', reason: 'the login item list could not be read' },
+  }));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await shown('application-autostart-enable');
+  await fireEvent.click(screen.getByTestId('application-autostart-enable'));
+  await shown('application-autostart-error');
+
+  inDocumentOrder([
+    byId('application-autostart-label'),
+    byId('application-autostart-status'),
+    byId('application-autostart-reason'),
+    byId('application-autostart-failed'),
+    byId('application-autostart-error'),
+    byId('application-autostart-enable'),
+    byId('application-autostart-disable'),
+  ]);
+});
