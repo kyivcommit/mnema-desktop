@@ -35,9 +35,10 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
 // The entry points `mount()` on import and hand the instance back as their
 // default export; Testing Library never sees it, so teardown is ours.
-// `Settings.svelte:61` opens the scan-progress subscription,
-// `Scanning.svelte:89` an interval, `JobStrip.svelte:423` two document
-// listeners — all of which would outlive the test without `unmount`.
+// `Settings.svelte`'s `onMount(() => jobs.mount())` opens the scan-progress
+// subscription, `Scanning.svelte`'s `$effect` starts a `setInterval`,
+// `JobStrip.svelte`'s `onMount` adds `focusin`/`pointerdown` listeners on
+// `document` — all of which would outlive the test without `unmount`.
 let app: Record<string, unknown> | null = null;
 
 beforeEach(() => {
