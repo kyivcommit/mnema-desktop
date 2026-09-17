@@ -2240,9 +2240,12 @@ test('a visible refusal paragraph is not a descendant of either region', async (
 // One assertion per adjacent pair, on the DOM's own order — `*-failed` and
 // `*-error` are two nodes, and either alone could be moved past the control
 // with the other left in place, so both are in the chain. `precedes` is also
-// true for containment (`compareDocumentPosition` returns
-// `FOLLOWING | CONTAINED_BY`), which is why every chain ends at a button,
-// never at a container.
+// true when the earlier element CONTAINS the later one (`compareDocumentPosition`
+// sets FOLLOWING on the container's side), so a chain step must never be an
+// ancestor of the next — the shortcut chain's first element, the label `<p>`,
+// is one, and a status moved inside it would pass. Ending at the first button
+// leaves one shape uncovered: a failure block moved inside the control ahead
+// of that button.
 // ---------------------------------------------------------------------------
 const precedes = (a: Element, b: Element) =>
   (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;

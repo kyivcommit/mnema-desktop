@@ -819,8 +819,8 @@ test('a wire-only reason that ends the embedding phase is named in the sentence,
       expect(visible(screen.getByTestId('indexing-embed-outcome')))
         .toBe(`Вбудовування спинилося з причини, якої тут не очікували (${reason}).`);
       if (embedding.kind === 'ran') {
-        // `indexing-embed-result` only exists under `{#if embedBlock.result}`
-        // (`JobStrip.svelte:533`), so this fails on a stale `notReached` frame.
+        // `indexing-embed-result` is rendered only under `{#if embedBlock.result}`,
+        // so this fails on a stale `notReached` frame.
         expect(visible(screen.getByTestId('indexing-embed-result')))
           .toBe('Вбудовано фрагментів: 1 з 3. Відхилено: 0.');
       }

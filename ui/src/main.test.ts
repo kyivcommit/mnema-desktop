@@ -62,7 +62,7 @@ test('the launcher entry point boots the locale and the theme once each', async 
   expect(h.bootLocale).toHaveBeenCalledTimes(1);
   expect(h.bootTheme).toHaveBeenCalledTimes(1);
   // Ceiling: proves something mounted at #app, not which component —
-  // `mount(Launcher)` in place of `mount(Settings)` would still pass this.
+  // `mount(Settings)` in place of `mount(Launcher)` would still pass this.
   expect(document.getElementById('app')!.childElementCount).toBeGreaterThan(0);
 });
 
