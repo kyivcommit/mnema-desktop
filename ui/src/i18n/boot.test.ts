@@ -38,8 +38,9 @@ describe('bootLocale ordering (reviewer F1)', () => {
       // This `await` is what makes a dropped `await listen(...)` in
       // `bootLocale` visible: without it, 'listen' is pushed synchronously
       // and lands first regardless. The mutant dies only because the
-      // `invoke` mock below pushes 'invoke' before its own first await
-      // (`:44-47`) — as `theme.test.ts:11-13` records.
+      // `invoke` mock just below (`mockImplementationOnce` on `h.invoke`)
+      // pushes 'invoke' before its own first await — as `theme.test.ts:11-13`
+      // records.
       await Promise.resolve();
       order.push('listen');
       h.state.handler = cb;
