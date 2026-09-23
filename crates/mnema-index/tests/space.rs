@@ -411,6 +411,71 @@ fn dropping_a_space_removes_its_row_its_table_and_its_shadows() {
     assert_eq!(rows, 0);
 }
 
+/// The pair of states this separates: a `drop_space` whose DROP and DELETE
+/// commit or roll back together, against one where the DROP has already gone
+/// through by the time the DELETE fails.
+///
+/// The one production caller (`set_embedding_model`'s retirement loop) treats
+/// an `Err` from this as "nothing was retired" and keeps the old model saved.
+/// That is only sound if an `Err` really does leave the space whole — the vector
+/// table included, which is a vec0 virtual table whose DROP runs the module's
+/// own destructor. Nothing in the schema can make the DELETE fail (the only key
+/// onto `embedding_space` cascades), so a trigger does.
+#[test]
+fn a_drop_that_fails_after_the_table_went_leaves_the_space_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let cfg = db
+        .create_model_config("f", "openrouter", None, "baai/bge-m3", 8)
+        .unwrap();
+    let space = db.create_space(cfg, 8, "chunker-v1").unwrap();
+    db.insert_vector(space, 1, &vec_of(8, 1.0)).unwrap();
+    db.insert_vector(space, 2, &vec_of(8, 2.0)).unwrap();
+
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER refuse_space_delete BEFORE DELETE ON embedding_space
+             BEGIN SELECT RAISE(ABORT, 'the delete was refused on purpose'); END;",
+        )
+        .unwrap();
+
+    let err = db
+        .drop_space(space)
+        .expect_err("the trigger did not stop the DELETE, so nothing below is about a failed drop");
+    assert!(
+        err.to_string().contains("refused on purpose"),
+        "the drop failed, but not at the DELETE this test arranged: {err}"
+    );
+
+    let tables: i64 = db
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT count(*) FROM sqlite_master
+                  WHERE name = 'vec_emb_{space}' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 1,
+        "the vector table is gone although drop_space answered Err — the DROP was \
+         not rolled back with the DELETE"
+    );
+    let vectors: i64 = db
+        .conn()
+        .query_row(&format!("SELECT count(*) FROM vec_emb_{space}"), [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(vectors, 2, "the vector table came back without its vectors");
+    assert!(
+        db.space_model(space).is_ok(),
+        "the space row is gone although drop_space answered Err"
+    );
+}
+
 /// `create_space` writes `state = 'building'` (space.rs:190) and nothing
 /// before D95b ever moved it. `mark_space_ready` and `mark_space_building`
 /// are the two writers now, and both directions are exercised here because a
