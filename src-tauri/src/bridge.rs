@@ -1886,11 +1886,12 @@ mod tests {
     /// match the `/a` this call was asked to delete, and answers
     /// [`Error::WatchedRootChanged`] without touching the row.
     ///
-    /// Two hand mutants are tried against this test (task-4 fix-round-1
-    /// report): a stale pre-claim read fed into the compare — the read
-    /// happens before this hook can run, so it still equals `/a` and passes,
-    /// and the delete lands on `/b` anyway — and a fresh read that is never
-    /// compared at all. Neither is part of the shipped code.
+    /// Two hand mutants were tried against this test (task-4 fix-round-1
+    /// report). A fresh read that is never compared at all dies here. A path
+    /// re-read from the id BEFORE the claim does not: this hook runs after the
+    /// claim, so that read still says `/a`, the compare inside the transaction
+    /// still refuses, and this test stays green. The stale-caller test below
+    /// is the one that kills it. Neither mutant is part of the shipped code.
     #[test]
     fn a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives() {
         let dir = tempfile::tempdir().unwrap();
@@ -1957,6 +1958,72 @@ mod tests {
         // matched `WatchedRootChanged` and then forgot to let `slot` drop
         // (held it in a loop, leaked it into a `static`) would pass every
         // assertion above and leave the application unable to index again.
+        assert_eq!(
+            state.scan_state().snapshot,
+            ScanSnapshot::Idle,
+            "the refused removal left the job slot taken"
+        );
+    }
+
+    /// 🔴 The pair of states this separates: a removal that compares the path
+    /// its CALLER sent against the row, against one that re-reads the path from
+    /// the id and compares the row with itself.
+    ///
+    /// The swap test above cannot tell them apart: its swap lands after the
+    /// claim, so a path re-read before the claim still says `/a`. Here the row
+    /// already holds a different folder when the call is made — a window that
+    /// listed the folders before another window removed one and added another,
+    /// which SQLite gave the same id. Nothing is racing; the caller is simply
+    /// stale, and only the caller's own path says so.
+    #[test]
+    fn a_caller_holding_a_path_the_row_no_longer_has_is_refused_and_the_newcomer_survives() {
+        // A no-op hook, taken for no reason but mutual exclusion: see
+        // `take_remove_hook_turn`'s own doc for why a caller with nothing to
+        // install still has to hold this turn.
+        let _turn = take_remove_hook_turn(Arc::new(|_: &AppState| {}));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_in(dir.path());
+
+        let id = state
+            .with_index(|db| db.insert_watched_root("/a"))
+            .expect("adding root A");
+        state
+            .with_index(|db| db.delete_watched_root(id))
+            .expect("removing root A");
+        let newcomer = state
+            .with_index(|db| db.insert_watched_root("/b"))
+            .expect("adding root B");
+        assert_eq!(
+            newcomer, id,
+            "this test is about an id handed on to another folder; SQLite did not \
+             hand it on"
+        );
+        seed_one_file(&state, newcomer, "one.txt", &"4".repeat(64));
+
+        let outcome = remove_watched_root(&state, id, "/a");
+
+        assert!(
+            matches!(outcome, Err(Error::WatchedRootChanged)),
+            "a removal asked for /a must be refused once the id names /b; got \
+             {outcome:?}"
+        );
+        assert_eq!(
+            state
+                .with_index(|db| db.watched_root_path(id))
+                .expect("reading the id back")
+                .as_deref(),
+            Some("/b"),
+            "the folder now at this id was deleted on behalf of a caller that asked \
+             for a different one"
+        );
+        assert_eq!(
+            state
+                .with_index(|db| db.indexed_file_count())
+                .expect("counting after the refusal"),
+            1,
+            "the newcomer's file went with a removal that was refused"
+        );
         assert_eq!(
             state.scan_state().snapshot,
             ScanSnapshot::Idle,
