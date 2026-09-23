@@ -50,17 +50,14 @@
 #     grep -rn -B4 "fn ${t}(" src-tauri | grep -q 'cfg(unix)' && echo "$t"
 #   done
 #
-# 🔴 **Two guards the plan asked for are NOT here, and their absence is the
-# claim rather than an omission.** The count was four until fix round 1 (the
-# header said «two» while listing three, and a fourth — `revision` not bumped
-# on `finish` — was missing from the list altogether, which is the shape this
-# file exists to catch), and three until debt PR E gave the removal's pre-claim
-# re-derivation an oracle. All of it is written up in `task-11b-report.md`; in
-# short:
+# 🔴 **One guard the plan asked for is NOT here, and its absence is the claim
+# rather than an omission.** The count was four until fix round 1 (the header
+# said «two» while listing three, and a fourth — `revision` not bumped on
+# `finish` — was missing from the list altogether, which is the shape this file
+# exists to catch), and three, then two, until debt PR E gave the removal's
+# pre-claim re-derivation and the shared pool an oracle each. All of it is
+# written up in `task-11b-report.md`; in short:
 #
-#   • `Pool::new` hoisted above the per-folder loop — the poison-across-roots
-#     observation does not exist (Task 2's open acceptance item, carried by
-#     name into the review). A case with no oracle is not a case.
 #   • `namesFolder`'s reconciliation moved below the next `await` in
 #     `Folders.svelte`'s `refresh()` — there is no next `await`: everything
 #     after `listTree()` returns is synchronous, so the mutation cannot be
@@ -76,6 +73,10 @@
 # Debt PR E: the removal's path re-derived before the claim had no oracle;
 # `bridge::tests::a_caller_holding_a_path_the_row_no_longer_has_is_refused_and_
 # the_newcomer_survives` is one, and the case above the tray section names it.
+# Debt PR E: `Pool::new` hoisted above the per-folder loop had no headless
+# observation; a stand-in worker that logs each request it is handed is one —
+# `scan_job::tests::a_file_that_killed_a_worker_under_one_folder_is_asked_
+# again_under_the_next`, and the case in the scan section names it.
 
 # ── The job slot: what a surface is told, and when (Task 1) ──────────────────
 
@@ -309,6 +310,17 @@ case_ "the embedding phase must be announced before the store is asked, not afte
   's~    slot\.update\(Phase::Embedding \{\n        counts: index\.opening\(\),\n    \}\);\n\n    let answer = \(deps\.key\)\(\);~    let answer = (deps.key)(); // mutant: the wait happens under the reading phase\n\n    slot.update(Phase::Embedding \{\n        counts: index.opening(),\n    \});~' \
   'let answer = (deps.key)(); // mutant: the wait happens under the reading phase' \
   mnema-desktop 'scan_job::tests::a_stop_during_the_key_read_wins_whatever_the_store_answers' --lib
+
+# A fresh extraction pool per folder, inside the loop. A pool remembers a file
+# that killed its worker by path alone, so a pool shared across two overlapping
+# folders skips that file under the second on no evidence. The mutant keeps the
+# `break` in the refusal arm inside the loop — hoisting the `let` verbatim would
+# not compile, which is a broken case rather than a kill.
+case_ "scan: every folder is read by a pool of its own, not one shared by the pass" \
+  src-tauri/src/scan_job.rs \
+  's{        let pool = match Pool::new\(PoolConfig::new\(&worker\)\) \{\n            Ok\(pool\) => pool,}{        static SHARED: std::sync::OnceLock<Pool> = std::sync::OnceLock::new(); // mutant: one pool for every folder\n        let pool: &Pool = match SHARED.get().map(Ok).unwrap_or_else(|| Pool::new(PoolConfig::new(&worker)).map(|p| SHARED.get_or_init(|| p))) \{\n            Ok(pool) => pool,}' \
+  '// mutant: one pool for every folder' \
+  mnema-desktop 'scan_job::tests::a_file_that_killed_a_worker_under_one_folder_is_asked_again_under_the_next' --lib
 
 # A Stop that lands BETWEEN two folders is a Stop. `walk_root` reads the flag
 # only while it is running, so without this check the pass walks on into the
