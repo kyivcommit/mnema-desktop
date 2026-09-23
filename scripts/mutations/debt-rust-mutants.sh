@@ -20,3 +20,13 @@ case_ "pool: a freshly spawned worker that cannot be written to is not retried" 
   's{                    if fresh \{}{                    if false \{ // mutant: a fresh worker is retried}' \
   'if false { // mutant: a fresh worker is retried' \
   mnema-pool 'a_fresh_worker_that_cannot_be_handed_its_request_is_not_retried' --test unreachable
+
+# The DROP of a space's vector table must share the DELETE's transaction. Run
+# ahead of it, a DELETE that then fails leaves a row naming a table that is gone
+# — and the model-change loop, which reads an Err as "nothing was retired",
+# keeps the old model saved over it.
+case_ "space: drop_space drops the vector table inside the transaction that deletes the row" \
+  crates/mnema-index/src/space.rs \
+  's{        let tx = Transaction::new_unchecked\(self\.conn\(\), TransactionBehavior::Immediate\)\?;\n        // DROP takes the four shadow tables with it, so the id becomes reusable\.\n        tx\.execute_batch\(&format!\("DROP TABLE IF EXISTS \{table\};"\)\)\?;\n}{        self.conn().execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?; // mutant: the drop runs outside the transaction\n        let tx = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;\n}' \
+  '// mutant: the drop runs outside the transaction' \
+  mnema-index 'a_drop_that_fails_after_the_table_went_leaves_the_space_whole' --test space
