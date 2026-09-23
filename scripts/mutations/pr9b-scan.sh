@@ -54,9 +54,10 @@
 # rather than an omission.** The count was four until fix round 1 (the header
 # said «two» while listing three, and a fourth — `revision` not bumped on
 # `finish` — was missing from the list altogether, which is the shape this file
-# exists to catch), and three, then two, until debt PR E gave the removal's
-# pre-claim re-derivation and the shared pool an oracle each. All of it is
-# written up in `task-11b-report.md`; in short:
+# exists to catch), then three until debt PR E gave the removal's pre-claim
+# re-derivation and the shared pool an oracle each — one now. The first four
+# are written up in `task-11b-report.md`; the PR E two are closed below; in
+# short:
 #
 #   • `namesFolder`'s reconciliation moved below the next `await` in
 #     `Folders.svelte`'s `refresh()` — there is no next `await`: everything
@@ -76,7 +77,7 @@
 # Debt PR E: `Pool::new` hoisted above the per-folder loop had no headless
 # observation; a stand-in worker that logs each request it is handed is one —
 # `scan_job::tests::a_file_that_killed_a_worker_under_one_folder_is_asked_
-# again_under_the_next`, and the case in the scan section names it.
+# again_under_the_next`, and the case in the reading-pass section names it.
 
 # ── The job slot: what a surface is told, and when (Task 1) ──────────────────
 
@@ -450,9 +451,9 @@ case_ "a removal must delete the folder it was asked about, not whatever holds i
 # The second removal case: the path re-derived from the id BEFORE the claim
 # rather than taken from the caller. The swap test above cannot kill it — its
 # swap lands after the claim, so a pre-claim read still says `/a`, the compare
-# still refuses, and it stays green (measured at Task 11b and again here). What
-# kills it is a caller that is simply stale: the id already names another
-# folder when the call is made, and only the caller's own path says so.
+# still refuses, and it stays green (measured at Task 11b and again in debt
+# PR E). What kills it is a caller that is simply stale: the id already names
+# another folder when the call is made, and only the caller's own path says so.
 case_ "bridge: the removal compares the caller's path, not one re-read from the id" \
   src-tauri/src/bridge.rs \
   's{(    path: &str,\n\) -> Result<u64, Error> \{\n)(    let slot = state\.claim_job\(\n        crate::scan_state::Phase::Removing \{)}{$1    let path: &str = &state.with_index(|db| db.watched_root_path(root_id))?.unwrap_or_default(); // mutant: the path is re-derived before the claim\n$2}' \

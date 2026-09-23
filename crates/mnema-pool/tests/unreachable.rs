@@ -3,10 +3,11 @@
 //! Its own binary, with one test, on purpose. The request below is written into
 //! a pipe whose only reader closes it without reading; the write fails only once
 //! EVERY read end is closed, and a child spawned outside the pool's lock by a
-//! sibling test in the same process can inherit that end and keep it for its
-//! whole life — `tests/pipes.rs` says how that was measured. With no sibling
-//! there is nothing to inherit it, and no concurrent fork to make the freshly
-//! written stand-in "Text file busy" either.
+//! sibling test in the same process can inherit that end — on macOS keeping it
+//! for its whole life, on Linux only until its own exec — `tests/pipes.rs` says
+//! how that was measured. With no sibling there is nothing to inherit it, and
+//! no concurrent fork to make the freshly written stand-in "Text file busy"
+//! either.
 
 #![cfg(unix)]
 

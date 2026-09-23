@@ -415,8 +415,9 @@ fn dropping_a_space_removes_its_row_its_table_and_its_shadows() {
 /// commit or roll back together, against one where the DROP has already gone
 /// through by the time the DELETE fails.
 ///
-/// The one production caller (`set_embedding_model`'s retirement loop) treats
-/// an `Err` from this as "nothing was retired" and keeps the old model saved.
+/// The one production caller (`set_embedding_model`'s retirement loop,
+/// `adopt_retiring_whatever_blocks`) treats an `Err` from this as "this space
+/// was not retired" and keeps the old model saved.
 /// That is only sound if an `Err` really does leave the space whole — the vector
 /// table included, which is a vec0 virtual table whose DROP runs the module's
 /// own destructor. Nothing in the schema can make the DELETE fail (the only key
