@@ -1577,6 +1577,76 @@ mod tests {
             .expect("adopting a model");
     }
 
+    /// Runs a freshly written stand-in once before a scan may, retrying while
+    /// Linux says the file is still open for writing somewhere — a child that
+    /// another test's thread forked during the write holds a copy until its
+    /// `exec`. The same function `crates/mnema-pool/tests/manifest.rs` and
+    /// `crates/mnema-ingest/tests/support/mod.rs` carry, for the same reason.
+    #[cfg(unix)]
+    fn wait_until_it_will_run(path: &Path) {
+        use std::process::{Command, Stdio};
+
+        for _ in 0..400 {
+            match Command::new(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.wait();
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!(
+                    "the stand-in at {} will not run at all: {e}",
+                    path.display()
+                ),
+            }
+        }
+        panic!(
+            "{} was still reported as busy after two seconds of retrying",
+            path.display()
+        );
+    }
+
+    /// An extraction worker that states a manifest when asked for one, and
+    /// otherwise writes the request it was handed to `log` and dies without
+    /// answering — which the pool records as a file that killed its worker.
+    ///
+    /// The pre-run above gives it no argument and an empty stdin: `read` fails
+    /// and it exits 0 without writing, so `log` holds only what a scan asked.
+    #[cfg(unix)]
+    fn a_worker_that_logs_and_dies(dir: &Path, log: &Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("logs-and-dies");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = \"--manifest\" ]; then\n\
+                 printf '%s\\n' '{{\"default\":{{\"reader\":\"text\",\"version\":1}},\"by_extension\":{{}}}}'\n\
+                 exit 0\n\
+                 fi\n\
+                 IFS= read -r line || exit 0\n\
+                 printf '%s\\n' \"$line\" >> '{}'\n\
+                 exit 3\n",
+                log.display()
+            ),
+        )
+        .expect("writing the stand-in worker");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("making the stand-in executable");
+        wait_until_it_will_run(&path);
+        assert!(
+            std::fs::read_to_string(log).unwrap_or_default().is_empty(),
+            "the pre-run wrote to the request log, so the count below would include it"
+        );
+        path
+    }
+
     /// The marker as the index holds it: `Some("1")` while a scan is under way,
     /// `Some("0")` after one that got all the way round, `None` before any scan
     /// has ever run.
@@ -3328,6 +3398,93 @@ mod tests {
             "{settled:?}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 🔴 The pair of states this separates: a pass that opens a fresh
+    /// extraction pool for every folder, against one that shares a pool across
+    /// them.
+    ///
+    /// A pool remembers a file that killed its worker by path alone, and answers
+    /// for that path from then on without asking a worker. Two watched folders
+    /// can overlap — nothing refuses a folder inside another — so a file that
+    /// killed a worker under the outer folder, shared with the inner one, would
+    /// be skipped under the inner one on no evidence at all. The observation is
+    /// the worker's own: each request it is handed is written to a log before
+    /// it dies, so a fresh pool leaves two lines for the shared file and a
+    /// shared pool leaves one.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_killed_a_worker_under_one_folder_is_asked_again_under_the_next() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let log = data.path().join("requests.log");
+        let worker = a_worker_that_logs_and_dies(data.path(), &log);
+
+        let outer = tempfile::tempdir().expect("the outer folder");
+        let inner = outer.path().join("inner");
+        std::fs::create_dir(&inner).expect("the inner folder");
+        std::fs::write(inner.join("boom.txt"), "the text of boom.txt").expect("the shared file");
+
+        let state = Arc::new(AppState::new(
+            data.path().to_path_buf(),
+            worker,
+            "http://127.0.0.1:1".to_string(),
+            format!(
+                "mnema-desktop-scan-job-test-poison-{}",
+                data.path().display()
+            ),
+        ));
+        state.open_index().expect("the index would not open");
+        watch(&state, outer.path());
+        watch(&state, &inner);
+        adopt_a_model(&state);
+
+        let (deps, _calls) = deps_counting_embeds(a_key, a_pass_that_embeds(0));
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+
+        let reading = settled
+            .last_reading
+            .clone()
+            .expect("the scan recorded no reading pass");
+        // The premise: both folders were walked, and neither was cut short.
+        // Asserted apart from the count below, so a failure there says "the
+        // pool was shared" and never "the fixture did not reach the second
+        // folder".
+        assert_eq!(
+            reading.roots.len(),
+            2,
+            "both folders were supposed to be read, so nothing below is about the \
+             second one: {reading:?}"
+        );
+        assert!(
+            reading
+                .roots
+                .iter()
+                .all(|root| root.reason != EndReason::Failed),
+            "a folder failed outright, so the shared file may never have reached a \
+             pool under it: {reading:?}"
+        );
+
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(
+            lines.iter().any(|line| line.contains("boom.txt")),
+            "the stand-in was never handed boom.txt, so nothing below is about a pool \
+             outliving its folder: {lines:?}"
+        );
+        let asked = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("boom.txt"))
+            .count();
+        assert_eq!(
+            asked, 2,
+            "the file that killed a worker under the first folder was not asked of a \
+             worker under the second — a pool outlived the folder it was opened for"
+        );
     }
 
     /// 🔴 A Stop at the boundary does not overwrite a reading pass that had

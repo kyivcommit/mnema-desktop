@@ -50,25 +50,19 @@
 #     grep -rn -B4 "fn ${t}(" src-tauri | grep -q 'cfg(unix)' && echo "$t"
 #   done
 #
-# 🔴 **Three guards the plan asked for are NOT here, and their absence is the
-# claim rather than an omission.** The count is three because it was four until
-# fix round 1: the header used to say «two» while listing three, and a fourth —
-# `revision` not bumped on `finish` — was missing from the list altogether,
-# which is the shape this file exists to catch. All of it is written up in
-# `task-11b-report.md`; in short:
+# 🔴 **One guard the plan asked for is NOT here, and its absence is the claim
+# rather than an omission.** The count was four until fix round 1 (the header
+# said «two» while listing three, and a fourth — `revision` not bumped on
+# `finish` — was missing from the list altogether, which is the shape this file
+# exists to catch), then three until debt PR E gave the removal's pre-claim
+# re-derivation and the shared pool an oracle each — one now. The first four
+# are written up in `task-11b-report.md`; the PR E two are closed below; in
+# short:
 #
-#   • `Pool::new` hoisted above the per-folder loop — the poison-across-roots
-#     observation does not exist (Task 2's open acceptance item, carried by
-#     name into the review). A case with no oracle is not a case.
 #   • `namesFolder`'s reconciliation moved below the next `await` in
 #     `Folders.svelte`'s `refresh()` — there is no next `await`: everything
 #     after `listTree()` returns is synchronous, so the mutation cannot be
 #     constructed at all.
-#   • the removal's path re-derived from the id before the claim — written,
-#     measured GREEN, removed. `remove_hook` fires AFTER the claim, which is
-#     the window the swap fixture models, so a pre-claim re-derivation still
-#     reads the folder's real path and the compare below still refuses. Not an
-#     equivalent mutant; simply one no fixture here reaches.
 #
 # CLOSED, and named so the list reads as a history rather than as a standing
 # gap. Fix round 1: `revision` not bumped on `finish` had no oracle when this
@@ -77,6 +71,13 @@
 # three REMAINING writes to `ScanState` — `drop`, `update` and
 # `mark_reading_done` — had the same hole, and `drop`'s is the one no later
 # write can repair. All four cases are below, together.
+# Debt PR E: the removal's path re-derived before the claim had no oracle;
+# `bridge::tests::a_caller_holding_a_path_the_row_no_longer_has_is_refused_and_
+# the_newcomer_survives` is one, and the case above the tray section names it.
+# Debt PR E: `Pool::new` hoisted above the per-folder loop had no headless
+# observation; a stand-in worker that logs each request it is handed is one —
+# `scan_job::tests::a_file_that_killed_a_worker_under_one_folder_is_asked_
+# again_under_the_next`, and the case in the reading-pass section names it.
 
 # ── The job slot: what a surface is told, and when (Task 1) ──────────────────
 
@@ -311,6 +312,17 @@ case_ "the embedding phase must be announced before the store is asked, not afte
   'let answer = (deps.key)(); // mutant: the wait happens under the reading phase' \
   mnema-desktop 'scan_job::tests::a_stop_during_the_key_read_wins_whatever_the_store_answers' --lib
 
+# A fresh extraction pool per folder, inside the loop. A pool remembers a file
+# that killed its worker by path alone, so a pool shared across two overlapping
+# folders skips that file under the second on no evidence. The mutant keeps the
+# `break` in the refusal arm inside the loop — hoisting the `let` verbatim would
+# not compile, which is a broken case rather than a kill.
+case_ "scan: every folder is read by a pool of its own, not one shared by the pass" \
+  src-tauri/src/scan_job.rs \
+  's{        let pool = match Pool::new\(PoolConfig::new\(&worker\)\) \{\n            Ok\(pool\) => pool,}{        static SHARED: std::sync::OnceLock<Pool> = std::sync::OnceLock::new(); // mutant: one pool for every folder\n        let pool: &Pool = match SHARED.get().map(Ok).unwrap_or_else(|| Pool::new(PoolConfig::new(&worker)).map(|p| SHARED.get_or_init(|| p))) \{\n            Ok(pool) => pool,}' \
+  '// mutant: one pool for every folder' \
+  mnema-desktop 'scan_job::tests::a_file_that_killed_a_worker_under_one_folder_is_asked_again_under_the_next' --lib
+
 # A Stop that lands BETWEEN two folders is a Stop. `walk_root` reads the flag
 # only while it is running, so without this check the pass walks on into the
 # next folder and reads a whole archive somebody asked it to stop reading. D-h
@@ -436,16 +448,17 @@ case_ "a removal must delete the folder it was asked about, not whatever holds i
   'Ok(match db.delete_watched_root(root_id).map(Some)? { // mutant: the path is never compared' \
   mnema-desktop 'bridge::tests::a_root_swapped_before_the_delete_is_refused_and_the_newcomer_survives' --lib
 
-# 🔴 **Not written, and this is the record of why.** The plan asks for a second
-# removal case — the path re-derived from the id BEFORE the claim rather than
-# taken from the caller — killed by the same swap test. Measured: it is not.
-# `remove_hook` fires AFTER the claim, which is the window that fixture models,
-# so a pre-claim re-derivation reads the folder's real path, the compare below
-# still refuses, and the test stays green. The mutant is not equivalent — a
-# caller sending a path that does NOT name the row would have its removal go
-# through instead of being refused — but nothing in this repository calls the
-# command that way, so there is no oracle. Carried into `task-11b-report.md`
-# as a coverage gap rather than faked with a marker.
+# The second removal case: the path re-derived from the id BEFORE the claim
+# rather than taken from the caller. The swap test above cannot kill it — its
+# swap lands after the claim, so a pre-claim read still says `/a`, the compare
+# still refuses, and it stays green (measured at Task 11b and again in debt
+# PR E). What kills it is a caller that is simply stale: the id already names
+# another folder when the call is made, and only the caller's own path says so.
+case_ "bridge: the removal compares the caller's path, not one re-read from the id" \
+  src-tauri/src/bridge.rs \
+  's{(    path: &str,\n\) -> Result<u64, Error> \{\n)(    let slot = state\.claim_job\(\n        crate::scan_state::Phase::Removing \{)}{$1    let path: &str = &state.with_index(|db| db.watched_root_path(root_id))?.unwrap_or_default(); // mutant: the path is re-derived before the claim\n$2}' \
+  '// mutant: the path is re-derived before the claim' \
+  mnema-desktop 'bridge::tests::a_caller_holding_a_path_the_row_no_longer_has_is_refused_and_the_newcomer_survives' --lib
 
 # ── The tray (Task 10c, F4) ──────────────────────────────────────────────────
 
