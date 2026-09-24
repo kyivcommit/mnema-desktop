@@ -676,6 +676,9 @@
     if (unavailable !== null && shortcutStatusText !== null && shortcutReasonText !== null) {
       out.push({ key: 'shortcut-status', text: shortcutStatusText });
       out.push({ key: 'shortcut-reason', text: shortcutReasonText });
+      // D165 (2): the way out is heard too — without it a listener is told
+      // what is broken and left with no next step.
+      out.push({ key: 'shortcut-tray', text: shortcutTrayText });
     }
     if (languageReadError !== null) {
       out.push({ key: `language-failed#${languageReadStamp}`, text: languageFailedLabel });
@@ -761,7 +764,7 @@
     <p data-testid="application-shortcut-status" data-announced-by={unavailable ? POLITE_ID : undefined}>{shortcutStatusText}</p>
     {#if unavailable}
       <p id="application-shortcut-reason" data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
-      <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
+      <p data-testid="application-shortcut-tray" data-announced-by={POLITE_ID}>{shortcutTrayText}</p>
     {/if}
     {#if hotkeyError !== null}
       <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={ASSERTIVE_ID}>{shortcutFailedLabel}</p>

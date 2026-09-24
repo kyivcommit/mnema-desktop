@@ -2061,6 +2061,7 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-load-error', POLITE],
   ['application-shortcut-status', POLITE],
   ['application-shortcut-reason', POLITE],
+  ['application-shortcut-tray', POLITE],
   ['application-shortcut-failed', ASSERTIVE],
   ['application-shortcut-error', ASSERTIVE],
   ['application-theme-failed', ASSERTIVE],
@@ -2178,8 +2179,19 @@ test('the polite region says the standing state, node by node, and nothing else'
   await waitFor(() => expect(announced(politeRegion())).toEqual([
     'Це скорочення не зареєстровано в системі.',
     `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
   ]));
   expect(announced(assertiveRegion())).toEqual([]);
+});
+
+test('an unavailable shortcut announces the way out, after the claim and its reason', async () => {
+  await withUnavailableShortcut();
+
+  await waitFor(() => expect(announced(politeRegion())).toEqual([
+    'Це скорочення не зареєстровано в системі.',
+    `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
+  ]));
 });
 
 test('the assertive region says the refusal, node by node, and nothing else', async () => {
@@ -2197,6 +2209,7 @@ test('the assertive region says the refusal, node by node, and nothing else', as
   expect(announced(politeRegion())).toEqual([
     'Це скорочення не зареєстровано в системі.',
     `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
   ]);
 });
 
