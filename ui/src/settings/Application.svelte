@@ -46,36 +46,23 @@
   let hotkeySeq = 0;
   let autostartSeq = 0;
 
-  // A read whose hotkey the stamp discarded (`takeHotkey === false`) must not
+  // A read whose hotkey the stamp discarded (`takeHotkey === false`) does not
   // choose the sentence drawn beside a hotkey it did not write. The early
-  // return below (`if (!takeHotkey && !takeAutostart) return;`) is what stops
-  // it, and it is enough on its own: reachable only when NEITHER stamp
-  // survived. Every path that invalidates `takeHotkey` alone also nulls
-  // `hotkeyError` first — a successful `setHotkey` — hiding the heading a
-  // discarded read could otherwise have rewritten; every OTHER path that
-  // invalidates it invalidates `takeAutostart` too, because any `refresh()`
-  // call claims both stamps at once (D-I1 above). So a discarded read is
-  // always turned away before it can write `prefs` or `shortcutOutcome`,
-  // whether or not the heading it might have chosen is even on screen. Pinned
-  // by the test `a corrective read the stamp discarded does not get to
-  // choose the sentence` (`Application.test.ts`).
+  // return below is the first of two guards, not the only one: a read
+  // holding NEITHER stamp returns there before writing anything, but a read
+  // holding `takeAutostart` alone (`takeHotkey` false) passes it and writes
+  // `prefs` — the per-field write (`takeHotkey || prefs === null ? p.hotkey
+  // : prefs.hotkey`) is what keeps ITS hotkey off screen, and the settle's
+  // own `appliedHotkey !== null` condition below is what keeps it out of
+  // `shortcutOutcome`.
   //
-  // 🔴 That test had to be REBUILT before its own sentence was true (fix
-  // round 2). Its first version superseded the held-open read with a
-  // successful recording, which sets `hotkeyError = null` and takes the
-  // heading off screen on its own — so it asserted an absence the write-side
-  // stamp was already producing, and the early return could have been
-  // removed without it noticing. It now supersedes with a SECOND REJECTION,
-  // so the heading stays on screen and the sentence it holds is the live
-  // rejection's own.
-  //
-  // 🔴 `refresh` ALSO settles a `pending` `shortcutOutcome`, at its own write
-  // site (fix round 1, Important 1) — not only the read a shortcut
-  // rejection's own catch started: whichever read is the one that actually
-  // reaches the screen with a hotkey settles it, including one an unrelated
-  // autostart rejection started. And a settled outcome does not get reopened
-  // by a LATER, unrelated read either — `pr9-ui.sh`, "a settled outcome must
-  // not be re-litigated by an unrelated later read".
+  // `refresh` also settles a `pending` `shortcutOutcome`, at its own write
+  // site: whichever read is the one that actually reaches the screen with a
+  // hotkey settles it, including one an unrelated autostart rejection
+  // started — see the comment above `ShortcutOutcome` for why. A settled
+  // outcome does not get reopened by a later, unrelated read either —
+  // `pr9-ui.sh`, "a settled outcome must not be re-litigated by an
+  // unrelated later read".
   async function refresh(): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
@@ -96,27 +83,16 @@
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
       };
       loadError = null;
-      // 🔴 The answer this read is ENTITLED to give about the shortcut — used
-      // only by the settle below. It was written TWICE until fix round 2:
-      // once here, once behind the early return above, reachable only when
-      // `takeHotkey` was false while `takeAutostart` was true — a shape that
-      // needed a SUCCESSFUL `setHotkey` as the superseder, since any
-      // `refresh()` call claims both stamps and would leave through the early
-      // return instead. A successful `setHotkey` also sets `hotkeyError =
-      // null`, and the sentence this value chose was drawn only under
-      // `hotkeyError !== null` — so the second copy could never be observed:
-      // mutated to `p.hotkey`, it survived all 665 tests, and no fixture
-      // could have killed it. One name, one site, one thing to get wrong —
-      // the project's "two truths, one message" in the small. Fix round 1
-      // moved the early return ahead of this line entirely, so there is now
-      // only the one site there was ever reason to keep.
+      // The hotkey THIS read wrote to the screen, or `null` if it did not
+      // take that field — read only by the settle below.
       const appliedHotkey = takeHotkey ? p.hotkey : null;
       // Settle a `pending` shortcut outcome from WHICHEVER read reaches the
-      // screen with a hotkey — see the comment above `refresh` for why this
-      // cannot live only in the read a shortcut rejection's own catch
-      // started. A read that did not take the hotkey field has nothing to
-      // judge (`appliedHotkey === null`), and once the outcome has already
-      // settled this is a no-op for every later read that also carries one.
+      // screen with a hotkey — see the comment above `ShortcutOutcome` for
+      // why this cannot live only in the read a shortcut rejection's own
+      // catch started. A read that did not take the hotkey field has
+      // nothing to judge (`appliedHotkey === null`), and once the outcome
+      // has already settled this is a no-op for every later read that also
+      // carries one.
       if (appliedHotkey !== null && shortcutOutcome === 'pending') {
         // «In effect» is a claim about the operating system, so only a
         // `registered` status may make it — a combination that came back the
@@ -213,9 +189,9 @@
   // then settles it. A read that is itself refused never settles it, and the
   // neutral sentence stays — worded so that it is still true when it stays.
   //
-  // 🔴 (review, fix round 1, Important 1) Settled inside `refresh()` itself,
-  // not by the read a shortcut rejection's own catch started: `refresh()`
-  // claims BOTH stamps (D-I1 above), so an autostart rejection's own
+  // 🔴 Settled inside `refresh()` itself, not by the read a shortcut
+  // rejection's own catch started: `refresh()` claims BOTH stamps (D-I1
+  // above), so an autostart rejection's own
   // corrective read can supersede that read, land first, and be the one that
   // actually writes the fresh hotkey to the screen. `pending` has to be
   // settled by WHICHEVER read reaches the screen with a hotkey, or it is left
@@ -349,15 +325,10 @@
       // And that read is what tells row 6 from the rows that changed nothing:
       // if it comes back naming the combination THIS call sent, the operating
       // system kept it and only the file did not. Deciding which does NOT
-      // happen here — `refresh` settles it at its own write site (fix round 1,
-      // Important 1), because the read that reaches the screen with a hotkey
-      // need not be the read THIS catch starts: an autostart rejection in
-      // flight at the same time claims the same hotkey stamp (D-I1) and can
-      // supersede this one and get there first. Two rejections in flight at
-      // once can also leave an EARLIER `pending` waiting on a read that gets
-      // superseded before it answers — `refresh`'s own comment names the
-      // fixture that guards a discarded read from choosing a sentence either
-      // way. `refusedShortcut` is the combination THIS call sent, so whichever
+      // happen here — `refresh` settles it at its own write site, because the
+      // read that reaches the screen with a hotkey need not be the read THIS
+      // catch starts (see the comment above `ShortcutOutcome`).
+      // `refusedShortcut` is the combination THIS call sent, so whichever
       // read settles it compares against the right one.
       shortcutOutcome = 'pending';
       refusedShortcut = shortcut;

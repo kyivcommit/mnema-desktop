@@ -549,29 +549,26 @@ case_ "a shortcut the system kept but could not save is not called unchanged" \
 # it survived all 665 tests. Collapsing the pair is what makes this mutant
 # killable at all.
 #
-# 🔴 Retargeted, fix round 1 (wayland-shortcut, D165). Settling moved INTO
-# `refresh()`, gated on a SECOND, independent condition —
-# `shortcutOutcome === 'pending'` — added to stop a discarded read from
-# rewriting an outcome a DIFFERENT rejection already settled (Important 1).
-# That second gate turns out to subsume the stamp check above for every
-# reachable case: a discarded read only reaches the settling block at all when
-# `takeAutostart` is true, and the only way to get there with `takeHotkey`
-# false is a successful write elsewhere — which also nulls `hotkeyError` and
-# hides the heading the mutant would otherwise be visible on — or a SECOND
-# rejection's own `refresh()`, which invalidates BOTH stamps together, so the
-# EARLY RETURN (unmutated `takeHotkey`/`takeAutostart`, never `appliedHotkey`)
-# is what stops it either way. Verified by construction against a scratch
-# mutation of the line below: no reachable fixture observes it any more. The
+# 🔴 Retargeted. Settling moved INTO `refresh()`, gated on a SECOND,
+# independent condition — `shortcutOutcome === 'pending'` — added to stop a
+# discarded read from rewriting an outcome a DIFFERENT rejection already
+# settled. That second gate subsumes the stamp check above for every
+# reachable case: a discarded read only reaches the settling block at all
+# when `takeAutostart` is true, and the only way to get there with
+# `takeHotkey` false is a successful write elsewhere — which also nulls
+# `hotkeyError` and hides the heading the mutant would otherwise be visible
+# on — or a SECOND rejection's own `refresh()`, which invalidates BOTH
+# stamps together, so the early return (unmutated `takeHotkey`/
+# `takeAutostart`, never `appliedHotkey`) is what stops it either way. The
 # judging test above stays — still true, still worth having — but it no
 # longer discriminates THIS mutant, so this case now targets the guard that
 # does: a settled outcome must not be reopened by a later, unrelated read
-# whose answer happens to satisfy the (stale) comparison. `refusedShortcut` is
-# not cleared on settle, so the comparison is still sitting there — but this
-# window's own `set_hotkey` cannot produce that transition today (every later
-# read returns the SAME hotkey state until the next recording, which resets
-# the outcome first). This is defence in depth for the day something else can
-# change the hotkey state without this window's own refusal deciding it —
-# another Settings window, or the tray — not a reachable bug in the
+# whose answer happens to satisfy the (stale) comparison. `refusedShortcut`
+# is not cleared on settle, so the comparison is still sitting there — but
+# this window's own `set_hotkey` cannot produce that transition today (every
+# later read returns the SAME hotkey state until the next recording, which
+# resets the outcome first). This is defence in depth for a hotkey-state
+# change this window's own refusal did not cause, not a reachable bug in the
 # single-window app today. The judging test constructs that transition by
 # hand, deliberately.
 case_ "a settled outcome must not be re-litigated by an unrelated later read" \

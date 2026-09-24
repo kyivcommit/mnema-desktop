@@ -1076,15 +1076,10 @@ test('a shortcut refused outright is still reported as unchanged', async () => {
 // resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
 // Then the FIRST rejection's re-read — superseded on BOTH stamps by the second
 // rejection's own `refresh()` call — answers naming the shortcut ITS OWN call
-// sent. What stops it now is the early return inside `refresh()`: neither
-// stamp survived, so it returns before touching `prefs` or `shortcutOutcome`
-// at all — there is nothing left for it to write, let alone compare. (Before
-// fix round 1 the comparison ran in a callback attached to this exact read,
-// against the shortcut THAT call sent; today the only comparison that ever
-// runs is against `refusedShortcut`, which by this point already holds the
-// SECOND rejection's own combination, not the first's — but the discarded
-// read never reaches it either way.) The assertion is positive: the sentence
-// on screen is still the one the LIVE rejection earned.
+// sent. It never reaches `prefs` or `shortcutOutcome`: the early return
+// inside `refresh()` fires first, because neither stamp survived. The
+// assertion is positive: the sentence on screen is still the one the LIVE
+// rejection earned.
 test('a corrective read the stamp discarded does not get to choose the sentence', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -2443,15 +2438,14 @@ test('a corrective read that is itself refused leaves the neutral heading standi
   expect(visiblePageText()).not.toContain('Скорочення діє');
 });
 
-// 🔴 (review, fix round 1, Important 1) `refresh()` claims BOTH stamps
-// (D-I1), so the read that reaches the screen with the answer a `pending`
-// shortcut is waiting on need not be the read the shortcut's OWN rejection
-// started. An autostart rejection in flight at the same time starts its own
-// `refresh()`, claims the same hotkey stamp, and can be the one that gets
-// there first — settling the outcome has to happen wherever a read actually
-// writes the hotkey, not only inside the read one particular rejection
-// happened to start, or `pending` is left standing beside a shortcut a read
-// already answered for.
+// 🔴 `refresh()` claims BOTH stamps (D-I1), so the read that reaches the
+// screen with the answer a `pending` shortcut is waiting on need not be the
+// read the shortcut's OWN rejection started. An autostart rejection in
+// flight at the same time starts its own `refresh()`, claims the same
+// hotkey stamp, and can be the one that gets there first — settling the
+// outcome has to happen wherever a read actually writes the hotkey, not
+// only inside the read one particular rejection happened to start, or
+// `pending` is left standing beside a shortcut a read already answered for.
 test('a read started by another refusal still settles the shortcut heading', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -2493,28 +2487,26 @@ test('a read started by another refusal still settles the shortcut heading', asy
     .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
 });
 
-// 🔴 (review, fix round 1 — mutation retarget) `refresh()`'s OWN stamp check
-// (`appliedHotkey = takeHotkey ? p.hotkey : null`) protected this outcome
-// alone before this round; now the settling block ALSO requires
-// `shortcutOutcome === 'pending'`, and that second guard turns out to make
-// the stamp check unobservable — a discarded read only ever reaches the
-// settling block when `takeAutostart` is true too, which needs a SUCCESSFUL
-// write that also clears `hotkeyError` (hiding the heading) or a second
-// rejection's own `refresh()` (which invalidates BOTH stamps together, so
-// the early return — not the settling block — is what stops it, unmutated).
-// Verified by construction: neither shape observes the stamp mutant (probed
-// directly against a scratch mutation of `appliedHotkey`, three ways, before
-// writing this). What the pending guard alone still protects, independent of
-// the stamp: an outcome that has ALREADY settled must not be reopened by a
-// later, unrelated read that happens to answer with data that would satisfy
-// the criterion. `refusedShortcut` is not cleared on settle, so the
-// comparison is still sitting there waiting — this window's own `set_hotkey`
-// cannot produce that transition today (every later read returns the SAME
-// hotkey state until the next recording, which resets the outcome first), so
-// this is defence in depth for the day something else can change the hotkey
-// state without going through this window's own refusal — another Settings
-// window, or the tray — not a reachable bug in the single-window app today.
-// The fixture below constructs that transition deliberately, by hand.
+// 🔴 `refresh()`'s stamp check (`appliedHotkey = takeHotkey ? p.hotkey :
+// null`) cannot alone protect this outcome: the settling block also
+// requires `shortcutOutcome === 'pending'`, and that guard makes the stamp
+// check unobservable on every reachable path — a discarded read only
+// reaches the settling block when `takeAutostart` is true too, which needs
+// either a successful write that also clears `hotkeyError` (hiding the
+// heading) or a second rejection's own `refresh()` (which invalidates BOTH
+// stamps together, so the early return — not the settling block — is what
+// stops it, unmutated).
+//
+// The pending guard alone still protects something real: an outcome that
+// has ALREADY settled must not be reopened by a later, unrelated read that
+// happens to answer with data satisfying the criterion. `refusedShortcut` is
+// not cleared on settle, so the comparison is still sitting there — but this
+// window's own `set_hotkey` cannot produce that transition today (every
+// later read returns the SAME hotkey state until the next recording resets
+// the outcome first). This is defence in depth for a hotkey-state change
+// this window's own refusal did not cause, not a reachable bug in the
+// single-window app today. The fixture below constructs that transition by
+// hand.
 test('a settled outcome must not be re-litigated by an unrelated later read', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
