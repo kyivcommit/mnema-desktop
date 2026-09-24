@@ -2052,7 +2052,7 @@ test('the reasons a partial language application names are on screen, not only i
 // count would let one site be swapped for another, and a spot check let
 // fourteen of twenty go unguarded on Task 1.
 //
-// Three tables, because three of the twenty cannot be on screen beside the
+// Three tables, because three of the twenty-one cannot be on screen beside the
 // rest: `not-usable` is cleared by the very press that produces a refused
 // `set_hotkey`, and a `partial` outcome is what a `set_locale` that RESOLVED
 // produces, so it never stands beside the rejection sentences.
@@ -2093,7 +2093,7 @@ const namesItsRegion = (table: ReadonlyArray<readonly [string, string]>) => {
   }
 };
 
-// Seventeen of the twenty on screen at once, so one fixture can ask about all
+// Eighteen of the twenty-one on screen at once, so one fixture can ask about all
 // of them: a load failure does not stop the groups rendering once a read has
 // already succeeded.
 const everythingRefused = async () => {
