@@ -548,8 +548,28 @@ case_ "a shortcut the system kept but could not save is not called unchanged" \
 # `setHotkey`, which nulls the very error the sentence is drawn under. Mutated,
 # it survived all 665 tests. Collapsing the pair is what makes this mutant
 # killable at all.
-case_ "a discarded corrective read must not choose the sentence" \
+#
+# 🔴 Retargeted, fix round 1 (wayland-shortcut, D165). Settling moved INTO
+# `refresh()`, gated on a SECOND, independent condition —
+# `shortcutOutcome === 'pending'` — added to stop a discarded read from
+# rewriting an outcome a DIFFERENT rejection already settled (Important 1).
+# That second gate turns out to subsume the stamp check above for every
+# reachable case: a discarded read only reaches the settling block at all when
+# `takeAutostart` is true, and the only way to get there with `takeHotkey`
+# false is a successful write elsewhere — which also nulls `hotkeyError` and
+# hides the heading the mutant would otherwise be visible on — or a SECOND
+# rejection's own `refresh()`, which invalidates BOTH stamps together, so the
+# EARLY RETURN (unmutated `takeHotkey`/`takeAutostart`, never `appliedHotkey`)
+# is what stops it either way. Verified by construction against a scratch
+# mutation of the line below: no reachable fixture observes it any more. The
+# judging test above stays — still true, still worth having — but it no
+# longer discriminates THIS mutant, so this case now targets the guard that
+# does: a settled outcome must not be reopened by a later, unrelated read
+# whose answer happens to satisfy the (stale) comparison — `refusedShortcut`
+# is not cleared on settle, so that comparison is one unrelated rejection away
+# for as long as `hotkeyError` keeps the heading on screen.
+case_ "a settled outcome must not be re-litigated by an unrelated later read" \
   ui/src/settings/Application.svelte \
-  's~      const appliedHotkey = takeHotkey \? p\.hotkey : null;~      const appliedHotkey = p.hotkey; // mutant: a superseded read answers anyway~' \
-  '// mutant: a superseded read answers anyway' \
-  src/settings/Application.test.ts 'a corrective read the stamp discarded does not get to choose the sentence' runner=vitest
+  's~      if \(appliedHotkey !== null && shortcutOutcome === .pending.\) \{~      if (appliedHotkey !== null) { // mutant: re-litigates a settled outcome~' \
+  '// mutant: re-litigates a settled outcome' \
+  src/settings/Application.test.ts 'a settled outcome must not be re-litigated by an unrelated later read' runner=vitest

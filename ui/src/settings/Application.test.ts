@@ -2484,3 +2484,54 @@ test('a read started by another refusal still settles the shortcut heading', asy
   expect(at('application-shortcut-failed'))
     .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
 });
+
+// 🔴 (review, fix round 1 — mutation retarget) `refresh()`'s OWN stamp check
+// (`appliedHotkey = takeHotkey ? p.hotkey : null`) protected this outcome
+// alone before this round; now the settling block ALSO requires
+// `shortcutOutcome === 'pending'`, and that second guard turns out to make
+// the stamp check unobservable — a discarded read only ever reaches the
+// settling block when `takeAutostart` is true too, which needs a SUCCESSFUL
+// write that also clears `hotkeyError` (hiding the heading) or a second
+// rejection's own `refresh()` (which invalidates BOTH stamps together, so
+// the early return — not the settling block — is what stops it, unmutated).
+// Verified by construction: neither shape observes the stamp mutant (probed
+// directly against a scratch mutation of `appliedHotkey`, three ways, before
+// writing this). What the pending guard alone still protects, independent of
+// the stamp: an outcome that has ALREADY settled must not be reopened by a
+// later, unrelated read that happens to answer with data that would satisfy
+// the criterion — refusedShortcut is not cleared on settle, so a stale
+// comparison is one unrelated rejection away.
+test('a settled outcome must not be re-litigated by an unrelated later read', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  const SENT = 'Ctrl+Alt+Space';
+  setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await record();
+
+  // Rejected outright — settles to `unchanged` from its own corrective read.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+
+  // Now something UNRELATED: autostart is refused too, and its own
+  // corrective read happens to report the STALE refused combination back,
+  // registered — it must not re-litigate the already-settled heading.
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(queue).toHaveLength(3));
+  queue[2].resolve(prefs({ hotkey: { shortcut: SENT, status: { kind: 'registered' } } }));
+  await tick();
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+});
