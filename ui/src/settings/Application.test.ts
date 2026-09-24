@@ -2367,3 +2367,73 @@ test('a combination the system still refuses is not called in effect, even when 
   expect(at('application-shortcut-failed')).not.toContain('Скорочення діє');
   expect(at('application-shortcut-failed')).toContain('Скорочення не змінено');
 });
+
+// ---------------------------------------------------------------------------
+// §2.2 «Затримка» (D165): between the refusal and the corrective read's
+// answer, the heading must not claim either settled sentence.
+// ---------------------------------------------------------------------------
+
+test('until the corrective read answers, the heading claims neither «unchanged» nor «in effect»', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+
+  const PENDING = 'Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:';
+  expect(at('application-shortcut-failed')).toBe(PENDING);
+  expect(announced(assertiveRegion())).toEqual([PENDING, SENTENCE]);
+
+  read.resolve(prefs());
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(announced(assertiveRegion())).toEqual(['Скорочення не змінено. Ось що відповів застосунок:', SENTENCE]);
+});
+
+test('the settled heading arrives as a new announcement, and the refusal sentence is not read again', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const [headingBefore, sentenceNode] = Array.from(assertiveRegion().children);
+
+  read.resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  await waitFor(() => expect(announced(assertiveRegion())[0]).toContain('Скорочення діє'));
+
+  const [headingAfter, sentenceAfter] = Array.from(assertiveRegion().children);
+  // A NEW node for the settled heading: text rewritten inside the old node is
+  // what an engine may not announce at all (`aria-relevant` defaults differ
+  // between engines), a node added is what every engine announces.
+  expect(headingAfter).not.toBe(headingBefore);
+  // And the SAME node for the sentence: kept, not re-inserted, so it is not
+  // read out a second time.
+  expect(sentenceAfter).toBe(sentenceNode);
+});
+
+test('a corrective read that is itself refused leaves the neutral heading standing, because it is still true', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const UNREADABLE = 'prefs.json could not be read';
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockRejectedValueOnce(new Error(UNREADABLE));
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-load-error')).toBe(UNREADABLE));
+  expect(at('application-shortcut-failed'))
+    .toBe('Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:');
+  expect(visiblePageText()).not.toContain('Скорочення не змінено');
+  expect(visiblePageText()).not.toContain('Скорочення діє');
+});

@@ -524,7 +524,7 @@ case_ "an unreadable autostart offers both directions, not the one Enable" \
 # survives this mutant, which is every one that existed before the finding.
 case_ "a shortcut the system kept but could not save is not called unchanged" \
   ui/src/settings/Application.svelte \
-  's~    return t\(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
+  's~    return t\(SHORTCUT_HEADING\[shortcutOutcome\]\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
   'return t("application_shortcut_failed"); // mutant: always the old heading' \
   src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest
 

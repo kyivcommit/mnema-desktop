@@ -49,7 +49,7 @@
   // Answers with the `hotkey` this read actually WROTE to the screen, or `null`
   // when it wrote none — superseded by a later writer, or rejected outright.
   // Only the caller that started a corrective read after a refused `set_hotkey`
-  // reads the answer; see `shortcutNotSaved` for what it decides. A read whose
+  // reads the answer; see `shortcutOutcome` for what it decides. A read whose
   // hotkey the stamp discarded never reached the screen, so it must not get to
   // choose the sentence drawn beside what did.
   //
@@ -181,10 +181,22 @@
   // sentence is a free-text `Display` this window does not own, and every
   // wording of it is one refactor away from moving; the state the operating
   // system reports is the fact.
-  let shortcutNotSaved = $state(false);
+  //
+  // 🔴 Three outcomes, not two (D165, spec §2.2 «Затримка»). Between a refusal
+  // and the corrective read's answer the section does not know which row of
+  // the transition table it is in, so the heading says exactly that; the read
+  // then settles it. A read that is itself refused never settles it, and the
+  // neutral sentence stays — worded so that it is still true when it stays.
+  type ShortcutOutcome = 'pending' | 'unchanged' | 'not_saved';
+  const SHORTCUT_HEADING: Record<ShortcutOutcome, Key> = {
+    pending: 'application_shortcut_pending',
+    unchanged: 'application_shortcut_failed',
+    not_saved: 'application_shortcut_not_saved',
+  };
+  let shortcutOutcome = $state<ShortcutOutcome>('unchanged');
   const shortcutFailedLabel = $derived.by(() => {
     void $locale;
-    return t(shortcutNotSaved ? 'application_shortcut_not_saved' : 'application_shortcut_failed');
+    return t(SHORTCUT_HEADING[shortcutOutcome]);
   });
 
   let recording = $state(false);
@@ -223,7 +235,7 @@
     recording = true;
     notUsable = false;
     hotkeyError = null;
-    shortcutNotSaved = false;
+    shortcutOutcome = 'unchanged';
     recordButton?.focus();
   }
 
@@ -270,7 +282,7 @@
     notUsable = false;
     recording = false;
     hotkeyError = null;
-    shortcutNotSaved = false;
+    shortcutOutcome = 'unchanged';
     hotkeyBusy = true;
     try {
       const reply = await setHotkey(shortcut);
@@ -300,16 +312,23 @@
       // system kept it and only the file did not. `applied === null` means the
       // read never reached the screen, and a read that wrote nothing decides
       // nothing — the heading stays whatever the writer that DID reach the
-      // screen earned. That is not hypothetical: two rejections in flight at
-      // once leave this callback holding the first one's shortcut long after
-      // the second one's read has drawn its own sentence, and without the
-      // `null` the stale one would rewrite it. `refresh`'s own comment names
-      // the fixture.
+      // screen earned, `pending` included when no writer has answered yet.
+      // That is not hypothetical: two rejections in flight at once leave this
+      // callback holding the first one's shortcut long after the second one's
+      // read has drawn its own sentence, and without the `null` the stale one
+      // would rewrite it. `refresh`'s own comment names the fixture.
+      shortcutOutcome = 'pending';
       void refresh().then((applied) => {
+        // `null` settles nothing: either a later writer owns the screen (and
+        // its own read decides), or the read was refused and the neutral
+        // heading is still the truth.
+        if (applied === null) return;
         // «In effect» is a claim about the operating system, so only a
         // `registered` status may make it — a combination that came back the
         // same but `unavailable` is the Wayland repeat (D165), not row 6.
-        shortcutNotSaved = applied !== null && applied.status.kind === 'registered' && applied.shortcut === shortcut;
+        shortcutOutcome = applied.status.kind === 'registered' && applied.shortcut === shortcut
+          ? 'not_saved'
+          : 'unchanged';
       });
     } finally {
       // Released whichever way the call went: a refusal that left the control
@@ -662,7 +681,7 @@
       out.push({ key: `shortcut-not-usable#${notUsableStamp}`, text: notUsableText });
     }
     if (hotkeyError !== null) {
-      out.push({ key: 'shortcut-failed', text: shortcutFailedLabel });
+      out.push({ key: `shortcut-failed#${shortcutOutcome}`, text: shortcutFailedLabel });
       out.push({ key: 'shortcut-error', text: hotkeyError });
     }
     if (themeError !== null) {

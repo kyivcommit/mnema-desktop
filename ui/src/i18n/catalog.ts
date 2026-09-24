@@ -117,7 +117,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
   | 'application_shortcut_tray' | 'application_shortcut_record'
   | 'application_shortcut_recording' | 'application_shortcut_not_usable'
-  | 'application_shortcut_failed' | 'application_shortcut_not_saved'
+  | 'application_shortcut_failed' | 'application_shortcut_not_saved' | 'application_shortcut_pending'
   | 'application_autostart_label' | 'application_autostart_enabled'
   | 'application_autostart_disabled' | 'application_autostart_unknown'
   | 'application_autostart_reason' | 'application_autostart_enable'
@@ -1025,6 +1025,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // «не змінено» поруч із ним є неправдою в обидва боки. Обирається за
     // ПЕРЕЧИТАНИМ станом, ніколи за розбором речення відмови.
     application_shortcut_not_saved: 'Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:',
+    // §2.2 «Затримка» (D165): between the refusal and the corrective read's
+    // answer, the section does not yet know which of the two sentences above
+    // is true — so this one claims neither, and stays true if the read is
+    // itself refused and never settles it.
+    application_shortcut_pending: 'Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:',
     application_autostart_label: 'Запуск під час входу в систему:',
     application_autostart_enabled: 'Mnema запускається під час входу в систему.',
     application_autostart_disabled: 'Mnema не запускається під час входу в систему.',
@@ -1344,6 +1349,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_shortcut_not_usable: 'That key cannot be used in a shortcut. A shortcut is a letter, a digit, a function key, an arrow or the space bar, held together with at least one of Ctrl, Alt, Shift or {mod}.',
     application_shortcut_failed: 'The shortcut was not changed. This is what the application answered:',
     application_shortcut_not_saved: 'The shortcut is in effect, but it could not be saved: the previous one returns after a restart. This is what the application answered:',
+    application_shortcut_pending: 'The application refused the change; whether the shortcut changed is not known yet. This is what the application answered:',
     application_autostart_label: 'Starting when you sign in:',
     application_autostart_enabled: 'Mnema starts when you sign in.',
     application_autostart_disabled: 'Mnema does not start when you sign in.',
