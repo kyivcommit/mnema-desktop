@@ -118,6 +118,15 @@
   // same reason.
   const unavailable = $derived(hotkey !== null && hotkey.status.kind === 'unavailable' ? hotkey.status : null);
 
+  // ONE predicate for both the shortcut and autostart groups below (spec
+  // §2.1, D165): they share this condition, so a second copy of it would be
+  // free to drift from this one. Verbatim `===` on purpose — `includes` or a
+  // normalised comparison would drop a quote whose text is not actually the
+  // standing reason.
+  function repeatsReason(reason: string | null, error: string | null): boolean {
+    return reason !== null && error !== null && reason === error;
+  }
+
   const shortcutStatusText = $derived.by(() => {
     void $locale;
     if (hotkey === null) return null;
@@ -190,6 +199,7 @@
   let refusedShortcut: string | null = null;
   const shortcutFailedLabel = $derived.by(() => {
     void $locale;
+    if (shortcutQuoteRepeats) return t('application_shortcut_failed_same_reason');
     return t(SHORTCUT_HEADING[shortcutOutcome]);
   });
 
@@ -201,6 +211,15 @@
   // catalogue lead-in above — never branched on, exactly as every other
   // rejection in this product.
   let hotkeyError = $state<string | null>(null);
+
+  // Gated on `shortcutOutcome === 'unchanged'`: while a change is `pending`,
+  // `unavailable` still holds the PRE-change reason, so a match there is not
+  // yet the settled fact this predicate is about. `not_saved` carries no
+  // reason to repeat either — its hotkey status is `registered`, which makes
+  // `unavailable` null.
+  const shortcutQuoteRepeats = $derived(
+    shortcutOutcome === 'unchanged' && repeatsReason(unavailable?.reason ?? null, hotkeyError),
+  );
 
   // 🔴 (review, Important 1) `onkeydown` below only ever reaches a FOCUSED
   // element, and a click does not focus a `<button>` on every platform — macOS
@@ -354,9 +373,13 @@
     if (autostart === null) return null;
     return autostartIsEnabled ? t('application_autostart_disable') : t('application_autostart_enable');
   });
-  const autostartFailedLabel = $derived.by(() => { void $locale; return t('application_autostart_failed'); });
+  const autostartFailedLabel = $derived.by(() => {
+    void $locale;
+    return t(autostartQuoteRepeats ? 'application_autostart_failed_same_reason' : 'application_autostart_failed');
+  });
 
   let autostartError = $state<string | null>(null);
+  const autostartQuoteRepeats = $derived(repeatsReason(autostartUnknown?.reason ?? null, autostartError));
   // (review, Minor 3) No in-flight guard meant a double press sent two
   // `set_autostart` calls — both carrying the same value, since the second
   // read the same unchanged on-screen state, so no WRONG state resulted, but
@@ -564,9 +587,19 @@
 
   // The ids an error paragraph carries, joined for `aria-describedby` on the
   // control it is about. `undefined` and not `''` where nothing applies —
-  // Svelte omits the attribute entirely rather than writing it empty.
-  const shortcutDescribedBy = $derived(hotkeyError === null ? undefined : 'application-shortcut-failed application-shortcut-error');
-  const autostartDescribedBy = $derived(autostartError === null ? undefined : 'application-autostart-failed application-autostart-error');
+  // Svelte omits the attribute entirely rather than writing it empty. When
+  // the quote is dropped for repeating the standing reason, the description
+  // points at the reason paragraph instead of the (unrendered) error one.
+  const shortcutDescribedBy = $derived(
+    hotkeyError === null ? undefined
+      : shortcutQuoteRepeats ? 'application-shortcut-failed application-shortcut-reason'
+      : 'application-shortcut-failed application-shortcut-error',
+  );
+  const autostartDescribedBy = $derived(
+    autostartError === null ? undefined
+      : autostartQuoteRepeats ? 'application-autostart-failed application-autostart-reason'
+      : 'application-autostart-failed application-autostart-error',
+  );
   const themeDescribedBy = $derived(themeError === null ? undefined : 'application-theme-failed application-theme-error');
   // Language has two independent rejections (a failed READ, a failed CHANGE)
   // plus two non-error outcomes worth describing (`partial`, `unknown`) —
@@ -727,12 +760,14 @@
     </p>
     <p data-testid="application-shortcut-status" data-announced-by={unavailable ? POLITE_ID : undefined}>{shortcutStatusText}</p>
     {#if unavailable}
-      <p data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
+      <p id="application-shortcut-reason" data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
       <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
     {/if}
     {#if hotkeyError !== null}
       <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={ASSERTIVE_ID}>{shortcutFailedLabel}</p>
-      <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={ASSERTIVE_ID}>{hotkeyError}</p>
+      {#if !shortcutQuoteRepeats}
+        <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={ASSERTIVE_ID}>{hotkeyError}</p>
+      {/if}
     {/if}
     <button
       type="button"
@@ -898,11 +933,13 @@
     <p data-testid="application-autostart-label">{autostartLabelText}</p>
     <p data-testid="application-autostart-status" data-announced-by={autostartUnknown ? POLITE_ID : undefined}>{autostartStatusText}</p>
     {#if autostartUnknown}
-      <p data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
+      <p id="application-autostart-reason" data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
     {/if}
     {#if autostartError !== null}
       <p id="application-autostart-failed" data-testid="application-autostart-failed" data-announced-by={ASSERTIVE_ID}>{autostartFailedLabel}</p>
-      <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={ASSERTIVE_ID}>{autostartError}</p>
+      {#if !autostartQuoteRepeats}
+        <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={ASSERTIVE_ID}>{autostartError}</p>
+      {/if}
     {/if}
     {#if autostartOffersBothDirections}
       <!-- Both disabled by the one flag: a press on either asks the

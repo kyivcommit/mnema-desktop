@@ -51,13 +51,13 @@ case_ "settings/main.ts: bootTheme() must be called" \
 
 case_ "Application: the shortcut failure block must precede its control" \
   ui/src/settings/Application.svelte \
-  's~(    \{#if hotkeyError !== null\}\n      <p id="application-shortcut-failed"[^\n]*\n      <p id="application-shortcut-error"[^\n]*\n    \{/if\}\n)(    <button\n      type="button"\n      data-testid="application-shortcut-record"\n(?:[^\n]*\n)*?    >\{recordLabel\}</button>\n)~$2$1    <!-- mutant: shortcut failure after control -->\n~' \
+  's~(    \{#if hotkeyError !== null\}\n      <p id="application-shortcut-failed"[^\n]*\n      \{#if !shortcutQuoteRepeats\}\n        <p id="application-shortcut-error"[^\n]*\n      \{/if\}\n    \{/if\}\n)(    <button\n      type="button"\n      data-testid="application-shortcut-record"\n(?:[^\n]*\n)*?    >\{recordLabel\}</button>\n)~$2$1    <!-- mutant: shortcut failure after control -->\n~' \
   '<!-- mutant: shortcut failure after control -->' \
   src/settings/Application.test.ts 'the shortcut block reads label, status, failure, error, control — in that order' runner=vitest
 
 case_ "Application: the shortcut failed line must precede the error line" \
   ui/src/settings/Application.svelte \
-  's~(      <p id="application-shortcut-failed"[^\n]*\n)(      <p id="application-shortcut-error"[^\n]*\n)~$2$1      <!-- mutant: shortcut error before failed -->\n~' \
+  's~(      <p id="application-shortcut-failed"[^\n]*\n)(      \{#if !shortcutQuoteRepeats\}\n)(        <p id="application-shortcut-error"[^\n]*\n)(      \{/if\}\n)~$2$3$4$1      <!-- mutant: shortcut error before failed -->\n~' \
   '<!-- mutant: shortcut error before failed -->' \
   src/settings/Application.test.ts 'the shortcut block reads label, status, failure, error, control — in that order' runner=vitest
 
@@ -75,19 +75,19 @@ case_ "Application: the theme failed line must precede the error line" \
 
 case_ "Application: the autostart failure block must precede the toggle" \
   ui/src/settings/Application.svelte \
-  's~(    \{#if autostartError !== null\}\n      <p id="application-autostart-failed"[^\n]*\n      <p id="application-autostart-error"[^\n]*\n    \{/if\}\n)(    \{#if autostartOffersBothDirections\}\n(?:[^\n]*\n)*?    \{/if\}\n)~$2$1    <!-- mutant: autostart failure after control -->\n~' \
+  's~(    \{#if autostartError !== null\}\n      <p id="application-autostart-failed"[^\n]*\n      \{#if !autostartQuoteRepeats\}\n        <p id="application-autostart-error"[^\n]*\n      \{/if\}\n    \{/if\}\n)(    \{#if autostartOffersBothDirections\}\n(?:[^\n]*\n)*?    \{/if\}\n)~$2$1    <!-- mutant: autostart failure after control -->\n~' \
   '<!-- mutant: autostart failure after control -->' \
   src/settings/Application.test.ts 'the startup block reads label, status, failure, error, control — in that order, with one toggle' runner=vitest
 
 case_ "Application: the autostart failure block must precede enable and disable" \
   ui/src/settings/Application.svelte \
-  's~(    \{#if autostartError !== null\}\n      <p id="application-autostart-failed"[^\n]*\n      <p id="application-autostart-error"[^\n]*\n    \{/if\}\n)(    \{#if autostartOffersBothDirections\}\n(?:[^\n]*\n)*?    \{/if\}\n)~$2$1    <!-- mutant: autostart failure after control -->\n~' \
+  's~(    \{#if autostartError !== null\}\n      <p id="application-autostart-failed"[^\n]*\n      \{#if !autostartQuoteRepeats\}\n        <p id="application-autostart-error"[^\n]*\n      \{/if\}\n    \{/if\}\n)(    \{#if autostartOffersBothDirections\}\n(?:[^\n]*\n)*?    \{/if\}\n)~$2$1    <!-- mutant: autostart failure after control -->\n~' \
   '<!-- mutant: autostart failure after control -->' \
   src/settings/Application.test.ts 'the startup block reads label, status, reason, failure, error, control — in that order, with enable and disable' runner=vitest
 
 case_ "Application: the autostart failed line must precede the error line" \
   ui/src/settings/Application.svelte \
-  's~(      <p id="application-autostart-failed"[^\n]*\n)(      <p id="application-autostart-error"[^\n]*\n)~$2$1      <!-- mutant: autostart error before failed -->\n~' \
+  's~(      <p id="application-autostart-failed"[^\n]*\n)(      \{#if !autostartQuoteRepeats\}\n)(        <p id="application-autostart-error"[^\n]*\n)(      \{/if\}\n)~$2$3$4$1      <!-- mutant: autostart error before failed -->\n~' \
   '<!-- mutant: autostart error before failed -->' \
   src/settings/Application.test.ts 'the startup block reads label, status, failure, error, control — in that order, with one toggle' runner=vitest
 

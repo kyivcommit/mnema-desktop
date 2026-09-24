@@ -2508,3 +2508,119 @@ test('a settled outcome must not be re-litigated by an unrelated later read', as
 
   expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
 });
+
+// ---------------------------------------------------------------------------
+// D165, spec §2.1: a refusal whose sentence equals the standing reason is not
+// quoted a second time. Shortcut and autostart share one predicate
+// (`repeatsReason`), so both are exercised here.
+// ---------------------------------------------------------------------------
+
+const SAME_SHORTCUT = 'Скорочення не змінено — з тієї самої причини.';
+
+test('a refusal whose sentence is the standing reason is not quoted a second time, and the heading says so', async () => {
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+  expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
+  // Once on screen, in the reason paragraph — counted in what a person SEES.
+  expect(visiblePageText().split(REASON).length - 1).toBe(1);
+  // And heard in full: the heading AND the sentence itself, not a pointer.
+  expect(announced(assertiveRegion())).toEqual([SAME_SHORTCUT, REASON]);
+});
+
+test('a refusal that differs from the standing reason by one full stop is quoted in full under the usual heading', async () => {
+  // A trailing full stop and not a swapped comma: `ALMOST` CONTAINS `REASON`,
+  // so an `includes` comparison calls them equal and dies here, and so does
+  // any normalisation that trims punctuation. A swapped comma would be missed
+  // by `includes` entirely. Not a trailing space: `visible()` trims it, and the
+  // assertion below could not tell the two strings apart.
+  const ALMOST = `${REASON}.`;
+  expect(REASON.endsWith('.')).toBe(false);
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(ALMOST));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(at('application-shortcut-error')).toBe(ALMOST);
+  expect(at('application-shortcut-reason')).toBe(`Програма повідомила: ${REASON}`);
+});
+
+test('a different refusal after a repeated one brings the quote back', async () => {
+  const OTHER = 'the operating system refused the combination';
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+
+  setHotkey.mockRejectedValue(new Error(OTHER));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', ctrlKey: true, shiftKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-error')).toBe(OTHER));
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+});
+
+test('when the quote is left out, the control is described by the heading and the reason, and both exist', async () => {
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+
+  const ids = describedByIds(screen.getByTestId('application-shortcut-record'));
+  expect(ids).toEqual(['application-shortcut-failed', 'application-shortcut-reason']);
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('autostart: a refusal whose sentence is the standing reason is not quoted twice either', async () => {
+  const WHY = 'the login item database could not be opened';
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'unknown', reason: WHY } }));
+  setAutostart.mockRejectedValue(new Error(WHY));
+  renderSection();
+  await fireEvent.click(await screen.findByTestId('application-autostart-enable'));
+
+  await waitFor(() => expect(at('application-autostart-failed')).toBe('Налаштування не змінено — з тієї самої причини.'));
+  expect(screen.queryByTestId('application-autostart-error')).toBeNull();
+  expect(visiblePageText().split(WHY).length - 1).toBe(1);
+  const ids = describedByIds(screen.getByTestId('application-autostart-enable'));
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+  expect(ids).toContain('application-autostart-reason');
+});
+
+test('autostart: a refusal different from the standing reason is quoted in full', async () => {
+  const WHY = 'the login item database could not be opened';
+  const OTHER = 'the login item could not be written';
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'unknown', reason: WHY } }));
+  setAutostart.mockRejectedValue(new Error(OTHER));
+  renderSection();
+  await fireEvent.click(await screen.findByTestId('application-autostart-enable'));
+
+  await waitFor(() => expect(at('application-autostart-error')).toBe(OTHER));
+  expect(at('application-autostart-failed')).toBe('Налаштування не змінено. Ось що відповів застосунок:');
+});
+
+test('while the corrective read is out, a quote that repeats the reason stays under the neutral heading', async () => {
+  const STANDING = prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } } });
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(STANDING);
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(REASON));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+
+  // The neutral heading ends in «Ось що відповів застосунок:», so the quote
+  // it promises is on screen.
+  expect(at('application-shortcut-failed')).toContain('поки не відомо');
+  expect(at('application-shortcut-error')).toBe(REASON);
+
+  read.resolve(STANDING);
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+  expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
+});
