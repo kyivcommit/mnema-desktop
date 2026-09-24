@@ -52,7 +52,17 @@
   // holding `takeAutostart` alone gets `appliedHotkey === null`. A settled
   // outcome is not judged again by a later read — `pr9-ui.sh`, "a settled
   // outcome must not be re-litigated by an unrelated later read".
-  async function refresh(): Promise<void> {
+  //
+  // D165 (1): who started a read decides how loud its refusal is. A read a
+  // person's press started is the answer to that press — assertive; the mount
+  // read and a standing failure after a remount are state — polite. Both are
+  // fields of THIS instance: a remount starts polite again on purpose.
+  let loadFailureAnswersPress = $state(false);
+  // Which refusal the load-failure nodes belong to, so a repeat is heard — the
+  // device `locale-choice.ts` uses for `readStamp`.
+  let loadStamp = $state(0);
+
+  async function refresh(origin: 'mount' | 'press'): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
     try {
@@ -88,11 +98,13 @@
       // read still had something to say — the same test both directions get.
       if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return;
       loadError = e instanceof Error ? e.message : String(e);
+      loadFailureAnswersPress = origin === 'press';
+      loadStamp += 1;
     }
   }
 
   onMount(() => {
-    void refresh();
+    void refresh('mount');
     // `localeChoiceState` is module-level (`../locale-choice`), not reset on
     // destroy: `Settings.svelte` destroys and recreates this component on
     // every section switch, and busy/warning/snapshot must survive that. This
@@ -329,7 +341,7 @@
       // one.
       shortcutOutcome = 'pending';
       refusedShortcut = shortcut;
-      void refresh();
+      void refresh('press');
     } finally {
       // Released whichever way the call went: a refusal that left the control
       // disabled would cost a person the only way to change the shortcut.
@@ -418,7 +430,7 @@
       if (prefs !== null) prefs = { ...prefs, autostart: reply };
     } catch (err) {
       autostartError = err instanceof Error ? err.message : String(err);
-      void refresh();
+      void refresh('press');
     } finally {
       autostartBusy = false;
     }
@@ -525,6 +537,9 @@
   // screen is drawn from them.
   const languageReadStamp = $derived($localeChoiceState.readStamp);
   const languageApplyStamp = $derived($localeChoiceState.applyStamp);
+  // D165 (1): set by the "Retry reading" button, never by `onMount` or by a
+  // remount, so only a read that button started answers assertively.
+  let languageReadAnswersPress = $state(false);
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -632,21 +647,22 @@
   // the node that arrived rather than the region again; `aria-atomic` stays
   // at its default `false`, which is what makes that true.
   //
-  // Which region a sentence goes to is decided by WHAT IT IS ABOUT, not by
-  // what happened to trigger it: a state a read reported is polite, a refusal
-  // of an operation this window issued is assertive.
+  // Which region a sentence goes to is decided by WHAT IT IS ABOUT, for most
+  // of this section: a state a read reported is polite, a refusal of an
+  // operation this window issued is assertive. D165 (1) is the one exception:
+  // a READ's own refusal is louder when a person's press started that read —
+  // `loadFailureAnswersPress` and `languageReadAnswersPress` carry which is
+  // true for the load failure and the language read failure respectively.
   //
-  // 🔴 That is NOT the spec's criterion, which says assertive means "a person
-  // just pressed, the answer is urgent" (§2.2). The two disagree in both
-  // directions, and both disagreements are left standing deliberately:
-  // a re-read refused after a press on "Retry reading" is drawn polite, and
-  // two paths reach assertive with nobody having pressed anything — a failed
-  // mount-time `get_locale`, and a REMOUNT, because `localeChoiceState` is
-  // module-level and `Settings.svelte` rebuilds this section on every switch,
-  // so a standing `partial`/`unknown`/`changeError` is inserted into the
-  // assertive region again. Whether that is right is the owner's call, booked
-  // rather than decided here; the live check's scenario 5 is where the
-  // remount case gets heard rather than reasoned about.
+  // 🔴 One disagreement with the spec's own criterion (§2.2: assertive means
+  // "a person just pressed, the answer is urgent") is left standing
+  // deliberately: a REMOUNT re-announces a standing `partial`/`unknown`/
+  // `changeError` in the assertive region again, with nobody having pressed
+  // anything for it, because `localeChoiceState` is module-level and
+  // `Settings.svelte` rebuilds this section on every section switch. Whether
+  // that is right is the owner's call, booked rather than decided here; the
+  // live check's scenario 5 is where the remount case gets heard rather than
+  // reasoned about.
   //
   // Visible paragraphs stay where they are and name their region through
   // `data-announced-by`; none of them is a descendant of either.
@@ -660,12 +676,21 @@
   // a refusal of one thing from re-reading the state of another.
   type Announcement = { key: string; text: string };
 
+  // D165 (1): the same pair of nodes, whichever region they end up in — kept
+  // in one function so the pair cannot drift into two different keys or texts
+  // in `politeAnnouncements` and `assertiveAnnouncements` below.
+  const loadFailureAnnouncements = $derived.by<Announcement[]>(() => loadError === null ? [] : [
+    { key: `load-failed#${loadStamp}`, text: loadFailedLabel },
+    { key: `load-error#${loadStamp}`, text: loadError },
+  ]);
+  const languageReadAnnouncements = $derived.by<Announcement[]>(() => languageReadError === null ? [] : [
+    { key: `language-failed#${languageReadStamp}`, text: languageFailedLabel },
+    { key: `language-error#${languageReadStamp}`, text: languageReadError },
+  ]);
+
   const politeAnnouncements = $derived.by<Announcement[]>(() => {
     const out: Announcement[] = [];
-    if (loadError !== null) {
-      out.push({ key: 'load-failed', text: loadFailedLabel });
-      out.push({ key: 'load-error', text: loadError });
-    }
+    if (!loadFailureAnswersPress) out.push(...loadFailureAnnouncements);
     if (prefs === null) return out;
     // The CLAIM and the reason that explains it, together: "this shortcut is
     // not registered" is the fact, and the backend's sentence below it is only
@@ -680,10 +705,7 @@
       // what is broken and left with no next step.
       out.push({ key: 'shortcut-tray', text: shortcutTrayText });
     }
-    if (languageReadError !== null) {
-      out.push({ key: `language-failed#${languageReadStamp}`, text: languageFailedLabel });
-      out.push({ key: `language-error#${languageReadStamp}`, text: languageReadError });
-    }
+    if (!languageReadAnswersPress) out.push(...languageReadAnnouncements);
     if (autostartUnknown !== null && autostartStatusText !== null && autostartReasonText !== null) {
       out.push({ key: 'autostart-status', text: autostartStatusText });
       out.push({ key: 'autostart-reason', text: autostartReasonText });
@@ -693,6 +715,7 @@
 
   const assertiveAnnouncements = $derived.by<Announcement[]>(() => {
     const out: Announcement[] = [];
+    if (loadFailureAnswersPress) out.push(...loadFailureAnnouncements);
     if (prefs === null) return out;
     if (notUsable && notUsableText !== null) {
       out.push({ key: `shortcut-not-usable#${notUsableStamp}`, text: notUsableText });
@@ -721,6 +744,7 @@
       out.push({ key: `language-change-unconfirmed#${languageApplyStamp}`, text: languageChangeUnconfirmedLabel });
       out.push({ key: `language-change-error#${languageApplyStamp}`, text: languageChangeError });
     }
+    if (languageReadAnswersPress) out.push(...languageReadAnnouncements);
     if (autostartError !== null) {
       out.push({ key: 'autostart-failed', text: autostartFailedLabel });
       out.push({ key: 'autostart-error', text: autostartError });
@@ -744,8 +768,8 @@
      answer on screen, which is `Settings.svelte`'s ruling for `model_settings`
      and not a new one here. -->
 {#if loadError}
-  <p data-testid="application-load-failed" data-announced-by={POLITE_ID}>{loadFailedLabel}</p>
-  <p data-testid="application-load-error" data-announced-by={POLITE_ID}>{loadError}</p>
+  <p data-testid="application-load-failed" data-announced-by={loadFailureAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{loadFailedLabel}</p>
+  <p data-testid="application-load-error" data-announced-by={loadFailureAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{loadError}</p>
 {/if}
 
 {#if prefs}
@@ -920,13 +944,13 @@
       <p id="application-language-change-error" data-testid="application-language-change-error" data-announced-by={ASSERTIVE_ID}>{languageChangeError}</p>
     {/if}
     {#if languageReadError !== null}
-      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={POLITE_ID}>{languageFailedLabel}</p>
-      <p id="application-language-error" data-testid="application-language-error" data-announced-by={POLITE_ID}>{languageReadError}</p>
+      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={languageReadAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{languageFailedLabel}</p>
+      <p id="application-language-error" data-testid="application-language-error" data-announced-by={languageReadAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{languageReadError}</p>
       <button
         type="button"
         data-testid="application-language-retry-read"
         disabled={languageBusy}
-        onclick={() => loadLocaleChoice()}
+        onclick={() => { languageReadAnswersPress = true; void loadLocaleChoice(); }}
       >{languageRetryReadLabel}</button>
     {/if}
   </div>

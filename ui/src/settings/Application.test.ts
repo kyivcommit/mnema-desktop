@@ -1822,7 +1822,7 @@ test('pressing "Retry reading" on the same language read failure is heard again'
   getLocale.mockRejectedValue(new Error(SENTENCE));
   renderSection();
   await shown('application-language-error');
-  const watcher = watchAnnouncements(politeRegion());
+  const watcher = watchAnnouncements(assertiveRegion());
 
   await fireEvent.click(screen.getByTestId('application-language-retry-read'));
   await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(2));
@@ -1831,7 +1831,7 @@ test('pressing "Retry reading" on the same language read failure is heard again'
 
   expect(watcher.count()).toBeGreaterThan(0);
   watcher.stop();
-  expect(announced(politeRegion())).toContain(SENTENCE);
+  expect(announced(assertiveRegion())).toContain(SENTENCE);
 });
 
 test('pressing "Retry applying" on the same partial application is heard again', async () => {
@@ -1943,6 +1943,9 @@ test('the same rejected language change, picked twice, is heard twice', async ()
 // the corrective read a REJECTED change starts, and that change's own refusal
 // is what answers the press. So the press is always heard — through the
 // refusal beside it — and the standing load sentence is not repeated on top.
+//
+// D165 (1): the corrective read is itself an answer to the press, so its own
+// refusal is heard assertively now, not politely.
 test('a press whose corrective read also fails is still heard, and the standing load failure is not repeated', async () => {
   const REFUSED = 'the operating system refused the combination';
   const UNREADABLE = 'prefs.json could not be read';
@@ -1951,7 +1954,7 @@ test('a press whose corrective read also fails is still heard, and the standing 
   await record();
   appPrefs.mockRejectedValue(new Error(UNREADABLE));
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
-  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
   const politeWatcher = watchAnnouncements(politeRegion());
   const assertiveWatcher = watchAnnouncements(assertiveRegion());
 
@@ -1965,6 +1968,56 @@ test('a press whose corrective read also fails is still heard, and the standing 
   expect(politeWatcher.count()).toBe(0);
   politeWatcher.stop();
   assertiveWatcher.stop();
+});
+
+// D165 (1): who started the read decides how loud its own refusal is heard.
+// A read a person's press started — the corrective read after a rejected
+// `setHotkey`/`setAutostart`, and "Retry reading" for the language — answers
+// that press, so its refusal is assertive; the mount read and a standing
+// failure surviving a remount are state, so they stay polite.
+test('a corrective read refused after a press is announced at once, heading and sentence', async () => {
+  const REFUSED = 'the operating system refused the combination';
+  const UNREADABLE = 'prefs.json could not be read';
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockRejectedValueOnce(new Error(UNREADABLE));
+  setHotkey.mockRejectedValue(new Error(REFUSED));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+  expect(announced(assertiveRegion())).toContain('Не вдалося прочитати налаштування застосунку.');
+  expect(announced(politeRegion())).not.toContain(UNREADABLE);
+  expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+test('pressing «Retry reading» for the language and being refused again is announced at once', async () => {
+  const UNREADABLE = 'locale could not be read';
+  getLocale.mockRejectedValue(new Error(UNREADABLE));
+  renderSection();
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+  expect(announced(politeRegion())).not.toContain(UNREADABLE);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+test('after a remount, a standing language read failure is reported politely again', async () => {
+  const UNREADABLE = 'locale could not be read';
+  getLocale.mockRejectedValue(new Error(UNREADABLE));
+  const first = renderSection();
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+
+  first.unmount();
+  renderSection();
+
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
 });
 
 // --- RED 1b.5: a refusal must not make the standing state be read again ----
@@ -2057,8 +2110,10 @@ test('the reasons a partial language application names are on screen, not only i
 // `set_hotkey`, and a `partial` outcome is what a `set_locale` that RESOLVED
 // produces, so it never stands beside the rejection sentences.
 const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
-  ['application-load-failed', POLITE],
-  ['application-load-error', POLITE],
+  // D165 (1): `everythingRefused` below writes this pair from the corrective
+  // read a rejected `setHotkey` starts — a read a press started, so assertive.
+  ['application-load-failed', ASSERTIVE],
+  ['application-load-error', ASSERTIVE],
   ['application-shortcut-status', POLITE],
   ['application-shortcut-reason', POLITE],
   ['application-shortcut-tray', POLITE],
@@ -2069,6 +2124,9 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-language-unknown', ASSERTIVE],
   ['application-language-change-unconfirmed', ASSERTIVE],
   ['application-language-change-error', ASSERTIVE],
+  // D165 (1): `everythingRefused` writes this pair from the read
+  // `changeLocaleChoice` starts to recover after a rejected `set_locale`, not
+  // from the "Retry reading" button — nobody pressed for THIS read, so polite.
   ['application-language-failed', POLITE],
   ['application-language-error', POLITE],
   ['application-autostart-status', POLITE],
