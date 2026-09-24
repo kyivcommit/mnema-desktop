@@ -2331,3 +2331,39 @@ test('the startup block reads label, status, reason, failure, error, control —
     byId('application-autostart-disable'),
   ]);
 });
+
+// ---------------------------------------------------------------------------
+// PR C (D165): the shortcut block under a registrar that keeps refusing.
+// ---------------------------------------------------------------------------
+
+test('a combination the system still refuses is not called in effect, even when the read names it back', async () => {
+  // The stored combination stands `unavailable`; the person records THAT SAME
+  // combination; the registrar refuses again; the corrective read reports it
+  // back — same combination, still not registered. Only `registered` may say
+  // «діє». The opposite direction is `a refused change shows the sentence and
+  // then draws the NEW shortcut when a fresh read reports it`.
+  //
+  // The corrective read is HELD and released by hand: before the fix the
+  // heading reads «не змінено» first and turns into «діє» only when the read
+  // answers, so an assertion that ran before the answer would pass on the
+  // defect. Three ticks after the release, as in `a corrective read the stamp
+  // discarded does not get to choose the sentence`.
+  const STANDING = prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } } });
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(STANDING);
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(REASON));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+  expect(setHotkey).toHaveBeenCalledWith('Alt+Space');
+
+  read.resolve(STANDING);
+  await tick();
+  await tick();
+  await tick();
+  expect(at('application-shortcut-failed')).not.toContain('Скорочення діє');
+  expect(at('application-shortcut-failed')).toContain('Скорочення не змінено');
+});

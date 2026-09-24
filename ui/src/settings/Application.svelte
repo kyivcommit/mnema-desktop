@@ -306,7 +306,10 @@
       // `null` the stale one would rewrite it. `refresh`'s own comment names
       // the fixture.
       void refresh().then((applied) => {
-        shortcutNotSaved = applied !== null && applied.shortcut === shortcut;
+        // «In effect» is a claim about the operating system, so only a
+        // `registered` status may make it — a combination that came back the
+        // same but `unavailable` is the Wayland repeat (D165), not row 6.
+        shortcutNotSaved = applied !== null && applied.status.kind === 'registered' && applied.shortcut === shortcut;
       });
     } finally {
       // Released whichever way the call went: a refusal that left the control
