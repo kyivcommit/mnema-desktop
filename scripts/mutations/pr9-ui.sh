@@ -407,11 +407,10 @@ case_ "unavailable must not be worded as registered" \
 # 🔴 D-b's closing note: a rejected `set_hotkey` carries no `HotkeyState` at
 # all — which of the table's seven rows produced it is not recoverable from the
 # sentence alone, so the only honest source for what the screen draws next is a
-# fresh `appPrefs()`, never the value the window held before the call. Every
-# fixture whose fresh read happens to answer with the SAME shortcut the window
-# already held would pass under a mutant that skips the re-read entirely; only
-# the pair that changes the answer between the two reads can see it, and this is
-# the first of that pair.
+# fresh `appPrefs()`, never the value the window held before the call. The
+# mutant deletes the re-read, and the `pending` bookkeeping before it. The
+# judging test's fresh read would report the sent combination as `registered`;
+# under the mutant the heading stays «Скорочення не змінено» instead of «діє».
 case_ "a rejected set_hotkey must trigger a fresh read, not keep the pre-call value" \
   ui/src/settings/Application.svelte \
   's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
@@ -520,57 +519,22 @@ case_ "an unreadable autostart offers both directions, not the one Enable" \
 # External review P3. The heading is the old one whatever the corrective re-read
 # says: «Скорочення не змінено» drawn beside the new shortcut the operating
 # system is holding (transition-table row 6, `prefs.rs`) — the persist failed,
-# the registration did not. Every fixture whose re-read reports the OLD shortcut
-# survives this mutant, which is every one that existed before the finding.
+# the registration did not. The judging test's re-read reports the new
+# combination as `registered`; the mutant keeps «Скорочення не змінено».
 case_ "a shortcut the system kept but could not save is not called unchanged" \
   ui/src/settings/Application.svelte \
   's~    return t\(SHORTCUT_HEADING\[shortcutOutcome\]\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
   'return t("application_shortcut_failed"); // mutant: always the old heading' \
   src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest
 
-# 🔴 Fix round 2. The corrective re-read's own stamp ignored: a read that was
-# superseded still answers with the shortcut it found, and the rejection that
-# started it then compares that answer against the shortcut ITS call sent. With
-# two rejections in flight the stale one wins the comparison and rewrites the
-# heading of a rejection it knows nothing about — «Скорочення діє…» drawn over a
-# refusal that changed nothing at all.
-#
-# The judging test had to be rebuilt before this case could exist. Its first
-# version superseded the held-open read with a SUCCESSFUL recording, which sets
-# `hotkeyError = null` and takes the heading off screen by itself, so it
-# asserted an absence the write-side stamp was already producing and this mutant
-# survived it. It now supersedes with a second REJECTION, so the heading stays
-# on screen and the assertion is positive: the sentence is still the live
-# rejection's own.
-#
-# One site, deliberately. The same expression stood twice until fix round 2, and
-# the second copy was unobservable — reachable only behind a successful
-# `setHotkey`, which nulls the very error the sentence is drawn under. Mutated,
-# it survived all 665 tests. Collapsing the pair is what makes this mutant
-# killable at all.
-#
-# 🔴 Retargeted. Settling moved INTO `refresh()`, gated on a SECOND,
-# independent condition — `shortcutOutcome === 'pending'` — added to stop a
-# discarded read from rewriting an outcome a DIFFERENT rejection already
-# settled. That second gate subsumes the stamp check above for every
-# reachable case: a discarded read only reaches the settling block at all
-# when `takeAutostart` is true, and the only way to get there with
-# `takeHotkey` false is a successful write elsewhere — which also nulls
-# `hotkeyError` and hides the heading the mutant would otherwise be visible
-# on — or a SECOND rejection's own `refresh()`, which invalidates BOTH
-# stamps together, so the early return (unmutated `takeHotkey`/
-# `takeAutostart`, never `appliedHotkey`) is what stops it either way. The
-# judging test above stays — still true, still worth having — but it no
-# longer discriminates THIS mutant, so this case now targets the guard that
-# does: a settled outcome must not be reopened by a later, unrelated read
-# whose answer happens to satisfy the (stale) comparison. `refusedShortcut`
-# is not cleared on settle, so the comparison is still sitting there — but
-# this window's own `set_hotkey` cannot produce that transition today (every
-# later read returns the SAME hotkey state until the next recording, which
-# resets the outcome first). This is defence in depth for a hotkey-state
-# change this window's own refusal did not cause, not a reachable bug in the
-# single-window app today. The judging test constructs that transition by
-# hand, deliberately.
+# The `pending` condition of the settle removed: a read that writes the hotkey
+# after the outcome has settled judges it again against `refusedShortcut`,
+# which a settle does not clear. The judging test settles to «не змінено»,
+# then lets an autostart rejection's read — the newest, holding both stamps —
+# report the refused combination as `registered`; the mutant turns the heading
+# into «діє». This window's own `set_hotkey` cannot produce that second read
+# today (every later read returns the same hotkey state until the next
+# recording, which resets the outcome first), so the test builds it by hand.
 case_ "a settled outcome must not be re-litigated by an unrelated later read" \
   ui/src/settings/Application.svelte \
   's~      if \(appliedHotkey !== null && shortcutOutcome === .pending.\) \{~      if (appliedHotkey !== null) { // mutant: re-litigates a settled outcome~' \

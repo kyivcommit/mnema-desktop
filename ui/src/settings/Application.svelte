@@ -46,23 +46,12 @@
   let hotkeySeq = 0;
   let autostartSeq = 0;
 
-  // A read whose hotkey the stamp discarded (`takeHotkey === false`) does not
-  // choose the sentence drawn beside a hotkey it did not write. The early
-  // return below is the first of two guards, not the only one: a read
-  // holding NEITHER stamp returns there before writing anything, but a read
-  // holding `takeAutostart` alone (`takeHotkey` false) passes it and writes
-  // `prefs` — the per-field write (`takeHotkey || prefs === null ? p.hotkey
-  // : prefs.hotkey`) is what keeps ITS hotkey off screen, and the settle's
-  // own `appliedHotkey !== null` condition below is what keeps it out of
-  // `shortcutOutcome`.
-  //
-  // `refresh` also settles a `pending` `shortcutOutcome`, at its own write
-  // site: whichever read is the one that actually reaches the screen with a
-  // hotkey settles it, including one an unrelated autostart rejection
-  // started — see the comment above `ShortcutOutcome` for why. A settled
-  // outcome does not get reopened by a later, unrelated read either —
-  // `pr9-ui.sh`, "a settled outcome must not be re-litigated by an
-  // unrelated later read".
+  // A read also settles a `pending` `shortcutOutcome` (the comment above
+  // `ShortcutOutcome` says why here). Only a read that took the hotkey field
+  // settles it: one holding neither stamp leaves at the early return, and one
+  // holding `takeAutostart` alone gets `appliedHotkey === null`. A settled
+  // outcome is not judged again by a later read — `pr9-ui.sh`, "a settled
+  // outcome must not be re-litigated by an unrelated later read".
   async function refresh(): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
@@ -86,13 +75,6 @@
       // The hotkey THIS read wrote to the screen, or `null` if it did not
       // take that field — read only by the settle below.
       const appliedHotkey = takeHotkey ? p.hotkey : null;
-      // Settle a `pending` shortcut outcome from WHICHEVER read reaches the
-      // screen with a hotkey — see the comment above `ShortcutOutcome` for
-      // why this cannot live only in the read a shortcut rejection's own
-      // catch started. A read that did not take the hotkey field has
-      // nothing to judge (`appliedHotkey === null`), and once the outcome
-      // has already settled this is a no-op for every later read that also
-      // carries one.
       if (appliedHotkey !== null && shortcutOutcome === 'pending') {
         // «In effect» is a claim about the operating system, so only a
         // `registered` status may make it — a combination that came back the
@@ -174,9 +156,9 @@
   // system registered the NEW combination and the write to `prefs.json` then
   // failed, so `set_hotkey` rejects with `Error::Prefs` while the shortcut is
   // in effect. The corrective re-read D-b requires then draws that new
-  // shortcut — under a heading saying nothing was changed. Each half is true
-  // alone; the pair is not, and what a person does about it differs: one is
-  // "try again", the other is "it works until you restart".
+  // shortcut, and a heading saying nothing was changed would contradict it.
+  // What a person does about each differs: one is "try again", the other is
+  // "it works until you restart".
   //
   // Decided from the RE-READ and never from the rejection's sentence. That
   // sentence is a free-text `Display` this window does not own, and every
@@ -189,13 +171,11 @@
   // then settles it. A read that is itself refused never settles it, and the
   // neutral sentence stays — worded so that it is still true when it stays.
   //
-  // 🔴 Settled inside `refresh()` itself, not by the read a shortcut
-  // rejection's own catch started: `refresh()` claims BOTH stamps (D-I1
-  // above), so an autostart rejection's own
-  // corrective read can supersede that read, land first, and be the one that
-  // actually writes the fresh hotkey to the screen. `pending` has to be
-  // settled by WHICHEVER read reaches the screen with a hotkey, or it is left
-  // standing beside a shortcut a read already answered for.
+  // 🔴 Settled inside `refresh()`, not only by the read the shortcut
+  // rejection's own catch started: every `refresh()` claims BOTH stamps, so
+  // an autostart rejection's read can supersede that one and be the read that
+  // writes the hotkey. Settled anywhere else, `pending` would stay beside a
+  // shortcut a read already answered for.
   type ShortcutOutcome = 'pending' | 'unchanged' | 'not_saved';
   const SHORTCUT_HEADING: Record<ShortcutOutcome, Key> = {
     pending: 'application_shortcut_pending',
@@ -204,8 +184,9 @@
   };
   let shortcutOutcome = $state<ShortcutOutcome>('unchanged');
   // The combination a `pending` outcome is waiting to hear back about — set
-  // together with `shortcutOutcome = 'pending'`, cleared together with every
-  // reset back to `unchanged`, read only by `refresh()`.
+  // together with `shortcutOutcome = 'pending'`, cleared when a recording
+  // starts and when a change is sent (not when the outcome settles), read
+  // only by `refresh()`.
   let refusedShortcut: string | null = null;
   const shortcutFailedLabel = $derived.by(() => {
     void $locale;
@@ -322,14 +303,11 @@
       // the only honest source for what the screen draws next is a fresh read,
       // never the value this window held before the call.
       //
-      // And that read is what tells row 6 from the rows that changed nothing:
-      // if it comes back naming the combination THIS call sent, the operating
-      // system kept it and only the file did not. Deciding which does NOT
-      // happen here — `refresh` settles it at its own write site, because the
-      // read that reaches the screen with a hotkey need not be the read THIS
-      // catch starts (see the comment above `ShortcutOutcome`).
-      // `refusedShortcut` is the combination THIS call sent, so whichever
-      // read settles it compares against the right one.
+      // A fresh read is also what tells row 6 from the rows that changed
+      // nothing, and `refresh` decides which, not this catch (see the comment
+      // above `ShortcutOutcome`). `refusedShortcut` is the combination THIS
+      // call sent, so whichever read settles it compares against the right
+      // one.
       shortcutOutcome = 'pending';
       refusedShortcut = shortcut;
       void refresh();

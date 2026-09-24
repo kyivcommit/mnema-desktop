@@ -1062,18 +1062,8 @@ test('a shortcut refused outright is still reported as unchanged', async () => {
   expect(at('application-shortcut-error')).toBe(SENTENCE);
 });
 
-// 🔴 The re-read is what decides, and this is the fixture that says so.
-//
-// Fix round 2, and the rebuild is the finding. The first version superseded the
-// held-open read with a SUCCESSFUL recording, which sets `hotkeyError = null` —
-// so the heading it then asserted absent was absent because no rejection was on
-// screen at all, and a `refresh()` that ignored its own stamp survived it
-// untouched. The project's named "test stands on a neighbouring defence": the
-// guard doing the work was the write-side stamp, already pinned elsewhere.
-//
-// Here BOTH acts are rejections, so `hotkeyError` never goes null and the
-// heading stays on screen throughout. The second rejection's own re-read
-// resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
+// Both acts are rejections, so the heading is on screen when the discarded
+// read answers. The second rejection's own re-read resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
 // Then the FIRST rejection's re-read — superseded on BOTH stamps by the second
 // rejection's own `refresh()` call — answers naming the shortcut ITS OWN call
 // sent. It never reaches `prefs` or `shortcutOutcome`: the early return
@@ -2333,7 +2323,7 @@ test('the startup block reads label, status, reason, failure, error, control —
 });
 
 // ---------------------------------------------------------------------------
-// PR C (D165): the shortcut block under a registrar that keeps refusing.
+// D165: the shortcut block under a registrar that keeps refusing.
 // ---------------------------------------------------------------------------
 
 test('a combination the system still refuses is not called in effect, even when the read names it back', async () => {
@@ -2343,11 +2333,8 @@ test('a combination the system still refuses is not called in effect, even when 
   // «діє». The opposite direction is `a refused change shows the sentence and
   // then draws the NEW shortcut when a fresh read reports it`.
   //
-  // The corrective read is HELD and released by hand: before the fix the
-  // heading reads «не змінено» first and turns into «діє» only when the read
-  // answers, so an assertion that ran before the answer would pass on the
-  // defect. Three ticks after the release, as in `a corrective read the stamp
-  // discarded does not get to choose the sentence`.
+  // The corrective read is held and released by hand, so the assertions run
+  // after it answers.
   const STANDING = prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } } });
   const read = deferred<AppPrefs>();
   appPrefs.mockResolvedValueOnce(STANDING);
@@ -2411,12 +2398,11 @@ test('the settled heading arrives as a new announcement, and the refusal sentenc
   await waitFor(() => expect(announced(assertiveRegion())[0]).toContain('Скорочення діє'));
 
   const [headingAfter, sentenceAfter] = Array.from(assertiveRegion().children);
-  // A NEW node for the settled heading: text rewritten inside the old node is
-  // what an engine may not announce at all (`aria-relevant` defaults differ
-  // between engines), a node added is what every engine announces.
+  // A NEW node for the settled heading: its key carries the outcome, so the
+  // settled heading is added to the live region, not rewritten inside it.
   expect(headingAfter).not.toBe(headingBefore);
-  // And the SAME node for the sentence: kept, not re-inserted, so it is not
-  // read out a second time.
+  // And the SAME node for the sentence: its key does not change, so it is not
+  // inserted again.
   expect(sentenceAfter).toBe(sentenceNode);
 });
 
@@ -2438,14 +2424,10 @@ test('a corrective read that is itself refused leaves the neutral heading standi
   expect(visiblePageText()).not.toContain('Скорочення діє');
 });
 
-// 🔴 `refresh()` claims BOTH stamps (D-I1), so the read that reaches the
-// screen with the answer a `pending` shortcut is waiting on need not be the
-// read the shortcut's OWN rejection started. An autostart rejection in
-// flight at the same time starts its own `refresh()`, claims the same
-// hotkey stamp, and can be the one that gets there first — settling the
-// outcome has to happen wherever a read actually writes the hotkey, not
-// only inside the read one particular rejection happened to start, or
-// `pending` is left standing beside a shortcut a read already answered for.
+// 🔴 `refresh()` claims BOTH stamps, so the read that writes the hotkey a
+// `pending` shortcut is waiting on need not be the read the shortcut's OWN
+// rejection started: an autostart rejection in flight at the same time
+// starts its own `refresh()`, which supersedes that read.
 test('a read started by another refusal still settles the shortcut heading', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -2460,24 +2442,21 @@ test('a read started by another refusal still settles the shortcut heading', asy
   queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
   await record();
 
-  // The shortcut change is refused. Its own corrective read (A) starts —
-  // held open, and never resolved until the very end of this test.
+  // The shortcut change is refused. Its own corrective read (A) starts and
+  // is held open.
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
   await waitFor(() => expect(queue).toHaveLength(2));
 
   // Autostart is refused too, while A is still in flight. Its OWN corrective
-  // read (B) claims the same hotkey stamp A holds (D-I1).
+  // read (B) supersedes A on both stamps.
   await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
   await waitFor(() => expect(queue).toHaveLength(3));
 
   // B answers, naming the combination the shortcut attempt sent — still
   // registered, row 6: the operating system kept it, only the file did not.
   queue[2].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
-  // A answers too, late — a DIFFERENT payload than B's, deliberately: if a
-  // regression let A (superseded on both stamps) settle instead of B, the
-  // outcome would read `unchanged` from THIS combination, not `not_saved`,
-  // so the assertion below pins which read answered, not merely that some
-  // read did.
+  // A answers too, late, with a DIFFERENT combination than B's: settled from
+  // A's answer the heading would read `unchanged`, from B's `not_saved`.
   queue[1].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
   await tick();
   await tick();
@@ -2487,26 +2466,14 @@ test('a read started by another refusal still settles the shortcut heading', asy
     .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
 });
 
-// 🔴 `refresh()`'s stamp check (`appliedHotkey = takeHotkey ? p.hotkey :
-// null`) cannot alone protect this outcome: the settling block also
-// requires `shortcutOutcome === 'pending'`, and that guard makes the stamp
-// check unobservable on every reachable path — a discarded read only
-// reaches the settling block when `takeAutostart` is true too, which needs
-// either a successful write that also clears `hotkeyError` (hiding the
-// heading) or a second rejection's own `refresh()` (which invalidates BOTH
-// stamps together, so the early return — not the settling block — is what
-// stops it, unmutated).
-//
-// The pending guard alone still protects something real: an outcome that
-// has ALREADY settled must not be reopened by a later, unrelated read that
-// happens to answer with data satisfying the criterion. `refusedShortcut` is
-// not cleared on settle, so the comparison is still sitting there — but this
-// window's own `set_hotkey` cannot produce that transition today (every
-// later read returns the SAME hotkey state until the next recording resets
-// the outcome first). This is defence in depth for a hotkey-state change
-// this window's own refusal did not cause, not a reachable bug in the
-// single-window app today. The fixture below constructs that transition by
-// hand.
+// 🔴 The settle requires `pending`, so an outcome that has settled is not
+// judged again. `refusedShortcut` is not cleared on settle, so without that
+// condition a later read naming the refused combination as `registered`
+// would turn `unchanged` into `not_saved`. The stamp check cannot stop this:
+// the later read is the newest one and holds both stamps. This window's own
+// `set_hotkey` cannot produce such a read today — every later read returns
+// the same hotkey state until the next recording, which resets the outcome
+// first — so the fixture builds it by hand.
 test('a settled outcome must not be re-litigated by an unrelated later read', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
