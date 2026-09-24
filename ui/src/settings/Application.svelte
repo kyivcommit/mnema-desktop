@@ -182,7 +182,7 @@
   // wording of it is one refactor away from moving; the state the operating
   // system reports is the fact.
   //
-  // 🔴 Three outcomes, not two (D165, spec §2.2 «Затримка»). Between a refusal
+  // 🔴 Three outcomes, not two (D165, spec §2.2). Between a refusal
   // and the corrective read's answer the section does not know which row of
   // the transition table it is in, so the heading says exactly that; the read
   // then settles it. A read that is itself refused never settles it, and the
