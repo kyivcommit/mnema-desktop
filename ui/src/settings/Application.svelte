@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
@@ -536,24 +537,18 @@
   // screen is drawn from them.
   const languageReadStamp = $derived($localeChoiceState.readStamp);
   const languageApplyStamp = $derived($localeChoiceState.applyStamp);
-  // D165 (1): holds the `readStamp` the "Retry reading" button's own read
-  // STARTED from, not the stamp it expects to land on — `readStamp` moves
-  // only when a read ANSWERS, never on success (`locale-choice.ts`'s own
-  // comment on it), so a click cannot compute its answer's stamp ahead of
-  // time. `null` while no press is unanswered. Cleared back to `null` by the
-  // click's own `.then` once `readStamp` stops moving (success, or a stale
-  // read superseded by a newer one) — see the button below.
-  //
-  // ponytail: a read nobody pressed for that fails while this one is still in
-  // flight moves `readStamp` too, and this cannot tell the two apart — it is
-  // taken as the press's own answer. Narrow this if that ever happens outside
-  // a race this rare (a double-click on this same button, or another read
-  // landing in the same instant).
-  let languageRetryFrom = $state<number | null>(null);
-  // True for exactly one answer: the first `readStamp` past the click. A
-  // later failure nobody pressed for moves `readStamp` again without moving
-  // `languageRetryFrom`, so it no longer equals `languageRetryFrom + 1`.
-  const languageReadAnswersPress = $derived(languageRetryFrom !== null && languageReadStamp === languageRetryFrom + 1);
+  // D165 (1): the store, not this component, records who started the read
+  // that produced the CURRENT `error` (`locale-choice.ts`'s own comment on
+  // `readAnswersPress`). `languageMountStamp` is the stamp that was already
+  // standing when THIS instance was created, captured once and never
+  // updated: a failure carrying that same stamp predates this instance's own
+  // first read, so it is drawn from a PREVIOUS instance's press (or no press
+  // at all) and stays polite regardless of `readAnswersPress` — this is what
+  // keeps a remount polite for a standing failure.
+  const languageMountStamp = get(localeChoiceState).readStamp;
+  const languageReadAnswersPress = $derived(
+    $localeChoiceState.readAnswersPress && languageReadStamp !== languageMountStamp,
+  );
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -968,7 +963,7 @@
         type="button"
         data-testid="application-language-retry-read"
         disabled={languageBusy}
-        onclick={() => { languageRetryFrom = languageReadStamp; void loadLocaleChoice().then(() => { if (languageReadStamp === languageRetryFrom) languageRetryFrom = null; }); }}
+        onclick={() => void loadLocaleChoice('press')}
       >{languageRetryReadLabel}</button>
     {/if}
   </div>

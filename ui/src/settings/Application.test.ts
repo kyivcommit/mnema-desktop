@@ -1840,26 +1840,26 @@ test('pressing "Retry reading" on the same language read failure is heard again'
   expect(announced(assertiveRegion())).toContain(SENTENCE);
 });
 
-// I-3 (fix round 1): the test above cannot pin `languageReadStamp` on its
-// own — `languageRetryFrom` (I-1/I-2) makes `languageReadAnswersPress` visit
-// `false` on every press before its next answer, and that transition alone
-// already moves the pair out of, then back into, the assertive region,
-// whatever the key is. A read NOBODY pressed for is the read that isolates
-// the stamp: `changeLocaleChoice`'s own recovery read after a rejected
-// `set_locale` never touches `languageRetryFrom`, so the flag stays `false`
-// for both failures below, and only the key's own stamp can tell a SECOND,
-// identically-worded refusal from the first one still standing.
+// `changeLocaleChoice`'s own recovery read (`loadLocaleChoice()`, no
+// argument) never carries the "Retry reading" button's own origin, so a
+// repeat of ITS refusal isolates the key's own stamp from the button
+// entirely — nothing here is ever pressed. The mount read must succeed
+// first: a persistently rejected `getLocale` would also fail the MOUNT read,
+// leaving `snapshot` unconfirmed and the select `disabled`, which is not a
+// control a person could operate to reach this scenario at all.
 test('a second rejected language change whose recovery read repeats the same refusal is heard again, politely', async () => {
   const SENTENCE = 'get_locale is unreachable';
   setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
-  getLocale.mockRejectedValue(new Error(SENTENCE));
   renderSection();
   await shown('application-language-select');
 
+  getLocale.mockRejectedValue(new Error(SENTENCE));
+  expect(languageSelect().disabled).toBe(false);
   await fireEvent.change(languageSelect(), { target: { value: 'en' } });
   await waitFor(() => expect(announced(politeRegion())).toContain(SENTENCE));
   const watcher = watchAnnouncements(politeRegion());
 
+  expect(languageSelect().disabled).toBe(false);
   await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
   await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(3));
   await tick();
@@ -1981,7 +1981,8 @@ test('the same rejected language change, picked twice, is heard twice', async ()
 // of it is heard again — pinned by the NODE, because the text is identical
 // both times and only a new node proves a second announcement. It is never
 // heard in the polite region, which a mount-time load failure still uses
-// (the test above this one).
+// ("a rejected first read leaves no groups, but the polite region carries
+// the load refusal", below).
 test('a press whose corrective read also fails is heard again, in the assertive region only', async () => {
   const REFUSED = 'the operating system refused the combination';
   const UNREADABLE = 'prefs.json could not be read';
@@ -2030,7 +2031,7 @@ test('a corrective read refused after a press is announced at once, heading and 
   expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
 });
 
-// I-5: the autostart call site's own `refresh('press')` — the twin of the
+// The autostart call site's own `refresh('press')` — the twin of the
 // hotkey test above, for the OTHER rejected change that starts a corrective
 // read.
 test('a corrective read refused after a rejected autostart change is announced at once', async () => {
@@ -2078,11 +2079,70 @@ test('pressing «Retry reading» for the language and being refused again is ann
   expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
 });
 
-// I-2: once Retry has been pressed and answered, a LATER read nobody pressed
-// for — the recovery read a rejected `set_locale` starts — must still be
-// polite. `languageRetryFrom` matches only the one `readStamp` right after
-// the press it was captured for; a later failure moves `readStamp` again
-// without moving `languageRetryFrom`.
+// Two clicks before either read answers. The store decides who wrote the
+// failure that lands, not a component-side marker: the FIRST click's own
+// read, once superseded by the second, writes nothing at all — the same
+// `mine !== opSeq` guard `locale-choice.ts` already had for any two reads in
+// flight — so there is nothing for the second click to erase.
+test('two Retry presses before either answers: the later read is heard, assertively', async () => {
+  const STANDING = 'IPC closed';
+  const R1 = 'first retry read refused';
+  const R2 = 'second retry read refused';
+  getLocale.mockRejectedValue(new Error(STANDING));
+  renderSection();
+  await shown('application-language-error');
+
+  const firstRead = deferred<unknown>();
+  const secondRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => firstRead.promise);
+  getLocale.mockImplementationOnce(() => secondRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+
+  firstRead.reject(new Error(R1));
+  await tick();
+  secondRead.reject(new Error(R2));
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(R2));
+  expect(announced(politeRegion())).not.toContain(R2);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+// A second press, while its own read is still in flight, must not disturb
+// the FIRST press's own answer already showing assertively: the store is
+// written only once a read itself resolves, so nothing moves between the
+// second click and that read's own answer.
+test("a second Retry press does not move the first press's own answer while its own read is in flight", async () => {
+  const FIRST = 'first retry read refused';
+  const SECOND = 'second retry read refused';
+  getLocale.mockRejectedValue(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-error');
+
+  getLocale.mockRejectedValueOnce(new Error(FIRST));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(FIRST));
+  const politeWatcher = watchAnnouncements(politeRegion());
+
+  const secondRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => secondRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await tick();
+  await tick();
+
+  expect(politeWatcher.count()).toBe(0);
+  expect(announced(assertiveRegion())).toContain(FIRST);
+
+  secondRead.reject(new Error(SECOND));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SECOND));
+  politeWatcher.stop();
+});
+
+// Once Retry has been pressed and answered, a LATER read nobody pressed for
+// — the recovery read a rejected `set_locale` starts — must still be
+// polite: `loadLocaleChoice`'s own recovery call carries no origin, so its
+// failure writes `readAnswersPress: false` regardless of an earlier press
+// answered in this same instance.
 test('a recovery read refused after a rejected language change stays polite, even after an earlier Retry press', async () => {
   const RETRY_UNREADABLE = 'locale could not be read';
   const RECOVERY_UNREADABLE = 'get_locale is unreachable';
@@ -2103,6 +2163,42 @@ test('a recovery read refused after a rejected language change stays polite, eve
   expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
 });
 
+// A language change made while a Retry press's own read is still in flight
+// supersedes that read (`locale-choice.ts`'s own `opSeq`, unchanged by this
+// task): the change's own recovery read is the one that answers, and it
+// carries no press origin, so its refusal is polite regardless of the Retry
+// click that never got to answer.
+test("a language change made while a Retry read is in flight is answered, politely, by that change's own recovery read", async () => {
+  const FIRST = 'get_locale is unreachable';
+  const SECOND = 'get_locale is unreachable again';
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  renderSection();
+  await shown('application-language-select');
+
+  getLocale.mockRejectedValueOnce(new Error(FIRST));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(announced(politeRegion())).toContain(FIRST));
+
+  const retryRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => retryRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await tick();
+
+  getLocale.mockRejectedValue(new Error(SECOND));
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+
+  await waitFor(() => expect(announced(politeRegion())).toContain(SECOND));
+  expect(announced(assertiveRegion())).not.toContain(SECOND);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
+
+  // The stale retry read, once it finally settles, must not overwrite what
+  // the newer, superseding recovery read already wrote.
+  retryRead.reject(new Error('stale — superseded before it could answer'));
+  await tick();
+  await tick();
+  expect(announced(politeRegion())).toContain(SECOND);
+});
+
 test('after a remount, a standing language read failure is reported politely again', async () => {
   const UNREADABLE = 'locale could not be read';
   getLocale.mockRejectedValue(new Error(UNREADABLE));
@@ -2112,8 +2208,18 @@ test('after a remount, a standing language read failure is reported politely aga
   await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
 
   first.unmount();
+  // The store's `readAnswersPress` is still `true` from the press the OLD
+  // instance answered — held here so the NEW instance's own mount read has
+  // not answered yet either, to check that a standing failure is not
+  // assertive before this instance's own read has had a say.
+  const remountRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => remountRead.promise);
   renderSection();
+  await tick();
+  await tick();
+  expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
 
+  remountRead.reject(new Error(UNREADABLE));
   await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
   expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
 });
