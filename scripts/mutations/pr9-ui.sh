@@ -414,7 +414,7 @@ case_ "unavailable must not be worded as registered" \
 # the first of that pair.
 case_ "a rejected set_hotkey must trigger a fresh read, not keep the pre-call value" \
   ui/src/settings/Application.svelte \
-  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\)\.then\(.*?\}\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
+  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
   '// mutant: a rejected set_hotkey does not re-read appPrefs' \
   src/settings/Application.test.ts 'a refused change shows the sentence and then draws the NEW shortcut when a fresh read reports it' runner=vitest
 

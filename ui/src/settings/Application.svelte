@@ -47,11 +47,14 @@
   let autostartSeq = 0;
 
   // Answers with the `hotkey` this read actually WROTE to the screen, or `null`
-  // when it wrote none — superseded by a later writer, or rejected outright.
-  // Only the caller that started a corrective read after a refused `set_hotkey`
-  // reads the answer; see `shortcutOutcome` for what it decides. A read whose
-  // hotkey the stamp discarded never reached the screen, so it must not get to
-  // choose the sentence drawn beside what did.
+  // when it wrote none — superseded by a later writer, or rejected outright. A
+  // read whose hotkey the stamp discarded never reached the screen, so it must
+  // not get to choose the sentence drawn beside what did. `refresh` reads its
+  // OWN answer, right where it is computed, to settle a `pending`
+  // `shortcutOutcome` (fix round 1, Important 1) — not only the read a
+  // shortcut rejection's own catch started: whichever read is the one that
+  // actually reaches the screen with a hotkey settles it, including one an
+  // unrelated autostart rejection started.
   //
   // 🔴 The fixture that holds this is `a corrective read the stamp discarded
   // does not get to choose the sentence`, and fix round 2 had to REBUILD it
@@ -98,6 +101,20 @@
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
       };
       loadError = null;
+      // Settle a `pending` shortcut outcome from WHICHEVER read reaches the
+      // screen with a hotkey — see `refusedShortcut`'s own comment for why
+      // this cannot live only in the read a shortcut rejection's own catch
+      // started. A read that did not take the hotkey field has nothing to
+      // judge (`appliedHotkey === null`), and once the outcome has already
+      // settled this is a no-op for every later read that also carries one.
+      if (appliedHotkey !== null && shortcutOutcome === 'pending') {
+        // «In effect» is a claim about the operating system, so only a
+        // `registered` status may make it — a combination that came back the
+        // same but `unavailable` is the Wayland repeat (D165), not row 6.
+        shortcutOutcome = appliedHotkey.status.kind === 'registered' && appliedHotkey.shortcut === refusedShortcut
+          ? 'not_saved'
+          : 'unchanged';
+      }
       return appliedHotkey;
     } catch (e) {
       // A rejection is about the read as a whole, so it is shown only where the
@@ -187,6 +204,14 @@
   // the transition table it is in, so the heading says exactly that; the read
   // then settles it. A read that is itself refused never settles it, and the
   // neutral sentence stays — worded so that it is still true when it stays.
+  //
+  // 🔴 (review, fix round 1, Important 1) Settled inside `refresh()` itself,
+  // not by the read a shortcut rejection's own catch started: `refresh()`
+  // claims BOTH stamps (D-I1 above), so an autostart rejection's own
+  // corrective read can supersede that read, land first, and be the one that
+  // actually writes the fresh hotkey to the screen. `pending` has to be
+  // settled by WHICHEVER read reaches the screen with a hotkey, or it is left
+  // standing beside a shortcut a read already answered for.
   type ShortcutOutcome = 'pending' | 'unchanged' | 'not_saved';
   const SHORTCUT_HEADING: Record<ShortcutOutcome, Key> = {
     pending: 'application_shortcut_pending',
@@ -194,6 +219,10 @@
     not_saved: 'application_shortcut_not_saved',
   };
   let shortcutOutcome = $state<ShortcutOutcome>('unchanged');
+  // The combination a `pending` outcome is waiting to hear back about — set
+  // together with `shortcutOutcome = 'pending'`, cleared together with every
+  // reset back to `unchanged`, read only by `refresh()`.
+  let refusedShortcut: string | null = null;
   const shortcutFailedLabel = $derived.by(() => {
     void $locale;
     return t(SHORTCUT_HEADING[shortcutOutcome]);
@@ -236,6 +265,7 @@
     notUsable = false;
     hotkeyError = null;
     shortcutOutcome = 'unchanged';
+    refusedShortcut = null;
     recordButton?.focus();
   }
 
@@ -283,6 +313,7 @@
     recording = false;
     hotkeyError = null;
     shortcutOutcome = 'unchanged';
+    refusedShortcut = null;
     hotkeyBusy = true;
     try {
       const reply = await setHotkey(shortcut);
@@ -309,27 +340,20 @@
       //
       // And that read is what tells row 6 from the rows that changed nothing:
       // if it comes back naming the combination THIS call sent, the operating
-      // system kept it and only the file did not. `applied === null` means the
-      // read never reached the screen, and a read that wrote nothing decides
-      // nothing — the heading stays whatever the writer that DID reach the
-      // screen earned, `pending` included when no writer has answered yet.
-      // That is not hypothetical: two rejections in flight at once leave this
-      // callback holding the first one's shortcut long after the second one's
-      // read has drawn its own sentence, and without the `null` the stale one
-      // would rewrite it. `refresh`'s own comment names the fixture.
+      // system kept it and only the file did not. Deciding which does NOT
+      // happen here — `refresh` settles it at its own write site (fix round 1,
+      // Important 1), because the read that reaches the screen with a hotkey
+      // need not be the read THIS catch starts: an autostart rejection in
+      // flight at the same time claims the same hotkey stamp (D-I1) and can
+      // supersede this one and get there first. Two rejections in flight at
+      // once can also leave an EARLIER `pending` waiting on a read that gets
+      // superseded before it answers — `refresh`'s own comment names the
+      // fixture that guards a discarded read from choosing a sentence either
+      // way. `refusedShortcut` is the combination THIS call sent, so whichever
+      // read settles it compares against the right one.
       shortcutOutcome = 'pending';
-      void refresh().then((applied) => {
-        // `null` settles nothing: either a later writer owns the screen (and
-        // its own read decides), or the read was refused and the neutral
-        // heading is still the truth.
-        if (applied === null) return;
-        // «In effect» is a claim about the operating system, so only a
-        // `registered` status may make it — a combination that came back the
-        // same but `unavailable` is the Wayland repeat (D165), not row 6.
-        shortcutOutcome = applied.status.kind === 'registered' && applied.shortcut === shortcut
-          ? 'not_saved'
-          : 'unchanged';
-      });
+      refusedShortcut = shortcut;
+      void refresh();
     } finally {
       // Released whichever way the call went: a refusal that left the control
       // disabled would cost a person the only way to change the shortcut.

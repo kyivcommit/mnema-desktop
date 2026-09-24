@@ -2437,3 +2437,50 @@ test('a corrective read that is itself refused leaves the neutral heading standi
   expect(visiblePageText()).not.toContain('Скорочення не змінено');
   expect(visiblePageText()).not.toContain('Скорочення діє');
 });
+
+// 🔴 (review, fix round 1, Important 1) `refresh()` claims BOTH stamps
+// (D-I1), so the read that reaches the screen with the answer a `pending`
+// shortcut is waiting on need not be the read the shortcut's OWN rejection
+// started. An autostart rejection in flight at the same time starts its own
+// `refresh()`, claims the same hotkey stamp, and can be the one that gets
+// there first — settling the outcome has to happen wherever a read actually
+// writes the hotkey, not only inside the read one particular rejection
+// happened to start, or `pending` is left standing beside a shortcut a read
+// already answered for.
+test('a read started by another refusal still settles the shortcut heading', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValue(new Error('prefs.json could not be written'));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await record();
+
+  // The shortcut change is refused. Its own corrective read (A) starts —
+  // held open, and never resolved until the very end of this test.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // Autostart is refused too, while A is still in flight. Its OWN corrective
+  // read (B) claims the same hotkey stamp A holds (D-I1).
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(queue).toHaveLength(3));
+
+  // B answers, naming the combination the shortcut attempt sent — still
+  // registered, row 6: the operating system kept it, only the file did not.
+  queue[2].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  // A answers too, late — already superseded by B when B was started, so it
+  // must not get to rewrite what B already settled.
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  await tick();
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut-failed'))
+    .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
+});
