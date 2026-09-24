@@ -46,22 +46,21 @@
   let hotkeySeq = 0;
   let autostartSeq = 0;
 
+  // D165 (1): who started a read decides how loud its refusal is. A read a
+  // person's press started is the answer to that press — assertive; the mount
+  // read is state — polite. Both of these fields are instance fields, so a
+  // remount (which only ever starts a fresh MOUNT read here) begins polite.
+  let loadFailureAnswersPress = $state(false);
+  // Which refusal the load-failure nodes belong to, so a repeat is heard — the
+  // device `locale-choice.ts` uses for `readStamp`.
+  let loadStamp = $state(0);
+
   // A read also settles a `pending` `shortcutOutcome` (the comment above
   // `ShortcutOutcome` says why here). Only a read that took the hotkey field
   // settles it: one holding neither stamp leaves at the early return, and one
   // holding `takeAutostart` alone gets `appliedHotkey === null`. A settled
   // outcome is not judged again by a later read — `pr9-ui.sh`, "a settled
   // outcome must not be re-litigated by an unrelated later read".
-  //
-  // D165 (1): who started a read decides how loud its refusal is. A read a
-  // person's press started is the answer to that press — assertive; the mount
-  // read and a standing failure after a remount are state — polite. Both are
-  // fields of THIS instance: a remount starts polite again on purpose.
-  let loadFailureAnswersPress = $state(false);
-  // Which refusal the load-failure nodes belong to, so a repeat is heard — the
-  // device `locale-choice.ts` uses for `readStamp`.
-  let loadStamp = $state(0);
-
   async function refresh(origin: 'mount' | 'press'): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
@@ -537,9 +536,24 @@
   // screen is drawn from them.
   const languageReadStamp = $derived($localeChoiceState.readStamp);
   const languageApplyStamp = $derived($localeChoiceState.applyStamp);
-  // D165 (1): set by the "Retry reading" button, never by `onMount` or by a
-  // remount, so only a read that button started answers assertively.
-  let languageReadAnswersPress = $state(false);
+  // D165 (1): holds the `readStamp` the "Retry reading" button's own read
+  // STARTED from, not the stamp it expects to land on — `readStamp` moves
+  // only when a read ANSWERS, never on success (`locale-choice.ts`'s own
+  // comment on it), so a click cannot compute its answer's stamp ahead of
+  // time. `null` while no press is unanswered. Cleared back to `null` by the
+  // click's own `.then` once `readStamp` stops moving (success, or a stale
+  // read superseded by a newer one) — see the button below.
+  //
+  // ponytail: a read nobody pressed for that fails while this one is still in
+  // flight moves `readStamp` too, and this cannot tell the two apart — it is
+  // taken as the press's own answer. Narrow this if that ever happens outside
+  // a race this rare (a double-click on this same button, or another read
+  // landing in the same instant).
+  let languageRetryFrom = $state<number | null>(null);
+  // True for exactly one answer: the first `readStamp` past the click. A
+  // later failure nobody pressed for moves `readStamp` again without moving
+  // `languageRetryFrom`, so it no longer equals `languageRetryFrom + 1`.
+  const languageReadAnswersPress = $derived(languageRetryFrom !== null && languageReadStamp === languageRetryFrom + 1);
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -649,20 +663,24 @@
   //
   // Which region a sentence goes to is decided by WHAT IT IS ABOUT, for most
   // of this section: a state a read reported is polite, a refusal of an
-  // operation this window issued is assertive. D165 (1) is the one exception:
+  // operation this window issued is assertive. D165 (1) is an exception:
   // a READ's own refusal is louder when a person's press started that read —
   // `loadFailureAnswersPress` and `languageReadAnswersPress` carry which is
   // true for the load failure and the language read failure respectively.
   //
-  // 🔴 One disagreement with the spec's own criterion (§2.2: assertive means
-  // "a person just pressed, the answer is urgent") is left standing
-  // deliberately: a REMOUNT re-announces a standing `partial`/`unknown`/
-  // `changeError` in the assertive region again, with nobody having pressed
-  // anything for it, because `localeChoiceState` is module-level and
-  // `Settings.svelte` rebuilds this section on every section switch. Whether
-  // that is right is the owner's call, booked rather than decided here; the
-  // live check's scenario 5 is where the remount case gets heard rather than
-  // reasoned about.
+  // 🔴 Two disagreements with the spec's own criterion (§2.2: assertive means
+  // "a person just pressed, the answer is urgent") are left standing
+  // deliberately, both with nobody having pressed anything. A failed
+  // MOUNT-time `get_locale` is one: `loadLocaleChoice`'s own catch sets
+  // `application: {kind: 'unknown'}` regardless of who started the read, and
+  // the `language-unknown` paragraph is unconditionally assertive — D165 (1)
+  // never touched that path, only the `language-failed`/`language-error`
+  // pair. A REMOUNT is the other: it re-announces a standing
+  // `partial`/`unknown`/`changeError` in the assertive region again, because
+  // `localeChoiceState` is module-level and `Settings.svelte` rebuilds this
+  // section on every section switch. Whether either is right is the owner's
+  // call, booked rather than decided here; the live check's scenario 5 is
+  // where the remount case gets heard rather than reasoned about.
   //
   // Visible paragraphs stay where they are and name their region through
   // `data-announced-by`; none of them is a descendant of either.
@@ -950,7 +968,7 @@
         type="button"
         data-testid="application-language-retry-read"
         disabled={languageBusy}
-        onclick={() => { languageReadAnswersPress = true; void loadLocaleChoice(); }}
+        onclick={() => { languageRetryFrom = languageReadStamp; void loadLocaleChoice().then(() => { if (languageReadStamp === languageRetryFrom) languageRetryFrom = null; }); }}
       >{languageRetryReadLabel}</button>
     {/if}
   </div>
