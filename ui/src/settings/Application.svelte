@@ -214,9 +214,9 @@
 
   // Gated on `shortcutOutcome === 'unchanged'`: while a change is `pending`,
   // `unavailable` still holds the PRE-change reason, so a match there is not
-  // yet the settled fact this predicate is about. `not_saved` carries no
-  // reason to repeat either — its hotkey status is `registered`, which makes
-  // `unavailable` null.
+  // yet the settled fact this predicate is about. `not_saved` is only ever
+  // set from a `registered` read in `refresh()`, so when it is set there is
+  // no reason on screen to repeat.
   const shortcutQuoteRepeats = $derived(
     shortcutOutcome === 'unchanged' && repeatsReason(unavailable?.reason ?? null, hotkeyError),
   );

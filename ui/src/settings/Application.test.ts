@@ -2533,10 +2533,12 @@ test('a refusal whose sentence is the standing reason is not quoted a second tim
 
 test('a refusal that differs from the standing reason by one full stop is quoted in full under the usual heading', async () => {
   // A trailing full stop and not a swapped comma: `ALMOST` CONTAINS `REASON`,
-  // so an `includes` comparison calls them equal and dies here, and so does
-  // any normalisation that trims punctuation. A swapped comma would be missed
-  // by `includes` entirely. Not a trailing space: `visible()` trims it, and the
-  // assertion below could not tell the two strings apart.
+  // so `error.includes(reason)` calls them equal and dies here — the reverse
+  // direction, `reason.includes(error)`, is not, since `REASON` does not
+  // contain the longer `ALMOST`. Any normalisation that trims punctuation
+  // dies here too. A swapped comma would be missed by `includes` entirely.
+  // Not a trailing space: `visible()` trims it, and the assertion below
+  // could not tell the two strings apart.
   const ALMOST = `${REASON}.`;
   expect(REASON.endsWith('.')).toBe(false);
   await withUnavailableShortcut();
@@ -2587,6 +2589,10 @@ test('autostart: a refusal whose sentence is the standing reason is not quoted t
   await waitFor(() => expect(at('application-autostart-failed')).toBe('Налаштування не змінено — з тієї самої причини.'));
   expect(screen.queryByTestId('application-autostart-error')).toBeNull();
   expect(visiblePageText().split(WHY).length - 1).toBe(1);
+  // Heard in full too (spec §2.1 requirement 2): the heading AND the
+  // sentence itself, not a pointer — the same requirement Task 3's shortcut
+  // test checks above, here for autostart.
+  expect(announced(assertiveRegion())).toEqual(['Налаштування не змінено — з тієї самої причини.', WHY]);
   const ids = describedByIds(screen.getByTestId('application-autostart-enable'));
   for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
   expect(ids).toContain('application-autostart-reason');
