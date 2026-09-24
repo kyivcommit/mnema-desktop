@@ -1074,12 +1074,17 @@ test('a shortcut refused outright is still reported as unchanged', async () => {
 // Here BOTH acts are rejections, so `hotkeyError` never goes null and the
 // heading stays on screen throughout. The second rejection's own re-read
 // resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
-// Then the FIRST rejection's re-read — long superseded — answers naming the
-// shortcut ITS call sent. A `refresh()` that returned that answer instead of
-// `null` would compare it against the shortcut that call sent, find them equal,
-// and rewrite the heading of a rejection it knows nothing about. The assertion
-// is positive: the sentence on screen is still the one the LIVE rejection
-// earned.
+// Then the FIRST rejection's re-read — superseded on BOTH stamps by the second
+// rejection's own `refresh()` call — answers naming the shortcut ITS OWN call
+// sent. What stops it now is the early return inside `refresh()`: neither
+// stamp survived, so it returns before touching `prefs` or `shortcutOutcome`
+// at all — there is nothing left for it to write, let alone compare. (Before
+// fix round 1 the comparison ran in a callback attached to this exact read,
+// against the shortcut THAT call sent; today the only comparison that ever
+// runs is against `refusedShortcut`, which by this point already holds the
+// SECOND rejection's own combination, not the first's — but the discarded
+// read never reaches it either way.) The assertion is positive: the sentence
+// on screen is still the one the LIVE rejection earned.
 test('a corrective read the stamp discarded does not get to choose the sentence', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -2474,9 +2479,12 @@ test('a read started by another refusal still settles the shortcut heading', asy
   // B answers, naming the combination the shortcut attempt sent — still
   // registered, row 6: the operating system kept it, only the file did not.
   queue[2].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
-  // A answers too, late — already superseded by B when B was started, so it
-  // must not get to rewrite what B already settled.
-  queue[1].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  // A answers too, late — a DIFFERENT payload than B's, deliberately: if a
+  // regression let A (superseded on both stamps) settle instead of B, the
+  // outcome would read `unchanged` from THIS combination, not `not_saved`,
+  // so the assertion below pins which read answered, not merely that some
+  // read did.
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
   await tick();
   await tick();
   await tick();
@@ -2499,8 +2507,14 @@ test('a read started by another refusal still settles the shortcut heading', asy
 // writing this). What the pending guard alone still protects, independent of
 // the stamp: an outcome that has ALREADY settled must not be reopened by a
 // later, unrelated read that happens to answer with data that would satisfy
-// the criterion — refusedShortcut is not cleared on settle, so a stale
-// comparison is one unrelated rejection away.
+// the criterion. `refusedShortcut` is not cleared on settle, so the
+// comparison is still sitting there waiting — this window's own `set_hotkey`
+// cannot produce that transition today (every later read returns the SAME
+// hotkey state until the next recording, which resets the outcome first), so
+// this is defence in depth for the day something else can change the hotkey
+// state without going through this window's own refusal — another Settings
+// window, or the tray — not a reachable bug in the single-window app today.
+// The fixture below constructs that transition deliberately, by hand.
 test('a settled outcome must not be re-litigated by an unrelated later read', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {

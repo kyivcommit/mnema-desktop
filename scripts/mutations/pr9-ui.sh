@@ -565,9 +565,15 @@ case_ "a shortcut the system kept but could not save is not called unchanged" \
 # judging test above stays — still true, still worth having — but it no
 # longer discriminates THIS mutant, so this case now targets the guard that
 # does: a settled outcome must not be reopened by a later, unrelated read
-# whose answer happens to satisfy the (stale) comparison — `refusedShortcut`
-# is not cleared on settle, so that comparison is one unrelated rejection away
-# for as long as `hotkeyError` keeps the heading on screen.
+# whose answer happens to satisfy the (stale) comparison. `refusedShortcut` is
+# not cleared on settle, so the comparison is still sitting there — but this
+# window's own `set_hotkey` cannot produce that transition today (every later
+# read returns the SAME hotkey state until the next recording, which resets
+# the outcome first). This is defence in depth for the day something else can
+# change the hotkey state without this window's own refusal deciding it —
+# another Settings window, or the tray — not a reachable bug in the
+# single-window app today. The judging test constructs that transition by
+# hand, deliberately.
 case_ "a settled outcome must not be re-litigated by an unrelated later read" \
   ui/src/settings/Application.svelte \
   's~      if \(appliedHotkey !== null && shortcutOutcome === .pending.\) \{~      if (appliedHotkey !== null) { // mutant: re-litigates a settled outcome~' \
