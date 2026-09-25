@@ -103,7 +103,7 @@ export type LocaleChoiceState = {
   // superseded read writes neither, so the two never disagree about which
   // read they describe. `changeLocaleChoice`'s own recovery call passes no
   // origin, so a rejected change is never mistaken for a press on this
-  // button, whichever value it lands on.
+  // button, whichever way that read answers.
   readAnswersPress: boolean;
   applyStamp: number;
 };

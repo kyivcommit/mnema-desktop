@@ -1845,8 +1845,9 @@ test('pressing "Retry reading" on the same language read failure is heard again'
 // repeat of ITS refusal isolates the key's own stamp from the button
 // entirely — nothing here is ever pressed. The mount read must succeed
 // first: a persistently rejected `getLocale` would also fail the MOUNT read,
-// leaving `snapshot` unconfirmed and the select `disabled`, which is not a
-// control a person could operate to reach this scenario at all.
+// leaving `snapshot` null (`languageReady` false) and the select `disabled`,
+// which is not a control a person could operate to reach this scenario at
+// all.
 test('a second rejected language change whose recovery read repeats the same refusal is heard again, politely', async () => {
   const SENTENCE = 'get_locale is unreachable';
   setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
@@ -2079,11 +2080,9 @@ test('pressing «Retry reading» for the language and being refused again is ann
   expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
 });
 
-// Two clicks before either read answers. The store decides who wrote the
-// failure that lands, not a component-side marker: the FIRST click's own
-// read, once superseded by the second, writes nothing at all — the same
-// `mine !== opSeq` guard `locale-choice.ts` already had for any two reads in
-// flight — so there is nothing for the second click to erase.
+// Two clicks before either read answers. The first click's read, superseded
+// by the second (`mine !== opSeq`), writes nothing; only the second read's
+// failure writes the store, with the press origin.
 test('two Retry presses before either answers: the later read is heard, assertively', async () => {
   const STANDING = 'IPC closed';
   const R1 = 'first retry read refused';
@@ -2164,10 +2163,10 @@ test('a recovery read refused after a rejected language change stays polite, eve
 });
 
 // A language change made while a Retry press's own read is still in flight
-// supersedes that read (`locale-choice.ts`'s own `opSeq`, unchanged by this
-// task): the change's own recovery read is the one that answers, and it
-// carries no press origin, so its refusal is polite regardless of the Retry
-// click that never got to answer.
+// supersedes that read (`locale-choice.ts`'s own `opSeq`): the change's own
+// recovery read is the one that answers, and it carries no press origin, so
+// its refusal is polite regardless of the Retry click that never got to
+// answer.
 test("a language change made while a Retry read is in flight is answered, politely, by that change's own recovery read", async () => {
   const FIRST = 'get_locale is unreachable';
   const SECOND = 'get_locale is unreachable again';
@@ -2218,6 +2217,8 @@ test('after a remount, a standing language read failure is reported politely aga
   await tick();
   await tick();
   expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
+  expect(announced(politeRegion())).toContain(UNREADABLE);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
 
   remountRead.reject(new Error(UNREADABLE));
   await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
