@@ -577,18 +577,14 @@ test('the handle offset matches the stylesheet', () => {
     barPadTop: num(/padding:\s*(\d+)px/, searchbar, '.searchbar padding-top'),
     pinH: num(/height:\s*(\d+)px/, pin, '.pin height'),
   };
-  const shape =
-    /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
+  const shape = /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
   const m = rust.match(shape);
   if (!m) throw new Error('HANDLE_CENTRE is not written in the guarded shape');
-  const fromRust = m.slice(1, 8).map(Number);
-  expect(fromRust).toEqual([
-    fromCss.padX, fromCss.col1, fromCss.gap, fromCss.col2,
-    fromCss.padY, fromCss.barPadTop, fromCss.pinH,
-  ]);
+  const fromRust = m.slice(1, 5).map(Number);
+  expect(fromRust).toEqual([fromCss.col2, fromCss.padY, fromCss.barPadTop, fromCss.pinH]);
   // And the numbers are what the spec says today, so a wrong regex that
   // captured the wrong declaration cannot pass by coincidence.
-  expect(fromRust).toEqual([0, 285, 5, 470, 0, 11, 26]);
+  expect(fromRust).toEqual([470, 0, 11, 26]);
   // The offset is only this fixed because the tracks plus gaps exactly fill the
   // content box: then `justify-content: center` and the minmax floor never engage.
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
@@ -604,4 +600,23 @@ test('the handle offset matches the stylesheet', () => {
   const breakpoints = [...css.matchAll(/@media \(max-width: (\d+)px\)/g)].map((b) => Number(b[1]));
   expect(breakpoints.length, 'no max-width breakpoint found').toBeGreaterThan(0);
   for (const bp of breakpoints) expect(bp, `breakpoint ${bp}px`).toBeLessThan(launcher.width);
+  // `launcher_layout::{SEARCH_WIDTH, LEFT_SPAN, RIGHT_SPAN}` (Task 2) restate
+  // the same columns for the width/offset math a side-panel layout uses —
+  // read the Rust file with a regex, as `launcher_position.rs` already is.
+  const layout = readFileSync(join(HERE, '../../../src-tauri/src/launcher_layout.rs'), 'utf8');
+  const oneConst = (name: string) => {
+    const re = new RegExp(`pub const ${name}: f64 = ([\\d.]+);`);
+    const mm = layout.match(re);
+    if (!mm) throw new Error(`${name} is not written in the guarded shape`);
+    return Number(mm[1]);
+  };
+  const spanConst = (name: string) => {
+    const re = new RegExp(`pub const ${name}: f64 = ([\\d.]+) \\+ ([\\d.]+);`);
+    const mm = layout.match(re);
+    if (!mm) throw new Error(`${name} is not written in the guarded shape`);
+    return Number(mm[1]) + Number(mm[2]);
+  };
+  expect(oneConst('SEARCH_WIDTH')).toBe(fromCss.col2);
+  expect(spanConst('LEFT_SPAN')).toBe(fromCss.col1 + fromCss.gap);
+  expect(spanConst('RIGHT_SPAN')).toBe(col3 + fromCss.gap);
 });

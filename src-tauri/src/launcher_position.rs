@@ -11,6 +11,7 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::launcher_layout::{Layout, search_offset};
 use crate::models::Platform;
 use tauri::{LogicalPosition, PhysicalPosition, PhysicalRect, Position};
 use tauri_plugin_positioner::{Position as TrayPosition, WindowExt};
@@ -115,39 +116,76 @@ impl Space {
     }
 }
 
-/// Where the window is now, in the space of this build; `None` when the
-/// runtime cannot say. The one read shared by `remember` and the focus-in
-/// settle — both must convert the same way, or a settle and a blur disagree.
-pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<Point> {
+/// The factor [`HANDLE_CENTRE`] and [`search_offset`] take when converting
+/// between the window's corner and the search column's, in the space
+/// `space`: the scale itself in the physical space (Windows), `1.0` in the
+/// logical one (macOS/Linux) — the same choice [`Space::area`] already makes
+/// for a monitor's own factor. `pub`: Task 4 reads it too.
+pub fn factor(space: Space, scale: f64) -> f64 {
+    match space {
+        Space::Physical => scale,
+        Space::Logical => 1.0,
+    }
+}
+
+/// A window corner shifted to the search column's corner: `Layout`'s left
+/// column pushes the search column right by `search_offset(l)`, scaled into
+/// `factor`'s space. The identity when `l` shows no left column.
+pub fn to_search(p: Point, l: Layout, factor: f64) -> Point {
+    Point {
+        x: p.x + (search_offset(l) * factor).round() as i32,
+        y: p.y,
+    }
+}
+
+/// The inverse of [`to_search`]: a search column corner shifted back to the
+/// window's own corner, the point `set_position` takes.
+pub fn to_window(p: Point, l: Layout, factor: f64) -> Point {
+    Point {
+        x: p.x - (search_offset(l) * factor).round() as i32,
+        y: p.y,
+    }
+}
+
+/// The search column's top-left corner right now, in the space of this
+/// build; `None` when the runtime cannot say. Every point this module reads,
+/// stores or compares is the search column's corner, never the window's —
+/// `here` converts the runtime's window-corner report through [`to_search`]
+/// for the launcher's current `Layout`. The one read shared by `remember` and
+/// the focus-in settle — both must convert the same way, or a settle and a
+/// blur disagree.
+pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>, l: Layout) -> Option<Point> {
     let p = window.outer_position().ok()?;
     let scale = window.scale_factor().ok()?;
-    Some(Space::of_this_build().point(p, scale))
+    let space = Space::of_this_build();
+    Some(to_search(space.point(p, scale), l, factor(space, scale)))
 }
 
 /// The `prefs.json` key: `{"x": <i32>, "y": <i32>}` in [`Space::of_this_build`]
 /// — physical pixels on Windows, logical points on macOS and Linux.
 pub const KEY: &str = "launcher_position";
 
-/// A point on the drag handle, in logical pixels from the window's top-left
-/// corner: the middle of the search panel's first row (the input and the pin).
-/// Every number is a declaration in `ui/src/styles/launcher.css` — `main.panels`
-/// padding `0px 0px` (owner, 2026-09-25: no hidden margin round the panels, so
-/// the window goes flush to a screen edge), first column 285, gap 5, second
-/// column 470, then the panel's own padding-top 11 and the pin's height 26.
-/// The owner narrowed the gap (16 → 8 → 5) and widened the side columns by
-/// half (190 → 285, 244 → 366) on 2026-09-25.
+/// A point on the drag handle, in logical pixels from the search column's own
+/// top-left corner — not the window's: the window's corner moves under
+/// `Layout` (a visible left column pushes it left of the search column, see
+/// [`to_window`]), the search column's does not. The point is the middle of
+/// the search panel's first row (the input and the pin). Every number is a
+/// declaration in `ui/src/styles/launcher.css` — `main.panels` padding
+/// `0px 0px` (owner, 2026-09-25: no hidden margin round the panels, so the
+/// window goes flush to a screen edge), the search column's own width 470,
+/// then the panel's own padding-top 11 and the pin's height 26. The owner
+/// narrowed the gap (16 → 8 → 5) and widened the side columns by half
+/// (190 → 285, 244 → 366) on 2026-09-25.
 ///
-/// The offset is only this fixed because the window is: `"width": 1131` and
-/// `"resizable": false` in `src-tauri/tauri.conf.json`. The three grid tracks
-/// plus their two 5px gaps (285 + 470 + 366 + 2 × 5 = 1131) exactly fill the
-/// content box (1131 − 2 × 0 = 1131), which is why `main.panels`'
-/// `justify-content: center` and the middle column's `minmax(0, …)` floor never
-/// actually engage — either one becoming live would shift the panel and make
-/// this offset wrong.
+/// The search column is always 470 wide (`launcher_layout::SEARCH_WIDTH`),
+/// whatever side panels `Layout` shows next to it, so this offset is the same
+/// constant in every layout — `to_search`/`to_window` carry the per-layout
+/// shift between the window's corner and this one.
 /// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` reads both
-/// this line and the stylesheet, and checks that same sum against the window
-/// width, failing if any of them disagree.
-pub const HANDLE_CENTRE: (f64, f64) = (0.0 + 285.0 + 5.0 + 470.0 / 2.0, 0.0 + 11.0 + 26.0 / 2.0);
+/// this line and the stylesheet, and separately checks the three columns'
+/// width sum against the window width in `tauri.conf.json`, failing if any of
+/// them disagree.
+pub const HANDLE_CENTRE: (f64, f64) = (470.0 / 2.0, 0.0 + 11.0 + 26.0 / 2.0);
 
 /// The saved position, or `None` for anything that is not two integers under
 /// `KEY`. Tolerant on purpose: this runs on show, with nowhere to report to,
@@ -166,29 +204,35 @@ pub fn write(data_dir: &Path, p: Point) -> std::io::Result<()> {
     crate::prefs::write_key(data_dir, KEY, serde_json::json!({ "x": p.x, "y": p.y }))
 }
 
-/// `Some(saved)` when the drag handle's reference point would land inside some
-/// monitor's work area — `(x + HANDLE_CENTRE.0 * scale, y + HANDLE_CENTRE.1 * scale)`
-/// with *that* monitor's factor, since `HANDLE_CENTRE` is always logical while
-/// `saved` and each area are in `Space::of_this_build()`. Monitors arrive from
-/// [`Space::area`], each paired with the factor the handle offset takes there —
-/// the monitor's scale in the physical space, 1 in the logical one. Each
-/// monitor is tried with its own factor (the physical space only — in the
-/// logical one every factor is 1): a window straddling a 1× and a 2× monitor
-/// takes the factor of whichever holds most of it, and the monitor that holds
-/// the handle is the one whose factor put it there — the approximation errs
-/// towards keeping a saved position, and
-/// `adjacent_monitors_with_different_scales_each_use_their_own` pins it. Otherwise `None`: a monitor that was unplugged,
-/// or a resolution / DPI change that left only the window's corner on screen.
-/// The whole window need not be visible — a window the person left half off
-/// the edge comes back half off the edge.
-pub fn reachable(saved: Option<Point>, monitors: &[(Area, f64)]) -> Option<Point> {
-    let p = saved?;
-    let on_some_monitor = monitors.iter().any(|(area, scale)| {
+/// The factor [`HANDLE_CENTRE`] takes on whichever monitor holds the drag
+/// handle's reference point — `(x + HANDLE_CENTRE.0 * scale, y + HANDLE_CENTRE.1 * scale)`
+/// landing inside that monitor's work area — or `None` off every monitor.
+/// `HANDLE_CENTRE` is always logical while `p` and each area are in
+/// `Space::of_this_build()`. Monitors arrive from [`Space::area`], each
+/// paired with the factor the handle offset takes there — the monitor's scale
+/// in the physical space, 1 in the logical one. Each monitor is tried with
+/// its own factor (the physical space only — in the logical one every factor
+/// is 1): a window straddling a 1× and a 2× monitor takes the factor of
+/// whichever holds most of it, and the monitor that holds the handle is the
+/// one whose factor put it there — the approximation errs towards keeping a
+/// saved position, and `adjacent_monitors_with_different_scales_each_use_their_own`
+/// pins it.
+pub fn handle_factor(p: Point, monitors: &[(Area, f64)]) -> Option<f64> {
+    monitors.iter().find_map(|(area, scale)| {
         let hx = f64::from(p.x) + HANDLE_CENTRE.0 * scale;
         let hy = f64::from(p.y) + HANDLE_CENTRE.1 * scale;
-        hx >= area.x && hx < area.x + area.width && hy >= area.y && hy < area.y + area.height
-    });
-    on_some_monitor.then_some(p)
+        (hx >= area.x && hx < area.x + area.width && hy >= area.y && hy < area.y + area.height)
+            .then_some(*scale)
+    })
+}
+
+/// `Some(saved)` when the drag handle would land inside some monitor's work
+/// area — [`handle_factor`] found one. Otherwise `None`: a monitor that was
+/// unplugged, or a resolution / DPI change that left only the search column's
+/// corner on screen. The whole window need not be visible — a window the
+/// person left half off the edge comes back half off the edge.
+pub fn reachable(saved: Option<Point>, monitors: &[(Area, f64)]) -> Option<Point> {
+    saved.filter(|p| handle_factor(*p, monitors).is_some())
 }
 
 #[derive(Default)]
@@ -308,10 +352,11 @@ pub fn place<R: tauri::Runtime>(
     memory: &Memory,
     data_dir: Option<&Path>,
     wayland: bool,
+    l: Layout,
 ) {
     let space = Space::of_this_build();
-    let restored = if wayland {
-        None
+    let (restored, monitors): (Option<Point>, Vec<(Area, f64)>) = if wayland {
+        (None, Vec::new())
     } else {
         let saved = memory.left().or_else(|| data_dir.and_then(read));
         let monitors: Vec<(Area, f64)> = window
@@ -320,11 +365,16 @@ pub fn place<R: tauri::Runtime>(
             .iter()
             .map(|m| space.area(*m.work_area(), m.scale_factor()))
             .collect();
-        reachable(saved, &monitors)
+        (reachable(saved, &monitors), monitors)
     };
     match restored {
         Some(p) => {
-            let _ = window.set_position(space.position(p));
+            // The saved point is the search column's corner; the factor is
+            // the scale of whichever monitor holds the handle there (`here`
+            // uses the window's own scale — this may be a different monitor
+            // than the one the window starts on, the PR #47 class of defect).
+            let factor = handle_factor(p, &monitors).unwrap_or(1.0);
+            let _ = window.set_position(space.position(to_window(p, l, factor)));
         }
         // §6: next to the tray on macOS, placed after `show` below.
         None if wayland || cfg!(target_os = "macos") => {}
@@ -357,11 +407,12 @@ pub fn remember<R: tauri::Runtime>(
     memory: &Memory,
     data_dir: &Path,
     wayland: bool,
+    l: Layout,
 ) {
     if wayland {
         return;
     }
-    let Some(now) = here(window) else {
+    let Some(now) = here(window, l) else {
         return;
     };
     if let Err(e) = remember_position(now, memory, data_dir) {
@@ -492,15 +543,59 @@ mod tests {
         let saved = Space::Logical.point(PhysicalPosition::new(1700, 100), 1.0);
         let restored = reachable(Some(saved), &[primary, external]);
         assert_eq!(restored, Some(Point { x: 1700, y: 100 }));
-        // Unplug the external: the handle (2173, 148) is on no monitor.
+        // Unplug the external: the handle (1935, 124) — 1700 + 235, 100 + 24 —
+        // is on no monitor.
         assert_eq!(reachable(Some(saved), &[primary]), None);
+    }
+
+    // --- to_search / to_window / handle_factor (Task 3: D155 relative to the search column) ---
+
+    #[test]
+    fn the_search_corner_round_trips_through_every_layout() {
+        for l in [(false, false), (true, false), (false, true), (true, true)] {
+            let l = Layout {
+                left: l.0,
+                right: l.1,
+            };
+            for factor in [1.0, 2.0] {
+                let p = Point { x: 600, y: 80 };
+                assert_eq!(to_search(to_window(p, l, factor), l, factor), p);
+            }
+        }
+    }
+
+    #[test]
+    fn the_left_column_moves_the_window_corner_not_the_search_corner() {
+        let search = Point { x: 600, y: 80 };
+        let hot = Layout {
+            left: true,
+            right: true,
+        };
+        assert_eq!(to_window(search, hot, 1.0), Point { x: 310, y: 80 });
+        // Review Focus 5: on a 2× monitor in the physical space the offset doubles.
+        assert_eq!(to_window(search, hot, 2.0), Point { x: 20, y: 80 });
+        assert_eq!(to_window(search, Layout::default(), 2.0), search);
+    }
+
+    #[test]
+    fn the_factor_is_the_monitor_that_holds_the_handle() {
+        // Review Focus 5: a 1× monitor and a 2× one to its right. A search corner
+        // whose handle is on the 2× monitor takes 2.0 whatever the window's own
+        // scale is now; off every monitor there is no factor.
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
+        assert_eq!(handle_factor(Point { x: 1700, y: 100 }, &two), Some(2.0)); // 1700 + 470 = 2170
+        assert_eq!(handle_factor(Point { x: 100, y: 100 }, &two), Some(1.0)); // 100 + 235 = 335
+        assert_eq!(handle_factor(Point { x: 9000, y: 100 }, &two), None);
     }
 
     // --- reachable: the two counterexamples from the spec review, then DPI ---
 
     #[test]
     fn a_handle_whose_centre_is_on_a_monitor_is_kept() {
-        // Window corner off the left edge, handle (x = 425) well inside.
+        // Window corner off the left edge, handle (x = -100 + 235 = 135) well inside.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(-100, 100), &m), at(-100, 100));
     }
@@ -508,7 +603,7 @@ mod tests {
     #[test]
     fn a_window_whose_corner_is_on_screen_but_whose_handle_is_not_is_dropped() {
         // Corner at x = 1800 is inside a 1920-wide monitor; the handle centre
-        // (1800 + 525 = 2325) is not. The old corner test kept this one.
+        // (1800 + 235 = 2035) is not. The old corner test kept this one.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(1800, 100), &m), None);
     }
@@ -516,11 +611,12 @@ mod tests {
     #[test]
     fn the_handle_offset_scales_with_the_monitor() {
         // Same physical point, same 3840-wide monitor: at scale 2 the handle
-        // centre is 3000 + 1050 = 4050 (off), at scale 1 it is 3525 (on).
+        // centre is 3500 + 235 * 2 = 3970 (off), at scale 1 it is
+        // 3500 + 235 = 3735 (on).
         let hidpi = [monitor(0, 0, 3840, 2160, 2.0)];
         let lodpi = [monitor(0, 0, 3840, 2160, 1.0)];
-        assert_eq!(reachable(at(3000, 200), &hidpi), None);
-        assert_eq!(reachable(at(3000, 200), &lodpi), at(3000, 200));
+        assert_eq!(reachable(at(3500, 200), &hidpi), None);
+        assert_eq!(reachable(at(3500, 200), &lodpi), at(3500, 200));
     }
 
     #[test]
@@ -528,7 +624,7 @@ mod tests {
         // Centre exactly at x0 + w is the first pixel that is NOT on the
         // monitor; one to the left is the last that is. Kills `<` → `<=`.
         let m = [monitor(0, 0, 1000, 1000, 1.0)];
-        let on_edge = 1000 - 525;
+        let on_edge = 1000 - 235;
         assert_eq!(reachable(at(on_edge, 0), &m), None);
         assert_eq!(reachable(at(on_edge - 1, 0), &m), at(on_edge - 1, 0));
     }
@@ -556,16 +652,16 @@ mod tests {
     #[test]
     fn adjacent_monitors_with_different_scales_each_use_their_own() {
         // A 1× monitor at 0..1920 and a 2× monitor to its right. Saved corner at
-        // x = 1600: on the 1× monitor the handle (2125) is off its edge, on the
-        // 2× monitor (1600 + 1050 = 2650) it is inside — kept. Remove the 2×
-        // monitor and it is off everything.
+        // x = 1700: on the 1× monitor the handle (1700 + 235 = 1935) is off its
+        // edge, on the 2× monitor (1700 + 235 * 2 = 2170) it is inside — kept.
+        // Remove the 2× monitor and it is off everything.
         let two = [
             monitor(0, 0, 1920, 1080, 1.0),
             monitor(1920, 0, 3840, 2160, 2.0),
         ];
         let one = [monitor(0, 0, 1920, 1080, 1.0)];
-        assert_eq!(reachable(at(1600, 100), &two), at(1600, 100));
-        assert_eq!(reachable(at(1600, 100), &one), None);
+        assert_eq!(reachable(at(1700, 100), &two), at(1700, 100));
+        assert_eq!(reachable(at(1700, 100), &one), None);
     }
 
     #[test]
@@ -576,8 +672,9 @@ mod tests {
 
     #[test]
     fn a_second_monitor_with_negative_origin_counts() {
-        // Primary at 0, a second monitor to its left. The point is off the
-        // primary and on the second — and with the second removed it is off.
+        // Primary at 0, a second monitor to its left. The handle
+        // (-1500 + 235 = -1265) is off the primary [0, 1920) and inside the
+        // second [-1920, 0) — and with the second removed it is off.
         let two = [
             monitor(0, 0, 1920, 1080, 1.0),
             monitor(-1920, 0, 1920, 1080, 1.0),

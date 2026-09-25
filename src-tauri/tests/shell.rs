@@ -166,7 +166,13 @@ fn place_leaves_the_position_to_the_focus_in() {
     let memory = app.state::<mnema_desktop::launcher_position::Memory>();
     assert_eq!(memory.applied(), None, "applied before any show?");
 
-    mnema_desktop::launcher_position::place(&window, &memory, None, false);
+    mnema_desktop::launcher_position::place(
+        &window,
+        &memory,
+        None,
+        false,
+        mnema_desktop::launcher_layout::Layout::default(),
+    );
 
     assert_eq!(
         memory.applied(),
@@ -180,6 +186,7 @@ fn place_leaves_the_position_to_the_focus_in() {
 
     memory.settled(mnema_desktop::launcher_position::here(
         &window.as_ref().window(),
+        mnema_desktop::launcher_layout::Layout::default(),
     ));
 
     assert_eq!(
@@ -232,7 +239,13 @@ fn a_wayland_show_leaves_nothing_awaiting() {
         .expect("no launcher window");
     let memory = app.state::<mnema_desktop::launcher_position::Memory>();
 
-    mnema_desktop::launcher_position::place(&window, &memory, None, true);
+    mnema_desktop::launcher_position::place(
+        &window,
+        &memory,
+        None,
+        true,
+        mnema_desktop::launcher_layout::Layout::default(),
+    );
 
     assert!(
         !memory.awaiting(),
@@ -250,6 +263,7 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     // the new default against the stale drag, scored it as a move, and
     // overwrote the file with the default (0, 0) — losing the saved position
     // with no drag anywhere in the sequence.
+    use mnema_desktop::launcher_layout::Layout;
     use mnema_desktop::launcher_position::{self, Memory};
     use tauri::Manager;
     let app = mock_app_with_memory();
@@ -269,9 +283,18 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
     memory.moved(launcher_position::Point { x: 640, y: 80 });
 
-    launcher_position::place(&window, &memory, Some(dir.path()), false);
-    memory.settled(launcher_position::here(&window.as_ref().window()));
-    launcher_position::remember(&window.as_ref().window(), &memory, dir.path(), false);
+    launcher_position::place(&window, &memory, Some(dir.path()), false, Layout::default());
+    memory.settled(launcher_position::here(
+        &window.as_ref().window(),
+        Layout::default(),
+    ));
+    launcher_position::remember(
+        &window.as_ref().window(),
+        &memory,
+        dir.path(),
+        false,
+        Layout::default(),
+    );
 
     let after = std::fs::read(&prefs_path).unwrap();
     assert_eq!(
@@ -305,6 +328,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     // answers `outer_position` with (0, 0); with (5, 5) recorded as applied,
     // that is a move, and the file must say so. Deleting `remember`'s body —
     // or its `outer_position` read — leaves the file without the key.
+    use mnema_desktop::launcher_layout::Layout;
     use mnema_desktop::launcher_position::{self, Memory};
     use tauri::Manager;
     let app = mock_app();
@@ -322,7 +346,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     let memory = Memory::default();
     memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
 
-    launcher_position::remember(&window, &memory, dir.path(), false);
+    launcher_position::remember(&window, &memory, dir.path(), false, Layout::default());
 
     assert_eq!(
         launcher_position::read(dir.path()),
@@ -335,7 +359,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     let dir2 = tempfile::tempdir().unwrap();
     let fresh = Memory::default();
     fresh.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
-    launcher_position::remember(&window, &fresh, dir2.path(), true);
+    launcher_position::remember(&window, &fresh, dir2.path(), true, Layout::default());
     assert_eq!(
         launcher_position::read(dir2.path()),
         None,

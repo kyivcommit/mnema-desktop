@@ -284,6 +284,7 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
                 &memory,
                 data_dir.as_deref(),
                 os_services::wayland_session(),
+                app.state::<launcher_layout::Current>().get(),
             );
             true
         }
@@ -656,6 +657,7 @@ pub fn run() -> anyhow::Result<()> {
                         &memory,
                         &data_dir,
                         os_services::wayland_session(),
+                        app.state::<launcher_layout::Current>().get(),
                     );
                 }
                 app.exit(0)
@@ -703,6 +705,7 @@ pub fn run() -> anyhow::Result<()> {
                     &memory,
                     &data_dir,
                     os_services::wayland_session(),
+                    app.state::<launcher_layout::Current>().get(),
                 );
             }
             // D155: the show cannot know where the window manager put the
@@ -715,7 +718,10 @@ pub fn run() -> anyhow::Result<()> {
             tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 let memory = app.state::<launcher_position::Memory>();
-                memory.settled(launcher_position::here(window));
+                memory.settled(launcher_position::here(
+                    window,
+                    app.state::<launcher_layout::Current>().get(),
+                ));
             }
             _ => {}
         })
