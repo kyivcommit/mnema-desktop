@@ -9815,6 +9815,21 @@ fn a_walk_applies_every_stored_mask_not_only_the_first() {
 // on the main thread and the autolaunch writes a LaunchAgent plist naming the
 // test binary. D-d.
 
+/// The launcher's ⌘, reaches the settings window through this command. The
+/// launcher test mocks `invoke`, so only this sees an unregistered command.
+#[test]
+fn open_settings_is_registered() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    assert_eq!(
+        call(&webview, "open_settings", json!({})),
+        Ok(Value::Null),
+        "open_settings was not answered"
+    );
+}
+
 /// The first fixture, and the only one with no fake at all: it proves
 /// `app_prefs` is registered, and that the default services really are inert.
 #[test]

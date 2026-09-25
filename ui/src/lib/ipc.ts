@@ -880,6 +880,9 @@ export const setHotkey = (shortcut: string) => invoke<HotkeyState>('set_hotkey',
 export const setAutostart = (enabled: boolean) =>
   invoke<AutostartState>('set_autostart', { enabled });
 
+// Shows and focuses the settings window — the tray item's path (`show_settings`).
+export const openSettings = () => invoke<void>('open_settings');
+
 // PR 10b. The three values the Rust side writes (`theme.rs`); anything else on
 // the wire is read as `system` at both ends, so the two cannot disagree.
 export type ThemeChoice = 'system' | 'light' | 'dark';

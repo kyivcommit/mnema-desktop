@@ -23,9 +23,11 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
 
 fn mock_app_with_memory() -> tauri::App<tauri::test::MockRuntime> {
     // `focus_launcher` reads the launcher-position memory from managed state
-    // (D155); the production `.setup` manages it, a test does it here.
+    // (D155), and `show_settings`/`hide_settings` the return-to-launcher mark;
+    // the production builder manages both, a test does it here.
     mock_builder()
         .manage(mnema_desktop::launcher_position::Memory::default())
+        .manage(mnema_desktop::ReturnToLauncher::default())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")
 }
@@ -40,6 +42,88 @@ fn focus_launcher_targets_the_launcher_window() {
     assert!(
         mnema_desktop::focus_launcher(app.handle()),
         "focus_launcher did not find the `launcher` window"
+    );
+}
+
+// `show_settings` is the one path to the settings window: the tray item and the
+// launcher's ⌘, both go through it. The pair distinguishes the label it looks
+// for — a function that targets any other window fails one of the two.
+#[test]
+fn show_settings_targets_the_settings_window() {
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "settings", Default::default())
+        .build()
+        .expect("failed to build the settings webview");
+    assert!(
+        mnema_desktop::show_settings(app.handle(), false),
+        "show_settings did not find the `settings` window"
+    );
+}
+
+#[test]
+fn show_settings_reports_a_missing_settings_window() {
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    assert!(
+        !mnema_desktop::show_settings(app.handle(), false),
+        "show_settings acted on a window that is not the settings window"
+    );
+}
+
+fn app_with_both_windows() -> tauri::App<tauri::test::MockRuntime> {
+    let app = mock_app_with_memory();
+    for label in ["launcher", "settings"] {
+        WebviewWindowBuilder::new(&app, label, Default::default())
+            .build()
+            .expect("failed to build a webview");
+    }
+    app
+}
+
+// Settings opened from the launcher (⌘,) hand the person back to it on close —
+// once: the mark is consumed, so a later close of a settings window opened
+// some other way does not bring the launcher up.
+#[test]
+fn closing_settings_opened_from_the_launcher_brings_the_launcher_back_once() {
+    let app = app_with_both_windows();
+    mnema_desktop::show_settings(app.handle(), true);
+    assert!(
+        mnema_desktop::hide_settings(app.handle()),
+        "the launcher was not brought back"
+    );
+    assert!(
+        !mnema_desktop::hide_settings(app.handle()),
+        "the mark outlived the close it was set for"
+    );
+}
+
+// The return reports the launcher it brought back, not the mark: with no
+// launcher window to show, nothing came back.
+#[test]
+fn closing_settings_with_no_launcher_window_brings_nothing_back() {
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "settings", Default::default())
+        .build()
+        .expect("failed to build the settings webview");
+    mnema_desktop::show_settings(app.handle(), true);
+    assert!(
+        !mnema_desktop::hide_settings(app.handle()),
+        "hide_settings reported a launcher that does not exist"
+    );
+}
+
+// The tray opens settings with no launcher behind them — and a tray open after
+// a ⌘, one supersedes it: the last way in decides the way out.
+#[test]
+fn closing_settings_opened_from_the_tray_leaves_the_launcher_hidden() {
+    let app = app_with_both_windows();
+    mnema_desktop::show_settings(app.handle(), true);
+    mnema_desktop::show_settings(app.handle(), false);
+    assert!(
+        !mnema_desktop::hide_settings(app.handle()),
+        "a tray-opened settings window brought the launcher up on close"
     );
 }
 

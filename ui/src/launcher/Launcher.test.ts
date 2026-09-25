@@ -337,6 +337,27 @@ test('Escape hides the launcher', async () => {
   expect(hide).toHaveBeenCalledOnce();
 });
 
+test('the launcher gaining focus puts the cursor in the search line', async () => {
+  render(Launcher);
+  const input = screen.getByRole('textbox');
+  // Start from somewhere else, so a focus that was already there cannot pass.
+  screen.getByTestId('pin').focus();
+  expect(document.activeElement).not.toBe(input);
+  await fireEvent.focus(window);
+  expect(document.activeElement).toBe(input);
+});
+
+test('Cmd+, and Ctrl+, open the settings window; a bare comma does not', async () => {
+  render(Launcher);
+  const openCalls = () => invoke.mock.calls.filter((c) => c[0] === 'open_settings');
+  await fireEvent.keyDown(window, { key: ',' });
+  expect(openCalls()).toHaveLength(0);
+  await fireEvent.keyDown(window, { key: ',', metaKey: true });
+  expect(openCalls()).toHaveLength(1);
+  await fireEvent.keyDown(window, { key: ',', ctrlKey: true });
+  expect(openCalls()).toHaveLength(2);
+});
+
 test('click-outside (blur) hides the launcher when it is not pinned', async () => {
   render(Launcher);
   await fireEvent.blur(window);

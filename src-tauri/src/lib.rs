@@ -89,6 +89,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::app_prefs,
         prefs::set_hotkey,
         prefs::set_autostart,
+        open_settings,
     ]
 }
 
@@ -303,6 +304,82 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// Whether closing the settings window should bring the launcher back: set when
+/// the launcher's ⌘, opened them (the launcher hides on the focus loss that
+/// follows), cleared by any other way in, consumed by the close.
+#[derive(Default)]
+pub struct ReturnToLauncher(std::sync::atomic::AtomicBool);
+
+/// Reveals and focuses the settings window, then lets the resident become
+/// Regular (Dock icon + menu bar) while it is up (§6/§8). The ONE path to the
+/// settings window: the tray's «Налаштування» and the launcher's ⌘, share it.
+/// Returns whether the window was there to act on, for the reason
+/// `focus_launcher` does.
+pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher: bool) -> bool {
+    app.state::<ReturnToLauncher>()
+        .0
+        .store(from_launcher, std::sync::atomic::Ordering::Relaxed);
+    let found = match app.get_webview_window("settings") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            true
+        }
+        None => false,
+    };
+    sync_activation_policy(app);
+    found
+}
+
+/// How long the launcher's return waits for the Accessory switch to settle.
+/// macOS only: elsewhere there is no policy switch to wait for.
+const RETURN_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(target_os = "macos") { 100 } else { 0 });
+
+/// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
+/// never quit) — and brings the launcher back if the launcher opened them.
+/// Returns whether it will: the mark was set and a launcher window is there to
+/// show — found-ness, since the mock runtime has no window manager to ask.
+/// The deferred show itself is verified by the live run only: a test binary
+/// exits before the hop runs, and the mock would leave nothing to observe.
+pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let back = app
+        .state::<ReturnToLauncher>()
+        .0
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+        && app.get_webview_window("launcher").is_some();
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.hide();
+    }
+    sync_activation_policy(app);
+    // Regular → Accessory deactivates the app a few milliseconds later, and a
+    // launcher focused before that hides on the blur it causes (live run:
+    // focus in, focus out 9 ms after). So the launcher is shown after the
+    // switch has landed; `set_focus` then re-activates the app, as it does
+    // for every show from the tray or the shortcut.
+    // ponytail: fixed delay, not the resign-active notification tao does not
+    // expose; raise it if a slower machine still flashes the launcher.
+    if back {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(RETURN_DELAY);
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                focus_launcher(&handle);
+            });
+        });
+    }
+    back
+}
+
+/// The launcher's ⌘, (Ctrl+, off macOS). Synchronous on purpose: Tauri runs a
+/// non-async command on the main thread, where AppKit wants the activation
+/// policy changed.
+#[tauri::command]
+fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    show_settings(&app, true);
+}
+
 /// Keeps the macOS activation policy in step with the settings window: the app
 /// is an `Accessory` (no Dock icon, no menu bar — a menu-bar resident) while
 /// only the launcher and tray are up, and becomes `Regular` (Dock icon + the
@@ -506,25 +583,16 @@ pub fn run() -> anyhow::Result<()> {
             // §6: ⌘Q closes the settings window (hide, keep state) and never
             // quits the app; the tray's «Вийти» is the only quit.
             id if id == CMD_Q_CLOSE_SETTINGS => {
-                if let Some(window) = app.get_webview_window("settings") {
-                    let _ = window.hide();
-                }
-                sync_activation_policy(app);
+                hide_settings(app);
             }
             // §6: show, not unminimize — the launcher is hidden. The bool it
             // returns (window found) has no meaning off a live window manager.
             "show_search" => {
                 focus_launcher(app);
             }
-            // Moved here from the tray builder (Task 5): reveal and focus the
-            // settings window, then let the resident become Regular (Dock icon
-            // + menu bar) while it is up (§6/§8).
+            // Moved here from the tray builder (Task 5).
             "open_settings" => {
-                if let Some(window) = app.get_webview_window("settings") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                sync_activation_policy(app);
+                show_settings(app, false);
             }
             // §8: ask the running job to stop. There is no guard here and none
             // is owed — `cancel_job` on an idle application returns `()` after
@@ -608,11 +676,14 @@ pub fn run() -> anyhow::Result<()> {
                 // an unsaved query or a result set survives dismissal (§7.3,
                 // "what disappears"). Real exit is `app.exit(0)` from the tray's
                 // Quit, which is not a window close and so is not prevented here.
-                let _ = window.hide();
-                // Hiding the settings window drops the resident back to
-                // Accessory (no Dock icon / menu bar); hiding the launcher while
-                // settings is still up leaves the policy unchanged. §6/§8.
-                sync_activation_policy(window.app_handle());
+                if window.label() == "settings" {
+                    hide_settings(window.app_handle());
+                } else {
+                    let _ = window.hide();
+                    // Hiding the launcher while settings is still up leaves the
+                    // policy unchanged. §6/§8.
+                    sync_activation_policy(window.app_handle());
+                }
                 api.prevent_close();
             }
             // D155: this window hides or exits without giving up focus first,
@@ -652,6 +723,7 @@ pub fn run() -> anyhow::Result<()> {
             // D155: what the launcher's last show applied and where the person
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
+            app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `Memory::default()` above touches
             // none), so every later step here meets an index that is
@@ -873,10 +945,11 @@ mod tests {
     }
 
     /// 🔴 **Brittle by design — a text-matching guard, not a type-level one.**
-    /// It reads `lib.rs`'s own source and asserts that the ONE `with_index`
-    /// substring never appears inside the `.setup` observer's
-    /// `run_on_main_thread` closure — the invariant `tray::refresh_tray`'s own
-    /// doc names: that closure runs on the main thread, and `with_index`
+    /// It reads `lib.rs`'s own source and asserts that the `with_index`
+    /// substring never appears inside any inline `run_on_main_thread` closure
+    /// — the `.setup` observer's first of all, whose invariant
+    /// `tray::refresh_tray`'s own doc names: that closure runs on the main
+    /// thread, and `with_index`
     /// blocks for as long as a job holds the index (a folder removal alone,
     /// on the order of twenty seconds), so a `with_index` call reachable from
     /// there would freeze every window redraw and every menu click for that
@@ -894,22 +967,22 @@ mod tests {
     /// renamed, or removed" branch was dead code. The fix: search only the
     /// PRODUCTION half of the file — everything above `#[cfg(test)]`, which
     /// this test's own source (including its needle and its `with_index`
-    /// literal) never reaches — and require EXACTLY one match there. Zero
-    /// matches (renamed/removed) and two-or-more matches (a second hop stole
-    /// or shares the search) each fail with their own message instead of one
-    /// swallowing the other. The needle is built with `concat!` on top of
+    /// literal) never reaches — and check EVERY match there. Zero matches
+    /// (renamed/removed) fails with its own message. The needle is built with
+    /// `concat!` on top of
     /// that even so: splitting `"run_on_main_thread"` from `"(move || {"`
     /// means no future refactor that widens the search region can make this
     /// test's own source satisfy its own search by accident.
     ///
-    /// It still protects only the ONE call site this file writes today —
-    /// splitting the closure into a named function, or a `with_index` reached
-    /// indirectly through a function this test cannot see into
-    /// (`tray::refresh_tray` itself, or anything it calls) would slip straight
-    /// past it, and a genuine SECOND `run_on_main_thread` hop added above the
-    /// observer needs a guard of its own (or this one taught to check both) —
-    /// this test can only say "not exactly one," not which one is the real
-    /// observer. A `#[test]` was chosen over nothing because nothing is a
+    /// It sees only the closure bodies written inline — splitting a closure
+    /// into a named function, or a `with_index` reached indirectly through a
+    /// function this test cannot see into (`tray::refresh_tray` itself, or
+    /// `focus_launcher` in `hide_settings`'s hop, or anything they call) would
+    /// slip straight past it. A second hop (`hide_settings`) made the old
+    /// "exactly one" rule fail, so every hop is now checked the same way, and
+    /// the observer's is required by name: one of the bodies must call
+    /// `tray::refresh_tray`, so its hop moving or going is still red.
+    /// A `#[test]` was chosen over nothing because nothing is a
     /// worse guard still; if a reviewer would rather have this as a
     /// mutation-harness case instead, that is Task 11's to make, not this
     /// one's.
@@ -940,51 +1013,51 @@ mod tests {
         let needle = concat!("run_on_main_thread", "(move || {");
 
         let occurrences: Vec<usize> = production.match_indices(needle).map(|(i, _)| i).collect();
-        let call_at = match occurrences.as_slice() {
-            [one] => *one,
-            [] => panic!(
-                "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
-                 was renamed, or was removed"
-            ),
-            many => panic!(
-                "found {} occurrences of `{needle}` above #[cfg(test)] — this guard only knows \
-                 how to check ONE `run_on_main_thread` closure and cannot tell which is the \
-                 observer's; a second call site needs a guard of its own or this one adapted to \
-                 check all of them. Byte offsets: {many:?}",
-                many.len()
-            ),
-        };
-        let body_start = call_at + needle.len();
+        assert!(
+            !occurrences.is_empty(),
+            "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
+             was renamed, or was removed"
+        );
+        let mut observer_seen = false;
+        for call_at in occurrences {
+            let body_start = call_at + needle.len();
 
-        // Balance braces from just after the closure's opening `{` to find
-        // where the closure body ends, so this does not have to assume any
-        // particular length or shape for what is inside.
-        let mut depth: i32 = 1;
-        let mut body_end = body_start;
-        for (offset, ch) in production[body_start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        body_end = body_start + offset;
-                        break;
+            // Balance braces from just after the closure's opening `{` to find
+            // where the closure body ends, so this does not have to assume any
+            // particular length or shape for what is inside.
+            let mut depth: i32 = 1;
+            let mut body_end = body_start;
+            for (offset, ch) in production[body_start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            body_end = body_start + offset;
+                            break;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            assert!(
+                depth == 0,
+                "the closure's braces never balanced — this guard's own brace-matching broke, \
+                 not the invariant it protects"
+            );
+
+            let body = &production[body_start..body_end];
+            observer_seen |= body.contains("tray::refresh_tray");
+            assert!(
+                !body.contains("with_index"),
+                "a `with_index` call reached a main-thread closure — this would block the whole \
+                 application for as long as a job holds the index. Closure body:\n{body}"
+            );
         }
         assert!(
-            depth == 0,
-            "the closure's braces never balanced — this guard's own brace-matching broke, \
-             not the invariant it protects"
-        );
-
-        let body = &production[body_start..body_end];
-        assert!(
-            !body.contains("with_index"),
-            "a `with_index` call reached the main-thread closure — this would block the whole \
-             application for as long as a job holds the index. Closure body:\n{body}"
+            observer_seen,
+            "no main-thread closure calls `tray::refresh_tray` — the observer's hop moved, \
+             was renamed, or was removed"
         );
     }
     /// 🔴 **The second region of the same brittle guard above, and for a

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, modelSettings } from '../lib/ipc';
+  import { ask, modelSettings, openSettings } from '../lib/ipc';
   import { checkQuery, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
@@ -61,7 +61,15 @@
   // survive dismissal (§6, `…interface-design.md:186` — §7.3 is the dismissal
   // gestures, and does not speak about state).
   function hide() { appWindow.hide(); }
-  function onKeydown(event: KeyboardEvent) { if (event.key === 'Escape') hide(); }
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') hide();
+    // ⌘, on macOS, Ctrl+, elsewhere. The launcher carries no menu bar (the app
+    // is an Accessory while only it is up), so no menu item can own the key.
+    if (event.key === ',' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      openSettings().catch((e) => console.error('open_settings failed', e));
+    }
+  }
 
   // D155: on some window managers (mutter on X11) the drag of a frameless
   // window is a pointer+keyboard grab that takes focus for the whole move and
