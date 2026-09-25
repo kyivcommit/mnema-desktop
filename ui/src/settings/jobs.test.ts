@@ -1,4 +1,4 @@
-import { expect, test, vi, beforeEach } from 'vitest';
+import { expect, test, vi, beforeEach, type Mock } from 'vitest';
 import { get } from 'svelte/store';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -111,7 +111,7 @@ function emit(state: ScanState) {
 }
 
 // `listen` resolves with the unlisten function, which is what `destroy` owes.
-let unlisten: ReturnType<typeof vi.fn>;
+let unlisten: Mock<() => void>;
 
 beforeEach(() => {
   invoke.mockReset();
