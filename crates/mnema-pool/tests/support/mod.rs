@@ -2,6 +2,7 @@
 //! and which spawns share a process is the whole point of there being several:
 //! see `pipes.rs`, `outside_the_pool.rs` and `rlimit.rs`.
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,7 +45,12 @@ impl Watchdog {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            eprintln!(
+            // Not `eprintln!`: libtest captures that macro in this thread too,
+            // and `exit` discards the capture — CI then shows only "103", not
+            // which test hung (D160). A direct write to the handle is not
+            // captured; `tests/watchdog.rs` holds it.
+            let _ = writeln!(
+                std::io::stderr(),
                 "watchdog: {label} did not finish within {bound:?}. Failing loudly \
                  rather than hanging: the supervisor's own deadline is broken."
             );
