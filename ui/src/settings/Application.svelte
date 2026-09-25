@@ -665,8 +665,8 @@
   // true for the load failure and the language read failure respectively.
   //
   // 🔴 Two disagreements with the spec's own criterion (§2.2: assertive means
-  // "a person just pressed, the answer is urgent") stand at HEAD, both with
-  // nobody having pressed anything. A failed MOUNT-time `get_locale` read is
+  // "a person just pressed, the answer is urgent") stand, both with nobody
+  // having pressed anything. A failed MOUNT-time `get_locale` read is
   // one: `loadLocaleChoice`'s own catch sets `application: {kind: 'unknown'}`
   // regardless of who started the read, and the `language-unknown` paragraph
   // is unconditionally assertive — D165 (1) never touched that path, only

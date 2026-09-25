@@ -2652,8 +2652,9 @@ test('until the corrective read answers, the heading claims neither «unchanged�
   await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
 
   const PENDING = 'Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:';
-  // Stays pending while the corrective read is still out, not just pending
-  // the instant it settles — three ticks and the state has not moved.
+  // Stays pending while the corrective read is still out, not just at the
+  // instant the refusal lands: the same heading before and after three ticks.
+  expect(at('application-shortcut-failed')).toBe(PENDING);
   await tick();
   await tick();
   await tick();

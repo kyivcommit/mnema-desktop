@@ -16,7 +16,8 @@
 #   the outcome's own key    — the settled heading is a NEW announcement, not
 #                              a rewrite of the pending one
 #   the whole-sentence match — a refusal repeats the standing reason only when
-#                              the two sentences are equal, never on overlap
+#                              the two sentences are equal, never when the
+#                              refusal contains it
 #   the reverse containment  — a refusal that is a strict prefix of the
 #                              standing reason is not treated as the same
 #                              sentence either
@@ -104,7 +105,7 @@ case_ "Application: the settled shortcut heading gets a fresh announcement key o
   '/* mutant: constant announcement key */' \
   src/settings/Application.test.ts 'the settled heading arrives as a new announcement, and the refusal sentence is not read again' runner=vitest
 
-case_ "Application: a refusal repeats the standing reason only when the two sentences are equal, never on overlap" \
+case_ "Application: a refusal repeats the standing reason only when the two sentences are equal, never when the refusal contains it" \
   ui/src/settings/Application.svelte \
   's~return reason !== null && error !== null && reason === error;~return reason !== null && error !== null && error.includes(reason); // mutant: substring match~' \
   '// mutant: substring match' \
