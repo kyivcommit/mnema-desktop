@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod embed_job;
 pub mod error;
 pub mod job;
+pub mod launcher_layout;
 pub mod launcher_position;
 pub mod locale;
 pub mod models;
@@ -723,6 +724,7 @@ pub fn run() -> anyhow::Result<()> {
             // D155: what the launcher's last show applied and where the person
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
+            app.manage(launcher_layout::Current::default());
             app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `Memory::default()` above touches
