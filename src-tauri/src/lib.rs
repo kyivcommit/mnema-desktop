@@ -298,10 +298,6 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
-            // A launcher `hide_settings` brought back without focus (the app
-            // was not active) never sends the `Focused(false)` that would
-            // have switched the policy; this hide is the next chance.
-            sync_activation_policy(app);
         } else {
             focus_launcher(app);
         }
@@ -335,28 +331,39 @@ pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher
     found
 }
 
+/// How long the launcher's return waits for the Accessory switch to settle.
+const RETURN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
 /// never quit) — and brings the launcher back if the launcher opened them.
-/// Returns whether it did: the mark was set and a launcher window was there to
-/// show — the found-ness `focus_launcher` reports, since the mock runtime has
-/// no window manager to ask about focus.
+/// Returns whether it will: the mark was set and a launcher window is there to
+/// show — found-ness, since the mock runtime has no window manager to ask.
 pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let back = app
         .state::<ReturnToLauncher>()
         .0
         .swap(false, std::sync::atomic::Ordering::Relaxed)
-        && focus_launcher(app);
+        && app.get_webview_window("launcher").is_some();
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.hide();
     }
-    // Regular → Accessory deactivates the app a few milliseconds later, after
-    // the `set_focus` above, and the launcher hides on that blur (live run:
-    // focus in, focus out 9 ms after; none without the switch). So when the
-    // launcher comes back, the switch waits for it to go — its `Focused(false)`
-    // arm, or the shortcut's hide in `toggle_launcher` for a launcher that
-    // never got focus — and the Dock icon and menu bar stay until then.
-    if !back {
-        sync_activation_policy(app);
+    sync_activation_policy(app);
+    // Regular → Accessory deactivates the app a few milliseconds later, and a
+    // launcher focused before that hides on the blur it causes (live run:
+    // focus in, focus out 9 ms after). So the launcher is shown after the
+    // switch has landed; `set_focus` then re-activates the app, as it does
+    // for every show from the tray or the shortcut.
+    // ponytail: fixed delay, not the resign-active notification tao does not
+    // expose; raise it if a slower machine still flashes the launcher.
+    if back {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(RETURN_DELAY);
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                focus_launcher(&handle);
+            });
+        });
     }
     back
 }
@@ -692,9 +699,6 @@ pub fn run() -> anyhow::Result<()> {
                     &data_dir,
                     os_services::wayland_session(),
                 );
-                // The Accessory switch `hide_settings` left for this moment.
-                // A no-op while settings is up (⌘, lands here too).
-                sync_activation_policy(app);
             }
             // D155: the show cannot know where the window manager put the
             // window — on GTK `outer_position` is a cache the configure event
@@ -958,22 +962,22 @@ mod tests {
     /// renamed, or removed" branch was dead code. The fix: search only the
     /// PRODUCTION half of the file — everything above `#[cfg(test)]`, which
     /// this test's own source (including its needle and its `with_index`
-    /// literal) never reaches — and require EXACTLY one match there. Zero
-    /// matches (renamed/removed) and two-or-more matches (a second hop stole
-    /// or shares the search) each fail with their own message instead of one
-    /// swallowing the other. The needle is built with `concat!` on top of
+    /// literal) never reaches — and check EVERY match there. Zero matches
+    /// (renamed/removed) fails with its own message. The needle is built with
+    /// `concat!` on top of
     /// that even so: splitting `"run_on_main_thread"` from `"(move || {"`
     /// means no future refactor that widens the search region can make this
     /// test's own source satisfy its own search by accident.
     ///
-    /// It still protects only the ONE call site this file writes today —
-    /// splitting the closure into a named function, or a `with_index` reached
-    /// indirectly through a function this test cannot see into
-    /// (`tray::refresh_tray` itself, or anything it calls) would slip straight
-    /// past it, and a genuine SECOND `run_on_main_thread` hop added above the
-    /// observer needs a guard of its own (or this one taught to check both) —
-    /// this test can only say "not exactly one," not which one is the real
-    /// observer. A `#[test]` was chosen over nothing because nothing is a
+    /// It sees only the closure bodies written inline — splitting a closure
+    /// into a named function, or a `with_index` reached indirectly through a
+    /// function this test cannot see into (`tray::refresh_tray` itself, or
+    /// `focus_launcher` in `hide_settings`'s hop, or anything they call) would
+    /// slip straight past it. A second hop (`hide_settings`) made the old
+    /// "exactly one" rule fail, so every hop is now checked the same way —
+    /// at the price that removing ONE of several hops is no longer noticed;
+    /// only all of them gone is.
+    /// A `#[test]` was chosen over nothing because nothing is a
     /// worse guard still; if a reviewer would rather have this as a
     /// mutation-harness case instead, that is Task 11's to make, not this
     /// one's.
@@ -1004,52 +1008,45 @@ mod tests {
         let needle = concat!("run_on_main_thread", "(move || {");
 
         let occurrences: Vec<usize> = production.match_indices(needle).map(|(i, _)| i).collect();
-        let call_at = match occurrences.as_slice() {
-            [one] => *one,
-            [] => panic!(
-                "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
-                 was renamed, or was removed"
-            ),
-            many => panic!(
-                "found {} occurrences of `{needle}` above #[cfg(test)] — this guard only knows \
-                 how to check ONE `run_on_main_thread` closure and cannot tell which is the \
-                 observer's; a second call site needs a guard of its own or this one adapted to \
-                 check all of them. Byte offsets: {many:?}",
-                many.len()
-            ),
-        };
-        let body_start = call_at + needle.len();
+        assert!(
+            !occurrences.is_empty(),
+            "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
+             was renamed, or was removed"
+        );
+        for call_at in occurrences {
+            let body_start = call_at + needle.len();
 
-        // Balance braces from just after the closure's opening `{` to find
-        // where the closure body ends, so this does not have to assume any
-        // particular length or shape for what is inside.
-        let mut depth: i32 = 1;
-        let mut body_end = body_start;
-        for (offset, ch) in production[body_start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        body_end = body_start + offset;
-                        break;
+            // Balance braces from just after the closure's opening `{` to find
+            // where the closure body ends, so this does not have to assume any
+            // particular length or shape for what is inside.
+            let mut depth: i32 = 1;
+            let mut body_end = body_start;
+            for (offset, ch) in production[body_start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            body_end = body_start + offset;
+                            break;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        assert!(
-            depth == 0,
-            "the closure's braces never balanced — this guard's own brace-matching broke, \
-             not the invariant it protects"
-        );
+            assert!(
+                depth == 0,
+                "the closure's braces never balanced — this guard's own brace-matching broke, \
+                 not the invariant it protects"
+            );
 
-        let body = &production[body_start..body_end];
-        assert!(
-            !body.contains("with_index"),
-            "a `with_index` call reached the main-thread closure — this would block the whole \
-             application for as long as a job holds the index. Closure body:\n{body}"
-        );
+            let body = &production[body_start..body_end];
+            assert!(
+                !body.contains("with_index"),
+                "a `with_index` call reached a main-thread closure — this would block the whole \
+                 application for as long as a job holds the index. Closure body:\n{body}"
+            );
+        }
     }
     /// 🔴 **The second region of the same brittle guard above, and for a
     /// harder-won reason.** Review round 1, Important 1: the `"resume"` arm
