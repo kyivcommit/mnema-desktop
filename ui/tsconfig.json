@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["vite/client", "vitest/globals", "node"]
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "dev/**/*.ts", "*.ts"]
 }
