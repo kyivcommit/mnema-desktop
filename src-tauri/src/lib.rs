@@ -298,6 +298,10 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
+            // A launcher `hide_settings` brought back without focus (the app
+            // was not active) never sends the `Focused(false)` that would
+            // have switched the policy; this hide is the next chance.
+            sync_activation_policy(app);
         } else {
             focus_launcher(app);
         }
@@ -333,24 +337,24 @@ pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher
 
 /// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
 /// never quit) — and brings the launcher back if the launcher opened them.
-/// Returns whether it did, which is the mark's decision; the mock runtime has
-/// no window manager to ask about the result.
+/// Returns whether it did: the mark was set and a launcher window was there to
+/// show — the found-ness `focus_launcher` reports, since the mock runtime has
+/// no window manager to ask about focus.
 pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let back = app
         .state::<ReturnToLauncher>()
         .0
-        .swap(false, std::sync::atomic::Ordering::Relaxed);
-    if back {
-        focus_launcher(app);
-    }
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+        && focus_launcher(app);
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.hide();
     }
     // Regular → Accessory deactivates the app a few milliseconds later, after
     // the `set_focus` above, and the launcher hides on that blur (live run:
     // focus in, focus out 9 ms after; none without the switch). So when the
-    // launcher comes back, the switch waits for its first focus loss — the
-    // `Focused(false)` arm — and the Dock icon and menu bar stay until then.
+    // launcher comes back, the switch waits for it to go — its `Focused(false)`
+    // arm, or the shortcut's hide in `toggle_launcher` for a launcher that
+    // never got focus — and the Dock icon and menu bar stay until then.
     if !back {
         sync_activation_policy(app);
     }

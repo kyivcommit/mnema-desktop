@@ -99,6 +99,21 @@ fn closing_settings_opened_from_the_launcher_brings_the_launcher_back_once() {
     );
 }
 
+// The return reports the launcher it brought back, not the mark: with no
+// launcher window to show, nothing came back.
+#[test]
+fn closing_settings_with_no_launcher_window_brings_nothing_back() {
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "settings", Default::default())
+        .build()
+        .expect("failed to build the settings webview");
+    mnema_desktop::show_settings(app.handle(), true);
+    assert!(
+        !mnema_desktop::hide_settings(app.handle()),
+        "hide_settings reported a launcher that does not exist"
+    );
+}
+
 // The tray opens settings with no launcher behind them — and a tray open after
 // a ⌘, one supersedes it: the last way in decides the way out.
 #[test]
