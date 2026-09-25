@@ -451,22 +451,23 @@ jobs:
     # the dependencies at the same time and none can see another's: one cold
     # build's compute per leg, 3:02–3:23 each on run
     # 33671866360, in front of the slowest file. The warm case is the steady
-    # state; the first run of this matrix is the measurement of it. At 49 legs
-    # the account's 20-concurrent-job ceiling caps how many run at once (18
-    # here — `check`, `sweeps` and `bundle` hold the rest); the scheduler
-    # backfills a slot the moment a leg ends, so it is not three waves but a
-    # rolling queue. Measured on the first 47-leg run, 35158566979 (PR #54,
-    # 2026-09-16): wall 11m31s from the first leg's start to the last leg's
-    # end, longest leg `model-config` at 6m07s (60 cases), shortest `task-6`
-    # at 1m00s; the whole run 11m34s.
+    # state; the first run of this matrix is the measurement of it. With the
+    # matrix holding more legs than the account's 20-concurrent-job ceiling,
+    # only so many run at once (18 here — `check`, `sweeps` and `bundle` hold
+    # the rest); the scheduler backfills a slot the moment a leg ends, so it
+    # is not three waves but a rolling queue. Measured on the first 47-leg
+    # run, 35158566979 (PR #54, 2026-09-16): wall 11m31s from the first leg's
+    # start to the last leg's end, longest leg `model-config` at 6m07s (60
+    # cases), shortest `task-6` at 1m00s; the whole run 11m34s.
     # Tried and refuted on 2026-09-17: putting the nine five-minute files
     # first in the `file:` list (commit 6c43323, run 35161340215) changed
     # nothing — wall 11m49s against 11m31s and 12m01s with the old order
     # (runs 35158566979, 35160188764), and the first batch of 16 again mixed
     # list positions freely (`task-1`, `task-13-xlsx`, `task-2` started at
     # 0 s; `embedding` at 204 s, `pr8-subfolders` at 397 s). The scheduler
-    # does not honour matrix order, so the list stays in name order. What
-    # would move the wall is a bigger concurrency ceiling (a paid plan or a
+    # does not honour matrix order, so the list stays in name order, with
+    # later additions appended. What would move the wall is a bigger
+    # concurrency ceiling (a paid plan or a
     # self-hosted runner) or splitting the six-minute files.
     #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in

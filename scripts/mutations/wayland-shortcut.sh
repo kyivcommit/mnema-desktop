@@ -50,37 +50,38 @@
 #                              politely, never as though a press started it
 #   the store's own marker (x2) — only a read a press itself started marks
 #                              its own failure as answering that press
+#   the Retry button's press — the language Retry control's own read starts
+#                              as a press, never the default mount origin
+#   the press-time silence   — a Retry read writes nothing to the store
+#                              until its own answer lands
+#   the still-refused read   — a corrective read that is itself refused
+#                              leaves a pending shortcut outcome pending
+#   the superseded read's silence — a read a later one has already
+#                              superseded writes nothing to the store
+#   the recovery read's origin — a rejected change's own recovery read is
+#                              never heard as a press
 #
 # Checked against the rest of this directory (`grep -rn` on each target line
 # and on `repeatsReason`, `QuoteRepeats`, `shortcut-tray`, `loadStamp`,
 # `languageReadStamp`, `languageMountStamp`, `loadFailureAnswersPress`,
-# `readAnswersPress`): no case below duplicates one already in `pr9-ui.sh`,
-# `debt-ui-blind-tests.sh` or `pr10f-settings.sh` — the only file-name hits
-# outside this file belong to `debt-ui-blind-tests.sh`'s own block-order
-# cases, whose regex happens to quote these identifiers without judging them.
+# `readAnswersPress`, `loadLocaleChoice`, `opSeq`): no case below duplicates
+# one already in `pr9-ui.sh`, `debt-ui-blind-tests.sh` or `pr10f-settings.sh`
+# — the only file-name hits outside this file belong to
+# `debt-ui-blind-tests.sh`'s own block-order cases, whose regex happens to
+# quote these identifiers without judging them.
 #
-# Three probes from the task reports are not cases here:
+# Two probes are not cases here, because neither has a one-line form:
 #
-#   - a rejected recording's corrective read settling `shortcutOutcome` from
-#     inside a `.then()` callback, and a mutant making a `null` answer force
-#     `'unchanged'` — that callback was removed by this task's own second
-#     round, before any later task touched the file; `refresh()` now settles
-#     the outcome inline, and a corrective read that itself fails reaches no
-#     line that writes `shortcutOutcome` at all, so there is no HEAD line
-#     whose mutation reproduces the same failure without inventing a branch
-#     the code does not have.
-#   - moving `let languageReadAnswersPress = $state(false);` into a
-#     `<script module>` block — that flag does not exist at HEAD; the whole
-#     click-time-marker design it belonged to was replaced by the store's own
-#     `readAnswersPress` field (`ui/src/locale-choice.ts`), which cannot be
-#     moved to `<script module>` in the same way because it is not a
-#     component field at all.
-#   - two mutants against that same click-time-marker design (a superseded
-#     click's own settle erasing a later click's marker; a second press
-#     replaying the first press's answer in the polite region before its own
-#     read answers) — both target fields (`languageRetryFrom`, its `.then`)
-#     that the next round deleted outright; `grep -rn languageRetryFrom ui/src`
-#     is empty at HEAD.
+#   - a settle tied only to the hotkey catch's own corrective read. Every
+#     read that takes the hotkey stamp settles a `pending` shortcut outcome
+#     inside `refresh()`, and both the hotkey catch and the autostart catch
+#     start that read the same way, `refresh('press')` — there is no single
+#     line whose mutation ties the settle back to one catch alone.
+#   - moving the language Retry marker to module scope. The marker is the
+#     store's own `readAnswersPress` field (`ui/src/locale-choice.ts`), not a
+#     component field, so it cannot be moved to a `<script module>` block the
+#     way a component field can; the remount property that move would have
+#     broken is pinned above by "the fresh instance's own read".
 
 case_ "Application: the settled shortcut heading calls a combination «in effect» only when the read's own status is registered" \
   ui/src/settings/Application.svelte \
@@ -207,3 +208,33 @@ case_ "locale-choice: only a read a press itself started marks its own failure a
   "s~readAnswersPress: origin === 'press',~readAnswersPress: false, // mutant: no failed read ever claims a press~" \
   '// mutant: no failed read ever claims a press' \
   src/locale-choice.test.ts 'a failed read started by a press sets readAnswersPress, a default one clears it' runner=vitest
+
+case_ "Application: the language Retry button starts its read as a press" \
+  ui/src/settings/Application.svelte \
+  "s~onclick=\{\(\) => void loadLocaleChoice\('press'\)\}~onclick={() => void loadLocaleChoice() /* mutant: a Retry read is never a press */}~" \
+  '/* mutant: a Retry read is never a press */' \
+  src/settings/Application.test.ts 'pressing «Retry reading» for the language and being refused again is announced at once' runner=vitest
+
+case_ "locale-choice: a Retry read writes nothing to the store until its own answer lands" \
+  ui/src/locale-choice.ts \
+  "s~(= 'mount'\): Promise<void> \{\n  if \(get\(state\)\.busy\) return;\n  const mine = \+\+opSeq;)~\$1 state.update((s) => ({ ...s, readAnswersPress: false })); // mutant: marks at press time~" \
+  '// mutant: marks at press time' \
+  src/settings/Application.test.ts "a second Retry press does not move the first press's own answer while its own read is in flight" runner=vitest
+
+case_ "Application: a corrective read that is itself refused leaves a pending shortcut outcome pending" \
+  ui/src/settings/Application.svelte \
+  "s~      loadStamp \+= 1;~      loadStamp += 1; shortcutOutcome = 'unchanged'; // mutant: a refused read settles the outcome~" \
+  '// mutant: a refused read settles the outcome' \
+  src/settings/Application.test.ts 'a corrective read that is itself refused leaves the neutral heading standing, because it is still true' runner=vitest
+
+case_ "locale-choice: a superseded read writes nothing to the store" \
+  ui/src/locale-choice.ts \
+  's~\} catch \(e\) \{\n    if \(mine !== opSeq\) return;\n    state\.update\(\(s\) => \(\{~} catch (e) {\n    // mutant: a superseded read still writes the store\n    state.update((s) => ({~' \
+  '// mutant: a superseded read still writes the store' \
+  src/settings/Application.test.ts "a language change made while a Retry read is in flight is answered, politely, by that change's own recovery read" runner=vitest
+
+case_ "locale-choice: a rejected change's own recovery read is never heard as a press" \
+  ui/src/locale-choice.ts \
+  "s~    await loadLocaleChoice\(\);~    await loadLocaleChoice('press'); // mutant: recovery read claims a press~" \
+  '// mutant: recovery read claims a press' \
+  src/settings/Application.test.ts 'a recovery read refused after a rejected language change stays polite, even after an earlier Retry press' runner=vitest
