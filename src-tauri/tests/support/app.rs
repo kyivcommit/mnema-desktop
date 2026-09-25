@@ -66,6 +66,8 @@ pub fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
             NO_PROVIDER.to_string(),
             format!("mnema-desktop-test-{}", dir.display()),
         ))
+        // `open_settings` reads it; the production `.setup` manages it.
+        .manage(mnema_desktop::ReturnToLauncher::default())
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")

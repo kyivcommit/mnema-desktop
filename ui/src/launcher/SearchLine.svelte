@@ -38,10 +38,17 @@
   function onKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter') onSubmit(query);
   }
+
+  // Every show of the launcher (⌥Space, the tray, single-instance) ends in
+  // `set_focus`, which reaches the webview as a window `focus`: the cursor goes
+  // to the line, so the person can type without a click first.
+  let input: HTMLInputElement;
 </script>
 
+<svelte:window onfocus={() => input.focus()} />
+
 <div class="search-line">
-  <input type="text" bind:value={query} placeholder={placeholder} onkeydown={onKeydown} />
+  <input type="text" bind:this={input} bind:value={query} placeholder={placeholder} onkeydown={onKeydown} />
   {#if state.kind === 'error'}
     <p class="guard" role="alert">{errorText}</p>
   {:else if state.kind === 'refused'}

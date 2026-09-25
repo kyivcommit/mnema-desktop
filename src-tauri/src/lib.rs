@@ -89,6 +89,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::app_prefs,
         prefs::set_hotkey,
         prefs::set_autostart,
+        open_settings,
     ]
 }
 
@@ -303,6 +304,67 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// Whether closing the settings window should bring the launcher back: set when
+/// the launcher's ⌘, opened them (the launcher hides on the focus loss that
+/// follows), cleared by any other way in, consumed by the close.
+#[derive(Default)]
+pub struct ReturnToLauncher(std::sync::atomic::AtomicBool);
+
+/// Reveals and focuses the settings window, then lets the resident become
+/// Regular (Dock icon + menu bar) while it is up (§6/§8). The ONE path to the
+/// settings window: the tray's «Налаштування» and the launcher's ⌘, share it.
+/// Returns whether the window was there to act on, for the reason
+/// `focus_launcher` does.
+pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher: bool) -> bool {
+    app.state::<ReturnToLauncher>()
+        .0
+        .store(from_launcher, std::sync::atomic::Ordering::Relaxed);
+    let found = match app.get_webview_window("settings") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            true
+        }
+        None => false,
+    };
+    sync_activation_policy(app);
+    found
+}
+
+/// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
+/// never quit) — and brings the launcher back if the launcher opened them.
+/// Returns whether it did, which is the mark's decision; the mock runtime has
+/// no window manager to ask about the result.
+pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let back = app
+        .state::<ReturnToLauncher>()
+        .0
+        .swap(false, std::sync::atomic::Ordering::Relaxed);
+    if back {
+        focus_launcher(app);
+    }
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.hide();
+    }
+    // Regular → Accessory deactivates the app a few milliseconds later, after
+    // the `set_focus` above, and the launcher hides on that blur (live run:
+    // focus in, focus out 9 ms after; none without the switch). So when the
+    // launcher comes back, the switch waits for its first focus loss — the
+    // `Focused(false)` arm — and the Dock icon and menu bar stay until then.
+    if !back {
+        sync_activation_policy(app);
+    }
+    back
+}
+
+/// The launcher's ⌘, (Ctrl+, off macOS). Synchronous on purpose: Tauri runs a
+/// non-async command on the main thread, where AppKit wants the activation
+/// policy changed.
+#[tauri::command]
+fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    show_settings(&app, true);
+}
+
 /// Keeps the macOS activation policy in step with the settings window: the app
 /// is an `Accessory` (no Dock icon, no menu bar — a menu-bar resident) while
 /// only the launcher and tray are up, and becomes `Regular` (Dock icon + the
@@ -506,25 +568,16 @@ pub fn run() -> anyhow::Result<()> {
             // §6: ⌘Q closes the settings window (hide, keep state) and never
             // quits the app; the tray's «Вийти» is the only quit.
             id if id == CMD_Q_CLOSE_SETTINGS => {
-                if let Some(window) = app.get_webview_window("settings") {
-                    let _ = window.hide();
-                }
-                sync_activation_policy(app);
+                hide_settings(app);
             }
             // §6: show, not unminimize — the launcher is hidden. The bool it
             // returns (window found) has no meaning off a live window manager.
             "show_search" => {
                 focus_launcher(app);
             }
-            // Moved here from the tray builder (Task 5): reveal and focus the
-            // settings window, then let the resident become Regular (Dock icon
-            // + menu bar) while it is up (§6/§8).
+            // Moved here from the tray builder (Task 5).
             "open_settings" => {
-                if let Some(window) = app.get_webview_window("settings") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                sync_activation_policy(app);
+                show_settings(app, false);
             }
             // §8: ask the running job to stop. There is no guard here and none
             // is owed — `cancel_job` on an idle application returns `()` after
@@ -608,11 +661,14 @@ pub fn run() -> anyhow::Result<()> {
                 // an unsaved query or a result set survives dismissal (§7.3,
                 // "what disappears"). Real exit is `app.exit(0)` from the tray's
                 // Quit, which is not a window close and so is not prevented here.
-                let _ = window.hide();
-                // Hiding the settings window drops the resident back to
-                // Accessory (no Dock icon / menu bar); hiding the launcher while
-                // settings is still up leaves the policy unchanged. §6/§8.
-                sync_activation_policy(window.app_handle());
+                if window.label() == "settings" {
+                    hide_settings(window.app_handle());
+                } else {
+                    let _ = window.hide();
+                    // Hiding the launcher while settings is still up leaves the
+                    // policy unchanged. §6/§8.
+                    sync_activation_policy(window.app_handle());
+                }
                 api.prevent_close();
             }
             // D155: this window hides or exits without giving up focus first,
@@ -632,6 +688,9 @@ pub fn run() -> anyhow::Result<()> {
                     &data_dir,
                     os_services::wayland_session(),
                 );
+                // The Accessory switch `hide_settings` left for this moment.
+                // A no-op while settings is up (⌘, lands here too).
+                sync_activation_policy(app);
             }
             // D155: the show cannot know where the window manager put the
             // window — on GTK `outer_position` is a cache the configure event
@@ -652,6 +711,7 @@ pub fn run() -> anyhow::Result<()> {
             // D155: what the launcher's last show applied and where the person
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
+            app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `Memory::default()` above touches
             // none), so every later step here meets an index that is
