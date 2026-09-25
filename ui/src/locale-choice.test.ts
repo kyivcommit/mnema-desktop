@@ -50,10 +50,10 @@ describe('loadLocaleChoice', () => {
     expect(s.application).toEqual({ kind: 'unknown' });
   });
 
-  // Task 5 review, D165 (1): the caller states who asked, and the failure
-  // this produces carries that on `readAnswersPress` — the default (no
-  // argument, what every caller but the "Retry reading" button passes) is
-  // never mistaken for a press.
+  // D165 (1): the caller states who asked, and the failure this produces
+  // carries that on `readAnswersPress` — the default (no argument, what
+  // every caller but the "Retry reading" button passes) is never mistaken
+  // for a press.
   it('a failed read started by a press sets readAnswersPress, a default one clears it', async () => {
     getLocale.mockRejectedValue(new Error('a'));
     await loadLocaleChoice('press');

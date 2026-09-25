@@ -2078,6 +2078,7 @@ test('pressing «Retry reading» for the language and being refused again is ann
   await waitFor(() => expect(announced(assertiveRegion())).toContain(NEW));
   expect(announced(politeRegion())).not.toContain(NEW);
   expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+  expect(screen.getByTestId('application-language-failed').getAttribute('data-announced-by')).toBe(ASSERTIVE);
 });
 
 // Two clicks before either read answers. The first click's read, superseded
@@ -2487,6 +2488,8 @@ test('a rejected first read leaves no groups, but the polite region carries the 
     'Не вдалося прочитати налаштування застосунку.',
     SENTENCE,
   ]);
+  expect(screen.getByTestId('application-load-failed').getAttribute('data-announced-by')).toBe(POLITE);
+  expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(POLITE);
 });
 
 test('a visible refusal paragraph is not a descendant of either region', async () => {
@@ -2649,6 +2652,11 @@ test('until the corrective read answers, the heading claims neither «unchanged�
   await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
 
   const PENDING = 'Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:';
+  // Stays pending while the corrective read is still out, not just pending
+  // the instant it settles — three ticks and the state has not moved.
+  await tick();
+  await tick();
+  await tick();
   expect(at('application-shortcut-failed')).toBe(PENDING);
   expect(announced(assertiveRegion())).toEqual([PENDING, SENTENCE]);
 
@@ -2809,12 +2817,12 @@ test('a refusal whose sentence is the standing reason is not quoted a second tim
 
 test('a refusal that differs from the standing reason by one full stop is quoted in full under the usual heading', async () => {
   // A trailing full stop and not a swapped comma: `ALMOST` CONTAINS `REASON`,
-  // so `error.includes(reason)` calls them equal and dies here — the reverse
-  // direction, `reason.includes(error)`, is not, since `REASON` does not
-  // contain the longer `ALMOST`. Any normalisation that trims punctuation
-  // dies here too. A swapped comma would be missed by `includes` entirely.
-  // Not a trailing space: `visible()` trims it, and the assertion below
-  // could not tell the two strings apart.
+  // so `error.includes(reason)` calls them equal and dies here. The reverse
+  // direction, `reason.includes(error)`, is checked by the next test. Any
+  // normalisation that trims punctuation dies here too. A swapped comma
+  // would be missed by `includes` entirely. Not a trailing space:
+  // `visible()` trims it, and the assertion below could not tell the two
+  // strings apart.
   const ALMOST = `${REASON}.`;
   expect(REASON.endsWith('.')).toBe(false);
   await withUnavailableShortcut();
@@ -2825,6 +2833,22 @@ test('a refusal that differs from the standing reason by one full stop is quoted
   await waitFor(() => expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:'));
   expect(at('application-shortcut-error')).toBe(ALMOST);
   expect(at('application-shortcut-reason')).toBe(`Програма повідомила: ${REASON}`);
+});
+
+test('a refusal that is a strict prefix of the standing reason is quoted in full, not treated as the same sentence', async () => {
+  // The reverse direction from the test above: `REASON` CONTAINS `SHORTER`,
+  // so `reason.includes(error)` calls them equal and must die here. `error
+  // === reason` is false, so under the correct predicate the quote stays.
+  const SHORTER = REASON.slice(0, -('shortcut'.length + 1));
+  expect(REASON.includes(SHORTER)).toBe(true);
+  expect(SHORTER).not.toBe(REASON);
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(SHORTER));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(at('application-shortcut-error')).toBe(SHORTER);
 });
 
 test('a different refusal after a repeated one brings the quote back', async () => {
@@ -2866,8 +2890,8 @@ test('autostart: a refusal whose sentence is the standing reason is not quoted t
   expect(screen.queryByTestId('application-autostart-error')).toBeNull();
   expect(visiblePageText().split(WHY).length - 1).toBe(1);
   // Heard in full too (spec §2.1 requirement 2): the heading AND the
-  // sentence itself, not a pointer — the same requirement Task 3's shortcut
-  // test checks above, here for autostart.
+  // sentence itself, not a pointer — the same requirement the shortcut test
+  // checks above, here for autostart.
   expect(announced(assertiveRegion())).toEqual(['Налаштування не змінено — з тієї самої причини.', WHY]);
   const ids = describedByIds(screen.getByTestId('application-autostart-enable'));
   for (const id of ids) expect(document.getElementById(id)).toBeTruthy();

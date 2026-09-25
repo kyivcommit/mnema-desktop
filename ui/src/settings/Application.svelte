@@ -178,8 +178,8 @@
   // failed, so `set_hotkey` rejects with `Error::Prefs` while the shortcut is
   // in effect. The corrective re-read D-b requires then draws that new
   // shortcut, and a heading saying nothing was changed would contradict it.
-  // What a person does about each differs: one is "try again", the other is
-  // "it works until you restart".
+  // What a person does differs between the two: one is "try again", the
+  // other is "it works until you restart".
   //
   // Decided from the RE-READ and never from the rejection's sentence. That
   // sentence is a free-text `Display` this window does not own, and every
@@ -195,8 +195,9 @@
   // 🔴 Settled inside `refresh()`, not only by the read the shortcut
   // rejection's own catch started: every `refresh()` claims BOTH stamps, so
   // an autostart rejection's read can supersede that one and be the read that
-  // writes the hotkey. Settled anywhere else, `pending` would stay beside a
-  // shortcut a read already answered for.
+  // writes the hotkey. Settled only by the read the shortcut's own catch
+  // started, `pending` would stay beside a shortcut a read already answered
+  // for.
   type ShortcutOutcome = 'pending' | 'unchanged' | 'not_saved';
   const SHORTCUT_HEADING: Record<ShortcutOutcome, Key> = {
     pending: 'application_shortcut_pending',
@@ -664,18 +665,16 @@
   // true for the load failure and the language read failure respectively.
   //
   // 🔴 Two disagreements with the spec's own criterion (§2.2: assertive means
-  // "a person just pressed, the answer is urgent") are left standing
-  // deliberately, both with nobody having pressed anything. A failed
-  // MOUNT-time `get_locale` is one: `loadLocaleChoice`'s own catch sets
-  // `application: {kind: 'unknown'}` regardless of who started the read, and
-  // the `language-unknown` paragraph is unconditionally assertive — D165 (1)
-  // never touched that path, only the `language-failed`/`language-error`
-  // pair. A REMOUNT is the other: it re-announces a standing
-  // `partial`/`unknown`/`changeError` in the assertive region again, because
-  // `localeChoiceState` is module-level and `Settings.svelte` rebuilds this
-  // section on every section switch. Whether either is right is the owner's
-  // call, booked rather than decided here; the live check's scenario 5 is
-  // where the remount case gets heard rather than reasoned about.
+  // "a person just pressed, the answer is urgent") stand at HEAD, both with
+  // nobody having pressed anything. A failed MOUNT-time `get_locale` read is
+  // one: `loadLocaleChoice`'s own catch sets `application: {kind: 'unknown'}`
+  // regardless of who started the read, and the `language-unknown` paragraph
+  // is unconditionally assertive — D165 (1) never touched that path, only
+  // the `language-failed`/`language-error` pair. A REMOUNT is the other: it
+  // re-announces a standing `partial`/`unknown`/`changeError` in the
+  // assertive region again, because `localeChoiceState` is module-level and
+  // `Settings.svelte` rebuilds this section on every section switch. Neither
+  // is decided here.
   //
   // Visible paragraphs stay where they are and name their region through
   // `data-announced-by`; none of them is a descendant of either.

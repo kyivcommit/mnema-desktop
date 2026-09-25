@@ -97,13 +97,13 @@ export type LocaleChoiceState = {
   // the retry is still in flight, which `Application.test.ts`'s own "clears
   // only once it comes back clean" forbids.
   readStamp: number;
-  // Task 5 review, D165 (1): whether the read that produced the CURRENT
-  // `error` was started by the "Retry reading" button. Written by the same
-  // read that writes `readStamp`, under the same `mine === opSeq` guard — a
-  // superseded read writes neither, so the two never disagree about which
-  // read they describe. `changeLocaleChoice`'s own recovery call passes no
-  // origin, so a rejected change is never mistaken for a press on this
-  // button, whichever way that read answers.
+  // D165 (1): whether the read that produced the CURRENT `error` was started
+  // by the "Retry reading" button. Written by the same read that writes
+  // `readStamp`, under the same `mine === opSeq` guard — a superseded read
+  // writes neither, so the two never disagree about which read they
+  // describe. `changeLocaleChoice`'s own recovery call passes no origin, so
+  // a rejected change is never mistaken for a press on this button,
+  // whichever way that read answers.
   readAnswersPress: boolean;
   applyStamp: number;
 };

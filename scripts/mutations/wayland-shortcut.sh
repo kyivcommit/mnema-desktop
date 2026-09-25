@@ -1,5 +1,5 @@
-# Wayland shortcut block (D165, `wayland-shortcut`) — the RED probes Tasks 1-5
-# ran against `ui/src/settings/Application.svelte`, `ui/src/locale-choice.ts`
+# Wayland shortcut block (D165, `wayland-shortcut`) — the RED probes run
+# against `ui/src/settings/Application.svelte`, `ui/src/locale-choice.ts`
 # and their catalogue keys, pinned so the mutant each one caught cannot come
 # back unnoticed. All vitest, so this file's matrix leg carries `node: true`
 # in `.github/workflows/ci.yml`. Run with:
@@ -17,6 +17,9 @@
 #                              a rewrite of the pending one
 #   the whole-sentence match — a refusal repeats the standing reason only when
 #                              the two sentences are equal, never on overlap
+#   the reverse containment  — a refusal that is a strict prefix of the
+#                              standing reason is not treated as the same
+#                              sentence either
 #   autostart's own dedupe   — an autostart refusal repeating its own standing
 #                              reason is quoted once, and only on a repeat
 #   the reason description   — the shortcut control's `aria-describedby` names
@@ -106,6 +109,12 @@ case_ "Application: a refusal repeats the standing reason only when the two sent
   's~return reason !== null && error !== null && reason === error;~return reason !== null && error !== null && error.includes(reason); // mutant: substring match~' \
   '// mutant: substring match' \
   src/settings/Application.test.ts 'a refusal that differs from the standing reason by one full stop is quoted in full under the usual heading' runner=vitest
+
+case_ "Application: a refusal that is a strict prefix of the standing reason is not treated as the same sentence, reverse containment" \
+  ui/src/settings/Application.svelte \
+  's~return reason !== null && error !== null && reason === error;~return reason !== null && error !== null && reason.includes(error); // mutant: reverse containment~' \
+  '// mutant: reverse containment' \
+  src/settings/Application.test.ts 'a refusal that is a strict prefix of the standing reason is quoted in full, not treated as the same sentence' runner=vitest
 
 case_ "Application: an autostart refusal repeating its own standing reason is quoted once, not twice" \
   ui/src/settings/Application.svelte \

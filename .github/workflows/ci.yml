@@ -465,10 +465,10 @@ jobs:
     # (runs 35158566979, 35160188764), and the first batch of 16 again mixed
     # list positions freely (`task-1`, `task-13-xlsx`, `task-2` started at
     # 0 s; `embedding` at 204 s, `pr8-subfolders` at 397 s). The scheduler
-    # does not honour matrix order, so the list stays in name order, with
-    # later additions appended. What would move the wall is a bigger
-    # concurrency ceiling (a paid plan or a
-    # self-hosted runner) or splitting the six-minute files.
+    # does not honour matrix order, so the list is not reordered for speed;
+    # new files are appended. What would move the wall is a bigger
+    # concurrency ceiling (a paid plan or a self-hosted runner) or splitting
+    # the six-minute files.
     #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
     # `sweeps` proves each case still APPLIES; a job here proves a case still
