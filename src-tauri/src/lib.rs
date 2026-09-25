@@ -332,12 +332,16 @@ pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher
 }
 
 /// How long the launcher's return waits for the Accessory switch to settle.
-const RETURN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+/// macOS only: elsewhere there is no policy switch to wait for.
+const RETURN_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(target_os = "macos") { 100 } else { 0 });
 
 /// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
 /// never quit) — and brings the launcher back if the launcher opened them.
 /// Returns whether it will: the mark was set and a launcher window is there to
 /// show — found-ness, since the mock runtime has no window manager to ask.
+/// The deferred show itself is verified by the live run only: a test binary
+/// exits before the hop runs, and the mock would leave nothing to observe.
 pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let back = app
         .state::<ReturnToLauncher>()
@@ -941,10 +945,11 @@ mod tests {
     }
 
     /// 🔴 **Brittle by design — a text-matching guard, not a type-level one.**
-    /// It reads `lib.rs`'s own source and asserts that the ONE `with_index`
-    /// substring never appears inside the `.setup` observer's
-    /// `run_on_main_thread` closure — the invariant `tray::refresh_tray`'s own
-    /// doc names: that closure runs on the main thread, and `with_index`
+    /// It reads `lib.rs`'s own source and asserts that the `with_index`
+    /// substring never appears inside any inline `run_on_main_thread` closure
+    /// — the `.setup` observer's first of all, whose invariant
+    /// `tray::refresh_tray`'s own doc names: that closure runs on the main
+    /// thread, and `with_index`
     /// blocks for as long as a job holds the index (a folder removal alone,
     /// on the order of twenty seconds), so a `with_index` call reachable from
     /// there would freeze every window redraw and every menu click for that
@@ -974,9 +979,9 @@ mod tests {
     /// function this test cannot see into (`tray::refresh_tray` itself, or
     /// `focus_launcher` in `hide_settings`'s hop, or anything they call) would
     /// slip straight past it. A second hop (`hide_settings`) made the old
-    /// "exactly one" rule fail, so every hop is now checked the same way —
-    /// at the price that removing ONE of several hops is no longer noticed;
-    /// only all of them gone is.
+    /// "exactly one" rule fail, so every hop is now checked the same way, and
+    /// the observer's is required by name: one of the bodies must call
+    /// `tray::refresh_tray`, so its hop moving or going is still red.
     /// A `#[test]` was chosen over nothing because nothing is a
     /// worse guard still; if a reviewer would rather have this as a
     /// mutation-harness case instead, that is Task 11's to make, not this
@@ -1013,6 +1018,7 @@ mod tests {
             "no `{needle}` found above #[cfg(test)] — the observer's main-thread hop moved, \
              was renamed, or was removed"
         );
+        let mut observer_seen = false;
         for call_at in occurrences {
             let body_start = call_at + needle.len();
 
@@ -1041,12 +1047,18 @@ mod tests {
             );
 
             let body = &production[body_start..body_end];
+            observer_seen |= body.contains("tray::refresh_tray");
             assert!(
                 !body.contains("with_index"),
                 "a `with_index` call reached a main-thread closure — this would block the whole \
                  application for as long as a job holds the index. Closure body:\n{body}"
             );
         }
+        assert!(
+            observer_seen,
+            "no main-thread closure calls `tray::refresh_tray` — the observer's hop moved, \
+             was renamed, or was removed"
+        );
     }
     /// 🔴 **The second region of the same brittle guard above, and for a
     /// harder-won reason.** Review round 1, Important 1: the `"resume"` arm
