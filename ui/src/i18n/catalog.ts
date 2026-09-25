@@ -68,7 +68,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_removing' | 'settings_folders_remove_blocked'
   | 'settings_folders_remove_question_withdrawn'
   | 'settings_folders_added_note'
-  | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
+  | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
@@ -603,6 +603,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // implicit promise used to be, and names the one place a scan now starts.
     settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
     settings_masks_heading: 'Маски файлів',
+    settings_masks_info_label: 'Як працюють маски',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
     // маска глобальна (D-c), тому не стосується тієї теки, поруч з якою вона
     // намальована; кожна тека застосує її на СВОЄМУ наступному скануванні,
@@ -1242,6 +1243,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
     settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
+    settings_masks_info_label: 'How masks work',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',

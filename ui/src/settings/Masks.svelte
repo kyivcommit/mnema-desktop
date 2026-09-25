@@ -279,6 +279,7 @@
   // not deduplicated behind the person's back; the sentence says they are the
   // same instead.
   const explainer = $derived.by(() => { void $locale; return t('settings_masks_explainer'); });
+  const infoLabel = $derived.by(() => { void $locale; return t('settings_masks_info_label'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('settings_masks_none'); });
   const addLabel = $derived.by(() => { void $locale; return t('settings_masks_add'); });
   const inputLabel = $derived.by(() => { void $locale; return t('settings_masks_input_label'); });
@@ -441,7 +442,6 @@
 
 <div class="masks">
   <h3>{heading}</h3>
-  <p>{explainer}</p>
   {#if loadError}
     <p>{loadFailedLabel}</p>
     <p data-testid="masks-load-reason">{loadError}</p>
@@ -484,12 +484,21 @@
     <p data-testid="mask-refused-reason">{actionError}</p>
     {#if refusal.note}<p>{refusal.note}</p>{/if}
   {/if}
-  <label class="fl" for="mask-draft-input">{inputLabel}</label>
-  <input id="mask-draft-input" type="text" bind:value={draft} />
-  <!-- Also disabled while `checking`: closes the OTHER route to the same guard
-       — nothing stopped a second Add before the first reply landed, queuing
-       two `mask_preview` calls on the mutex with no order guarantee between
-       them. The generation guard above is what makes either route safe; this
-       is what keeps the second call from being placed at all. -->
-  <button type="button" disabled={draft === '' || pending?.kind === 'checking'} onclick={askAdd}>{addLabel}</button>
+  <div class="row">
+    <label class="fl" for="mask-draft-input">{inputLabel}</label>
+    <input id="mask-draft-input" type="text" bind:value={draft} />
+    <!-- Also disabled while `checking`: closes the OTHER route to the same guard
+         — nothing stopped a second Add before the first reply landed, queuing
+         two `mask_preview` calls on the mutex with no order guarantee between
+         them. The generation guard above is what makes either route safe; this
+         is what keeps the second call from being placed at all. -->
+    <button type="button" disabled={draft === '' || pending?.kind === 'checking'} onclick={askAdd}>{addLabel}</button>
+    <!-- The explainer sits behind an ⓘ right of Add, the same button and
+         popover as the model picker's notes (owner, 2026-09-25): a paragraph
+         that long, always on screen above the list, was hard to read past. -->
+    <button type="button" class="info" data-testid="masks-info" popovertarget="masks-notes" aria-label={infoLabel}>ⓘ</button>
+  </div>
+  <div id="masks-notes" class="notes" popover="auto" data-testid="masks-notes">
+    <p>{explainer}</p>
+  </div>
 </div>

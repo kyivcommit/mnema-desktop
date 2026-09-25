@@ -588,7 +588,7 @@ test('the handle offset matches the stylesheet', () => {
   ]);
   // And the numbers are what the spec says today, so a wrong regex that
   // captured the wrong declaration cannot pass by coincidence.
-  expect(fromRust).toEqual([32, 190, 16, 470, 24, 11, 26]);
+  expect(fromRust).toEqual([0, 285, 5, 470, 0, 11, 26]);
   // The offset is only this fixed because the tracks plus gaps exactly fill the
   // content box: then `justify-content: center` and the minmax floor never engage.
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
@@ -598,4 +598,10 @@ test('the handle offset matches the stylesheet', () => {
   expect(launcher.resizable).toBe(false);
   const col3 = num(/grid-template-columns:\s*\d+px minmax\(0, \d+px\) (\d+)px/, panels, 'third column');
   expect(2 * fromCss.padX + fromCss.col1 + fromCss.col2 + col3 + 2 * fromCss.gap).toBe(launcher.width);
+  // And no narrow-window rule applies at that width: a `max-width` breakpoint at
+  // or past it swaps the tracks and padding under the constant above. It
+  // happened (2026-09-25): the window shrank to 936 under a 959px breakpoint.
+  const breakpoints = [...css.matchAll(/@media \(max-width: (\d+)px\)/g)].map((b) => Number(b[1]));
+  expect(breakpoints.length, 'no max-width breakpoint found').toBeGreaterThan(0);
+  for (const bp of breakpoints) expect(bp, `breakpoint ${bp}px`).toBeLessThan(launcher.width);
 });

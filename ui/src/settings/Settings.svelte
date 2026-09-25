@@ -298,7 +298,19 @@
           data-testid={`settings-nav-${id}`}
           aria-pressed={section === id}
           onclick={() => (section = id)}
-        >{labelFor(id)}</button>
+        ><!-- A coloured tile per section (owner, 2026-09-25, a macOS-style
+             sidebar). Drawn here, not fetched: the window's CSP is
+             default-src 'self'. Decorative — the label is the name. --><span class="nav-icon" data-section={id} aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          {#if id === 'models'}
+            <rect x="7" y="7" width="10" height="10" rx="2" /><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4" />
+          {:else if id === 'folders'}
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          {:else if id === 'indexing'}
+            <circle cx="11" cy="11" r="6" /><path d="M16 16l4 4" />
+          {:else}
+            <path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" />
+          {/if}
+        </svg></span>{labelFor(id)}</button>
       {/each}
     </nav>
 
@@ -352,7 +364,7 @@
            now survives a section switch too, the same way the folder tree's
            expanded state and the mask editor's own draft already do — not a
            new store, just the same component staying alive. -->
-      <div data-testid="settings-panel-folders" hidden={section !== 'folders'}>
+      <div class="panel" data-testid="settings-panel-folders" hidden={section !== 'folders'}>
         <h2>{foldersLabel}</h2>
         <Folders {jobs} />
         <!-- Beside the folder list, never inside a folder row (§9.2, D-c): a
@@ -390,7 +402,7 @@
            handful of booleans and strings duplicated from the component that
            already owns them) would have been the bigger diff for no extra
            property gained. -->
-      <div data-testid="settings-panel-models" hidden={section !== 'models'}>
+      <div class="panel" data-testid="settings-panel-models" hidden={section !== 'models'}>
         <h2>{modelsLabel}</h2>
         <Models {jobs} />
       </div>

@@ -1151,6 +1151,10 @@
 <!-- Task 5 — outside `{#if settings}` too: `provider_models` is public and
      needs neither a key nor an open index, so browsing and choosing a chat
      model does not have to wait on either. -->
+<!-- The tabs sit on the panel they switch (owner, 2026-09-25, a GitHub-style
+     Write/Preview pair): the active tab and the panel share one border, so
+     the two are wrapped together with no gap between them. -->
+<div class="mtabset">
 <div class="mtabs">
   <!-- Task 9 (owner's ruling, live run 2026-09-10): the dot moves inside its
        own tab button, as its LAST child, and the state word it used to show
@@ -1185,6 +1189,7 @@
   ><span class="mtab-label">{chatTabLabel}</span><span class="mdot" data-testid="model-dot-chat" data-configured={chatDotState}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">, {chatDotLabel}</span></span></button>
 </div>
 
+<div class="tabpanel">
 {#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
@@ -1268,6 +1273,8 @@
      cannot keep; the sentences about what just happened come after it now, and
      the last word on the screen is the loss rather than the reassurance. -->
 <p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
+</div>
+</div>
 
 <!-- Task 6. The question comes before the act, the report after it, and they
      carry two different numbers about two different moments — the estimate is

@@ -29,7 +29,6 @@
   --surface: #FFFFFF;
   --surface-2: #F4F6FB;
   --surface-3: #ECF0F7;
-  --panel: rgba(255, 255, 255, .90);
 
   --ink: #1B2331;
   --ink-soft: #586274;
@@ -46,6 +45,9 @@
 
   --ok: #2C7A57;
   --err: #C2453B;
+  --select: #CDD3F3; /* the pressed sidebar row, and the ink on it (owner, 2026-09-25: softer than the accent) */
+  --on-select: #1B2331;
+  --tile-wash: 25%; /* surface mixed into a section tile, to soften its fill */
 
   --shadow: rgba(30, 40, 70, .20);
   --glow: rgba(59, 73, 168, .22);
@@ -60,7 +62,6 @@
     --surface: #1A1E27;
     --surface-2: #141821;
     --surface-3: #20252F;
-    --panel: rgba(26, 30, 39, .90);
 
     --ink: #E8EBF1;
     --ink-soft: #9AA3B5;
@@ -77,6 +78,9 @@
 
     --ok: #62C398;
     --err: #E8877C;
+    --select: #353D63;
+    --on-select: #E8EBF1;
+    --tile-wash: 30%;
 
     --shadow: rgba(0, 0, 0, .55);
     --glow: rgba(147, 160, 238, .25);
@@ -93,7 +97,6 @@
   --surface: #1A1E27;
   --surface-2: #141821;
   --surface-3: #20252F;
-  --panel: rgba(26, 30, 39, .90);
 
   --ink: #E8EBF1;
   --ink-soft: #9AA3B5;
@@ -110,6 +113,9 @@
 
   --ok: #62C398;
   --err: #E8877C;
+  --select: #353D63;
+  --on-select: #E8EBF1;
+  --tile-wash: 30%;
 
   --shadow: rgba(0, 0, 0, .55);
   --glow: rgba(147, 160, 238, .25);

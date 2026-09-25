@@ -16,8 +16,8 @@
       {
         "label": "launcher",
         "url": "launcher.html",
-        "width": 1000,
-        "height": 640,
+        "width": 1131,
+        "height": 592,
         "decorations": false,
         "transparent": true,
         "shadow": false,

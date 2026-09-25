@@ -807,24 +807,26 @@ test('a read that fails is not the last word: a later successful read replaces i
   expect(screen.queryByText('The list of masks could not be read.')).toBeNull();
 });
 
-// 🔴 The whole section, read as a person reads it. Everything below is one
-// screen: the heading, the sentence that a mask is global and lands on each
-// folder's own next scan, the case ruling, the stored masks, and the controls.
+// 🔴 The whole section, read as a person reads it: the heading, the stored
+// masks, the controls with the ⓘ right of Add, and then the sentence that a
+// mask is global and lands on each folder's own next scan, and the case
+// ruling. Since 2026-09-25 that sentence sits in the ⓘ's popover (owner), last
+// in the document; the test below holds that it is the popover that carries it.
 test('the whole section reads as one screen', async () => {
   const { container } = await mount(['*.pdf', '*.tmp']);
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
 
   expect(visibleText(container)).toBe(
     'File masks'
+    + ' *.pdf Remove'
+    + ' *.tmp Remove'
+    + ' New mask: Add a mask ⓘ'
     + ' A mask applies to every watched folder at once: it is compared with a file name, at any'
     + ' depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF'
     + ' and *.pdf are one and the same rule; neither does the way a name happens to store its'
     + ' accents.'
     + ' And ? stands for a single byte rather than a single letter, so a letter outside the basic'
-    + ' Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.'
-    + ' *.pdf Remove'
-    + ' *.tmp Remove'
-    + ' New mask: Add a mask',
+    + ' Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
   );
 });
 
@@ -957,4 +959,19 @@ test('the refusal frame and the already-gone note also follow a language switch'
   expect(screen.getByTestId('mask-already-stored').textContent)
     .toBe(t('settings_masks_already_stored', { stored: '*.pdf' }));
   expect(visibleText(container3)).not.toContain('You already have this rule');
+});
+
+// Owner, 2026-09-25: the explainer paragraph moved behind an ⓘ right of the
+// Add button, the model picker's own button-and-popover. What holds it there is
+// the pair of attributes, not the text: `popovertarget` names the element the
+// paragraph sits in, and that element is a popover, so the browser keeps it
+// off screen until the button is pressed.
+test('keeps the explainer in a popover the ⓘ right of Add opens', async () => {
+  await mount();
+  const info = screen.getByRole('button', { name: t('settings_masks_info_label') });
+  const target = document.getElementById(info.getAttribute('popovertarget') ?? '');
+  expect(target, 'popovertarget names no element').not.toBeNull();
+  expect(target!.getAttribute('popover')).toBe('auto');
+  const explainer = screen.getByText(t('settings_masks_explainer'));
+  expect(explainer.closest('[popover]')).toBe(target);
 });

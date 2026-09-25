@@ -90,8 +90,8 @@ case_ "launcher position: a drag back to the applied place is not a move" \
 
 case_ "launcher position: the handle's y offset drifts" \
   src-tauri/src/launcher_position.rs \
-  's~24\.0 \+ 11\.0 \+ 26\.0 / 2\.0\);~24.0 + 111.0 + 26.0 / 2.0);~' \
-  '24.0 + 111.0 + 26.0 / 2.0);' \
+  's~0\.0 \+ 11\.0 \+ 26\.0 / 2\.0\);~0.0 + 111.0 + 26.0 / 2.0);~' \
+  '0.0 + 111.0 + 26.0 / 2.0);' \
   mnema-desktop 'launcher_position::tests::the_work_area_bottom_edge_is_outside' --lib
 
 case_ "launcher position: the handle's y offset is ignored" \

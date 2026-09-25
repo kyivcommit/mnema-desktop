@@ -369,9 +369,13 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // reads as a comma-separated pair rather than one run-together word. Read
   // off a real render rather than hand-edited, the same rule every earlier
   // version of this string followed.
+  //
+  // 2026-09-25 (owner): the tabs and their panel are wrapped together so the
+  // pressed tab can share the panel's border — one more space before
+  // "Embedding", the wrapper's own indentation, and no new word.
   expect(panel()?.textContent).toBe(
     ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
-    + ' Create one in your OpenRouter account and paste it here.  Save    '
+    + ' Create one in your OpenRouter account and paste it here.  Save     '
     + ' Embedding, Not configured Chat, Not configured   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
     + '      ',

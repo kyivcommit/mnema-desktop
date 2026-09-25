@@ -131,20 +131,23 @@ pub const KEY: &str = "launcher_position";
 /// A point on the drag handle, in logical pixels from the window's top-left
 /// corner: the middle of the search panel's first row (the input and the pin).
 /// Every number is a declaration in `ui/src/styles/launcher.css` — `main.panels`
-/// padding `24px 32px`, first column 190, gap 16, second column 470, then the
-/// panel's own padding-top 11 and the pin's height 26.
+/// padding `0px 0px` (owner, 2026-09-25: no hidden margin round the panels, so
+/// the window goes flush to a screen edge), first column 285, gap 5, second
+/// column 470, then the panel's own padding-top 11 and the pin's height 26.
+/// The owner narrowed the gap (16 → 8 → 5) and widened the side columns by
+/// half (190 → 285, 244 → 366) on 2026-09-25.
 ///
-/// The offset is only this fixed because the window is: `"width": 1000` and
+/// The offset is only this fixed because the window is: `"width": 1131` and
 /// `"resizable": false` in `src-tauri/tauri.conf.json`. The three grid tracks
-/// plus their two 16px gaps (190 + 470 + 244 + 2 × 16 = 936) exactly fill the
-/// content box (1000 − 2 × 32 = 936), which is why `main.panels`'
+/// plus their two 5px gaps (285 + 470 + 366 + 2 × 5 = 1131) exactly fill the
+/// content box (1131 − 2 × 0 = 1131), which is why `main.panels`'
 /// `justify-content: center` and the middle column's `minmax(0, …)` floor never
 /// actually engage — either one becoming live would shift the panel and make
 /// this offset wrong.
 /// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` reads both
 /// this line and the stylesheet, and checks that same sum against the window
 /// width, failing if any of them disagree.
-pub const HANDLE_CENTRE: (f64, f64) = (32.0 + 190.0 + 16.0 + 470.0 / 2.0, 24.0 + 11.0 + 26.0 / 2.0);
+pub const HANDLE_CENTRE: (f64, f64) = (0.0 + 285.0 + 5.0 + 470.0 / 2.0, 0.0 + 11.0 + 26.0 / 2.0);
 
 /// The saved position, or `None` for anything that is not two integers under
 /// `KEY`. Tolerant on purpose: this runs on show, with nowhere to report to,
@@ -497,7 +500,7 @@ mod tests {
 
     #[test]
     fn a_handle_whose_centre_is_on_a_monitor_is_kept() {
-        // Window corner off the left edge, handle (x = 373) well inside.
+        // Window corner off the left edge, handle (x = 425) well inside.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(-100, 100), &m), at(-100, 100));
     }
@@ -505,7 +508,7 @@ mod tests {
     #[test]
     fn a_window_whose_corner_is_on_screen_but_whose_handle_is_not_is_dropped() {
         // Corner at x = 1800 is inside a 1920-wide monitor; the handle centre
-        // (1800 + 473 = 2273) is not. The old corner test kept this one.
+        // (1800 + 525 = 2325) is not. The old corner test kept this one.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(1800, 100), &m), None);
     }
@@ -513,7 +516,7 @@ mod tests {
     #[test]
     fn the_handle_offset_scales_with_the_monitor() {
         // Same physical point, same 3840-wide monitor: at scale 2 the handle
-        // centre is 3000 + 946 = 3946 (off), at scale 1 it is 3473 (on).
+        // centre is 3000 + 1050 = 4050 (off), at scale 1 it is 3525 (on).
         let hidpi = [monitor(0, 0, 3840, 2160, 2.0)];
         let lodpi = [monitor(0, 0, 3840, 2160, 1.0)];
         assert_eq!(reachable(at(3000, 200), &hidpi), None);
@@ -525,36 +528,36 @@ mod tests {
         // Centre exactly at x0 + w is the first pixel that is NOT on the
         // monitor; one to the left is the last that is. Kills `<` → `<=`.
         let m = [monitor(0, 0, 1000, 1000, 1.0)];
-        let on_edge = 1000 - 473;
+        let on_edge = 1000 - 525;
         assert_eq!(reachable(at(on_edge, 0), &m), None);
         assert_eq!(reachable(at(on_edge - 1, 0), &m), at(on_edge - 1, 0));
     }
 
     #[test]
     fn the_work_area_bottom_edge_is_outside() {
-        // The vertical twin: handle y = saved.y + 48. Kills a `y` offset that
-        // drifts (48 → 148 leaves every horizontal test green) and `<` → `<=`.
+        // The vertical twin: handle y = saved.y + 24. Kills a `y` offset that
+        // drifts (24 → 124 leaves every horizontal test green) and `<` → `<=`.
         let m = [monitor(0, 0, 1000, 1000, 1.0)];
-        let on_edge = 1000 - 48;
+        let on_edge = 1000 - 24;
         assert_eq!(reachable(at(0, on_edge), &m), None);
         assert_eq!(reachable(at(0, on_edge - 1), &m), at(0, on_edge - 1));
     }
 
     #[test]
     fn a_window_above_the_top_edge_with_its_handle_below_it_is_kept() {
-        // Corner 30 px above the monitor, handle (−30 + 48 = 18) inside. A
+        // Corner 10 px above the monitor, handle (−10 + 24 = 14) inside. A
         // `reachable` that checks the corner's y — or ignores the y offset —
         // drops it.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
-        assert_eq!(reachable(at(100, -30), &m), at(100, -30));
-        assert_eq!(reachable(at(100, -49), &m), None);
+        assert_eq!(reachable(at(100, -10), &m), at(100, -10));
+        assert_eq!(reachable(at(100, -25), &m), None);
     }
 
     #[test]
     fn adjacent_monitors_with_different_scales_each_use_their_own() {
         // A 1× monitor at 0..1920 and a 2× monitor to its right. Saved corner at
-        // x = 1600: on the 1× monitor the handle (2073) is off its edge, on the
-        // 2× monitor (1600 + 946 = 2546) it is inside — kept. Remove the 2×
+        // x = 1600: on the 1× monitor the handle (2125) is off its edge, on the
+        // 2× monitor (1600 + 1050 = 2650) it is inside — kept. Remove the 2×
         // monitor and it is off everything.
         let two = [
             monitor(0, 0, 1920, 1080, 1.0),
