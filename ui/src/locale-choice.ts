@@ -97,12 +97,20 @@ export type LocaleChoiceState = {
   // the retry is still in flight, which `Application.test.ts`'s own "clears
   // only once it comes back clean" forbids.
   readStamp: number;
+  // D165 (1): whether the read that produced the CURRENT `error` was started
+  // by the "Retry reading" button. Written by the same read that writes
+  // `readStamp`, under the same `mine === opSeq` guard — a superseded read
+  // writes neither, so the two never disagree about which read they
+  // describe. `changeLocaleChoice`'s own recovery call passes no origin, so
+  // a rejected change is never mistaken for a press on this button,
+  // whichever way that read answers.
+  readAnswersPress: boolean;
   applyStamp: number;
 };
 
 const INITIAL: LocaleChoiceState = {
   snapshot: null, snapshotConfirmed: false, busy: false, error: null, changeError: null,
-  application: { kind: 'initial' }, readStamp: 0, applyStamp: 0,
+  application: { kind: 'initial' }, readStamp: 0, readAnswersPress: false, applyStamp: 0,
 };
 
 const state = writable<LocaleChoiceState>({ ...INITIAL });
@@ -122,11 +130,18 @@ const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : S
 // change starts, resolving after that change has already settled the store.
 let opSeq = 0;
 
-// Mount-time (and remount-time) read. A no-op while `busy`: a write already
-// in flight will settle the store itself once it resolves, and starting a
-// second, concurrent read here could resolve in either order against it —
-// this is the "remount lands mid-write" case, not a special one.
-export async function loadLocaleChoice(): Promise<void> {
+// Mount-time (and remount-time) read by default. A no-op while `busy`: a
+// write already in flight will settle the store itself once it resolves, and
+// starting a second, concurrent read here could resolve in either order
+// against it — this is the "remount lands mid-write" case, not a special one.
+//
+// `origin` is who started this particular call, carried through to the
+// failure it writes (`readAnswersPress` above) — never guessed afterwards
+// from `opSeq` or any other shared counter, which a superseding call would
+// already have moved. The "Retry reading" button is the only caller that
+// passes `'press'`; every other caller, including `changeLocaleChoice`'s own
+// recovery read, takes the default.
+export async function loadLocaleChoice(origin: 'mount' | 'press' = 'mount'): Promise<void> {
   if (get(state).busy) return;
   const mine = ++opSeq;
   try {
@@ -136,7 +151,11 @@ export async function loadLocaleChoice(): Promise<void> {
   } catch (e) {
     if (mine !== opSeq) return;
     state.update((s) => ({
-      ...s, error: errorMessage(e), application: { kind: 'unknown' }, readStamp: s.readStamp + 1,
+      ...s,
+      error: errorMessage(e),
+      application: { kind: 'unknown' },
+      readStamp: s.readStamp + 1,
+      readAnswersPress: origin === 'press',
     }));
   }
 }
@@ -184,6 +203,10 @@ export async function changeLocaleChoice(choice: LocaleChoice): Promise<void> {
       // whatever the stamp says. Both mutants (reset it, bump it) leave the
       // suite green; this line keeps the field's meaning, not a behaviour.
       readStamp: s.readStamp,
+      // Same as `readStamp` above: carried through, not reset — its value
+      // guards nothing here either, since `error: null` already clears the
+      // display this field only qualifies.
+      readAnswersPress: s.readAnswersPress,
       applyStamp: s.applyStamp + 1,
     }));
   } catch (e) {

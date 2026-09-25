@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
@@ -46,49 +47,32 @@
   let hotkeySeq = 0;
   let autostartSeq = 0;
 
-  // Answers with the `hotkey` this read actually WROTE to the screen, or `null`
-  // when it wrote none — superseded by a later writer, or rejected outright.
-  // Only the caller that started a corrective read after a refused `set_hotkey`
-  // reads the answer; see `shortcutNotSaved` for what it decides. A read whose
-  // hotkey the stamp discarded never reached the screen, so it must not get to
-  // choose the sentence drawn beside what did.
-  //
-  // 🔴 The fixture that holds this is `a corrective read the stamp discarded
-  // does not get to choose the sentence`, and fix round 2 had to REBUILD it
-  // before that sentence was true. Its first version superseded the held-open
-  // read with a successful recording, which sets `hotkeyError = null` and takes
-  // the heading off screen on its own — so it asserted an absence that the
-  // write-side stamp was already producing, and the `null` return could be
-  // removed without it noticing. It now supersedes with a SECOND REJECTION, so
-  // the heading stays on screen and the sentence it holds is the live
-  // rejection's own. Judged by `pr9-ui.sh`, "a discarded corrective read must
-  // not choose the sentence".
-  async function refresh(): Promise<AppPrefs['hotkey'] | null> {
+  // D165 (1): who started a read decides how loud its refusal is. A read a
+  // person's press started is the answer to that press — assertive; the mount
+  // read is state — polite. Both of these fields are instance fields, so a
+  // remount (which only ever starts a fresh MOUNT read here) begins polite.
+  let loadFailureAnswersPress = $state(false);
+  // Which refusal the load-failure nodes belong to, so a repeat is heard — the
+  // device `locale-choice.ts` uses for `readStamp`.
+  let loadStamp = $state(0);
+
+  // A read also settles a `pending` `shortcutOutcome` (the comment above
+  // `ShortcutOutcome` says why here). Only a read that took the hotkey field
+  // settles it: one holding neither stamp leaves at the early return, and one
+  // holding `takeAutostart` alone gets `appliedHotkey === null`. A settled
+  // outcome is not judged again by a later read — `pr9-ui.sh`, "a settled
+  // outcome must not be re-litigated by an unrelated later read".
+  async function refresh(origin: 'mount' | 'press'): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
     try {
       const p = await appPrefs();
       const takeHotkey = myHotkey === hotkeySeq;
       const takeAutostart = myAutostart === autostartSeq;
-      // 🔴 The answer this read is ENTITLED to give about the shortcut,
-      // computed once and returned from both exits below. It was written twice,
-      // and fix round 2 measured what that cost: the second copy sat behind the
-      // early return, reachable only when `takeHotkey` is false while
-      // `takeAutostart` is true — which needs a SUCCESSFUL `setHotkey` as the
-      // superseder, because any `refresh()` claims both stamps and would leave
-      // through the early return instead. A successful `setHotkey` sets
-      // `hotkeyError = null`, and the sentence this value chooses is drawn only
-      // under `hotkeyError !== null`. So the second copy could not be observed
-      // at all: mutated to `p.hotkey`, it survived all 665 tests, and no
-      // fixture could have killed it. One name, one site, one thing to get
-      // wrong — the project's "two truths, one message" in the small.
-      const appliedHotkey = takeHotkey ? p.hotkey : null;
-      // Superseded on every field this read could have written. `version` and
-      // `platform` are decided at compile time and cannot have changed, so
-      // there is nothing left for it to say. It returns `appliedHotkey` rather
-      // than a bare `null` — the same thing by construction here, and one
-      // expression fewer that a later edit could make disagree with the other.
-      if (!takeHotkey && !takeAutostart) return appliedHotkey;
+      // Superseded on every field this read could have written — `version`
+      // and `platform` are decided at compile time and cannot have changed,
+      // so there is nothing left for either to say.
+      if (!takeHotkey && !takeAutostart) return;
       prefs = {
         ...p,
         // A writer that landed while this read was in flight holds the truth
@@ -98,18 +82,29 @@
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
       };
       loadError = null;
-      return appliedHotkey;
+      // The hotkey THIS read wrote to the screen, or `null` if it did not
+      // take that field — read only by the settle below.
+      const appliedHotkey = takeHotkey ? p.hotkey : null;
+      if (appliedHotkey !== null && shortcutOutcome === 'pending') {
+        // «In effect» is a claim about the operating system, so only a
+        // `registered` status may make it — a combination that came back the
+        // same but `unavailable` is the Wayland repeat (D165), not row 6.
+        shortcutOutcome = appliedHotkey.status.kind === 'registered' && appliedHotkey.shortcut === refusedShortcut
+          ? 'not_saved'
+          : 'unchanged';
+      }
     } catch (e) {
       // A rejection is about the read as a whole, so it is shown only where the
       // read still had something to say — the same test both directions get.
-      if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return null;
+      if (myHotkey !== hotkeySeq && myAutostart !== autostartSeq) return;
       loadError = e instanceof Error ? e.message : String(e);
-      return null;
+      loadFailureAnswersPress = origin === 'press';
+      loadStamp += 1;
     }
   }
 
   onMount(() => {
-    void refresh();
+    void refresh('mount');
     // `localeChoiceState` is module-level (`../locale-choice`), not reset on
     // destroy: `Settings.svelte` destroys and recreates this component on
     // every section switch, and busy/warning/snapshot must survive that. This
@@ -134,6 +129,15 @@
   // `Scanning.svelte`'s own `index`/`read`/`unreadable` discrimination, for the
   // same reason.
   const unavailable = $derived(hotkey !== null && hotkey.status.kind === 'unavailable' ? hotkey.status : null);
+
+  // ONE predicate for both the shortcut and autostart groups below (spec
+  // §2.1, D165): they share this condition, so a second copy of it would be
+  // free to drift from this one. Verbatim `===` on purpose — `includes` or a
+  // normalised comparison would drop a quote whose text is not actually the
+  // standing reason.
+  function repeatsReason(reason: string | null, error: string | null): boolean {
+    return reason !== null && error !== null && reason === error;
+  }
 
   const shortcutStatusText = $derived.by(() => {
     void $locale;
@@ -173,18 +177,43 @@
   // system registered the NEW combination and the write to `prefs.json` then
   // failed, so `set_hotkey` rejects with `Error::Prefs` while the shortcut is
   // in effect. The corrective re-read D-b requires then draws that new
-  // shortcut — under a heading saying nothing was changed. Each half is true
-  // alone; the pair is not, and what a person does about it differs: one is
-  // "try again", the other is "it works until you restart".
+  // shortcut, and a heading saying nothing was changed would contradict it.
+  // What a person does differs between the two: one is "try again", the
+  // other is "it works until you restart".
   //
   // Decided from the RE-READ and never from the rejection's sentence. That
   // sentence is a free-text `Display` this window does not own, and every
   // wording of it is one refactor away from moving; the state the operating
   // system reports is the fact.
-  let shortcutNotSaved = $state(false);
+  //
+  // 🔴 Three outcomes, not two (D165, spec §2.2). Between a refusal
+  // and the corrective read's answer the section does not know which row of
+  // the transition table it is in, so the heading says exactly that; the read
+  // then settles it. A read that is itself refused never settles it, and the
+  // neutral sentence stays — worded so that it is still true when it stays.
+  //
+  // 🔴 Settled inside `refresh()`, not only by the read the shortcut
+  // rejection's own catch started: every `refresh()` claims BOTH stamps, so
+  // an autostart rejection's read can supersede that one and be the read that
+  // writes the hotkey. Settled only by the read the shortcut's own catch
+  // started, `pending` would stay beside a shortcut a read already answered
+  // for.
+  type ShortcutOutcome = 'pending' | 'unchanged' | 'not_saved';
+  const SHORTCUT_HEADING: Record<ShortcutOutcome, Key> = {
+    pending: 'application_shortcut_pending',
+    unchanged: 'application_shortcut_failed',
+    not_saved: 'application_shortcut_not_saved',
+  };
+  let shortcutOutcome = $state<ShortcutOutcome>('unchanged');
+  // The combination a `pending` outcome is waiting to hear back about — set
+  // together with `shortcutOutcome = 'pending'`, cleared when a recording
+  // starts and when a change is sent (not when the outcome settles), read
+  // only by `refresh()`.
+  let refusedShortcut: string | null = null;
   const shortcutFailedLabel = $derived.by(() => {
     void $locale;
-    return t(shortcutNotSaved ? 'application_shortcut_not_saved' : 'application_shortcut_failed');
+    if (shortcutQuoteRepeats) return t('application_shortcut_failed_same_reason');
+    return t(SHORTCUT_HEADING[shortcutOutcome]);
   });
 
   let recording = $state(false);
@@ -195,6 +224,15 @@
   // catalogue lead-in above — never branched on, exactly as every other
   // rejection in this product.
   let hotkeyError = $state<string | null>(null);
+
+  // Gated on `shortcutOutcome === 'unchanged'`: while a change is `pending`,
+  // `unavailable` still holds the PRE-change reason, so a match there is not
+  // yet the settled fact this predicate is about. `not_saved` is only ever
+  // set from a `registered` read in `refresh()`, so when it is set there is
+  // no reason on screen to repeat.
+  const shortcutQuoteRepeats = $derived(
+    shortcutOutcome === 'unchanged' && repeatsReason(unavailable?.reason ?? null, hotkeyError),
+  );
 
   // 🔴 (review, Important 1) `onkeydown` below only ever reaches a FOCUSED
   // element, and a click does not focus a `<button>` on every platform — macOS
@@ -223,7 +261,8 @@
     recording = true;
     notUsable = false;
     hotkeyError = null;
-    shortcutNotSaved = false;
+    shortcutOutcome = 'unchanged';
+    refusedShortcut = null;
     recordButton?.focus();
   }
 
@@ -270,7 +309,8 @@
     notUsable = false;
     recording = false;
     hotkeyError = null;
-    shortcutNotSaved = false;
+    shortcutOutcome = 'unchanged';
+    refusedShortcut = null;
     hotkeyBusy = true;
     try {
       const reply = await setHotkey(shortcut);
@@ -295,19 +335,14 @@
       // the only honest source for what the screen draws next is a fresh read,
       // never the value this window held before the call.
       //
-      // And that read is what tells row 6 from the rows that changed nothing:
-      // if it comes back naming the combination THIS call sent, the operating
-      // system kept it and only the file did not. `applied === null` means the
-      // read never reached the screen, and a read that wrote nothing decides
-      // nothing — the heading stays whatever the writer that DID reach the
-      // screen earned. That is not hypothetical: two rejections in flight at
-      // once leave this callback holding the first one's shortcut long after
-      // the second one's read has drawn its own sentence, and without the
-      // `null` the stale one would rewrite it. `refresh`'s own comment names
-      // the fixture.
-      void refresh().then((applied) => {
-        shortcutNotSaved = applied !== null && applied.shortcut === shortcut;
-      });
+      // A fresh read is also what tells row 6 from the rows that changed
+      // nothing, and `refresh` decides which, not this catch (see the comment
+      // above `ShortcutOutcome`). `refusedShortcut` is the combination THIS
+      // call sent, so whichever read settles it compares against the right
+      // one.
+      shortcutOutcome = 'pending';
+      refusedShortcut = shortcut;
+      void refresh('press');
     } finally {
       // Released whichever way the call went: a refusal that left the control
       // disabled would cost a person the only way to change the shortcut.
@@ -351,9 +386,13 @@
     if (autostart === null) return null;
     return autostartIsEnabled ? t('application_autostart_disable') : t('application_autostart_enable');
   });
-  const autostartFailedLabel = $derived.by(() => { void $locale; return t('application_autostart_failed'); });
+  const autostartFailedLabel = $derived.by(() => {
+    void $locale;
+    return t(autostartQuoteRepeats ? 'application_autostart_failed_same_reason' : 'application_autostart_failed');
+  });
 
   let autostartError = $state<string | null>(null);
+  const autostartQuoteRepeats = $derived(repeatsReason(autostartUnknown?.reason ?? null, autostartError));
   // (review, Minor 3) No in-flight guard meant a double press sent two
   // `set_autostart` calls — both carrying the same value, since the second
   // read the same unchanged on-screen state, so no WRONG state resulted, but
@@ -392,7 +431,7 @@
       if (prefs !== null) prefs = { ...prefs, autostart: reply };
     } catch (err) {
       autostartError = err instanceof Error ? err.message : String(err);
-      void refresh();
+      void refresh('press');
     } finally {
       autostartBusy = false;
     }
@@ -499,6 +538,18 @@
   // screen is drawn from them.
   const languageReadStamp = $derived($localeChoiceState.readStamp);
   const languageApplyStamp = $derived($localeChoiceState.applyStamp);
+  // D165 (1): the store, not this component, records who started the read
+  // that produced the CURRENT `error` (`locale-choice.ts`'s own comment on
+  // `readAnswersPress`). `languageMountStamp` is the stamp that was already
+  // standing when THIS instance was created, captured once and never
+  // updated: a failure carrying that same stamp predates this instance's own
+  // first read, so it is drawn from a PREVIOUS instance's press (or no press
+  // at all) and stays polite regardless of `readAnswersPress` — this is what
+  // keeps a remount polite for a standing failure.
+  const languageMountStamp = get(localeChoiceState).readStamp;
+  const languageReadAnswersPress = $derived(
+    $localeChoiceState.readAnswersPress && languageReadStamp !== languageMountStamp,
+  );
 
   const languageLabelText = $derived.by(() => { void $locale; return t('application_language_label'); });
   const languageAutoLabel = $derived.by(() => { void $locale; return t('application_language_auto'); });
@@ -561,9 +612,19 @@
 
   // The ids an error paragraph carries, joined for `aria-describedby` on the
   // control it is about. `undefined` and not `''` where nothing applies —
-  // Svelte omits the attribute entirely rather than writing it empty.
-  const shortcutDescribedBy = $derived(hotkeyError === null ? undefined : 'application-shortcut-failed application-shortcut-error');
-  const autostartDescribedBy = $derived(autostartError === null ? undefined : 'application-autostart-failed application-autostart-error');
+  // Svelte omits the attribute entirely rather than writing it empty. When
+  // the quote is dropped for repeating the standing reason, the description
+  // points at the reason paragraph instead of the (unrendered) error one.
+  const shortcutDescribedBy = $derived(
+    hotkeyError === null ? undefined
+      : shortcutQuoteRepeats ? 'application-shortcut-failed application-shortcut-reason'
+      : 'application-shortcut-failed application-shortcut-error',
+  );
+  const autostartDescribedBy = $derived(
+    autostartError === null ? undefined
+      : autostartQuoteRepeats ? 'application-autostart-failed application-autostart-reason'
+      : 'application-autostart-failed application-autostart-error',
+  );
   const themeDescribedBy = $derived(themeError === null ? undefined : 'application-theme-failed application-theme-error');
   // Language has two independent rejections (a failed READ, a failed CHANGE)
   // plus two non-error outcomes worth describing (`partial`, `unknown`) —
@@ -596,21 +657,24 @@
   // the node that arrived rather than the region again; `aria-atomic` stays
   // at its default `false`, which is what makes that true.
   //
-  // Which region a sentence goes to is decided by WHAT IT IS ABOUT, not by
-  // what happened to trigger it: a state a read reported is polite, a refusal
-  // of an operation this window issued is assertive.
+  // Which region a sentence goes to is decided by WHAT IT IS ABOUT, for most
+  // of this section: a state a read reported is polite, a refusal of an
+  // operation this window issued is assertive. D165 (1) is an exception:
+  // a READ's own refusal is louder when a person's press started that read —
+  // `loadFailureAnswersPress` and `languageReadAnswersPress` carry which is
+  // true for the load failure and the language read failure respectively.
   //
-  // 🔴 That is NOT the spec's criterion, which says assertive means "a person
-  // just pressed, the answer is urgent" (§2.2). The two disagree in both
-  // directions, and both disagreements are left standing deliberately:
-  // a re-read refused after a press on "Retry reading" is drawn polite, and
-  // two paths reach assertive with nobody having pressed anything — a failed
-  // mount-time `get_locale`, and a REMOUNT, because `localeChoiceState` is
-  // module-level and `Settings.svelte` rebuilds this section on every switch,
-  // so a standing `partial`/`unknown`/`changeError` is inserted into the
-  // assertive region again. Whether that is right is the owner's call, booked
-  // rather than decided here; the live check's scenario 5 is where the
-  // remount case gets heard rather than reasoned about.
+  // 🔴 Two disagreements with the spec's own criterion (§2.2: assertive means
+  // "a person just pressed, the answer is urgent") stand, both with nobody
+  // having pressed anything. A failed MOUNT-time `get_locale` read is
+  // one: `loadLocaleChoice`'s own catch sets `application: {kind: 'unknown'}`
+  // regardless of who started the read, and the `language-unknown` paragraph
+  // is unconditionally assertive — D165 (1) never touched that path, only
+  // the `language-failed`/`language-error` pair. A REMOUNT is the other: it
+  // re-announces a standing `partial`/`unknown`/`changeError` in the
+  // assertive region again, because `localeChoiceState` is module-level and
+  // `Settings.svelte` rebuilds this section on every section switch. Neither
+  // is decided here.
   //
   // Visible paragraphs stay where they are and name their region through
   // `data-announced-by`; none of them is a descendant of either.
@@ -624,12 +688,21 @@
   // a refusal of one thing from re-reading the state of another.
   type Announcement = { key: string; text: string };
 
+  // D165 (1): the same pair of nodes, whichever region they end up in — kept
+  // in one function so the pair cannot drift into two different keys or texts
+  // in `politeAnnouncements` and `assertiveAnnouncements` below.
+  const loadFailureAnnouncements = $derived.by<Announcement[]>(() => loadError === null ? [] : [
+    { key: `load-failed#${loadStamp}`, text: loadFailedLabel },
+    { key: `load-error#${loadStamp}`, text: loadError },
+  ]);
+  const languageReadAnnouncements = $derived.by<Announcement[]>(() => languageReadError === null ? [] : [
+    { key: `language-failed#${languageReadStamp}`, text: languageFailedLabel },
+    { key: `language-error#${languageReadStamp}`, text: languageReadError },
+  ]);
+
   const politeAnnouncements = $derived.by<Announcement[]>(() => {
     const out: Announcement[] = [];
-    if (loadError !== null) {
-      out.push({ key: 'load-failed', text: loadFailedLabel });
-      out.push({ key: 'load-error', text: loadError });
-    }
+    if (!loadFailureAnswersPress) out.push(...loadFailureAnnouncements);
     if (prefs === null) return out;
     // The CLAIM and the reason that explains it, together: "this shortcut is
     // not registered" is the fact, and the backend's sentence below it is only
@@ -640,11 +713,11 @@
     if (unavailable !== null && shortcutStatusText !== null && shortcutReasonText !== null) {
       out.push({ key: 'shortcut-status', text: shortcutStatusText });
       out.push({ key: 'shortcut-reason', text: shortcutReasonText });
+      // D165 (2): the way out is heard too — without it a listener is told
+      // what is broken and left with no next step.
+      out.push({ key: 'shortcut-tray', text: shortcutTrayText });
     }
-    if (languageReadError !== null) {
-      out.push({ key: `language-failed#${languageReadStamp}`, text: languageFailedLabel });
-      out.push({ key: `language-error#${languageReadStamp}`, text: languageReadError });
-    }
+    if (!languageReadAnswersPress) out.push(...languageReadAnnouncements);
     if (autostartUnknown !== null && autostartStatusText !== null && autostartReasonText !== null) {
       out.push({ key: 'autostart-status', text: autostartStatusText });
       out.push({ key: 'autostart-reason', text: autostartReasonText });
@@ -654,12 +727,13 @@
 
   const assertiveAnnouncements = $derived.by<Announcement[]>(() => {
     const out: Announcement[] = [];
+    if (loadFailureAnswersPress) out.push(...loadFailureAnnouncements);
     if (prefs === null) return out;
     if (notUsable && notUsableText !== null) {
       out.push({ key: `shortcut-not-usable#${notUsableStamp}`, text: notUsableText });
     }
     if (hotkeyError !== null) {
-      out.push({ key: 'shortcut-failed', text: shortcutFailedLabel });
+      out.push({ key: `shortcut-failed#${shortcutOutcome}`, text: shortcutFailedLabel });
       out.push({ key: 'shortcut-error', text: hotkeyError });
     }
     if (themeError !== null) {
@@ -682,6 +756,7 @@
       out.push({ key: `language-change-unconfirmed#${languageApplyStamp}`, text: languageChangeUnconfirmedLabel });
       out.push({ key: `language-change-error#${languageApplyStamp}`, text: languageChangeError });
     }
+    if (languageReadAnswersPress) out.push(...languageReadAnnouncements);
     if (autostartError !== null) {
       out.push({ key: 'autostart-failed', text: autostartFailedLabel });
       out.push({ key: 'autostart-error', text: autostartError });
@@ -705,8 +780,8 @@
      answer on screen, which is `Settings.svelte`'s ruling for `model_settings`
      and not a new one here. -->
 {#if loadError}
-  <p data-testid="application-load-failed" data-announced-by={POLITE_ID}>{loadFailedLabel}</p>
-  <p data-testid="application-load-error" data-announced-by={POLITE_ID}>{loadError}</p>
+  <p data-testid="application-load-failed" data-announced-by={loadFailureAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{loadFailedLabel}</p>
+  <p data-testid="application-load-error" data-announced-by={loadFailureAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{loadError}</p>
 {/if}
 
 {#if prefs}
@@ -724,12 +799,14 @@
     </p>
     <p data-testid="application-shortcut-status" data-announced-by={unavailable ? POLITE_ID : undefined}>{shortcutStatusText}</p>
     {#if unavailable}
-      <p data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
-      <p data-testid="application-shortcut-tray">{shortcutTrayText}</p>
+      <p id="application-shortcut-reason" data-testid="application-shortcut-reason" data-announced-by={POLITE_ID}>{shortcutReasonText}</p>
+      <p data-testid="application-shortcut-tray" data-announced-by={POLITE_ID}>{shortcutTrayText}</p>
     {/if}
     {#if hotkeyError !== null}
       <p id="application-shortcut-failed" data-testid="application-shortcut-failed" data-announced-by={ASSERTIVE_ID}>{shortcutFailedLabel}</p>
-      <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={ASSERTIVE_ID}>{hotkeyError}</p>
+      {#if !shortcutQuoteRepeats}
+        <p id="application-shortcut-error" data-testid="application-shortcut-error" data-announced-by={ASSERTIVE_ID}>{hotkeyError}</p>
+      {/if}
     {/if}
     <button
       type="button"
@@ -879,13 +956,13 @@
       <p id="application-language-change-error" data-testid="application-language-change-error" data-announced-by={ASSERTIVE_ID}>{languageChangeError}</p>
     {/if}
     {#if languageReadError !== null}
-      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={POLITE_ID}>{languageFailedLabel}</p>
-      <p id="application-language-error" data-testid="application-language-error" data-announced-by={POLITE_ID}>{languageReadError}</p>
+      <p id="application-language-failed" data-testid="application-language-failed" data-announced-by={languageReadAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{languageFailedLabel}</p>
+      <p id="application-language-error" data-testid="application-language-error" data-announced-by={languageReadAnswersPress ? ASSERTIVE_ID : POLITE_ID}>{languageReadError}</p>
       <button
         type="button"
         data-testid="application-language-retry-read"
         disabled={languageBusy}
-        onclick={() => loadLocaleChoice()}
+        onclick={() => void loadLocaleChoice('press')}
       >{languageRetryReadLabel}</button>
     {/if}
   </div>
@@ -895,11 +972,13 @@
     <p data-testid="application-autostart-label">{autostartLabelText}</p>
     <p data-testid="application-autostart-status" data-announced-by={autostartUnknown ? POLITE_ID : undefined}>{autostartStatusText}</p>
     {#if autostartUnknown}
-      <p data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
+      <p id="application-autostart-reason" data-testid="application-autostart-reason" data-announced-by={POLITE_ID}>{autostartReasonText}</p>
     {/if}
     {#if autostartError !== null}
       <p id="application-autostart-failed" data-testid="application-autostart-failed" data-announced-by={ASSERTIVE_ID}>{autostartFailedLabel}</p>
-      <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={ASSERTIVE_ID}>{autostartError}</p>
+      {#if !autostartQuoteRepeats}
+        <p id="application-autostart-error" data-testid="application-autostart-error" data-announced-by={ASSERTIVE_ID}>{autostartError}</p>
+      {/if}
     {/if}
     {#if autostartOffersBothDirections}
       <!-- Both disabled by the one flag: a press on either asks the

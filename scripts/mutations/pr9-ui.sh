@@ -407,14 +407,13 @@ case_ "unavailable must not be worded as registered" \
 # 🔴 D-b's closing note: a rejected `set_hotkey` carries no `HotkeyState` at
 # all — which of the table's seven rows produced it is not recoverable from the
 # sentence alone, so the only honest source for what the screen draws next is a
-# fresh `appPrefs()`, never the value the window held before the call. Every
-# fixture whose fresh read happens to answer with the SAME shortcut the window
-# already held would pass under a mutant that skips the re-read entirely; only
-# the pair that changes the answer between the two reads can see it, and this is
-# the first of that pair.
+# fresh `appPrefs()`, never the value the window held before the call. The
+# mutant deletes the re-read, and the `pending` bookkeeping before it. The
+# judging test's fresh read would report the sent combination as `registered`;
+# under the mutant the heading stays «Скорочення не змінено» instead of «діє».
 case_ "a rejected set_hotkey must trigger a fresh read, not keep the pre-call value" \
   ui/src/settings/Application.svelte \
-  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\)\.then\(.*?\}\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
+  's~hotkeyError = err instanceof Error \? err\.message : String\(err\);.*?void refresh\(\x27press\x27\);~hotkeyError = err instanceof Error ? err.message : String(err); // mutant: a rejected set_hotkey does not re-read appPrefs~s' \
   '// mutant: a rejected set_hotkey does not re-read appPrefs' \
   src/settings/Application.test.ts 'a refused change shows the sentence and then draws the NEW shortcut when a fresh read reports it' runner=vitest
 
@@ -520,36 +519,24 @@ case_ "an unreadable autostart offers both directions, not the one Enable" \
 # External review P3. The heading is the old one whatever the corrective re-read
 # says: «Скорочення не змінено» drawn beside the new shortcut the operating
 # system is holding (transition-table row 6, `prefs.rs`) — the persist failed,
-# the registration did not. Every fixture whose re-read reports the OLD shortcut
-# survives this mutant, which is every one that existed before the finding.
+# the registration did not. The judging test's re-read reports the new
+# combination as `registered`; the mutant keeps «Скорочення не змінено».
 case_ "a shortcut the system kept but could not save is not called unchanged" \
   ui/src/settings/Application.svelte \
-  's~    return t\(shortcutNotSaved \? .application_shortcut_not_saved. : .application_shortcut_failed.\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
+  's~    return t\(SHORTCUT_HEADING\[shortcutOutcome\]\);~    return t("application_shortcut_failed"); // mutant: always the old heading~' \
   'return t("application_shortcut_failed"); // mutant: always the old heading' \
   src/settings/Application.test.ts 'a shortcut the system kept but could not save is not reported as unchanged' runner=vitest
 
-# 🔴 Fix round 2. The corrective re-read's own stamp ignored: a read that was
-# superseded still answers with the shortcut it found, and the rejection that
-# started it then compares that answer against the shortcut ITS call sent. With
-# two rejections in flight the stale one wins the comparison and rewrites the
-# heading of a rejection it knows nothing about — «Скорочення діє…» drawn over a
-# refusal that changed nothing at all.
-#
-# The judging test had to be rebuilt before this case could exist. Its first
-# version superseded the held-open read with a SUCCESSFUL recording, which sets
-# `hotkeyError = null` and takes the heading off screen by itself, so it
-# asserted an absence the write-side stamp was already producing and this mutant
-# survived it. It now supersedes with a second REJECTION, so the heading stays
-# on screen and the assertion is positive: the sentence is still the live
-# rejection's own.
-#
-# One site, deliberately. The same expression stood twice until fix round 2, and
-# the second copy was unobservable — reachable only behind a successful
-# `setHotkey`, which nulls the very error the sentence is drawn under. Mutated,
-# it survived all 665 tests. Collapsing the pair is what makes this mutant
-# killable at all.
-case_ "a discarded corrective read must not choose the sentence" \
+# The `pending` condition of the settle removed: a read that writes the hotkey
+# after the outcome has settled judges it again against `refusedShortcut`,
+# which a settle does not clear. The judging test settles to «не змінено»,
+# then lets an autostart rejection's read — the newest, holding both stamps —
+# report the refused combination as `registered`; the mutant turns the heading
+# into «діє». This window's own `set_hotkey` cannot produce that second read
+# today (every later read returns the same hotkey state until the next
+# recording, which resets the outcome first), so the test builds it by hand.
+case_ "a settled outcome must not be re-litigated by an unrelated later read" \
   ui/src/settings/Application.svelte \
-  's~      const appliedHotkey = takeHotkey \? p\.hotkey : null;~      const appliedHotkey = p.hotkey; // mutant: a superseded read answers anyway~' \
-  '// mutant: a superseded read answers anyway' \
-  src/settings/Application.test.ts 'a corrective read the stamp discarded does not get to choose the sentence' runner=vitest
+  's~      if \(appliedHotkey !== null && shortcutOutcome === .pending.\) \{~      if (appliedHotkey !== null) { // mutant: re-litigates a settled outcome~' \
+  '// mutant: re-litigates a settled outcome' \
+  src/settings/Application.test.ts 'a settled outcome must not be re-litigated by an unrelated later read' runner=vitest

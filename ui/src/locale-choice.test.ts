@@ -50,6 +50,20 @@ describe('loadLocaleChoice', () => {
     expect(s.application).toEqual({ kind: 'unknown' });
   });
 
+  // D165 (1): the caller states who asked, and the failure this produces
+  // carries that on `readAnswersPress` — the default (no argument, what
+  // every caller but the "Retry reading" button passes) is never mistaken
+  // for a press.
+  it('a failed read started by a press sets readAnswersPress, a default one clears it', async () => {
+    getLocale.mockRejectedValue(new Error('a'));
+    await loadLocaleChoice('press');
+    expect(get(localeChoiceState).readAnswersPress).toBe(true);
+
+    getLocale.mockRejectedValue(new Error('b'));
+    await loadLocaleChoice();
+    expect(get(localeChoiceState).readAnswersPress).toBe(false);
+  });
+
   // "збереження warning при load": a plain read must never clear a partial
   // warning a previous change earned — it has no `applyErrors` to confirm one
   // way or the other, so it is not entitled to an opinion about it.

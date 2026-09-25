@@ -1062,24 +1062,14 @@ test('a shortcut refused outright is still reported as unchanged', async () => {
   expect(at('application-shortcut-error')).toBe(SENTENCE);
 });
 
-// 🔴 The re-read is what decides, and this is the fixture that says so.
-//
-// Fix round 2, and the rebuild is the finding. The first version superseded the
-// held-open read with a SUCCESSFUL recording, which sets `hotkeyError = null` —
-// so the heading it then asserted absent was absent because no rejection was on
-// screen at all, and a `refresh()` that ignored its own stamp survived it
-// untouched. The project's named "test stands on a neighbouring defence": the
-// guard doing the work was the write-side stamp, already pinned elsewhere.
-//
-// Here BOTH acts are rejections, so `hotkeyError` never goes null and the
-// heading stays on screen throughout. The second rejection's own re-read
-// resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
-// Then the FIRST rejection's re-read — long superseded — answers naming the
-// shortcut ITS call sent. A `refresh()` that returned that answer instead of
-// `null` would compare it against the shortcut that call sent, find them equal,
-// and rewrite the heading of a rejection it knows nothing about. The assertion
-// is positive: the sentence on screen is still the one the LIVE rejection
-// earned.
+// Both acts are rejections, so the heading is on screen when the discarded
+// read answers. The second rejection's own re-read resolves FIRST and reports the OLD shortcut, so «не змінено» is what is drawn.
+// Then the FIRST rejection's re-read — superseded on BOTH stamps by the second
+// rejection's own `refresh()` call — answers naming the shortcut ITS OWN call
+// sent. It never reaches `prefs` or `shortcutOutcome`: the early return
+// inside `refresh()` fires first, because neither stamp survived. The
+// assertion is positive: the sentence on screen is still the one the LIVE
+// rejection earned.
 test('a corrective read the stamp discarded does not get to choose the sentence', async () => {
   const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
   appPrefs.mockImplementation(() => {
@@ -1832,16 +1822,54 @@ test('pressing "Retry reading" on the same language read failure is heard again'
   getLocale.mockRejectedValue(new Error(SENTENCE));
   renderSection();
   await shown('application-language-error');
-  const watcher = watchAnnouncements(politeRegion());
+
+  // The first press answers, moving the pair to the assertive region — the
+  // watcher attaches only AFTER that landed, so what it counts is the SECOND
+  // press's own repeat, not the one-time move across regions.
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
 
   await fireEvent.click(screen.getByTestId('application-language-retry-read'));
-  await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(3));
+  await tick();
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+  expect(announced(assertiveRegion())).toContain(SENTENCE);
+});
+
+// `changeLocaleChoice`'s own recovery read (`loadLocaleChoice()`, no
+// argument) never carries the "Retry reading" button's own origin, so a
+// repeat of ITS refusal isolates the key's own stamp from the button
+// entirely — nothing here is ever pressed. The mount read must succeed
+// first: a persistently rejected `getLocale` would also fail the MOUNT read,
+// leaving `snapshot` null (`languageReady` false) and the select `disabled`,
+// which is not a control a person could operate to reach this scenario at
+// all.
+test('a second rejected language change whose recovery read repeats the same refusal is heard again, politely', async () => {
+  const SENTENCE = 'get_locale is unreachable';
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  renderSection();
+  await shown('application-language-select');
+
+  getLocale.mockRejectedValue(new Error(SENTENCE));
+  expect(languageSelect().disabled).toBe(false);
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(announced(politeRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(politeRegion());
+
+  expect(languageSelect().disabled).toBe(false);
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+  await waitFor(() => expect(getLocale).toHaveBeenCalledTimes(3));
   await tick();
   await tick();
 
   expect(watcher.count()).toBeGreaterThan(0);
   watcher.stop();
   expect(announced(politeRegion())).toContain(SENTENCE);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
 });
 
 test('pressing "Retry applying" on the same partial application is heard again', async () => {
@@ -1949,11 +1977,14 @@ test('the same rejected language change, picked twice, is heard twice', async ()
   watcher.stop();
 });
 
-// The load failure has no retry control of its own: it is only ever written by
-// the corrective read a REJECTED change starts, and that change's own refusal
-// is what answers the press. So the press is always heard — through the
-// refusal beside it — and the standing load sentence is not repeated on top.
-test('a press whose corrective read also fails is still heard, and the standing load failure is not repeated', async () => {
+// D165 (1): the corrective read a rejected `setHotkey` starts is itself an
+// answer to the press, so its own refusal is heard assertively, and a repeat
+// of it is heard again — pinned by the NODE, because the text is identical
+// both times and only a new node proves a second announcement. It is never
+// heard in the polite region, which a mount-time load failure still uses
+// ("a rejected first read leaves no groups, but the polite region carries
+// the load refusal", below).
+test('a press whose corrective read also fails is heard again, in the assertive region only', async () => {
   const REFUSED = 'the operating system refused the combination';
   const UNREADABLE = 'prefs.json could not be read';
   setHotkey.mockRejectedValue(new Error(REFUSED));
@@ -1961,9 +1992,10 @@ test('a press whose corrective read also fails is still heard, and the standing 
   await record();
   appPrefs.mockRejectedValue(new Error(UNREADABLE));
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
-  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+  const firstNode = Array.from(assertiveRegion().children).find((c) => visible(c) === UNREADABLE) ?? null;
+  expect(firstNode).not.toBeNull();
   const politeWatcher = watchAnnouncements(politeRegion());
-  const assertiveWatcher = watchAnnouncements(assertiveRegion());
 
   await record();
   await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
@@ -1971,10 +2003,227 @@ test('a press whose corrective read also fails is still heard, and the standing 
   await tick();
   await tick();
 
-  expect(assertiveWatcher.count()).toBeGreaterThan(0);
+  const secondNode = Array.from(assertiveRegion().children).find((c) => visible(c) === UNREADABLE) ?? null;
+  expect(secondNode).not.toBeNull();
+  expect(secondNode).not.toBe(firstNode);
   expect(politeWatcher.count()).toBe(0);
   politeWatcher.stop();
-  assertiveWatcher.stop();
+});
+
+// D165 (1): who started the read decides how loud its own refusal is heard.
+// A read a person's press started — the corrective read after a rejected
+// `setHotkey`/`setAutostart`, and "Retry reading" for the language — answers
+// that press, so its refusal is assertive; the mount read and a standing
+// failure surviving a remount are state, so they stay polite.
+test('a corrective read refused after a press is announced at once, heading and sentence', async () => {
+  const REFUSED = 'the operating system refused the combination';
+  const UNREADABLE = 'prefs.json could not be read';
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockRejectedValueOnce(new Error(UNREADABLE));
+  setHotkey.mockRejectedValue(new Error(REFUSED));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+  expect(announced(assertiveRegion())).toContain('Не вдалося прочитати налаштування застосунку.');
+  expect(announced(politeRegion())).not.toContain(UNREADABLE);
+  expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+// The autostart call site's own `refresh('press')` — the twin of the
+// hotkey test above, for the OTHER rejected change that starts a corrective
+// read.
+test('a corrective read refused after a rejected autostart change is announced at once', async () => {
+  const REFUSED = 'the login item could not be written';
+  const UNREADABLE = 'prefs.json could not be read';
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockRejectedValueOnce(new Error(UNREADABLE));
+  setAutostart.mockRejectedValue(new Error(REFUSED));
+  renderSection();
+  await shown('application-autostart-toggle');
+
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+  expect(announced(assertiveRegion())).toContain('Не вдалося прочитати налаштування застосунку.');
+  expect(announced(politeRegion())).not.toContain(UNREADABLE);
+  expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+// `readStamp` moves only when a read ANSWERS (`locale-choice.ts`'s own
+// comment on it), never when one starts — so the OLD refusal, still standing
+// while the click's own read is in flight, must not jump to the assertive
+// region ahead of that read's own answer. Two different texts, because a
+// persistent `mockRejectedValue` with one text cannot tell "the new read
+// answered" from "the old refusal was carried over" apart.
+test('pressing «Retry reading» for the language and being refused again is announced at once', async () => {
+  const OLD = 'OLD: locale could not be read';
+  const NEW = 'NEW: get_locale is unreachable';
+  getLocale.mockRejectedValueOnce(new Error(OLD));
+  renderSection();
+  await waitFor(() => expect(announced(politeRegion())).toContain(OLD));
+
+  const second = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => second.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await tick();
+  await tick();
+
+  expect(announced(assertiveRegion())).not.toContain(OLD);
+  expect(announced(politeRegion())).toContain(OLD);
+
+  second.reject(new Error(NEW));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(NEW));
+  expect(announced(politeRegion())).not.toContain(NEW);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+  expect(screen.getByTestId('application-language-failed').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+// Two clicks before either read answers. The first click's read, superseded
+// by the second (`mine !== opSeq`), writes nothing; only the second read's
+// failure writes the store, with the press origin.
+test('two Retry presses before either answers: the later read is heard, assertively', async () => {
+  const STANDING = 'IPC closed';
+  const R1 = 'first retry read refused';
+  const R2 = 'second retry read refused';
+  getLocale.mockRejectedValue(new Error(STANDING));
+  renderSection();
+  await shown('application-language-error');
+
+  const firstRead = deferred<unknown>();
+  const secondRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => firstRead.promise);
+  getLocale.mockImplementationOnce(() => secondRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+
+  firstRead.reject(new Error(R1));
+  await tick();
+  secondRead.reject(new Error(R2));
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(R2));
+  expect(announced(politeRegion())).not.toContain(R2);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(ASSERTIVE);
+});
+
+// A second press, while its own read is still in flight, must not disturb
+// the FIRST press's own answer already showing assertively: the store is
+// written only once a read itself resolves, so nothing moves between the
+// second click and that read's own answer.
+test("a second Retry press does not move the first press's own answer while its own read is in flight", async () => {
+  const FIRST = 'first retry read refused';
+  const SECOND = 'second retry read refused';
+  getLocale.mockRejectedValue(new Error('IPC closed'));
+  renderSection();
+  await shown('application-language-error');
+
+  getLocale.mockRejectedValueOnce(new Error(FIRST));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(FIRST));
+  const politeWatcher = watchAnnouncements(politeRegion());
+
+  const secondRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => secondRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await tick();
+  await tick();
+
+  expect(politeWatcher.count()).toBe(0);
+  expect(announced(assertiveRegion())).toContain(FIRST);
+
+  secondRead.reject(new Error(SECOND));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SECOND));
+  politeWatcher.stop();
+});
+
+// Once Retry has been pressed and answered, a LATER read nobody pressed for
+// — the recovery read a rejected `set_locale` starts — must still be
+// polite: `loadLocaleChoice`'s own recovery call carries no origin, so its
+// failure writes `readAnswersPress: false` regardless of an earlier press
+// answered in this same instance.
+test('a recovery read refused after a rejected language change stays polite, even after an earlier Retry press', async () => {
+  const RETRY_UNREADABLE = 'locale could not be read';
+  const RECOVERY_UNREADABLE = 'get_locale is unreachable';
+  getLocale.mockRejectedValueOnce(new Error(RETRY_UNREADABLE));
+  renderSection();
+  await waitFor(() => expect(announced(politeRegion())).toContain(RETRY_UNREADABLE));
+
+  getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' });
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(screen.queryByTestId('application-language-error')).toBeNull());
+
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  getLocale.mockRejectedValue(new Error(RECOVERY_UNREADABLE));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+
+  await waitFor(() => expect(announced(politeRegion())).toContain(RECOVERY_UNREADABLE));
+  expect(announced(assertiveRegion())).not.toContain(RECOVERY_UNREADABLE);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
+});
+
+// A language change made while a Retry press's own read is still in flight
+// supersedes that read (`locale-choice.ts`'s own `opSeq`): the change's own
+// recovery read is the one that answers, and it carries no press origin, so
+// its refusal is polite regardless of the Retry click that never got to
+// answer.
+test("a language change made while a Retry read is in flight is answered, politely, by that change's own recovery read", async () => {
+  const FIRST = 'get_locale is unreachable';
+  const SECOND = 'get_locale is unreachable again';
+  setLocaleChoice.mockRejectedValue(new Error('set_locale was refused'));
+  renderSection();
+  await shown('application-language-select');
+
+  getLocale.mockRejectedValueOnce(new Error(FIRST));
+  await fireEvent.change(languageSelect(), { target: { value: 'en' } });
+  await waitFor(() => expect(announced(politeRegion())).toContain(FIRST));
+
+  const retryRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => retryRead.promise);
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await tick();
+
+  getLocale.mockRejectedValue(new Error(SECOND));
+  await fireEvent.change(languageSelect(), { target: { value: 'uk' } });
+
+  await waitFor(() => expect(announced(politeRegion())).toContain(SECOND));
+  expect(announced(assertiveRegion())).not.toContain(SECOND);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
+
+  // The stale retry read, once it finally settles, must not overwrite what
+  // the newer, superseding recovery read already wrote.
+  retryRead.reject(new Error('stale — superseded before it could answer'));
+  await tick();
+  await tick();
+  expect(announced(politeRegion())).toContain(SECOND);
+});
+
+test('after a remount, a standing language read failure is reported politely again', async () => {
+  const UNREADABLE = 'locale could not be read';
+  getLocale.mockRejectedValue(new Error(UNREADABLE));
+  const first = renderSection();
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  await fireEvent.click(screen.getByTestId('application-language-retry-read'));
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(UNREADABLE));
+
+  first.unmount();
+  // The store's `readAnswersPress` is still `true` from the press the OLD
+  // instance answered — held here so the NEW instance's own mount read has
+  // not answered yet either, to check that a standing failure is not
+  // assertive before this instance's own read has had a say.
+  const remountRead = deferred<unknown>();
+  getLocale.mockImplementationOnce(() => remountRead.promise);
+  renderSection();
+  await tick();
+  await tick();
+  expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
+  expect(announced(politeRegion())).toContain(UNREADABLE);
+  expect(screen.getByTestId('application-language-error').getAttribute('data-announced-by')).toBe(POLITE);
+
+  remountRead.reject(new Error(UNREADABLE));
+  await waitFor(() => expect(announced(politeRegion())).toContain(UNREADABLE));
+  expect(announced(assertiveRegion())).not.toContain(UNREADABLE);
 });
 
 // --- RED 1b.5: a refusal must not make the standing state be read again ----
@@ -2062,15 +2311,18 @@ test('the reasons a partial language application names are on screen, not only i
 // count would let one site be swapped for another, and a spot check let
 // fourteen of twenty go unguarded on Task 1.
 //
-// Three tables, because three of the twenty cannot be on screen beside the
+// Three tables, because three of the sites cannot be on screen beside the
 // rest: `not-usable` is cleared by the very press that produces a refused
 // `set_hotkey`, and a `partial` outcome is what a `set_locale` that RESOLVED
 // produces, so it never stands beside the rejection sentences.
 const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
-  ['application-load-failed', POLITE],
-  ['application-load-error', POLITE],
+  // D165 (1): `everythingRefused` below writes this pair from the corrective
+  // read a rejected `setHotkey` starts — a read a press started, so assertive.
+  ['application-load-failed', ASSERTIVE],
+  ['application-load-error', ASSERTIVE],
   ['application-shortcut-status', POLITE],
   ['application-shortcut-reason', POLITE],
+  ['application-shortcut-tray', POLITE],
   ['application-shortcut-failed', ASSERTIVE],
   ['application-shortcut-error', ASSERTIVE],
   ['application-theme-failed', ASSERTIVE],
@@ -2078,6 +2330,9 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-language-unknown', ASSERTIVE],
   ['application-language-change-unconfirmed', ASSERTIVE],
   ['application-language-change-error', ASSERTIVE],
+  // D165 (1): `everythingRefused` writes this pair from the read
+  // `changeLocaleChoice` starts to recover after a rejected `set_locale`, not
+  // from the "Retry reading" button — nobody pressed for THIS read, so polite.
   ['application-language-failed', POLITE],
   ['application-language-error', POLITE],
   ['application-autostart-status', POLITE],
@@ -2102,9 +2357,9 @@ const namesItsRegion = (table: ReadonlyArray<readonly [string, string]>) => {
   }
 };
 
-// Seventeen of the twenty on screen at once, so one fixture can ask about all
-// of them: a load failure does not stop the groups rendering once a read has
-// already succeeded.
+// Every site but those three is on screen at once, so one fixture can ask
+// about all of them: a load failure does not stop the groups rendering once
+// a read has already succeeded.
 const everythingRefused = async () => {
   appPrefs.mockResolvedValue(prefs({
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } },
@@ -2188,8 +2443,19 @@ test('the polite region says the standing state, node by node, and nothing else'
   await waitFor(() => expect(announced(politeRegion())).toEqual([
     'Це скорочення не зареєстровано в системі.',
     `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
   ]));
   expect(announced(assertiveRegion())).toEqual([]);
+});
+
+test('an unavailable shortcut announces the way out, after the claim and its reason', async () => {
+  await withUnavailableShortcut();
+
+  await waitFor(() => expect(announced(politeRegion())).toEqual([
+    'Це скорочення не зареєстровано в системі.',
+    `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
+  ]));
 });
 
 test('the assertive region says the refusal, node by node, and nothing else', async () => {
@@ -2207,6 +2473,7 @@ test('the assertive region says the refusal, node by node, and nothing else', as
   expect(announced(politeRegion())).toEqual([
     'Це скорочення не зареєстровано в системі.',
     `Програма повідомила: ${REASON}`,
+    'Пошук усе одно можна відкрити з піктограми застосунку в системному лотку.',
   ]);
 });
 
@@ -2221,6 +2488,8 @@ test('a rejected first read leaves no groups, but the polite region carries the 
     'Не вдалося прочитати налаштування застосунку.',
     SENTENCE,
   ]);
+  expect(screen.getByTestId('application-load-failed').getAttribute('data-announced-by')).toBe(POLITE);
+  expect(screen.getByTestId('application-load-error').getAttribute('data-announced-by')).toBe(POLITE);
 });
 
 test('a visible refusal paragraph is not a descendant of either region', async () => {
@@ -2330,4 +2599,335 @@ test('the startup block reads label, status, reason, failure, error, control —
     byId('application-autostart-enable'),
     byId('application-autostart-disable'),
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// D165: the shortcut block under a registrar that keeps refusing.
+// ---------------------------------------------------------------------------
+
+test('a combination the system still refuses is not called in effect, even when the read names it back', async () => {
+  // The stored combination stands `unavailable`; the person records THAT SAME
+  // combination; the registrar refuses again; the corrective read reports it
+  // back — same combination, still not registered. Only `registered` may say
+  // «діє». The opposite direction is `a refused change shows the sentence and
+  // then draws the NEW shortcut when a fresh read reports it`.
+  //
+  // The corrective read is held and released by hand, so the assertions run
+  // after it answers.
+  const STANDING = prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } } });
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(STANDING);
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(REASON));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+  expect(setHotkey).toHaveBeenCalledWith('Alt+Space');
+
+  read.resolve(STANDING);
+  await tick();
+  await tick();
+  await tick();
+  expect(at('application-shortcut-failed')).not.toContain('Скорочення діє');
+  expect(at('application-shortcut-failed')).toContain('Скорочення не змінено');
+});
+
+// ---------------------------------------------------------------------------
+// §2.2 «Затримка» (D165): between the refusal and the corrective read's
+// answer, the heading must not claim either settled sentence.
+// ---------------------------------------------------------------------------
+
+test('until the corrective read answers, the heading claims neither «unchanged» nor «in effect»', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+
+  const PENDING = 'Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:';
+  // Stays pending while the corrective read is still out, not just at the
+  // instant the refusal lands: the same heading before and after three ticks.
+  expect(at('application-shortcut-failed')).toBe(PENDING);
+  await tick();
+  await tick();
+  await tick();
+  expect(at('application-shortcut-failed')).toBe(PENDING);
+  expect(announced(assertiveRegion())).toEqual([PENDING, SENTENCE]);
+
+  read.resolve(prefs());
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(announced(assertiveRegion())).toEqual(['Скорочення не змінено. Ось що відповів застосунок:', SENTENCE]);
+});
+
+test('the settled heading arrives as a new announcement, and the refusal sentence is not read again', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const [headingBefore, sentenceNode] = Array.from(assertiveRegion().children);
+
+  read.resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  await waitFor(() => expect(announced(assertiveRegion())[0]).toContain('Скорочення діє'));
+
+  const [headingAfter, sentenceAfter] = Array.from(assertiveRegion().children);
+  // A NEW node for the settled heading: its key carries the outcome, so the
+  // settled heading is added to the live region, not rewritten inside it.
+  expect(headingAfter).not.toBe(headingBefore);
+  // And the SAME node for the sentence: its key does not change, so it is not
+  // inserted again.
+  expect(sentenceAfter).toBe(sentenceNode);
+});
+
+test('a corrective read that is itself refused leaves the neutral heading standing, because it is still true', async () => {
+  const SENTENCE = 'the operating system refused the combination';
+  const UNREADABLE = 'prefs.json could not be read';
+  appPrefs.mockResolvedValueOnce(prefs());
+  appPrefs.mockRejectedValueOnce(new Error(UNREADABLE));
+  setHotkey.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await record();
+
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-load-error')).toBe(UNREADABLE));
+  expect(at('application-shortcut-failed'))
+    .toBe('Застосунок відхилив зміну; чи змінилось скорочення, поки не відомо. Ось що відповів застосунок:');
+  expect(visiblePageText()).not.toContain('Скорочення не змінено');
+  expect(visiblePageText()).not.toContain('Скорочення діє');
+});
+
+// 🔴 `refresh()` claims BOTH stamps, so the read that writes the hotkey a
+// `pending` shortcut is waiting on need not be the read the shortcut's OWN
+// rejection started: an autostart rejection in flight at the same time
+// starts its own `refresh()`, which supersedes that read.
+test('a read started by another refusal still settles the shortcut heading', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValue(new Error('prefs.json could not be written'));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await record();
+
+  // The shortcut change is refused. Its own corrective read (A) starts and
+  // is held open.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // Autostart is refused too, while A is still in flight. Its OWN corrective
+  // read (B) supersedes A on both stamps.
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(queue).toHaveLength(3));
+
+  // B answers, naming the combination the shortcut attempt sent — still
+  // registered, row 6: the operating system kept it, only the file did not.
+  queue[2].resolve(prefs({ hotkey: { shortcut: 'Ctrl+Alt+Space', status: { kind: 'registered' } } }));
+  // A answers too, late, with a DIFFERENT combination than B's: settled from
+  // A's answer the heading would read `unchanged`, from B's `not_saved`.
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await tick();
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut-failed'))
+    .toBe('Скорочення діє, але зберегти його не вдалося: після перезапуску повернеться попереднє. Ось що відповів застосунок:');
+});
+
+// 🔴 The settle requires `pending`, so an outcome that has settled is not
+// judged again. `refusedShortcut` is not cleared on settle, so without that
+// condition a later read naming the refused combination as `registered`
+// would turn `unchanged` into `not_saved`. The stamp check cannot stop this:
+// the later read is the newest one and holds both stamps. This window's own
+// `set_hotkey` cannot produce such a read today — every later read returns
+// the same hotkey state until the next recording, which resets the outcome
+// first — so the fixture builds it by hand.
+test('a settled outcome must not be re-litigated by an unrelated later read', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  const SENT = 'Ctrl+Alt+Space';
+  setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
+  setAutostart.mockRejectedValue(new Error('the login item could not be written'));
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await record();
+
+  // Rejected outright — settles to `unchanged` from its own corrective read.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+  queue[1].resolve(prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } } }));
+  await waitFor(() => expect(at('application-shortcut-failed'))
+    .toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+
+  // Now something UNRELATED: autostart is refused too, and its own
+  // corrective read happens to report the STALE refused combination back,
+  // registered — it must not re-litigate the already-settled heading.
+  await fireEvent.click(screen.getByTestId('application-autostart-toggle'));
+  await waitFor(() => expect(queue).toHaveLength(3));
+  queue[2].resolve(prefs({ hotkey: { shortcut: SENT, status: { kind: 'registered' } } }));
+  await tick();
+  await tick();
+  await tick();
+
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+});
+
+// ---------------------------------------------------------------------------
+// D165, spec §2.1: a refusal whose sentence equals the standing reason is not
+// quoted a second time. Shortcut and autostart share one predicate
+// (`repeatsReason`), so both are exercised here.
+// ---------------------------------------------------------------------------
+
+const SAME_SHORTCUT = 'Скорочення не змінено — з тієї самої причини.';
+
+test('a refusal whose sentence is the standing reason is not quoted a second time, and the heading says so', async () => {
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+  expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
+  // Once on screen, in the reason paragraph — counted in what a person SEES.
+  expect(visiblePageText().split(REASON).length - 1).toBe(1);
+  // And heard in full: the heading AND the sentence itself, not a pointer.
+  expect(announced(assertiveRegion())).toEqual([SAME_SHORTCUT, REASON]);
+});
+
+test('a refusal that differs from the standing reason by one full stop is quoted in full under the usual heading', async () => {
+  // A trailing full stop and not a swapped comma: `ALMOST` CONTAINS `REASON`,
+  // so `error.includes(reason)` calls them equal and dies here. The reverse
+  // direction, `reason.includes(error)`, is checked by the next test. Any
+  // normalisation that trims punctuation dies here too. A swapped comma
+  // would be missed by `includes` entirely. Not a trailing space:
+  // `visible()` trims it, and the assertion below could not tell the two
+  // strings apart.
+  const ALMOST = `${REASON}.`;
+  expect(REASON.endsWith('.')).toBe(false);
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(ALMOST));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(at('application-shortcut-error')).toBe(ALMOST);
+  expect(at('application-shortcut-reason')).toBe(`Програма повідомила: ${REASON}`);
+});
+
+test('a refusal that is a strict prefix of the standing reason is quoted in full, not treated as the same sentence', async () => {
+  // The reverse direction from the test above: `REASON` CONTAINS `SHORTER`,
+  // so `reason.includes(error)` calls them equal and must die here. `error
+  // === reason` is false, so under the correct predicate the quote stays.
+  const SHORTER = REASON.slice(0, -('shortcut'.length + 1));
+  expect(REASON.includes(SHORTER)).toBe(true);
+  expect(SHORTER).not.toBe(REASON);
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(SHORTER));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:'));
+  expect(at('application-shortcut-error')).toBe(SHORTER);
+});
+
+test('a different refusal after a repeated one brings the quote back', async () => {
+  const OTHER = 'the operating system refused the combination';
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+
+  setHotkey.mockRejectedValue(new Error(OTHER));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', ctrlKey: true, shiftKey: true });
+
+  await waitFor(() => expect(at('application-shortcut-error')).toBe(OTHER));
+  expect(at('application-shortcut-failed')).toBe('Скорочення не змінено. Ось що відповів застосунок:');
+});
+
+test('when the quote is left out, the control is described by the heading and the reason, and both exist', async () => {
+  await withUnavailableShortcut();
+  setHotkey.mockRejectedValue(new Error(REASON));
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+
+  const ids = describedByIds(screen.getByTestId('application-shortcut-record'));
+  expect(ids).toEqual(['application-shortcut-failed', 'application-shortcut-reason']);
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('autostart: a refusal whose sentence is the standing reason is not quoted twice either', async () => {
+  const WHY = 'the login item database could not be opened';
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'unknown', reason: WHY } }));
+  setAutostart.mockRejectedValue(new Error(WHY));
+  renderSection();
+  await fireEvent.click(await screen.findByTestId('application-autostart-enable'));
+
+  await waitFor(() => expect(at('application-autostart-failed')).toBe('Налаштування не змінено — з тієї самої причини.'));
+  expect(screen.queryByTestId('application-autostart-error')).toBeNull();
+  expect(visiblePageText().split(WHY).length - 1).toBe(1);
+  // Heard in full too (spec §2.1 requirement 2): the heading AND the
+  // sentence itself, not a pointer — the same requirement the shortcut test
+  // checks above, here for autostart.
+  expect(announced(assertiveRegion())).toEqual(['Налаштування не змінено — з тієї самої причини.', WHY]);
+  const ids = describedByIds(screen.getByTestId('application-autostart-enable'));
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+  expect(ids).toContain('application-autostart-reason');
+});
+
+test('autostart: a refusal different from the standing reason is quoted in full', async () => {
+  const WHY = 'the login item database could not be opened';
+  const OTHER = 'the login item could not be written';
+  appPrefs.mockResolvedValue(prefs({ autostart: { kind: 'unknown', reason: WHY } }));
+  setAutostart.mockRejectedValue(new Error(OTHER));
+  renderSection();
+  await fireEvent.click(await screen.findByTestId('application-autostart-enable'));
+
+  await waitFor(() => expect(at('application-autostart-error')).toBe(OTHER));
+  expect(at('application-autostart-failed')).toBe('Налаштування не змінено. Ось що відповів застосунок:');
+});
+
+test('while the corrective read is out, a quote that repeats the reason stays under the neutral heading', async () => {
+  const STANDING = prefs({ hotkey: { shortcut: 'Alt+Space', status: { kind: 'unavailable', reason: REASON } } });
+  const read = deferred<AppPrefs>();
+  appPrefs.mockResolvedValueOnce(STANDING);
+  appPrefs.mockImplementationOnce(() => read.promise);
+  setHotkey.mockRejectedValue(new Error(REASON));
+  renderSection();
+  await record();
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(appPrefs).toHaveBeenCalledTimes(2));
+
+  // The neutral heading ends in «Ось що відповів застосунок:», so the quote
+  // it promises is on screen.
+  expect(at('application-shortcut-failed')).toContain('поки не відомо');
+  expect(at('application-shortcut-error')).toBe(REASON);
+
+  read.resolve(STANDING);
+  await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
+  expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
 });
