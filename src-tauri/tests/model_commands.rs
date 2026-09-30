@@ -2820,3 +2820,54 @@ fn forgetting_the_key_and_entering_it_again_asks_again() {
         "the cache outlived forget_key"
     );
 }
+
+#[test]
+fn a_store_that_will_not_answer_is_unreachable_not_a_missing_key_and_is_not_cached() {
+    let fx = Fixture::with_a_credential_store_that_will_not_answer();
+    fx.open_index();
+    for _ in 0..2 {
+        match provider_status(fx.state()) {
+            ProviderStatus::Unreachable { reason } => assert!(!reason.is_empty()),
+            other => panic!("an unreadable store must not read as no key: {other:?}"),
+        }
+    }
+    assert!(fx.provider_request().is_none());
+}
+
+#[test]
+fn entering_a_key_again_makes_the_next_status_ask_again() {
+    let fx = configured(vec![
+        Reply::ok(CREDITS_BODY), // the first status
+        Reply::ok(CREDITS_BODY), // set_key's own check
+        Reply::ok(CREDITS_BODY), // the status after it
+    ]);
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(fx.provider_request().is_some());
+    set_key(fx.state(), KEY.into()).expect("accepted");
+    // Whatever set_key itself asked, then drop the queue so the next request is ours.
+    while fx.provider_request().is_some() {}
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(
+        fx.provider_request().is_some(),
+        "set_key left the cache standing"
+    );
+}
+
+#[test]
+fn choosing_a_model_makes_the_next_status_ask_again() {
+    let vectors = mnema_mock_provider::two_vectors(1536);
+    let fx = configured(vec![
+        Reply::ok(CREDITS_BODY),
+        Reply::ok(&vectors),
+        Reply::ok(CREDITS_BODY),
+    ]);
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(fx.provider_request().is_some());
+    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep).expect("chosen");
+    while fx.provider_request().is_some() {}
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(
+        fx.provider_request().is_some(),
+        "set_embedding_model left the cache standing"
+    );
+}

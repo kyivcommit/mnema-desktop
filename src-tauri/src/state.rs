@@ -161,7 +161,13 @@ pub struct AppState {
     /// The provider's last answer to `/credits`, and when it came. Cleared by
     /// `set_key`, `forget_key` and `set_embedding_model`. Never held across the
     /// request itself.
-    provider_status: Mutex<Option<(Instant, crate::provider_status::ProviderStatus)>>,
+    provider_status: Mutex<ProviderCache>,
+}
+
+#[derive(Default)]
+struct ProviderCache {
+    generation: u64,
+    entry: Option<(Instant, crate::provider_status::ProviderStatus)>,
 }
 
 impl AppState {
@@ -205,7 +211,7 @@ impl AppState {
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
-            provider_status: Mutex::new(None),
+            provider_status: Mutex::new(ProviderCache::default()),
         }
     }
 
@@ -345,34 +351,48 @@ impl AppState {
         &self.worker
     }
 
-    /// The cached provider answer, if `is_fresh(when it was taken, now)`.
-    pub fn cached_provider_status(
-        &self,
-        is_fresh: impl FnOnce(Instant, Instant) -> bool,
-    ) -> Option<crate::provider_status::ProviderStatus> {
-        let guard = self
-            .provider_status
+    fn provider_cache(&self) -> std::sync::MutexGuard<'_, ProviderCache> {
+        self.provider_status
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.as_ref() {
-            Some((at, status)) if is_fresh(*at, Instant::now()) => Some(status.clone()),
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The cached provider answer, if it is still fresh.
+    pub fn cached_provider_status(&self) -> Option<crate::provider_status::ProviderStatus> {
+        match &self.provider_cache().entry {
+            Some((at, status)) if crate::provider_status::fresh(*at, Instant::now()) => {
+                Some(status.clone())
+            }
             _ => None,
         }
     }
 
-    pub fn store_provider_status(&self, status: crate::provider_status::ProviderStatus) {
-        *self
-            .provider_status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), status));
+    /// Which generation of the cache a check is about to answer for. Read
+    /// BEFORE the facts the check depends on, so that a change landing after
+    /// the read is seen at the write.
+    pub fn provider_status_gen(&self) -> u64 {
+        self.provider_cache().generation
+    }
+
+    /// Stores `status` only if nothing has invalidated the cache since `epoch`
+    /// was read: a check that was in flight across a `set_key` would otherwise
+    /// put the old key's verdict back.
+    pub fn store_provider_status(
+        &self,
+        epoch: u64,
+        status: crate::provider_status::ProviderStatus,
+    ) {
+        let mut cache = self.provider_cache();
+        if cache.generation == epoch {
+            cache.entry = Some((Instant::now(), status));
+        }
     }
 
     /// Drops the cached provider answer: what it was an answer about has changed.
     pub fn forget_provider_status(&self) {
-        *self
-            .provider_status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let mut cache = self.provider_cache();
+        cache.generation += 1;
+        cache.entry = None;
     }
 
     pub fn provider_base(&self) -> &str {

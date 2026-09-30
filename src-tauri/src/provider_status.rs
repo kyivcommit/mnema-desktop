@@ -37,45 +37,53 @@ pub fn fresh(cached_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(cached_at) < TTL
 }
 
-/// What is missing, from local facts only. The same two facts the launcher's
-/// `providerReady` reads: a stored key, and an active embedding space. An index
-/// that cannot be read counts as no model.
-fn missing(state: &AppState) -> Option<Missing> {
-    match mnema_secrets::load(state.credential_ref()) {
-        Ok(Some(_)) => {}
-        // A store that will not answer is not a key we can use either.
-        _ => return Some(Missing::Key),
-    }
+/// The local facts: the key, or the status that stands in for it. The same two
+/// facts the launcher's `providerReady` reads: a stored key, and an active
+/// embedding space. An index that cannot be read counts as no model.
+///
+/// A credential store that will not answer is NOT "no key entered": the
+/// person may well have one, and sending them to re-enter it is wrong
+/// (`KeyState::Unreadable`). It is `Unreachable`, and never cached.
+fn local_facts(state: &AppState) -> Result<String, ProviderStatus> {
+    let key = match mnema_secrets::load(state.credential_ref()) {
+        Ok(Some(key)) => key,
+        Ok(None) => return Err(not_configured(Missing::Key)),
+        Err(e) => {
+            return Err(ProviderStatus::Unreachable {
+                reason: Error::from(e).to_string(),
+            });
+        }
+    };
     match state.with_index(|db| db.active_space()) {
-        Ok(Some(_)) => None,
-        _ => Some(Missing::EmbeddingModel),
+        Ok(Some(_)) => Ok(key),
+        _ => Err(not_configured(Missing::EmbeddingModel)),
     }
+}
+
+fn not_configured(missing: Missing) -> ProviderStatus {
+    ProviderStatus::NotConfigured { missing }
 }
 
 #[tauri::command(async)]
 pub fn provider_status(state: State<'_, AppState>) -> ProviderStatus {
-    if let Some(missing) = missing(&state) {
-        return ProviderStatus::NotConfigured { missing };
-    }
-    if let Some(cached) = state.cached_provider_status(fresh) {
+    // Before the first read of anything the answer depends on.
+    let epoch = state.provider_status_gen();
+    let key = match local_facts(&state) {
+        Ok(key) => key,
+        Err(status) => return status,
+    };
+    if let Some(cached) = state.cached_provider_status() {
         return cached;
     }
-    // Checked against the key as it is now; the cache lock is not held across
-    // the request, so a slow `/credits` never blocks `set_key` and friends.
-    let status = match mnema_secrets::load(state.credential_ref()) {
-        Ok(Some(key)) => match mnema_provider::check_key(state.provider_base(), &key) {
-            Ok(_) => ProviderStatus::Ok,
-            Err(e) => ProviderStatus::Unreachable {
-                reason: Error::from(e).to_string(),
-            },
+    // The cache lock is not held across the request, so a slow `/credits`
+    // never blocks `set_key` and friends.
+    let status = match mnema_provider::check_key(state.provider_base(), &key) {
+        Ok(_) => ProviderStatus::Ok,
+        Err(e) => ProviderStatus::Unreachable {
+            reason: Error::from(e).to_string(),
         },
-        _ => {
-            return ProviderStatus::NotConfigured {
-                missing: Missing::Key,
-            };
-        }
     };
-    state.store_provider_status(status.clone());
+    state.store_provider_status(epoch, status.clone());
     status
 }
 
@@ -94,5 +102,46 @@ mod tests {
     fn a_clock_that_reads_earlier_than_the_answer_is_fresh_not_a_panic() {
         let t0 = Instant::now() + Duration::from_secs(5);
         assert!(fresh(t0, t0 - Duration::from_secs(5)));
+    }
+}
+
+#[cfg(test)]
+mod wire {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn every_spelling_the_window_reads_is_pinned() {
+        let v = |s: &ProviderStatus| serde_json::to_value(s).unwrap();
+        assert_eq!(v(&ProviderStatus::Ok), json!({ "kind": "ok" }));
+        assert_eq!(
+            v(&ProviderStatus::Unreachable { reason: "r".into() }),
+            json!({ "kind": "unreachable", "reason": "r" })
+        );
+        assert_eq!(
+            v(&not_configured(Missing::Key)),
+            json!({ "kind": "notConfigured", "missing": "key" })
+        );
+        assert_eq!(
+            v(&not_configured(Missing::EmbeddingModel)),
+            json!({ "kind": "notConfigured", "missing": "embeddingModel" })
+        );
+    }
+
+    #[test]
+    fn a_check_in_flight_across_an_invalidation_cannot_put_its_verdict_back() {
+        let state = AppState::new("d".into(), "w".into(), "b".into(), "r".into());
+        let epoch = state.provider_status_gen();
+        state.forget_provider_status();
+        state.store_provider_status(
+            epoch,
+            ProviderStatus::Unreachable {
+                reason: "old".into(),
+            },
+        );
+        assert_eq!(state.cached_provider_status(), None);
+        // Positive control: a write under the current generation lands.
+        state.store_provider_status(state.provider_status_gen(), ProviderStatus::Ok);
+        assert_eq!(state.cached_provider_status(), Some(ProviderStatus::Ok));
     }
 }
