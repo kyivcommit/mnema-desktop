@@ -858,6 +858,8 @@ export type AutostartState =
 export type AppPrefs = {
   hotkey: HotkeyState;
   autostart: AutostartState;
+  // Minutes of idleness after which the launcher forgets its last answer.
+  coldAfterMinutes: number;
   version: string;
   platform: Platform;
 };
@@ -879,6 +881,11 @@ export const setHotkey = (shortcut: string) => invoke<HotkeyState>('set_hotkey',
 // switch that moved while the machine stayed where it was.
 export const setAutostart = (enabled: boolean) =>
   invoke<AutostartState>('set_autostart', { enabled });
+
+// Rejects with a sentence for `0`; the caller never sends a negative or
+// fractional number (the command would fail to deserialise it). Answers the
+// stored value.
+export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
 
 // Shows and focuses the settings window — the tray item's path (`show_settings`).
 export const openSettings = () => invoke<void>('open_settings');

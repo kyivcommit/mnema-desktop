@@ -16,6 +16,7 @@ import type { AppPrefs, LocaleApplyReply, ModelSettings, ScanState } from '../li
 const appPrefs = vi.fn();
 const setHotkey = vi.fn();
 const setAutostart = vi.fn();
+const setColdAfter = vi.fn();
 const setTheme = vi.fn();
 const getLocale = vi.fn();
 const setLocaleChoice = vi.fn();
@@ -28,6 +29,7 @@ vi.mock('../lib/ipc', () => ({
   appPrefs: (...a: unknown[]) => appPrefs(...a),
   setHotkey: (...a: unknown[]) => setHotkey(...a),
   setAutostart: (...a: unknown[]) => setAutostart(...a),
+  setColdAfter: (...a: unknown[]) => setColdAfter(...a),
   setTheme: (...a: unknown[]) => setTheme(...a),
   getLocale: (...a: unknown[]) => getLocale(...a),
   setLocaleChoice: (...a: unknown[]) => setLocaleChoice(...a),
@@ -85,6 +87,7 @@ function prefs(over: Partial<AppPrefs> = {}): AppPrefs {
   return {
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
     autostart: { kind: 'disabled' },
+    coldAfterMinutes: 5,
     version: '0.0.0',
     platform: 'linux',
     ...over,
@@ -101,6 +104,7 @@ beforeEach(() => {
   appPrefs.mockReset();
   setHotkey.mockReset();
   setAutostart.mockReset();
+  setColdAfter.mockReset();
   setTheme.mockReset();
   getLocale.mockReset();
   setLocaleChoice.mockReset();
@@ -879,6 +883,8 @@ test('a person who opens Application in the settings window reads the shortcut, 
     + ' Системна'
     + ' Мова:'
     + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
+    + ' Лаунчер'
+    + ' Лаунчер забуває останню відповідь через (хвилин):'
     + ' Запуск'
     + ' Запуск під час входу в систему:'
     + ' Mnema не запускається під час входу в систему.'
@@ -2930,4 +2936,67 @@ test('while the corrective read is out, a quote that repeats the reason stays un
   read.resolve(STANDING);
   await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
   expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
+});
+
+// The launcher's idle threshold: a number field in its own group between
+// Appearance and Startup.
+const coldField = () => screen.getByTestId('application-launcher-cold') as HTMLInputElement;
+const typeCold = async (text: string) => {
+  await fireEvent.input(coldField(), { target: { value: text } });
+  await fireEvent.change(coldField());
+};
+
+test('the launcher threshold sits in its own group, between appearance and startup', async () => {
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 12 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  const group = screen.getByRole('group', { name: 'Лаунчер' });
+  expect(within(group).getByTestId('application-launcher-cold')).toBeTruthy();
+  expect(coldField().value).toBe('12');
+  expect(coldField().min).toBe('1');
+  expect(coldField().step).toBe('1');
+  const order = screen.getAllByRole('group').map((g) => g.getAttribute('aria-labelledby'));
+  const at3 = (id: string) => order.indexOf(id);
+  expect(at3('application-group-appearance')).toBeLessThan(at3('application-group-launcher'));
+  expect(at3('application-group-launcher')).toBeLessThan(at3('application-group-startup'));
+});
+
+test('changing the threshold calls set_cold_after with the number', async () => {
+  setColdAfter.mockResolvedValue(7);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('7');
+
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledWith(7));
+  expect(setColdAfter).toHaveBeenCalledTimes(1);
+  expect(coldField().value).toBe('7');
+});
+
+test.each(['', '-3', '2.5'])('%j is never sent, and the field goes back to the stored value', async (bad) => {
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold(bad);
+
+  expect(setColdAfter).not.toHaveBeenCalled();
+  await waitFor(() => expect(coldField().value).toBe('5'));
+});
+
+test('a refused threshold shows the command\'s sentence, links it, and shows the stored value', async () => {
+  setColdAfter.mockRejectedValue(new Error('the launcher needs at least one minute before it forgets the last answer'));
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 9 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+
+  expect(setColdAfter).toHaveBeenCalledWith(0);
+  expect(await shown('application-launcher-cold-error'))
+    .toBe('the launcher needs at least one minute before it forgets the last answer');
+  await waitFor(() => expect(coldField().value).toBe('9'));
+  const ids = describedByIds(coldField());
+  expect(ids).toContain('application-launcher-cold-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
 });

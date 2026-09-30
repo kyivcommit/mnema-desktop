@@ -112,6 +112,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_pending_chunks'
   | 'indexing_statcard_documents' | 'indexing_statcard_updated'
   | 'application_group_shortcut' | 'application_group_appearance'
+  | 'application_group_launcher' | 'application_launcher_cold_label' | 'application_launcher_cold_failed'
   | 'application_group_startup' | 'application_group_version'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
@@ -1001,6 +1002,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // unchanged; only the labelled `role="group"` wrapper around them is new.
     application_group_shortcut: 'Виклик',
     application_group_appearance: 'Вигляд',
+    application_group_launcher: 'Лаунчер',
+    application_launcher_cold_label: 'Лаунчер забуває останню відповідь через (хвилин):',
+    application_launcher_cold_failed: 'Час не змінено. Ось що відповів застосунок:',
     application_group_startup: 'Запуск',
     application_group_version: 'Версія',
     application_shortcut_label: 'Скорочення для відкриття пошуку:',
@@ -1343,6 +1347,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // these and is English, like every other rejection in this product.
     application_group_shortcut: 'Shortcut',
     application_group_appearance: 'Appearance',
+    application_group_launcher: 'Launcher',
+    application_launcher_cold_label: 'Launcher forgets the last answer after (minutes):',
+    application_launcher_cold_failed: 'The time was not changed. This is what the application answered:',
     application_group_startup: 'Startup',
     application_group_version: 'Version',
     application_shortcut_label: 'Shortcut for opening the search:',

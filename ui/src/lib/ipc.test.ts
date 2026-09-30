@@ -582,6 +582,7 @@ test('the index read arm rejects Rust snake_case spellings', () => {
 const REGISTERED: AppPrefs = {
   hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
   autostart: { kind: 'disabled' },
+  coldAfterMinutes: 5,
   version: '0.0.0',
   platform: 'mac',
 };

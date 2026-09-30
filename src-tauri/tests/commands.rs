@@ -403,6 +403,8 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "app_prefs",
         "set_hotkey",
         "set_autostart",
+        // The launcher's idle threshold: a read-modify-write of `prefs.json`.
+        "set_cold_after",
     ] {
         assert_ne!(
             responding_thread(&webview, cmd),
@@ -10732,6 +10734,65 @@ fn a_stored_shortcut_with_no_modifier_is_not_registered_at_boot_either() {
         vec!["register(Alt+Space)".to_string()],
         "the space bar must never be handed to the operating system"
     );
+}
+
+#[test]
+fn set_cold_after_writes_the_key_and_app_prefs_reads_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let before = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(
+        before["coldAfterMinutes"],
+        json!(5),
+        "the default: {before}"
+    );
+
+    let reply =
+        call(&webview, "set_cold_after", json!({ "minutes": 7 })).expect("set_cold_after rejected");
+    assert_eq!(reply, json!(7));
+
+    let after = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(after["coldAfterMinutes"], json!(7), "{after}");
+    assert_eq!(prefs::cold_after_minutes(dir.path()), 7, "the key on disk");
+}
+
+#[test]
+fn set_cold_after_refuses_zero_and_leaves_the_stored_value() {
+    let dir = tempfile::tempdir().unwrap();
+    prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(9)).unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let rejected = call(&webview, "set_cold_after", json!({ "minutes": 0 }))
+        .expect_err("a zero-minute threshold was accepted");
+
+    assert_eq!(
+        error_text(&rejected),
+        "the launcher needs at least one minute before it forgets the last answer"
+    );
+    assert_eq!(
+        prefs::cold_after_minutes(dir.path()),
+        9,
+        "the key was touched"
+    );
+}
+
+#[test]
+fn set_cold_after_rejects_a_negative_or_fractional_number_before_it_runs() {
+    // The window must never send one; this pins what happens if it does:
+    // argument deserialisation refuses, and nothing is written.
+    let dir = tempfile::tempdir().unwrap();
+    prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(9)).unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    for bad in [json!(-1), json!(2.5)] {
+        call(&webview, "set_cold_after", json!({ "minutes": bad }))
+            .expect_err("a non-u32 number reached the command");
+    }
+    assert_eq!(prefs::cold_after_minutes(dir.path()), 9);
 }
 
 #[test]

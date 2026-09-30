@@ -47,6 +47,7 @@ function initialState(scenario: string) {
   const prefs: AppPrefs = {
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
     autostart: { kind: 'disabled' },
+    coldAfterMinutes: 5,
     version: '0.0.0-mock',
     platform: 'mac',
   };
@@ -223,6 +224,11 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     set_autostart: (a) => {
       s.prefs = { ...s.prefs, autostart: { kind: a.enabled ? 'enabled' : 'disabled' } };
       return s.prefs.autostart;
+    },
+    set_cold_after: (a) => {
+      if (a.minutes === 0) throw 'the launcher needs at least one minute before it forgets the last answer';
+      s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
+      return s.prefs.coldAfterMinutes;
     },
     open_settings: () => { win === 'launcher' && open('/dev/settings.html' + location.search, '_blank'); },
 

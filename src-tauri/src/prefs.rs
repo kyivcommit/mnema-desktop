@@ -90,6 +90,9 @@ pub enum AutostartState {
 pub struct AppPrefs {
     pub hotkey: HotkeyState,
     pub autostart: AutostartState,
+    /// Minutes of idleness after which the launcher forgets its last answer;
+    /// [`cold_after_minutes`] is its one reader.
+    pub cold_after_minutes: u32,
     pub version: String,
     pub platform: crate::models::Platform,
 }
@@ -404,6 +407,7 @@ pub fn app_prefs<R: tauri::Runtime>(
     AppPrefs {
         hotkey: state.hotkey(),
         autostart: read_autostart(&state),
+        cold_after_minutes: cold_after_minutes(state.data_dir()),
         // The same version the macOS About box shows (`build_app_menu`), which
         // is the one the bundle carries rather than this crate's own constant.
         version: app.package_info().version.to_string(),
@@ -617,6 +621,25 @@ pub fn set_autostart(
         .with_autolaunch(|a| if enabled { a.enable() } else { a.disable() })
         .map_err(Error::Autostart)?;
     Ok(read_autostart(&state))
+}
+
+/// Sets the idle threshold after which the launcher forgets its last answer,
+/// and answers with the stored value. `go_cold_if_idle` reads the key on every
+/// show, so the next show already uses it.
+///
+/// Refuses `0`: [`cold_after_minutes`] would read it back as the default, so
+/// accepting it would store a value that means something else.
+#[tauri::command(async)]
+pub fn set_cold_after(state: tauri::State<'_, AppState>, minutes: u32) -> Result<u32, Error> {
+    if minutes == 0 {
+        return Err(Error::ColdAfterTooShort);
+    }
+    write_key(
+        state.data_dir(),
+        "launcher_cold_after_minutes",
+        serde_json::Value::from(minutes),
+    )?;
+    Ok(cold_after_minutes(state.data_dir()))
 }
 
 /// What a test installs to be called from inside [`write_key`]'s critical
