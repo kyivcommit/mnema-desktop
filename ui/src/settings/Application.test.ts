@@ -1949,6 +1949,34 @@ test('the same theme refusal, pressed twice, is heard twice', async () => {
   watcher.stop();
 });
 
+test('a refused threshold is announced assertively', async () => {
+  const SENTENCE = 'the launcher needs at least one minute';
+  setColdAfter.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+});
+
+test('the same threshold refusal, entered twice, is heard twice', async () => {
+  const SENTENCE = 'the launcher needs at least one minute';
+  setColdAfter.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-launcher-cold-label');
+  await typeCold('0');
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await typeCold('0');
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
 test('the same autostart refusal, pressed twice, is heard twice', async () => {
   const SENTENCE = 'the login item could not be written';
   setAutostart.mockRejectedValue(new Error(SENTENCE));
@@ -2345,6 +2373,8 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-autostart-reason', POLITE],
   ['application-autostart-failed', ASSERTIVE],
   ['application-autostart-error', ASSERTIVE],
+  ['application-launcher-cold-failed', ASSERTIVE],
+  ['application-launcher-cold-error', ASSERTIVE],
 ];
 const ANNOUNCED_BY_PARTIAL: ReadonlyArray<readonly [string, string]> = [
   ['application-language-partial', ASSERTIVE],
@@ -2374,6 +2404,7 @@ const everythingRefused = async () => {
   setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
   setAutostart.mockRejectedValue(new Error('the login item could not be written'));
   setTheme.mockRejectedValue(new Error('prefs.json is read-only'));
+  setColdAfter.mockRejectedValue(new Error('the threshold could not be saved'));
   // The mount's read succeeds, so the select is usable; every read after it
   // fails, which is what puts the read refusal on screen.
   getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' });
@@ -2386,6 +2417,8 @@ const everythingRefused = async () => {
   await shown('application-theme-error');
   await fireEvent.click(screen.getByTestId('application-autostart-enable'));
   await shown('application-autostart-error');
+  await typeCold('0');
+  await shown('application-launcher-cold-error');
   await fireEvent.change(languageSelect(), { target: { value: 'en' } });
   await shown('application-language-change-error');
   await shown('application-language-error');
@@ -2974,7 +3007,7 @@ test('changing the threshold calls set_cold_after with the number', async () => 
   expect(coldField().value).toBe('7');
 });
 
-test.each(['', '-3', '2.5'])('%j is never sent, and the field goes back to the stored value', async (bad) => {
+test.each(['', '-3', '2.5', '4294967296', '1e20'])('%j is never sent, and the field goes back to the stored value', async (bad) => {
   renderSection();
   await shown('application-launcher-cold-label');
 

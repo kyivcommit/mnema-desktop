@@ -882,7 +882,8 @@ export const setHotkey = (shortcut: string) => invoke<HotkeyState>('set_hotkey',
 export const setAutostart = (enabled: boolean) =>
   invoke<AutostartState>('set_autostart', { enabled });
 
-// Rejects with a sentence for `0`; the caller never sends a negative or
+// Rejects with a sentence for `0`, and with the write's own for a preferences
+// file that could not be written; the caller never sends a negative or
 // fractional number (the command would fail to deserialise it). Answers the
 // stored value.
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });

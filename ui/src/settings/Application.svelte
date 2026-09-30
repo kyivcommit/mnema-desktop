@@ -618,9 +618,10 @@
     // assigning it again changes nothing and the field keeps what was typed.
     const showStored = () => { coldText = String(prefs!.coldAfterMinutes); field.value = coldText; };
     // Only what `u32` deserialises is sent: an empty field is `0` to `Number`,
-    // so it is checked as text; a negative or fractional number would fail
-    // before the command ran. `0` is sent on purpose — refusing it is Rust's.
-    if (text.trim() === '' || !Number.isInteger(minutes) || minutes < 0) {
+    // so it is checked as text; a negative, fractional or over-`u32` number
+    // would fail before the command ran. `0` is sent on purpose — refusing it
+    // is Rust's.
+    if (text.trim() === '' || !Number.isInteger(minutes) || minutes < 0 || minutes > 4294967295) {
       showStored();
       return;
     }
@@ -633,7 +634,8 @@
       field.value = coldText;
     } catch (err) {
       coldError = err instanceof Error ? err.message : String(err);
-      await refresh('press');
+      // No re-read, as for the theme: a refusal writes nothing, so the stored
+      // value is already what `prefs` holds.
       showStored();
     } finally {
       coldBusy = false;
