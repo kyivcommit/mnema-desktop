@@ -155,10 +155,24 @@ pub fn to_window(p: Point, l: Layout, factor: f64) -> Point {
 /// the focus-in settle — both must convert the same way, or a settle and a
 /// blur disagree.
 pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>, l: Layout) -> Option<Point> {
+    let (corner, f) = window_corner(window)?;
+    Some(to_search(corner, l, f))
+}
+
+/// The window's own top-left corner in the space of this build, with the
+/// factor [`to_search`]/[`to_window`] take for it. The one raw read `here` and
+/// `set_launcher_layout` share.
+pub fn window_corner<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<(Point, f64)> {
     let p = window.outer_position().ok()?;
     let scale = window.scale_factor().ok()?;
     let space = Space::of_this_build();
-    Some(to_search(space.point(p, scale), l, factor(space, scale)))
+    Some((space.point(p, scale), factor(space, scale)))
+}
+
+/// Where the window's corner goes when the layout changes from `before` to
+/// `next` and the search column stays put on screen.
+pub fn relayout(window_corner: Point, before: Layout, next: Layout, factor: f64) -> Point {
+    to_window(to_search(window_corner, before, factor), next, factor)
 }
 
 /// The `prefs.json` key: `{"x": <i32>, "y": <i32>}` in [`Space::of_this_build`]
@@ -590,6 +604,35 @@ mod tests {
         // Review Focus 5: on a 2× monitor in the physical space the offset doubles.
         assert_eq!(to_window(search, hot, 2.0), Point { x: 20, y: 80 });
         assert_eq!(to_window(search, Layout::default(), 2.0), search);
+    }
+
+    #[test]
+    fn relayout_keeps_the_search_column_where_it_was() {
+        let l = |left, right| Layout { left, right };
+        let p = Point { x: 600, y: 80 };
+        // Left column off -> on: the window grows leftwards, its corner moves -290.
+        assert_eq!(
+            relayout(p, l(false, false), l(true, false), 1.0),
+            Point { x: 310, y: 80 }
+        );
+        assert_eq!(
+            relayout(p, l(false, false), l(true, false), 2.0),
+            Point { x: 20, y: 80 }
+        );
+        // on -> off: +290 (logical) / +580 (factor 2).
+        assert_eq!(
+            relayout(p, l(true, false), l(false, false), 1.0),
+            Point { x: 890, y: 80 }
+        );
+        assert_eq!(
+            relayout(p, l(true, false), l(false, false), 2.0),
+            Point { x: 1180, y: 80 }
+        );
+        // The right column grows to the right: the corner does not move.
+        assert_eq!(relayout(p, l(false, false), l(false, true), 2.0), p);
+        assert_eq!(relayout(p, l(true, false), l(true, true), 2.0), p);
+        // The same layout is the identity.
+        assert_eq!(relayout(p, l(true, true), l(true, true), 2.0), p);
     }
 
     #[test]

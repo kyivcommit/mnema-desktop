@@ -212,3 +212,21 @@ case_ "launcher position: here reports the window corner, not the search column'
   's~Some\(to_search\(space\.point\(p, scale\), l, factor\(space, scale\)\)\)~Some(space.point(p, scale))~' \
   'Some(space.point(p, scale))' \
   mnema-desktop 'here_reports_the_search_column_corner' --test shell
+
+case_ "launcher position: relayout reads the window in the new layout" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, next, factor), next, factor)~' \
+  'to_window(to_search(window_corner, next, factor), next, factor)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher position: relayout puts the window round the search column in the old layout" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, before, factor), before, factor)~' \
+  'to_window(to_search(window_corner, before, factor), before, factor)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher position: relayout ignores the monitor's factor" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, before, 1.0), next, 1.0)~' \
+  'to_window(to_search(window_corner, before, 1.0), next, 1.0)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib

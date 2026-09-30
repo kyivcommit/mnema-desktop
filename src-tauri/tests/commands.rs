@@ -4238,6 +4238,39 @@ fn every_model_command_the_window_calls_is_registered() {
     }
 }
 
+/// `set_launcher_layout` is reachable through the IPC, binds `left` and
+/// `right`, and records the layout even with no launcher window (the mock app
+/// has none, so only the bookkeeping runs).
+#[test]
+fn every_launcher_command_is_registered() {
+    use mnema_desktop::launcher_layout::{Current, Layout};
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let unbound = error_text(
+        &call(&webview, "set_launcher_layout", json!({}))
+            .expect_err("a command was accepted without the arguments it declares"),
+    );
+    assert_ne!(unbound, not_registered("set_launcher_layout"));
+    assert!(unbound.contains(INVALID_ARGS), "{unbound}");
+    assert!(unbound.contains("`left`"), "{unbound}");
+
+    call(
+        &webview,
+        "set_launcher_layout",
+        json!({ "left": true, "right": false }),
+    )
+    .expect("set_launcher_layout was rejected");
+    assert_eq!(
+        app.state::<Current>().get(),
+        Layout {
+            left: true,
+            right: false
+        }
+    );
+}
+
 /// A model change that says nothing about the embeddings already there is
 /// refused before the command runs.
 ///

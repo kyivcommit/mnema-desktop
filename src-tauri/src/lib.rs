@@ -91,6 +91,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::set_hotkey,
         prefs::set_autostart,
         open_settings,
+        launcher_layout::set_launcher_layout,
     ]
 }
 

@@ -40,6 +40,39 @@ impl Current {
     }
 }
 
+/// Resizes the launcher to its visible panels; the search column keeps its
+/// place on screen (owner, 2026-09-25). Synchronous: AppKit wants the window
+/// size from the main thread, as `open_settings`.
+#[tauri::command]
+pub fn set_launcher_layout<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: tauri::State<'_, Current>,
+    left: bool,
+    right: bool,
+) {
+    use crate::launcher_position::{Space, relayout, window_corner};
+    use tauri::Manager;
+    let next = Layout { left, right };
+    let before = current.get();
+    if before == next {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("launcher") {
+        // Read in the old layout, put the window round it in the new one.
+        let corner = if crate::os_services::wayland_session() {
+            None
+        } else {
+            window_corner(&window.as_ref().window())
+        };
+        let _ = window.set_size(tauri::LogicalSize::new(width(next), HEIGHT));
+        if let Some((c, factor)) = corner {
+            let _ = window
+                .set_position(Space::of_this_build().position(relayout(c, before, next, factor)));
+        }
+    }
+    current.set(next);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

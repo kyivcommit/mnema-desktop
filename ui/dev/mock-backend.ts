@@ -226,6 +226,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
     open_settings: () => { win === 'launcher' && open('/dev/settings.html' + location.search, '_blank'); },
 
+    set_launcher_layout: () => null,
     set_search_arms: (a) => { s.index = { ...s.index, searchTextArm: !!a.text, searchContentArm: !!a.content }; },
     ask: () => generated,
     source_around: () => excerptSpanA,
