@@ -230,6 +230,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
     },
+    provider_status: () => ({ kind: 'ok' }),
     open_settings: () => { win === 'launcher' && open('/dev/settings.html' + location.search, '_blank'); },
 
     set_launcher_layout: () => null,

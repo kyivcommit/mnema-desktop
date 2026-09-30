@@ -405,6 +405,8 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "set_autostart",
         // The launcher's idle threshold: a read-modify-write of `prefs.json`.
         "set_cold_after",
+        // A network call (`/credits`) and a credential-store read.
+        "provider_status",
     ] {
         assert_ne!(
             responding_thread(&webview, cmd),

@@ -158,6 +158,10 @@ pub struct AppState {
     /// mean holding the state's own lock for the length of a command, which is
     /// what every other getter here exists to avoid.
     hotkey_change: Mutex<()>,
+    /// The provider's last answer to `/credits`, and when it came. Cleared by
+    /// `set_key`, `forget_key` and `set_embedding_model`. Never held across the
+    /// request itself.
+    provider_status: Mutex<Option<(Instant, crate::provider_status::ProviderStatus)>>,
 }
 
 impl AppState {
@@ -201,6 +205,7 @@ impl AppState {
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
+            provider_status: Mutex::new(None),
         }
     }
 
@@ -338,6 +343,36 @@ impl AppState {
 
     pub fn worker_path(&self) -> &Path {
         &self.worker
+    }
+
+    /// The cached provider answer, if `is_fresh(when it was taken, now)`.
+    pub fn cached_provider_status(
+        &self,
+        is_fresh: impl FnOnce(Instant, Instant) -> bool,
+    ) -> Option<crate::provider_status::ProviderStatus> {
+        let guard = self
+            .provider_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_ref() {
+            Some((at, status)) if is_fresh(*at, Instant::now()) => Some(status.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn store_provider_status(&self, status: crate::provider_status::ProviderStatus) {
+        *self
+            .provider_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), status));
+    }
+
+    /// Drops the cached provider answer: what it was an answer about has changed.
+    pub fn forget_provider_status(&self) {
+        *self
+            .provider_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     pub fn provider_base(&self) -> &str {

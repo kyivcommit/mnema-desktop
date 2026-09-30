@@ -925,3 +925,12 @@ export const getLocale = () => invoke<LocaleReply>('get_locale');
 // the caller re-reads `getLocale()` rather than guessing what happened.
 export const setLocaleChoice = (choice: LocaleChoice) =>
   invoke<LocaleApplyReply>('set_locale', { choice });
+
+// What the launcher's cloud indicator shows. `notConfigured` is answered from
+// local facts on every call; `unreachable` and `ok` come from the provider and
+// are cached by the core for a minute. `reason` is the core's own sentence.
+export type ProviderStatus =
+  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' }
+  | { kind: 'unreachable'; reason: string }
+  | { kind: 'ok' };
+export const providerStatus = () => invoke<ProviderStatus>('provider_status');

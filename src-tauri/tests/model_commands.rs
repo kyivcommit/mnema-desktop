@@ -2704,3 +2704,119 @@ fn a_boot_with_no_key_stored_calls_nobody_and_chooses_nothing() {
         "a boot with no key chose a chat model anyway"
     );
 }
+
+// --- provider_status -------------------------------------------------------
+
+use mnema_desktop::provider_status::{Missing, ProviderStatus, provider_status};
+
+const CREDITS_BODY: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#;
+
+/// A fixture whose key and default model are in place (`set_key` spent the
+/// first two replies) and whose next replies are `run`.
+fn configured(run: Vec<Reply>) -> Fixture {
+    let fx = Fixture::with_provider_answering_a_run(run);
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    assert!(fx.provider_request().is_some(), "set_key's /credits");
+    assert!(fx.provider_request().is_some(), "set_key's embedding check");
+    fx
+}
+
+#[test]
+fn no_key_is_not_configured_and_asks_nobody() {
+    let fx = Fixture::with_provider_rejecting_the_key();
+    fx.open_index();
+    assert_eq!(
+        provider_status(fx.state()),
+        ProviderStatus::NotConfigured {
+            missing: Missing::Key
+        }
+    );
+    assert!(fx.provider_request().is_none());
+}
+
+#[test]
+fn a_key_with_an_unread_index_misses_the_embedding_model() {
+    let fx = Fixture::with_provider_rejecting_the_key();
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
+    // The index was never opened: `with_index` fails.
+    assert_eq!(
+        provider_status(fx.state()),
+        ProviderStatus::NotConfigured {
+            missing: Missing::EmbeddingModel
+        }
+    );
+    // Opened, but no model chosen.
+    fx.open_index();
+    assert_eq!(
+        provider_status(fx.state()),
+        ProviderStatus::NotConfigured {
+            missing: Missing::EmbeddingModel
+        }
+    );
+    assert!(fx.provider_request().is_none());
+}
+
+#[test]
+fn a_working_key_and_model_is_ok() {
+    let fx = configured(vec![Reply::ok(CREDITS_BODY)]);
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+}
+
+#[test]
+fn a_refusing_provider_is_unreachable_and_the_reason_does_not_carry_the_key() {
+    let fx = configured(vec![Reply::status(
+        401,
+        &format!(r#"{{"error":{{"message":"bad {KEY}"}}}}"#),
+    )]);
+    match provider_status(fx.state()) {
+        ProviderStatus::Unreachable { reason } => {
+            // Positive control: the provider's body does reach the reason, so
+            // the absence of the key below is redaction and not silence.
+            assert!(
+                reason.contains("bad"),
+                "the body never reached the reason: {reason}"
+            );
+            assert!(
+                !reason.contains(KEY),
+                "the key leaked into the reason: {reason}"
+            );
+        }
+        other => panic!("expected unreachable, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_second_call_within_a_minute_asks_nobody() {
+    let fx = configured(vec![Reply::ok(CREDITS_BODY)]);
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(fx.provider_request().is_some(), "the first call asks");
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(
+        fx.provider_request().is_none(),
+        "the second call must come from the cache"
+    );
+}
+
+#[test]
+fn forgetting_the_key_and_entering_it_again_asks_again() {
+    let fx = configured(vec![Reply::ok(CREDITS_BODY), Reply::ok(CREDITS_BODY)]);
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(fx.provider_request().is_some());
+
+    forget_key(fx.state()).unwrap();
+    assert_eq!(
+        provider_status(fx.state()),
+        ProviderStatus::NotConfigured {
+            missing: Missing::Key
+        }
+    );
+    // The key comes back through the store, not `set_key`, which would itself
+    // clear the cache and hide what `forget_key` did.
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
+    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert!(
+        fx.provider_request().is_some(),
+        "the cache outlived forget_key"
+    );
+}
