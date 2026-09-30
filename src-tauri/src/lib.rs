@@ -419,10 +419,16 @@ pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 
 /// The launcher's ⌘, (Ctrl+, off macOS). Synchronous on purpose: Tauri runs a
 /// non-async command on the main thread, where AppKit wants the activation
-/// policy changed.
+/// policy changed. A `section` is sent to the settings window alone, after the
+/// show, so an already-open window moves to it; a fresh one starts on Models,
+/// which is the only section named today, so an event sent before its listener
+/// is up loses nothing.
 #[tauri::command]
-fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, section: Option<String>) {
     show_settings(&app, true);
+    if let Some(section) = section {
+        let _ = app.emit_to("settings", "settings-section", section);
+    }
 }
 
 /// Keeps the macOS activation policy in step with the settings window: the app

@@ -25,6 +25,8 @@ const providerModels = vi.fn();
 const listTree = vi.fn();
 const listMasks = vi.fn();
 const jobStatus = vi.fn();
+// `Settings.svelte` listens for `settings-section`; nothing here sends it.
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
   appPrefs: (...a: unknown[]) => appPrefs(...a),
   setHotkey: (...a: unknown[]) => setHotkey(...a),

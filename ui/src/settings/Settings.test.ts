@@ -88,6 +88,17 @@ const listMasks = vi.fn();
 const maskPreview = vi.fn();
 const addMask = vi.fn();
 let deliver: ((state: ScanState) => void) | null = null;
+
+// The window listens for `settings-section` straight from the event module, so
+// the mock keeps the handler for a test to fire and the unlisten to count.
+let sectionHandler: ((e: { payload: unknown }) => void) | null = null;
+const unlistenSection = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    if (name === 'settings-section') sectionHandler = cb;
+    return Promise.resolve(unlistenSection);
+  },
+}));
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
@@ -168,6 +179,8 @@ beforeEach(() => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
   addMask.mockReset();
   deliver = null;
+  sectionHandler = null;
+  unlistenSection.mockReset();
 });
 
 afterEach(() => {
@@ -1554,4 +1567,32 @@ test('forget_question_survives_a_section_switch', async () => {
 
   expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
   expect(forgetKey).not.toHaveBeenCalled();
+});
+
+// Task 8 of the launcher panels: the launcher's cloud opens Settings on Models
+// even when the window is already open on another section.
+test('a settings-section event moves the open window to that section', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('true');
+  await waitFor(() => expect(sectionHandler).not.toBeNull());
+
+  sectionHandler!({ payload: 'models' });
+  await tick();
+
+  expect(screen.getByTestId('settings-nav-models').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('false');
+});
+
+test('a settings-section event naming no section changes nothing, and unmount stops listening', async () => {
+  const { unmount } = render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await waitFor(() => expect(sectionHandler).not.toBeNull());
+
+  sectionHandler!({ payload: 'nope' });
+  await tick();
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('true');
+
+  unmount();
+  await waitFor(() => expect(unlistenSection).toHaveBeenCalledTimes(1));
 });

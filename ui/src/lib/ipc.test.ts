@@ -158,6 +158,16 @@ test('cancelJob invokes cancel_job with no arguments and no channel', async () =
   expect(invoke.mock.calls.at(-1)).toHaveLength(1);
 });
 
+test('openSettings sends no arguments alone, and the section beside it when given one', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.openSettings();
+  expect(invoke).toHaveBeenLastCalledWith('open_settings', {});
+
+  await ipc.openSettings('models');
+  expect(invoke).toHaveBeenLastCalledWith('open_settings', { section: 'models' });
+});
+
 test('forgetKey invokes forget_key with no arguments', async () => {
   invoke.mockResolvedValue({ kind: 'removed' });
 

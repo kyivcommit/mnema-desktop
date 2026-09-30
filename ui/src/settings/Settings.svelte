@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { listen } from '@tauri-apps/api/event';
   import { locale, t } from '../i18n';
   import Models from './Models.svelte';
   import Folders from './Folders.svelte';
@@ -18,6 +19,21 @@
   const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'application'];
 
   let section = $state<SectionId>('models');
+
+  // The launcher's cloud asks for a section while this window may already be
+  // open on another. Anything off the list is ignored; like a nav click, this
+  // only sets `section` and moves no focus.
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    let destroyed = false;
+    void listen<string>('settings-section', (e) => {
+      if ((SECTIONS as string[]).includes(e.payload)) section = e.payload as SectionId;
+    }).then((un) => (destroyed ? un() : (unlisten = un)));
+    return () => {
+      destroyed = true;
+      unlisten?.();
+    };
+  });
 
   // Task 5 — where the bottom disclosure's focus goes when the whole panel
   // disappears out from under it (the job ended with nothing left to say).

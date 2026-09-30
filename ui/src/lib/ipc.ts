@@ -888,8 +888,11 @@ export const setAutostart = (enabled: boolean) =>
 // stored value.
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
 
-// Shows and focuses the settings window — the tray item's path (`show_settings`).
-export const openSettings = () => invoke<void>('open_settings');
+// Shows and focuses the settings window (`show_settings`); with a section, an
+// already-open window moves to it too. The literal, not `SectionId`, which is
+// local to `Settings.svelte`.
+export const openSettings = (section?: 'models') =>
+  invoke<void>('open_settings', section ? { section } : {});
 
 // PR 10b. The three values the Rust side writes (`theme.rs`); anything else on
 // the wire is read as `system` at both ends, so the two cannot disagree.

@@ -4326,6 +4326,44 @@ fn every_launcher_command_is_registered() {
     );
 }
 
+/// `open_settings` takes an optional section: without one it opens the window
+/// and says nothing, with one the SETTINGS window — not the launcher, not every
+/// window — hears `settings-section` carrying it.
+#[test]
+fn open_settings_names_a_section_to_the_settings_window_only() {
+    use std::sync::{Arc, Mutex};
+    use tauri::{Listener, WebviewWindowBuilder};
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let heard: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::default();
+    for label in ["settings", "launcher"] {
+        let window = WebviewWindowBuilder::new(&app, label, Default::default())
+            .build()
+            .unwrap();
+        let h = heard.clone();
+        window.listen("settings-section", move |e| {
+            h.lock().unwrap().push((label, e.payload().to_string()));
+        });
+    }
+
+    call(&webview, "open_settings", json!({})).expect("open_settings was rejected without one");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        heard.lock().unwrap().is_empty(),
+        "an event without a section"
+    );
+
+    call(&webview, "open_settings", json!({ "section": "models" }))
+        .expect("open_settings was rejected with a section");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![("settings", "\"models\"".to_string())]
+    );
+}
+
 /// A model change that says nothing about the embeddings already there is
 /// refused before the command runs.
 ///

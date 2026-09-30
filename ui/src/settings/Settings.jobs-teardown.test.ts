@@ -50,6 +50,8 @@ vi.mock('./jobs', async (importOriginal) => {
 // every other file in this directory needs one, or the real, un-mockable
 // `invoke` runs and every render fails on an unhandled rejection.
 const modelSettings = vi.fn();
+// `Settings.svelte` listens for `settings-section`; nothing here sends it.
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),

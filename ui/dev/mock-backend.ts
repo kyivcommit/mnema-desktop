@@ -231,7 +231,11 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       return s.prefs.coldAfterMinutes;
     },
     provider_status: () => ({ kind: 'ok' }),
-    open_settings: () => { win === 'launcher' && open('/dev/settings.html' + location.search, '_blank'); },
+    open_settings: (a) => {
+      win === 'launcher' && open('/dev/settings.html' + location.search, '_blank');
+      // An already-open settings page hears it; a fresh one starts on Models.
+      if (a.section) void emit('settings-section', a.section);
+    },
 
     set_launcher_layout: () => null,
     set_search_arms: (a) => { s.index = { ...s.index, searchTextArm: !!a.text, searchContentArm: !!a.content }; },
