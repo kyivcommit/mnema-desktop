@@ -209,8 +209,8 @@ case_ "launcher position: restore_to takes the factor from the wrong monitor" \
 
 case_ "launcher position: here reports the window corner, not the search column's" \
   src-tauri/src/launcher_position.rs \
-  's~Some\(to_search\(space\.point\(p, scale\), l, factor\(space, scale\)\)\)~Some(space.point(p, scale))~' \
-  'Some(space.point(p, scale))' \
+  's~Some\(to_search\(corner, l, f\)\)~Some(corner)~' \
+  'Some(corner)' \
   mnema-desktop 'here_reports_the_search_column_corner' --test shell
 
 case_ "launcher position: relayout reads the window in the new layout" \
