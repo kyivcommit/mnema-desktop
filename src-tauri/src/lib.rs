@@ -255,6 +255,30 @@ pub fn boot_files(state: &state::AppState) -> i64 {
     state.with_index(|db| db.indexed_file_count()).unwrap_or(0)
 }
 
+/// If the launcher has been hidden for at least the idle threshold at `now`,
+/// makes it cold: the default layout, its window size, and a `launcher-cold`
+/// event to the launcher so the UI drops its answer. Returns whether it did.
+/// `try_state`: the shell tests build no `AppState`; there the threshold is
+/// its default.
+pub fn go_cold_if_idle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    now: std::time::Instant,
+) -> bool {
+    let minutes = app
+        .try_state::<state::AppState>()
+        .map_or(5, |s| prefs::cold_after_minutes(s.data_dir()));
+    let hidden_at = app.state::<launcher_layout::HiddenAt>().get();
+    if !launcher_layout::goes_cold(hidden_at, now, minutes) {
+        return false;
+    }
+    let cold = launcher_layout::Layout::default();
+    app.state::<launcher_layout::Current>().set(cold);
+    launcher_layout::resize(window, cold);
+    let _ = app.emit_to("launcher", "launcher-cold", ());
+    true
+}
+
 /// Shows the launcher and focuses it, returning whether the launcher window was
 /// there to act on. The single-instance callback, the tray's "show search"
 /// item and the shortcut share this — it is the ONE show path (D155):
@@ -274,25 +298,16 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
                 let _ = window.set_focus();
                 return true;
             }
-            // Cold before `place` and `show`, so the window never appears wide
-            // with a stale answer; `place` then uses the cold layout.
+            // Cold before `place` and `show`: the window never appears wide,
+            // and the UI clears its answer on `launcher-cold`. `place` then
+            // uses the cold layout.
+            go_cold_if_idle(app, &window, std::time::Instant::now());
             let data_dir = app
                 .try_state::<state::AppState>()
                 .map(|s| s.data_dir().to_path_buf());
-            let minutes = data_dir.as_deref().map_or(5, prefs::cold_after_minutes);
-            if launcher_layout::goes_cold(
-                app.state::<launcher_layout::HiddenAt>().get(),
-                std::time::Instant::now(),
-                minutes,
-            ) {
-                let cold = launcher_layout::Layout::default();
-                app.state::<launcher_layout::Current>().set(cold);
-                launcher_layout::resize(&window, cold);
-                let _ = window.emit("launcher-cold", ());
-            }
             let memory = app.state::<launcher_position::Memory>();
             // `try_state`: the shell tests build no `AppState`; there the
-            // file is simply "nothing saved" (and the threshold its default).
+            // file is simply "nothing saved".
             launcher_position::place(
                 &window,
                 &memory,

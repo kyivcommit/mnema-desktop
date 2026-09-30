@@ -23,11 +23,10 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
 
 fn mock_app_with_memory() -> tauri::App<tauri::test::MockRuntime> {
     // `focus_launcher` reads the launcher-position memory from managed state
-    // (D155), and `show_settings`/`hide_settings` the return-to-launcher mark;
-    // the production builder manages both, a test does it here. Nothing in
-    // this test file reads `launcher_layout::Current` yet, but `lib.rs`'s
-    // `.setup` manages it right alongside the other two, so this fixture
-    // stays in step with production rather than a step behind it.
+    // (D155), `show_settings`/`hide_settings` the return-to-launcher mark, and
+    // `focus_launcher` the launcher's layout and hide time (`Current`,
+    // `HiddenAt`); the production builder manages all of them, a test does it
+    // here.
     mock_builder()
         .manage(mnema_desktop::launcher_position::Memory::default())
         .manage(mnema_desktop::launcher_layout::Current::default())

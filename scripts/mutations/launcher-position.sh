@@ -250,3 +250,22 @@ case_ "launcher cold: a threshold of 0 minutes is accepted" \
   's~\.filter\(\|&m\| m >= 1\)~.filter(|\&m| m >= 0)~' \
   '.filter(|&m| m >= 0)' \
   mnema-desktop 'prefs::tests::the_cold_threshold_is_a_whole_number_of_minutes_from_one' --lib
+
+case_ "launcher cold: the cold show keeps the old layout" \
+  src-tauri/src/lib.rs \
+  's~app\.state::<launcher_layout::Current>\(\)\.set\(cold\);~let _ = cold;~' \
+  'let _ = cold;' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher cold: the cold show does not tell the launcher" \
+  src-tauri/src/lib.rs \
+  's~    let _ = app\.emit_to\("launcher", "launcher-cold", \(\)\);\n~~' \
+  'launcher_layout::resize(window, cold);
+    true' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher cold: the threshold ignores the preference" \
+  src-tauri/src/lib.rs \
+  's~prefs::cold_after_minutes\(s\.data_dir\(\)\)~{ let _ = s; 5 }~' \
+  '{ let _ = s; 5 }' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands

@@ -4238,6 +4238,57 @@ fn every_model_command_the_window_calls_is_registered() {
     }
 }
 
+/// The cold show: past the threshold read from `prefs.json` the launcher takes
+/// the default layout and the launcher window hears `launcher-cold`; short of
+/// it, nothing changes. The mock runtime reports every window visible, so the
+/// test calls `go_cold_if_idle` itself; `focus_launcher` calling it before
+/// `place` is the live run's, and so is the window's size: the mock's
+/// `set_size` does nothing, so `resize` cannot be observed here.
+#[test]
+fn go_cold_if_idle_follows_the_prefs_threshold() {
+    use mnema_desktop::launcher_layout::{Current, HiddenAt, Layout};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tauri::{Listener, Manager, WebviewWindowBuilder};
+
+    let wide = Layout {
+        left: true,
+        right: true,
+    };
+    let run = |after: u64| {
+        let dir = tempfile::tempdir().unwrap();
+        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
+            .unwrap();
+        let app = app_in(dir.path());
+        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+            .build()
+            .unwrap();
+        let heard = Arc::new(AtomicUsize::new(0));
+        let h = heard.clone();
+        window.listen("launcher-cold", move |_| {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        app.state::<Current>().set(wide);
+        app.state::<HiddenAt>().mark();
+        let marked = app.state::<HiddenAt>().get().unwrap();
+        let cold = mnema_desktop::go_cold_if_idle(
+            app.handle(),
+            &window,
+            marked + Duration::from_secs(after),
+        );
+        // The mock delivers synchronously; give a queued one a moment anyway.
+        std::thread::sleep(Duration::from_millis(50));
+        (
+            cold,
+            app.state::<Current>().get(),
+            heard.load(Ordering::SeqCst),
+        )
+    };
+
+    assert_eq!(run(61), (true, Layout::default(), 1));
+    assert_eq!(run(59), (false, wide, 0));
+}
+
 /// `set_launcher_layout` is reachable through the IPC, binds `left` and
 /// `right`, and records the layout even with no launcher window (the mock app
 /// has none, so only the bookkeeping runs).

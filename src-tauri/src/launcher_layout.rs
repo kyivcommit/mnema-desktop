@@ -41,8 +41,10 @@ impl Current {
     }
 }
 
-/// When the launcher was last hidden, by any path; `None` until the first
-/// hide. Managed; written by `hide_launcher`, read by the show.
+/// When the launcher last hid or lost focus (a pinned one loses focus and
+/// stays up; every hide that follows marks again); `None` until the first.
+/// Managed; written by `hide_launcher` and the `Focused(false)` arm, read by
+/// the show.
 #[derive(Default)]
 pub struct HiddenAt(Mutex<Option<Instant>>);
 
