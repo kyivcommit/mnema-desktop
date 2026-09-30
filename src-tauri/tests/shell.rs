@@ -31,6 +31,7 @@ fn mock_app_with_memory() -> tauri::App<tauri::test::MockRuntime> {
     mock_builder()
         .manage(mnema_desktop::launcher_position::Memory::default())
         .manage(mnema_desktop::launcher_layout::Current::default())
+        .manage(mnema_desktop::launcher_layout::HiddenAt::default())
         .manage(mnema_desktop::ReturnToLauncher::default())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")
@@ -391,4 +392,25 @@ fn here_reports_the_search_column_corner() {
         launcher_position::here(&window.as_ref().window(), left),
         Some(Point { x: 290, y: 0 })
     );
+}
+
+#[test]
+fn hide_launcher_records_when_it_hid() {
+    // The primitive, not the mechanism: the mock cannot tell visible from
+    // hidden, so the hotkey-while-pinned-and-unfocused path is the live run's.
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let hidden_at = app.state::<mnema_desktop::launcher_layout::HiddenAt>();
+    assert_eq!(hidden_at.get(), None);
+
+    mnema_desktop::hide_launcher(app.handle());
+    let first = hidden_at.get().expect("the hide left no mark");
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    mnema_desktop::hide_launcher(app.handle());
+    let second = hidden_at.get().unwrap();
+    assert!(second > first, "a second hide did not move the mark");
 }

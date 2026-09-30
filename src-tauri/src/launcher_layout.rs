@@ -2,6 +2,7 @@
 //! declarations in `ui/src/styles/launcher.css` (`main.panels`); the guard
 //! `the handle offset matches the stylesheet` (`Launcher.test.ts`) reads both.
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct Layout {
@@ -40,6 +41,34 @@ impl Current {
     }
 }
 
+/// When the launcher was last hidden, by any path; `None` until the first
+/// hide. Managed; written by `hide_launcher`, read by the show.
+#[derive(Default)]
+pub struct HiddenAt(Mutex<Option<Instant>>);
+
+impl HiddenAt {
+    pub fn mark(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+    pub fn get(&self) -> Option<Instant> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Whether a show at `now` finds the launcher cold: hidden for at least
+/// `minutes`. Never hidden (`None`) is not cold: the start-up layout already is.
+pub fn goes_cold(hidden_at: Option<Instant>, now: Instant, minutes: u32) -> bool {
+    hidden_at.is_some_and(|t| {
+        now.saturating_duration_since(t) >= Duration::from_secs(u64::from(minutes) * 60)
+    })
+}
+
+/// Sets the window to the size of layout `l`. The one place that turns a
+/// layout into a window size, for `set_launcher_layout` and the cold show.
+pub fn resize<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, l: Layout) {
+    let _ = window.set_size(tauri::LogicalSize::new(width(l), HEIGHT));
+}
+
 /// Resizes the launcher to its visible panels; the search column keeps its
 /// place on screen (owner, 2026-09-25). Synchronous: AppKit wants the window
 /// size from the main thread, as `open_settings`.
@@ -64,7 +93,7 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
         } else {
             window_corner(&window.as_ref().window())
         };
-        let _ = window.set_size(tauri::LogicalSize::new(width(next), HEIGHT));
+        resize(&window, next);
         if let Some((c, factor)) = corner {
             let _ = window
                 .set_position(Space::of_this_build().position(relayout(c, before, next, factor)));
@@ -102,6 +131,14 @@ mod tests {
             }),
             290.0
         );
+    }
+
+    #[test]
+    fn cold_exactly_at_the_threshold_not_a_second_before() {
+        let t0 = Instant::now();
+        assert!(goes_cold(Some(t0), t0 + Duration::from_secs(300), 5));
+        assert!(!goes_cold(Some(t0), t0 + Duration::from_secs(299), 5));
+        assert!(!goes_cold(None, t0 + Duration::from_secs(9999), 5));
     }
 
     #[test]

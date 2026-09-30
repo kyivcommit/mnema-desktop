@@ -149,6 +149,17 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// Minutes the launcher may stay hidden before its next show is cold
+/// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
+pub fn cold_after_minutes(data_dir: &Path) -> u32 {
+    read_all(data_dir)
+        .get("launcher_cold_after_minutes")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&m| m >= 1)
+        .and_then(|m| u32::try_from(m).ok())
+        .unwrap_or(5)
+}
+
 /// Writes one key, preserving every other key already in the file.
 ///
 /// Forward-safe: a field a newer version wrote survives a write from this one.
@@ -692,6 +703,20 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn the_cold_threshold_is_a_whole_number_of_minutes_from_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cold_after_minutes(dir.path()), 5, "no file");
+        let set = |v: serde_json::Value| {
+            write_key(dir.path(), "launcher_cold_after_minutes", v).unwrap();
+            cold_after_minutes(dir.path())
+        };
+        for bad in [json!(0), json!(-3), json!("7"), json!(1.5)] {
+            assert_eq!(set(bad.clone()), 5, "{bad} must fall back to 5");
+        }
+        assert_eq!(set(json!(7)), 7);
     }
 
     #[test]

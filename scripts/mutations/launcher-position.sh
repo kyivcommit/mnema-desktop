@@ -230,3 +230,23 @@ case_ "launcher position: relayout ignores the monitor's factor" \
   's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, before, 1.0), next, 1.0)~' \
   'to_window(to_search(window_corner, before, 1.0), next, 1.0)' \
   mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher cold: the threshold second itself is not yet cold" \
+  src-tauri/src/launcher_layout.rs \
+  's~>= Duration::from_secs\(u64::from\(minutes\) \* 60\)~> Duration::from_secs(u64::from(minutes) * 60)~' \
+  '> Duration::from_secs(u64::from(minutes) * 60)' \
+  mnema-desktop 'launcher_layout::tests::cold_exactly_at_the_threshold_not_a_second_before' --lib
+
+case_ "launcher cold: hide_launcher records no hide" \
+  src-tauri/src/lib.rs \
+  's~        app\.state::<launcher_layout::HiddenAt>\(\)\.mark\(\);\n    \}\n\}~    }\n}~' \
+  'let _ = window.hide();
+    }
+}' \
+  mnema-desktop 'hide_launcher_records_when_it_hid' --test shell
+
+case_ "launcher cold: a threshold of 0 minutes is accepted" \
+  src-tauri/src/prefs.rs \
+  's~\.filter\(\|&m\| m >= 1\)~.filter(|\&m| m >= 0)~' \
+  '.filter(|&m| m >= 0)' \
+  mnema-desktop 'prefs::tests::the_cold_threshold_is_a_whole_number_of_minutes_from_one' --lib

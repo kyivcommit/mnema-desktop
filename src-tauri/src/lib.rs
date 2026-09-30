@@ -274,12 +274,25 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
                 let _ = window.set_focus();
                 return true;
             }
-            let memory = app.state::<launcher_position::Memory>();
-            // `try_state`: the shell tests build no `AppState`; there the
-            // file is simply "nothing saved".
+            // Cold before `place` and `show`, so the window never appears wide
+            // with a stale answer; `place` then uses the cold layout.
             let data_dir = app
                 .try_state::<state::AppState>()
                 .map(|s| s.data_dir().to_path_buf());
+            let minutes = data_dir.as_deref().map_or(5, prefs::cold_after_minutes);
+            if launcher_layout::goes_cold(
+                app.state::<launcher_layout::HiddenAt>().get(),
+                std::time::Instant::now(),
+                minutes,
+            ) {
+                let cold = launcher_layout::Layout::default();
+                app.state::<launcher_layout::Current>().set(cold);
+                launcher_layout::resize(&window, cold);
+                let _ = window.emit("launcher-cold", ());
+            }
+            let memory = app.state::<launcher_position::Memory>();
+            // `try_state`: the shell tests build no `AppState`; there the
+            // file is simply "nothing saved" (and the threshold its default).
             launcher_position::place(
                 &window,
                 &memory,
@@ -293,6 +306,17 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     }
 }
 
+/// Hides the launcher and records when, so the next show can tell how long it
+/// was away (`launcher_layout::goes_cold`). The shortcut and a window close
+/// hide through here; Esc and blur hide from the UI, and the `Focused(false)`
+/// arm marks those.
+pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("launcher") {
+        let _ = window.hide();
+        app.state::<launcher_layout::HiddenAt>().mark();
+    }
+}
+
 /// The global shortcut's action: hide the launcher if it is up, otherwise show
 /// and focus it through `focus_launcher`. The visibility branch is exercised by
 /// the live run — the mock runtime does not track a real window's visibility —
@@ -300,7 +324,7 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         if window.is_visible().unwrap_or(false) {
-            let _ = window.hide();
+            hide_launcher(app);
         } else {
             focus_launcher(app);
         }
@@ -683,7 +707,11 @@ pub fn run() -> anyhow::Result<()> {
                 if window.label() == "settings" {
                     hide_settings(window.app_handle());
                 } else {
-                    let _ = window.hide();
+                    if window.label() == "launcher" {
+                        hide_launcher(window.app_handle());
+                    } else {
+                        let _ = window.hide();
+                    }
                     // Hiding the launcher while settings is still up leaves the
                     // policy unchanged. §6/§8.
                     sync_activation_policy(window.app_handle());
@@ -699,6 +727,8 @@ pub fn run() -> anyhow::Result<()> {
             // it (see `launcher_position::remember`).
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 let app = window.app_handle();
+                // Esc and blur hide from the UI, not through `hide_launcher`.
+                app.state::<launcher_layout::HiddenAt>().mark();
                 let memory = app.state::<launcher_position::Memory>();
                 let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
                 launcher_position::remember(
@@ -732,6 +762,7 @@ pub fn run() -> anyhow::Result<()> {
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
             app.manage(launcher_layout::Current::default());
+            app.manage(launcher_layout::HiddenAt::default());
             app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `Memory::default()` above touches
