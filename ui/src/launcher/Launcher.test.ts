@@ -585,8 +585,9 @@ test('the handle offset matches the stylesheet', () => {
   // And the numbers are what the spec says today, so a wrong regex that
   // captured the wrong declaration cannot pass by coincidence.
   expect(fromRust).toEqual([470, 0, 11, 26]);
-  // The offset is only this fixed because the tracks plus gaps exactly fill the
-  // content box: then `justify-content: center` and the minmax floor never engage.
+  // `search_offset` (LEFT_SPAN) is only right because the tracks plus gaps
+  // exactly fill the content box: then `justify-content: center` and the minmax
+  // floor never engage.
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
     app: { windows: Array<{ label: string; width: number; resizable?: boolean }> };
   };

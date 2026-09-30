@@ -44,14 +44,14 @@ case_ "launcher position: y is not read" \
 
 case_ "launcher position: the show does not record where it put the window" \
   src-tauri/src/launcher_position.rs \
-  's~memory\.placed\(restored\);~let _ = restored;~' \
-  'let _ = restored;' \
+  's~memory\.placed\(restored_search\);~let _ = restored_search;~' \
+  'let _ = restored_search;' \
   mnema-desktop 'place_leaves_the_position_to_the_focus_in' --test shell
 
 case_ "launcher position: placed runs even on Wayland" \
   src-tauri/src/launcher_position.rs \
-  's~if !wayland \{\n        memory\.placed\(restored\);\n    \}~memory.placed(restored);\n    if !wayland {\n    }~' \
-  'memory.placed(restored);
+  's~if !wayland \{\n        memory\.placed\(restored_search\);\n    \}~memory.placed(restored_search);\n    if !wayland {\n    }~' \
+  'memory.placed(restored_search);
     if !wayland {' \
   mnema-desktop 'a_wayland_show_leaves_nothing_awaiting' --test shell
 
@@ -194,3 +194,21 @@ case_ "launcher: a release does not disarm the drag window" \
   's~function onPointerUp\(\) \{ handlePressedAt = -Infinity; \}~function onPointerUp() { void handlePressedAt; }~' \
   'function onPointerUp() { void handlePressedAt; }' \
   src/launcher/Launcher.test.ts 'a release after the press disarms the drag window: a click on the handle, then a blur, hides' runner=vitest
+
+case_ "launcher position: restore_to hands set_position the search corner" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(\(p, to_window\(p, l, factor\)\)\)~Some((p, p))~' \
+  'Some((p, p))' \
+  mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
+
+case_ "launcher position: restore_to takes the factor from the wrong monitor" \
+  src-tauri/src/launcher_position.rs \
+  's~let factor = handle_factor\(p, monitors\)\.unwrap_or\(1\.0\);~let factor = 1.0;~' \
+  'let factor = 1.0;' \
+  mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
+
+case_ "launcher position: here reports the window corner, not the search column's" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(to_search\(space\.point\(p, scale\), l, factor\(space, scale\)\)\)~Some(space.point(p, scale))~' \
+  'Some(space.point(p, scale))' \
+  mnema-desktop 'here_reports_the_search_column_corner' --test shell

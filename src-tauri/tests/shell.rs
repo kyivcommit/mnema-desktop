@@ -367,3 +367,28 @@ fn remember_writes_the_launcher_position_it_finds() {
     );
     assert_eq!(fresh.left(), None, "Wayland recorded a move in memory");
 }
+
+#[test]
+fn here_reports_the_search_column_corner() {
+    // The mock runtime puts every window at (0, 0) with scale 1. With the left
+    // column shown the search column is 290 logical px to the right of the
+    // window's corner, so that is the point `here` must report.
+    use mnema_desktop::launcher_layout::Layout;
+    use mnema_desktop::launcher_position::{self, Point};
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let left = Layout {
+        left: true,
+        right: false,
+    };
+    assert_eq!(
+        launcher_position::here(&window.as_ref().window(), left),
+        Some(Point { x: 290, y: 0 })
+    );
+}

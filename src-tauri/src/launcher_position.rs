@@ -216,7 +216,10 @@ pub fn write(data_dir: &Path, p: Point) -> std::io::Result<()> {
 /// whichever holds most of it, and the monitor that holds the handle is the
 /// one whose factor put it there — the approximation errs towards keeping a
 /// saved position, and `adjacent_monitors_with_different_scales_each_use_their_own`
-/// pins it.
+/// pins it. The same approximation means two adjacent monitors can both
+/// "hold" one handle, since its position depends on each one's scale: the
+/// first in `monitors` wins, and `place` uses that scale to decide where the
+/// window goes, not only whether a saved position is kept.
 pub fn handle_factor(p: Point, monitors: &[(Area, f64)]) -> Option<f64> {
     monitors.iter().find_map(|(area, scale)| {
         let hx = f64::from(p.x) + HANDLE_CENTRE.0 * scale;
@@ -329,6 +332,22 @@ pub fn remember_position(now: Point, memory: &Memory, data_dir: &Path) -> std::i
     }
 }
 
+/// What `place` does with a saved search column corner: `None` unless its
+/// handle is reachable ([`reachable`]); otherwise that corner and the window
+/// corner `set_position` takes for it. The conversion uses the scale of the
+/// monitor that holds the handle ([`handle_factor`]), not the window's own —
+/// the saved point may be on another monitor than the one the window starts
+/// on (the PR #47 class of defect).
+pub fn restore_to(
+    saved: Option<Point>,
+    monitors: &[(Area, f64)],
+    l: Layout,
+) -> Option<(Point, Point)> {
+    let p = reachable(saved, monitors)?;
+    let factor = handle_factor(p, monitors).unwrap_or(1.0);
+    Some((p, to_window(p, l, factor)))
+}
+
 /// The one show path (D155): put the window where the person left it — from
 /// memory first, then the file — if the handle is reachable; otherwise the
 /// platform default. Then show and focus; what it actually applied is not
@@ -355,8 +374,8 @@ pub fn place<R: tauri::Runtime>(
     l: Layout,
 ) {
     let space = Space::of_this_build();
-    let (restored, monitors): (Option<Point>, Vec<(Area, f64)>) = if wayland {
-        (None, Vec::new())
+    let restored = if wayland {
+        None
     } else {
         let saved = memory.left().or_else(|| data_dir.and_then(read));
         let monitors: Vec<(Area, f64)> = window
@@ -365,16 +384,12 @@ pub fn place<R: tauri::Runtime>(
             .iter()
             .map(|m| space.area(*m.work_area(), m.scale_factor()))
             .collect();
-        (reachable(saved, &monitors), monitors)
+        restore_to(saved, &monitors, l)
     };
+    let restored_search = restored.map(|(search, _)| search);
     match restored {
-        Some(p) => {
-            // The saved point is the search column's corner; the factor is
-            // the scale of whichever monitor holds the handle there (`here`
-            // uses the window's own scale — this may be a different monitor
-            // than the one the window starts on, the PR #47 class of defect).
-            let factor = handle_factor(p, &monitors).unwrap_or(1.0);
-            let _ = window.set_position(space.position(to_window(p, l, factor)));
+        Some((_, corner)) => {
+            let _ = window.set_position(space.position(corner));
         }
         // §6: next to the tray on macOS, placed after `show` below.
         None if wayland || cfg!(target_os = "macos") => {}
@@ -383,7 +398,7 @@ pub fn place<R: tauri::Runtime>(
         }
     }
     if !wayland {
-        memory.placed(restored);
+        memory.placed(restored_search);
     }
     let _ = window.show();
     if restored.is_none() && !wayland && cfg!(target_os = "macos") {
@@ -851,5 +866,40 @@ mod tests {
         memory.set_applied(at(0, 0));
         remember_position(Point { x: 50, y: 60 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(50, 60));
+    }
+
+    #[test]
+    fn a_restore_moves_the_window_by_the_handles_monitor_scale() {
+        // A 1x monitor and a 2x one to its right, the left column shown. The
+        // search corner (1700, 100) has its handle on the 2x monitor
+        // (1700 + 470 = 2170), so the window corner is the search corner minus
+        // 290 * 2 = 580, not minus 290: (1120, 100). At (100, 100) the handle
+        // is on the 1x monitor: minus 290 -> (-190, 100). Not shown: unmoved.
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
+        let left = Layout {
+            left: true,
+            right: false,
+        };
+        let search = Point { x: 1700, y: 100 };
+        assert_eq!(
+            restore_to(Some(search), &two, left),
+            Some((search, Point { x: 1120, y: 100 }))
+        );
+        let near = Point { x: 100, y: 100 };
+        assert_eq!(
+            restore_to(Some(near), &two, left),
+            Some((near, Point { x: -190, y: 100 }))
+        );
+        assert_eq!(
+            restore_to(Some(search), &two, Layout::default()),
+            Some((search, search))
+        );
+        assert_eq!(
+            restore_to(Some(Point { x: 9000, y: 100 }), &two, left),
+            None
+        );
     }
 }

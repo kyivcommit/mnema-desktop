@@ -18,6 +18,10 @@ pub fn width(l: Layout) -> f64 {
     SEARCH_WIDTH + if l.left { LEFT_SPAN } else { 0.0 } + if l.right { RIGHT_SPAN } else { 0.0 }
 }
 
+/// How far the search column's left edge sits from the window's. Exact only
+/// because the tracks plus gaps exactly fill the window's content box, so
+/// `justify-content: center` and the minmax floor never engage; if either
+/// did, the column would sit elsewhere and this offset would be wrong.
 pub fn search_offset(l: Layout) -> f64 {
     if l.left { LEFT_SPAN } else { 0.0 }
 }
