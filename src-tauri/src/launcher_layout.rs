@@ -104,6 +104,17 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
     current.set(next);
 }
 
+/// An answer landed: the idle clock restarts, so the answer lives the cold
+/// threshold from its arrival and not from the hide (owner, 2026-10-01). Asked
+/// from a launcher that hid while the ask was in flight, the answer would
+/// otherwise be dropped, with its query, by a show that is cold by the hide's
+/// clock. Unconditional: marking while the launcher is visible is harmless,
+/// because every hide (`hide_launcher`, the `Focused(false)` arm) marks again.
+#[tauri::command]
+pub fn launcher_answered(hidden_at: tauri::State<'_, HiddenAt>) {
+    hidden_at.mark();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

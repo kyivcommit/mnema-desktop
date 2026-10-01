@@ -245,6 +245,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
 
     set_launcher_layout: () => null,
+    launcher_answered: () => null,
     set_search_arms: (a) => { s.index = { ...s.index, searchTextArm: !!a.text, searchContentArm: !!a.content }; },
     ask: () => generated,
     source_around: () => excerptSpanA,

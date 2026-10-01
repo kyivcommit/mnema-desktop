@@ -817,6 +817,9 @@ export const listenLauncherCold = async (cb: () => void): Promise<UnlistenFn> =>
 export const setLauncherLayout = (left: boolean, right: boolean) =>
   invoke<void>('set_launcher_layout', { left, right });
 
+// An answer was applied: restarts the launcher's idle clock (Rust side).
+export const launcherAnswered = () => invoke<void>('launcher_answered');
+
 // Takes no channel at all (bridge.rs): stopping a job never depends on owning
 // the channel it reports on, which is why a page that has lost the channel must
 // still offer this.

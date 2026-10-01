@@ -99,6 +99,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::set_cold_after,
         open_settings,
         launcher_layout::set_launcher_layout,
+        launcher_layout::launcher_answered,
     ]
 }
 
@@ -265,6 +266,8 @@ pub fn boot_files(state: &state::AppState) -> i64 {
 /// If the launcher has been hidden for at least the idle threshold at `now`,
 /// makes it cold: the default layout, its window size, and a `launcher-cold`
 /// event to the launcher so the UI drops its answer. Returns whether it did.
+/// The clock is the last hide or the last answer to land, whichever is later
+/// (`launcher_layout::launcher_answered`).
 /// `try_state`: the shell tests build no `AppState`; there the threshold is
 /// its default.
 pub fn go_cold_if_idle<R: tauri::Runtime>(

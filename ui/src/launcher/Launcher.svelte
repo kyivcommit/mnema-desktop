@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, listenLauncherCold, modelSettings, openSettings, providerStatus, setLauncherLayout, type ProviderStatus } from '../lib/ipc';
+  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerStatus, setLauncherLayout, type ProviderStatus } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import Toolbar from './Toolbar.svelte';
@@ -95,6 +95,9 @@
       const answer = await ask(check.query);
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      // The idle clock restarts when an answer lands, so one that arrived while
+      // the launcher was hidden is not dropped by the hide's older clock.
+      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
       // Only the cold-to-hot step opens the panels; a hot launcher keeps
       // whichever the person switched off.
       const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';

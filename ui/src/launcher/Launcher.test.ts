@@ -231,11 +231,11 @@ test('a generated answer renders the centre card, not a refusal', async () => {
 // 🔴 C1, and the only place it can be seen: `Cards.test.ts` drives `Cards` by
 // hand and can build a transition the product never performs, while these tests
 // drive the real `runSearch`. `Cards` gates its cards on the launcher's state
-// and `runSearch` sets `inFlight` before EVERY ask (`Launcher.svelte:42`), so a
+// and `runSearch` sets `inFlight` before EVERY ask (`runSearch` in `Launcher.svelte`), so a
 // tree drawn only for a generated answer is torn down and refetched in the
 // middle of every question — the outcome Ruling AC forbids, reached with no
 // `{#key}` anywhere. Both are anchored on the echo, which only a RESOLVED ask
-// can write (`Launcher.svelte:53`).
+// can write (`runSearch` in `Launcher.svelte`).
 //
 // 🔴 I-A: two tests, not one with two assertions. Against the only mutant that
 // exists for them — the pre-fix gate — a single test fails on the `list_tree`
@@ -787,6 +787,33 @@ test('the launcher listens for the event Rust emits', async () => {
 
 // An ask still on the wire when the launcher goes cold must not bring the
 // forgotten answer back, and must not hold the one-ask-at-a-time guard.
+const answeredCalls = () => invoke.mock.calls.filter((c) => c[0] === 'launcher_answered');
+
+test('an applied answer restarts the idle clock exactly once', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await waitFor(() => expect(screen.getByTestId('card-centre')).toBeTruthy());
+  expect(answeredCalls()).toHaveLength(1);
+});
+
+test('an answer dropped after launcher-cold does not restart the idle clock', async () => {
+  let resolveAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  resolveAsk(generated);
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(answeredCalls()).toHaveLength(0);
+});
+
 test('an ask in flight when launcher-cold arrives is dropped when it resolves', async () => {
   let resolveAsk!: (v: unknown) => void;
   invoke.mockImplementation((cmd: string) => {

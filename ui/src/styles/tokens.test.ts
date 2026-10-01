@@ -1097,7 +1097,7 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     // a number field must keep its own width and not stretch
     const numberInput = document.querySelector('[role="group"] > input[type="number"]')!;
     expect(getComputedStyle(numberInput).alignSelf).toBe('flex-start');
-    expect(getComputedStyle(numberInput).width).not.toBe('');
+    expect(getComputedStyle(numberInput).width).toBe('16ch');
   });
 });
 

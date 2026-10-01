@@ -183,22 +183,24 @@ pub const KEY: &str = "launcher_position";
 /// top-left corner — not the window's: the window's corner moves under
 /// `Layout` (a visible left column pushes it left of the search column, see
 /// [`to_window`]), the search column's does not. The point is the middle of
-/// the search panel's first row (the input; the toolbar buttons sit in the second row). Every number is a
-/// declaration in `ui/src/styles/launcher.css` — `main.panels` padding
-/// `0px 0px` (owner, 2026-09-25: no hidden margin round the panels, so the
-/// window goes flush to a screen edge), the search column's own width 470,
-/// then the panel's own padding-top 11 and the first row's `min-height` 26. The owner
-/// narrowed the gap (16 → 8 → 5) and widened the side columns by half
-/// (190 → 285, 244 → 366) on 2026-09-25.
+/// the search panel's first row (the input; the toolbar buttons sit in the
+/// second row). Every number is a declaration in
+/// `ui/src/styles/launcher.css` — `main.panels` padding `0px 0px` (owner,
+/// 2026-09-25: no hidden margin round the panels, so the window goes flush to
+/// a screen edge), the search column's own width 470, then the panel's own
+/// padding-top 11 and the first row's `min-height` 26. The owner narrowed the
+/// gap (16 → 8 → 5) and widened the side columns by half (190 → 285,
+/// 244 → 366) on 2026-09-25.
 ///
 /// The search column is always 470 wide (`launcher_layout::SEARCH_WIDTH`),
 /// whatever side panels `Layout` shows next to it, so this offset is the same
 /// constant in every layout — `to_search`/`to_window` carry the per-layout
 /// shift between the window's corner and this one.
 /// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` reads both
-/// this line and the stylesheet, and separately checks the three columns'
-/// width sum against the window width in `tauri.conf.json`, failing if any of
-/// them disagree.
+/// this line and the stylesheet. It also checks each `data-cols` layout's
+/// track-and-gap sum against `launcher_layout::width` (built from
+/// `SEARCH_WIDTH`, `LEFT_SPAN`, `RIGHT_SPAN`) and the width in
+/// `tauri.conf.json` against `SEARCH_WIDTH`, failing if any of them disagree.
 pub const HANDLE_CENTRE: (f64, f64) = (470.0 / 2.0, 0.0 + 11.0 + 26.0 / 2.0);
 
 /// The saved position, or `None` for anything that is not two integers under

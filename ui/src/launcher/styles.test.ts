@@ -25,7 +25,7 @@ beforeEach(() => {
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return Promise.resolve(generated);
-    if (cmd === 'set_launcher_layout') return Promise.resolve();
+    if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
     if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
     throw new Error(`unexpected command ${cmd}`);

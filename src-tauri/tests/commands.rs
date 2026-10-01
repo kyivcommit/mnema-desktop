@@ -4293,6 +4293,38 @@ fn go_cold_if_idle_follows_the_prefs_threshold() {
     assert_eq!(run(59), (false, wide, 0));
 }
 
+/// An answer that lands restarts the idle clock: hidden at t0, answered one
+/// second short of the threshold, a show past the threshold from the hide is
+/// still hot; without the answer the same show is cold.
+#[test]
+fn an_answer_restarts_the_idle_clock() {
+    use mnema_desktop::launcher_layout::HiddenAt;
+    use tauri::{Manager, WebviewWindowBuilder};
+
+    let run = |answered: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
+            .unwrap();
+        let app = app_in(dir.path());
+        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+            .build()
+            .unwrap();
+        // Hidden "at t0": the clock the answer must move past.
+        app.state::<HiddenAt>().mark();
+        std::thread::sleep(Duration::from_millis(1100));
+        let t0 = app.state::<HiddenAt>().get().unwrap();
+        if answered {
+            call(&main_webview(&app), "launcher_answered", json!({}))
+                .expect("launcher_answered was rejected");
+        }
+        // The answer landed 1.1 s after the hide; 61 s after the hide is past
+        // the threshold for the hide, 59.9 s short of it for the answer.
+        mnema_desktop::go_cold_if_idle(app.handle(), &window, t0 + Duration::from_secs(61))
+    };
+    assert!(run(false));
+    assert!(!run(true));
+}
+
 /// `set_launcher_layout` is reachable through the IPC, binds `left` and
 /// `right`, and records the layout even with no launcher window (the mock app
 /// has none, so only the bookkeeping runs).
