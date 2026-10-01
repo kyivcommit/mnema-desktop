@@ -610,8 +610,14 @@
   const storedCold = $derived(prefs?.coldAfterMinutes);
   $effect(() => { if (storedCold !== undefined) coldText = String(storedCold); });
 
+  // At most one write is in flight and the field is never disabled for it: a
+  // disabled input loses focus, which ends the arrow keys. A change made while
+  // a write is in flight is remembered (the last one wins) and written when
+  // that write settles, if it differs from what was just stored.
+  let coldQueued: number | null = null;
+
   async function changeCold(field: HTMLInputElement) {
-    if (prefs === null || coldBusy) return;
+    if (prefs === null) return;
     const text = field.value;
     const minutes = Number(text);
     // `coldText` alone cannot put the stored value back: it still holds it, so
@@ -625,18 +631,29 @@
       showStored();
       return;
     }
-    coldError = null;
+    if (coldBusy) {
+      coldQueued = minutes;
+      return;
+    }
     coldBusy = true;
     try {
-      const stored = await setColdAfter(minutes);
-      prefs = { ...prefs, coldAfterMinutes: stored };
-      coldText = String(stored);
-      field.value = coldText;
-    } catch (err) {
-      coldError = err instanceof Error ? err.message : String(err);
-      // No re-read, as for the theme: a refusal writes nothing, so the stored
-      // value is already what `prefs` holds.
-      showStored();
+      let next: number | null = minutes;
+      while (next !== null) {
+        coldError = null;
+        try {
+          const stored = await setColdAfter(next);
+          prefs = { ...prefs!, coldAfterMinutes: stored };
+        } catch (err) {
+          coldError = err instanceof Error ? err.message : String(err);
+          // No re-read, as for the theme: a refusal writes nothing, so the
+          // stored value is already what `prefs` holds.
+        }
+        const stored = prefs!.coldAfterMinutes;
+        next = coldQueued !== null && coldQueued !== stored ? coldQueued : null;
+        coldQueued = null;
+        coldText = String(stored);
+        field.value = coldText;
+      }
     } finally {
       coldBusy = false;
     }
@@ -1030,7 +1047,6 @@
       data-testid="application-launcher-cold"
       aria-labelledby="application-launcher-cold-label"
       aria-describedby={coldDescribedBy}
-      disabled={coldBusy}
       value={coldText}
       onchange={(e) => changeCold(e.currentTarget)}
     />

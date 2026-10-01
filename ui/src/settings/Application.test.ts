@@ -3035,3 +3035,38 @@ test('a refused threshold shows the command\'s sentence, links it, and shows the
   expect(ids).toContain('application-launcher-cold-error');
   for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
 });
+
+test('a threshold write in flight does not disable the field, so it keeps focus', async () => {
+  const inFlight = deferred<number>();
+  setColdAfter.mockReturnValue(inFlight.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  coldField().focus();
+  await typeCold('7');
+
+  expect(setColdAfter).toHaveBeenCalledWith(7);
+  expect(coldField().disabled).toBe(false);
+  expect(document.activeElement).toBe(coldField());
+  inFlight.resolve(7);
+  await waitFor(() => expect(coldField().value).toBe('7'));
+});
+
+test('a second threshold change during a write waits for it, and the last one wins', async () => {
+  const first = deferred<number>();
+  const second = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('2');
+  await typeCold('3');
+  await tick();
+  expect(setColdAfter.mock.calls).toEqual([[2]]);
+
+  first.resolve(2);
+  await waitFor(() => expect(setColdAfter.mock.calls).toEqual([[2], [3]]));
+  second.resolve(3);
+  await waitFor(() => expect(coldField().value).toBe('3'));
+  expect(setColdAfter).toHaveBeenCalledTimes(2);
+});
