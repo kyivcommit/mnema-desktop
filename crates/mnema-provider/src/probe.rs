@@ -5,6 +5,8 @@
 //! is checked without a model (the credits endpoint needs none), and the
 //! embedding model is checked separately, when one is chosen.
 
+use std::time::Duration;
+
 use serde::Deserialize;
 use serde_json::Value;
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -526,7 +528,14 @@ pub(crate) fn attach_reason(err: Error, body: &str, key: &str) -> Error {
 
 /// Checks a key without needing a model to be chosen yet.
 pub fn check_key(base: &str, key: &str) -> Result<KeyCheck, Error> {
-    let (status, body) = match http::get(base, "/credits", Some(key)) {
+    check_key_within(base, key, http::GLOBAL_TIMEOUT)
+}
+
+/// `check_key` with the wait chosen by the caller, for a status probe that
+/// must notice a lost network in seconds. Every other call keeps the one
+/// global timeout.
+pub fn check_key_within(base: &str, key: &str, timeout: Duration) -> Result<KeyCheck, Error> {
+    let (status, body) = match http::get_within(base, "/credits", Some(key), timeout) {
         Ok(pair) => pair,
         // A body-read failure still carries its status (`Error::BodyUnreadable`,
         // Task 2 review round 2, G3) precisely so it is not lost — and this

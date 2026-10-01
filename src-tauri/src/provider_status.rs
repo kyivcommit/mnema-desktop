@@ -2,7 +2,8 @@
 //! it answer.
 //!
 //! The first half is local and cheap, so it is recomputed on EVERY call and
-//! never cached; only the network half is. That order is what makes a
+//! never cached; only an `Ok` from the network half is (an `Unreachable`
+//! is asked again on the next call, so the cloud follows the network back). That order is what makes a
 //! `forget_key` racing an in-flight check harmless — the next call answers
 //! `notConfigured` from local facts whatever the cache holds.
 
@@ -13,7 +14,12 @@ use tauri::State;
 use crate::error::Error;
 use crate::state::AppState;
 
-/// How long an answer from the provider is believed.
+/// How long the status probe waits for `/credits`. Short on purpose: a lost
+/// network must turn the cloud grey within seconds, not after the provider
+/// crate's 30 s global timeout.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an `Ok` from the provider is believed.
 const TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -77,7 +83,8 @@ pub fn provider_status(state: State<'_, AppState>) -> ProviderStatus {
     }
     // The cache lock is not held across the request, so a slow `/credits`
     // never blocks `set_key` and friends.
-    let status = match mnema_provider::check_key(state.provider_base(), &key) {
+    let status = match mnema_provider::check_key_within(state.provider_base(), &key, PROBE_TIMEOUT)
+    {
         Ok(_) => ProviderStatus::Ok,
         Err(e) => ProviderStatus::Unreachable {
             reason: Error::from(e).to_string(),
@@ -126,6 +133,21 @@ mod wire {
             v(&not_configured(Missing::EmbeddingModel)),
             json!({ "kind": "notConfigured", "missing": "embeddingModel" })
         );
+    }
+
+    #[test]
+    fn an_unreachable_verdict_is_not_cached_but_ok_is() {
+        let state = AppState::new("d".into(), "w".into(), "b".into(), "r".into());
+        let epoch = state.provider_status_gen();
+        state.store_provider_status(epoch, ProviderStatus::Unreachable { reason: "x".into() });
+        assert_eq!(state.cached_provider_status(), None);
+        state.store_provider_status(epoch, ProviderStatus::Ok);
+        assert_eq!(state.cached_provider_status(), Some(ProviderStatus::Ok));
+    }
+
+    #[test]
+    fn the_probe_gives_up_after_five_seconds_not_the_global_thirty() {
+        assert_eq!(PROBE_TIMEOUT, Duration::from_secs(5));
     }
 
     #[test]

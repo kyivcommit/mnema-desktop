@@ -158,7 +158,8 @@ pub struct AppState {
     /// mean holding the state's own lock for the length of a command, which is
     /// what every other getter here exists to avoid.
     hotkey_change: Mutex<()>,
-    /// The provider's last answer to `/credits`, and when it came. Cleared by
+    /// The provider's last `Ok` answer to `/credits`, and when it came (an
+    /// `Unreachable` is never kept). Cleared by
     /// `set_key`, `forget_key` and `set_embedding_model`. Never held across the
     /// request itself.
     provider_status: Mutex<ProviderCache>,
@@ -374,7 +375,7 @@ impl AppState {
         self.provider_cache().generation
     }
 
-    /// Stores `status` only if nothing has invalidated the cache since `epoch`
+    /// Stores an `Ok` `status` only if nothing has invalidated the cache since `epoch`
     /// was read: a check that was in flight across a `set_key` would otherwise
     /// put the old key's verdict back.
     pub fn store_provider_status(
@@ -383,7 +384,9 @@ impl AppState {
         status: crate::provider_status::ProviderStatus,
     ) {
         let mut cache = self.provider_cache();
-        if cache.generation == epoch {
+        // Only a verdict that cannot flip back by itself is kept: a network
+        // that was down a second ago must be asked again at the next focus.
+        if cache.generation == epoch && status == crate::provider_status::ProviderStatus::Ok {
             cache.entry = Some((Instant::now(), status));
         }
     }
