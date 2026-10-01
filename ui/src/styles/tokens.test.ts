@@ -1084,7 +1084,7 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     mount(`<main><div class="spane">
       <div class="panel"><div class="folders"></div><div class="masks"></div></div>
       <div class="panel" hidden></div>
-      <div role="group" aria-labelledby="g"><select></select></div>
+      <div role="group" aria-labelledby="g"><select></select><input type="number" /></div>
     </div></main>`);
     for (const sel of ['.panel:not([hidden])', '.folders', '.masks', '[role="group"]']) {
       const el = document.querySelector(sel)!;
@@ -1094,6 +1094,10 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     expect(getComputedStyle(document.querySelector('.panel[hidden]')!).display).toBe('none');
     // a select straight inside a column must not stretch to the pane's width
     expect(getComputedStyle(document.querySelector('[role="group"] > select')!).alignSelf).toBe('flex-start');
+    // a number field must keep its own width and not stretch
+    const numberInput = document.querySelector('[role="group"] > input[type="number"]')!;
+    expect(getComputedStyle(numberInput).alignSelf).toBe('flex-start');
+    expect(getComputedStyle(numberInput).width).not.toBe('');
   });
 });
 

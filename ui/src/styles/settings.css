@@ -345,9 +345,14 @@ main select:focus-visible {
   gap: 10px;
 }
 
-/* `main button` already holds its own width; a select in a column would not */
-.spane > [role="group"] > select {
+/* `main button` already holds its own width; a select or number field in a column would not */
+.spane > [role="group"] > select,
+.spane > [role="group"] > input[type="number"] {
   align-self: flex-start;
+}
+
+.spane > [role="group"] > input[type="number"] {
+  width: 16ch;
 }
 
 /* section title (mockup .stitle .t) */
