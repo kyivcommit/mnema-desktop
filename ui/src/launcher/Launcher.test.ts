@@ -218,6 +218,58 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
   err.mockRestore();
 });
 
+// A failed ask is an error, not an answer: a hot launcher keeps the answer it
+// already showed and says what failed in the search line. A refusal is an
+// answer ("nothing found") and still replaces it.
+function mockAsksThenReject(first: unknown) {
+  let n = 0;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'ask') return n++ === 0 ? Promise.resolve(first) : Promise.reject('offline');
+    return Promise.resolve();
+  });
+}
+
+test('a failed ask in the hot state brings the previous answer back and shows the error in the line', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await submit('second');
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  err.mockRestore();
+});
+
+test('a failed ask in the cold state stays an error with no answer cards', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockBackend('offline', { reject: true });
+  render(Launcher);
+  await submit('q');
+  await screen.findByRole('alert');
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  err.mockRestore();
+});
+
+test('a failed ask does not restart the idle clock', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await submit('second');
+  await screen.findByRole('alert');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'launcher_answered')).toHaveLength(1);
+  err.mockRestore();
+});
+
 test('a generated answer renders the centre card, not a refusal', async () => {
   mockBackend(generated);
   render(Launcher);
@@ -776,8 +828,10 @@ test('a failed ask in the hot state keeps it hot', async () => {
   err.mockRestore();
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
   expect(screen.getByTestId('card-tree')).toBeTruthy();
-  expect(screen.getByTestId('card-results-empty')).toBeTruthy();
-  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+  // The previous answer is back, so neither side shows its empty placeholder.
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+  expect(screen.queryByTestId('card-results-empty')).toBeNull();
+  expect(screen.queryByTestId('card-source-empty')).toBeNull();
 });
 
 test('the launcher listens for the event Rust emits', async () => {

@@ -13,6 +13,17 @@
   let echo = $state('');
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
+  // The answer a hot launcher was showing when the current ask started. A
+  // failed ask puts it back: the failure is told in the search line, and the
+  // person keeps what they were reading. Null when there was none, and for
+  // every ask that did not start from a hot launcher's answer.
+  let previous = $state<LauncherState | null>(null);
+  // What the cards draw. The search line always gets `launcherState` itself.
+  const cardsState = $derived(
+    launcherState.kind === 'error' && launcherState.reason === 'askFailed' && previous
+      ? previous
+      : launcherState,
+  );
   let provider = $state(false);
   let status = $state<ProviderStatus | null>(null);
   let textOn = $state(true);
@@ -70,6 +81,7 @@
       heat = 'cold';
       left = right = false;
       launcherState = { kind: 'idle' };
+      previous = null;
       echo = '';
     })
       .then((u) => { if (gone) u(); else unlisten = u; })
@@ -86,6 +98,9 @@
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
+    const shown = launcherState;
+    previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
+    const shownEcho = echo;
     echo = '';
     const check = checkQuery(raw);
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
@@ -114,6 +129,7 @@
       if (gen !== coldGen) return;
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
+      if (previous) echo = shownEcho; // the restored answer's own question
     }
   }
 
@@ -182,5 +198,5 @@
       <Toolbar {heat} bind:left bind:right bind:pinned {status} />
     </div>
   </div>
-  <Cards state={launcherState} query={echo} {left} {right} {heat} />
+  <Cards state={cardsState} query={echo} {left} {right} {heat} />
 </main>
