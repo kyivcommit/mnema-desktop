@@ -315,8 +315,7 @@ test('a second question does not shut a hand-opened folder', async () => {
 });
 
 // 🔴 Ruling I-B, the refusal path. §7 calls only state A «лише рядок пошуку»;
-// row F says «тихе повідомлення», which is no more "only the line" than row D's
-// spinner is — and the reason the tree survives D (its content is the INDEX, not
+// row F says «тихе повідомлення», which is no more "only the line" than row D is — and the reason the tree survives D (its content is the INDEX, not
 // the answer) never depended on which answer came back. Measured before the
 // widening: a question that finds nothing destroyed the whole tree card and
 // every folder the person had opened. Anchored on the refusal text, which is

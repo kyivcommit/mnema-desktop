@@ -78,19 +78,11 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 .arms label { display: inline-flex; align-items: center; gap: 6px; }
 .arms input { accent-color: var(--accent); }
 .arms .unavailable { color: var(--ink-soft); }
-.search-line :is(.guard, .refusal, .phases) {
+.search-line :is(.guard, .refusal) {
   margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px;
 }
 .search-line .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
 .search-line .refusal { color: var(--ink-soft); }
-.phases {
-  font-family: var(--mono); font-weight: 400; font-style: normal;
-  color: var(--ink-soft);
-}
-.spinner {
-  display: inline-block; width: 15px; height: 15px; margin-top: 8px;
-  border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%;
-}
 .float {
   padding: 14px; overflow: auto;
   box-shadow: 0 20px 46px -20px var(--shadow), 0 3px 8px -4px var(--shadow);
