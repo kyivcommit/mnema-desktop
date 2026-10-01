@@ -166,8 +166,8 @@ test('each data-cols layout places the tree, search, results and source in its o
 test('the cards spanning both rows cannot size the search row (WebKit spanning-item distribution)', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
   expect(css).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
-  expect(css).toMatch(/main\.panels\s*\{\s*position:\s*relative/);
-  expect(css).toMatch(/main > :is\(\.col-side, \.doc\)\s*\{[^}]*position:\s*absolute;\s*inset:\s*0/);
+  expect(css).toMatch(/main > :is\(\.col-side, \.doc\)\s*\{[^}]*contain:\s*size/);
+  expect(css).toMatch(/main > :is\(\.col-side, \.doc\)\s*\{[^}]*min-height:\s*0/);
 });
 
 test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {
