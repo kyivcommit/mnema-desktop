@@ -47,6 +47,10 @@ use tauri::Manager as _;
 /// actually emitted, rather than a second copy kept beside it.
 pub const SCAN_PROGRESS_EVENT: &str = "scan-progress";
 
+/// Emitted to the launcher window when it was hidden past the cold threshold;
+/// `ipc.test.ts` compares it with the UI's name for it.
+pub const LAUNCHER_COLD_EVENT: &str = "launcher-cold";
+
 /// Everything the webview is allowed to call, in one place.
 ///
 /// Exposed rather than written inline in [`run`] so that a test drives the same
@@ -278,7 +282,7 @@ pub fn go_cold_if_idle<R: tauri::Runtime>(
     let cold = launcher_layout::Layout::default();
     app.state::<launcher_layout::Current>().set(cold);
     launcher_layout::resize(window, cold);
-    let _ = app.emit_to("launcher", "launcher-cold", ());
+    let _ = app.emit_to("launcher", LAUNCHER_COLD_EVENT, ());
     true
 }
 

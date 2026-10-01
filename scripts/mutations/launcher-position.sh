@@ -259,7 +259,7 @@ case_ "launcher cold: the cold show keeps the old layout" \
 
 case_ "launcher cold: the cold show does not tell the launcher" \
   src-tauri/src/lib.rs \
-  's~    let _ = app\.emit_to\("launcher", "launcher-cold", \(\)\);\n~~' \
+  's~    let _ = app\.emit_to\("launcher", LAUNCHER_COLD_EVENT, \(\)\);\n~~' \
   'launcher_layout::resize(window, cold);
     true' \
   mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands

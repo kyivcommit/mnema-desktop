@@ -11,9 +11,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const hide = vi.fn();
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide }) }));
 // The launcher listens for `launcher-cold`; the test fires it by hand.
-const cold = vi.hoisted(() => ({ handlers: [] as Array<() => void> }));
+const cold = vi.hoisted(() => ({ handlers: [] as Array<() => void>, names: [] as string[] }));
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: (_name: string, cb: () => void) => { cold.handlers.push(cb); return Promise.resolve(() => {}); },
+  listen: (name: string, cb: () => void) => {
+    cold.names.push(name);
+    cold.handlers.push(cb);
+    return Promise.resolve(() => {});
+  },
 }));
 const fireCold = () => cold.handlers.at(-1)!();
 
@@ -108,7 +112,7 @@ async function askAndOpenAFolder() {
 
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
-beforeEach(() => { hide.mockClear(); invoke.mockReset(); cold.handlers.length = 0; mockBackend(undefined); });
+beforeEach(() => { hide.mockClear(); invoke.mockReset(); cold.handlers.length = 0; cold.names.length = 0; mockBackend(undefined); });
 
 async function submit(value: string) {
   const box = screen.getByRole('textbox');
@@ -683,6 +687,7 @@ test('the first answer warms the launcher: both panels, the first card open, the
   expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
   expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/a\.md/);
   await waitFor(() => expect(layoutCalls().at(-1)).toEqual(ON));
 });
 
@@ -698,17 +703,18 @@ test('the layout is sent once per change, not once per render', async () => {
   expect(wide()).toHaveLength(1);
 });
 
-test('a refusal from the cold state leaves it cold: no tree, no source, no empty panels', async () => {
+test('a refusal from the cold state leaves it cold: no source, no empty panels, the tree not drawn', async () => {
   mockBackend(refusedNoCandidates);
   render(Launcher);
   await submit('nothing');
   await screen.findByRole('status');
-  for (const id of ['card-tree', 'card-source', 'card-source-empty', 'card-results-empty']) {
+  for (const id of ['card-source', 'card-source-empty', 'card-results-empty']) {
     expect(screen.queryByTestId(id), id).toBeNull();
   }
+  // Mounted (C1: mounting follows the state) but not drawn.
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
   expect(layoutCalls().every((c) => JSON.stringify(c) === JSON.stringify(OFF))).toBe(true);
-  expect(listTreeCalls()).toHaveLength(0);
 });
 
 test('an answer with no passages does not warm a cold launcher', async () => {
@@ -716,7 +722,7 @@ test('an answer with no passages does not warm a cold launcher', async () => {
   render(Launcher);
   await submit('q');
   await screen.findByTestId('card-centre');
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
 });
 
@@ -756,11 +762,62 @@ test('a failed ask in the hot state keeps it hot', async () => {
   await submit('one');
   await screen.findByTestId('card-source');
   mockBackend(new Error('boom'), { reject: true });
-  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   await submit('two');
   await screen.findByRole('alert');
+  err.mockRestore();
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.getByTestId('card-results-empty')).toBeTruthy();
   expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+});
+
+test('the launcher listens for the event Rust emits', async () => {
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+});
+
+// An ask still on the wire when the launcher goes cold must not bring the
+// forgotten answer back, and must not hold the one-ask-at-a-time guard.
+test('an ask in flight when launcher-cold arrives is dropped when it resolves', async () => {
+  let resolveAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  resolveAsk(generated);
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await waitFor(() => expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s'));
+  for (const id of ['card-centre', 'card-source', 'card-tree']) expect(screen.queryByTestId(id), id).toBeNull();
+  expect(layoutCalls().some((c) => JSON.stringify(c) === JSON.stringify(ON))).toBe(false);
+  // The guard is open again: a new question goes out.
+  await submit('fresh');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+});
+
+test('an ask rejected after launcher-cold leaves the cold idle state alone', async () => {
+  let rejectAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((_, r) => { rejectAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    return Promise.resolve();
+  });
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  rejectAsk(new Error('late'));
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(err).not.toHaveBeenCalledWith('ask failed', expect.anything());
+  err.mockRestore();
 });

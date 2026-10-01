@@ -95,14 +95,22 @@
   {/if}
 </section>
 
-{#if showSource && selected !== null}
-  <!-- §7: the source card does not exist without a selection (the answer's first card is preselected, so in practice it is drawn whenever the panel is on), and
-       `Source` takes a non-nullable selection (`Source.svelte:83-86`) — so this
-       guard is what the type asks for as well as what the mockup shows.
-       `siblings` is the whole citation list: `Source` drops the clicked one and
-       everything in another document itself (Decision 4, Ruling U), and that
-       rule stays in one place. -->
-  <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
-    <Source {selected} siblings={answer.citations} />
-  </section>
+{#if showSource}
+  {#if selected !== null}
+    <!-- §7: the source card needs a selection, and `Source` takes a
+         non-nullable one (`Source.svelte:83-86`), so this guard is what the type
+         asks for as well as what the mockup shows. The answer's first card is
+         preselected, so the card is normally drawn whenever the panel is on.
+         `siblings` is the whole citation list: `Source` drops the clicked one and
+         everything in another document itself (Decision 4, Ruling U), and that
+         rule stays in one place. -->
+    <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
+      <Source {selected} siblings={answer.citations} />
+    </section>
+  {:else}
+    <!-- An answer with no passages: the panel is on, so it is an opaque empty
+         one rather than a hole in the window. Decided HERE, beside the card, so
+         the two cannot disagree for the length of a flush. -->
+    <section class="float doc" data-testid="card-source-empty"></section>
+  {/if}
 {/if}

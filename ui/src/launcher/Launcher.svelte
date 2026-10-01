@@ -53,6 +53,7 @@
     let unlisten: (() => void) | null = null;
     let gone = false;
     listenLauncherCold(() => {
+      coldGen += 1;
       heat = 'cold';
       left = right = false;
       launcherState = { kind: 'idle' };
@@ -66,14 +67,20 @@
   // The owner validates and calls ask — the whole machine goes through
   // state.ts. A rejected ask becomes a visible error, never a silent reset:
   // an eaten error is easy to miss.
+  // Bumped by `launcher-cold`: an ask that was in flight when the launcher went
+  // cold belongs to an answer the person has been told is forgotten.
+  let coldGen = 0;
+
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
     echo = '';
     const check = checkQuery(raw);
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     launcherState = { kind: 'inFlight', query: check.query };
+    const gen = coldGen;
     try {
       const answer = await ask(check.query);
+      if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
       // Only the cold-to-hot step opens the panels; a hot launcher keeps
       // whichever the person switched off.
@@ -88,6 +95,7 @@
       // second one of its own here, and in state B both were on screen at once.
       echo = check.query;
     } catch (e) {
+      if (gen !== coldGen) return;
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
     }

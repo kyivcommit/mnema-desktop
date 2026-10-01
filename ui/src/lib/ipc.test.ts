@@ -24,7 +24,7 @@ import type {
   SubfolderListing,
   SubfolderState,
 } from './ipc';
-import { OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
+import { LAUNCHER_COLD_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -823,6 +823,13 @@ const LIB_RS = readFileSync(join(HERE, '../../../src-tauri/src/lib.rs'), 'utf8')
 
 test('the scan-progress event name is the one lib.rs actually emits', () => {
   expect(SCAN_PROGRESS_EVENT).toBe(rustStrConst(LIB_RS, 'SCAN_PROGRESS_EVENT'));
+});
+
+// The same failure for `launcher-cold`: rename one side and the launcher keeps
+// its last answer inside a window Rust has already narrowed.
+test('the launcher-cold event name is the one lib.rs actually emits', () => {
+  expect(LAUNCHER_COLD_EVENT).toBe(rustStrConst(LIB_RS, 'LAUNCHER_COLD_EVENT'));
+  expect(LIB_RS).toMatch(/emit_to\("launcher", LAUNCHER_COLD_EVENT,/);
 });
 
 test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {

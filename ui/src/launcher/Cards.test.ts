@@ -73,7 +73,7 @@ function defaultSources(): Record<number, Promise<SourceAround>> {
     43: Promise.resolve(excerptSpanB),
     9: Promise.resolve(excerptDocTwo),
     50: Promise.resolve(excerptSpanA),
-    61: Promise.resolve(excerptSpanA),
+    61: Promise.resolve(excerptDocTwo),
   };
 }
 function mockSourceFor(byChunkId: Record<number, SourceAround | Promise<SourceAround>>) {
@@ -166,7 +166,8 @@ test('refused keeps the tree and draws neither answer nor source (state F)', () 
 // The six tests above and below cover all six `LauncherState` variants against
 // TWO independent gates, and each one must be readable on its own:
 //
-//   card-tree               — every state except `idle` (ruling I-B)
+//   card-tree               — mounted in every state except `idle` (ruling I-B);
+//                             drawn only when hot and the left switch is on
 //   card-centre             — `generated` AND `citationsOnly` (Task 9)
 //   card-source             — those two, and only after a click
 //
@@ -318,8 +319,13 @@ test('a new answer clears the previous selection instead of leaving a stale exce
   // The new answer opens on ITS first card, not on the clicked one of the old.
   expect(screen.getByTestId('card-source')).toBeTruthy();
   expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61);
-  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).not.toContain(SPAN_B_TEXT);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
   expect(screen.getByTestId('answer-body').textContent).toContain('second answer');
+  // The left card follows: the new answer's file is marked, the old one is not.
+  await waitFor(() =>
+    expect(screen.getByTestId('tree-file-doc-2').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
 });
 
 // The test above is the PRODUCT's claim and goes through state D, where the
@@ -342,7 +348,8 @@ test('Cards clears the selection on a new answer even without passing through in
   await settled();
 
   expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61);
-  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).not.toContain(SPAN_B_TEXT);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
 });
 
 // Fixture question, state 1 of 2: the tree answers on its own schedule, and a
@@ -388,8 +395,10 @@ test('a second answer arriving mid-fetch leaves no excerpt from the first', asyn
   clicked.resolve(excerptSpanB); // the answer for a card that is no longer on screen
   await flush();
   await settled();
+  expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61); // the new answer's card is what is up
 
-  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).not.toContain(SPAN_B_TEXT);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
   expect(screen.getByTestId('answer-body').textContent).toContain('second answer');
 });
 
@@ -876,14 +885,24 @@ test('the banner agrees in number with the passages it introduces', async () => 
 // the card the centre draws first. Held against the DOM, not against the array
 // it is read from.
 test('firstCard is the first card the centre draws, in both answer kinds', async () => {
-  const g = stateFromAnswer('q', generated);
+  // Citations listed 7 then 3: citation order and anchor order differ, so a
+  // preview list sorted by anchor would not pass for `citations[0]`.
+  const base = stateFromAnswer('q', generated);
+  if (base.kind !== 'generated') throw new Error('fixture');
+  const g: LauncherState = {
+    ...base,
+    answer: { ...base.answer, citations: [...base.answer.citations].reverse() },
+  };
   if (g.kind !== 'generated') throw new Error('fixture');
+  expect(g.answer.citations.map((c) => c.anchor)).toEqual([7, 3]);
   const { unmount } = render(Cards, { ...HOT, state: g, query: 'q' });
   const previews = screen.getAllByTestId(/^preview-/);
   expect(previews[0].dataset.testid ?? previews[0].getAttribute('data-testid'))
     .toBe(`preview-${(firstCard(g.answer) as { anchor: number }).anchor}`);
   await settled();
   expect(sourceAroundCalls()[0][1].chunkId).toBe(firstCard(g.answer)!.chunkId);
+  // Through what is rendered, not only what was asked for.
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/a\.md/);
   unmount();
 
   const e = stateFromAnswer('q', citationsOnly);
@@ -900,9 +919,12 @@ test('a cold launcher draws no side panel and no empty panel, whatever the state
     stateFromAnswer('q', refusedNoCandidates),
   ] as LauncherState[]) {
     const { unmount } = render(Cards, { heat: 'cold', left: false, right: false, state, query: '' });
-    for (const id of ['card-tree', 'card-centre', 'card-source', 'card-source-empty', 'card-results-empty']) {
+    for (const id of ['card-centre', 'card-source', 'card-source-empty', 'card-results-empty']) {
       expect(screen.queryByTestId(id), `${state.kind} / ${id}`).toBeNull();
     }
+    // The tree is mounted whenever the state is not idle, but never drawn cold.
+    const tree = screen.queryByTestId('card-tree');
+    expect(tree === null || tree.hasAttribute('hidden'), `${state.kind} / card-tree`).toBe(true);
     unmount();
   }
 });

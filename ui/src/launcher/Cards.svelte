@@ -58,10 +58,9 @@
   // discovered. `error` carries three reasons (`state.ts:25`) and only
   // `askFailed` is an answer state: `blank` and `tooLong` come from `checkQuery`
   // BEFORE any ask, so one Enter on an empty line is `error` with no answer
-  // behind it. In the cold launcher that Enter draws nothing: the tree is
-  // mounted only while the launcher is hot, and a stray Enter does not warm it.
-  // In the hot one the state was never `idle` to begin with (`launcher-cold` is
-  // the way back, and it resets the launcher whole).
+  // behind it. That Enter mounts the tree, and mounting fires `list_tree`; in
+  // the cold launcher the section is `hidden` below, so nothing is drawn, and
+  // `launcher-cold` (which sets `idle`) is the way back to the bare line.
   //
   // Narrowing to `reason === 'askFailed'` was considered and rejected: a blank
   // query typed from state B is ALSO `error: 'blank'`, so a gate keyed on the
@@ -69,11 +68,12 @@
   // mistypes an Enter — C1's exact defect, reintroduced through the gate that
   // was widened to fix it. One condition, no state, cost declared.
   //
-  // MOUNTING and SEEING are two decisions. Mounting is this condition; seeing is
-  // the left toggle, a `hidden` attribute on the section below. A switch that
+  // MOUNTING and SEEING are two decisions. Mounting is this condition alone;
+  // seeing is the heat and the left switch, a `hidden` attribute on the section
+  // below. A switch that
   // unmounted the tree would refetch it and shut every folder on the way back
   // on — C1 again, reached through a button.
-  const showTree = $derived(heat === 'hot' && launcherState.kind !== 'idle');
+  const showTree = $derived(launcherState.kind !== 'idle');
   const showSource = $derived(heat === 'hot' && right);
 
   // What `Selection` reports up, tagged with the state it belongs to. Read by
@@ -109,7 +109,7 @@
     class="float col-side"
     data-testid="card-tree"
     aria-label={treeLabel}
-    hidden={!left}>
+    hidden={!(heat === 'hot' && left)}>
     <Tree {selected} />
   </section>
 {/if}
@@ -132,10 +132,11 @@
 <!-- A column that is on screen with nothing to put in it is an opaque empty
      panel, not a hole in the window (owner, 2026-09-25): the window is as wide
      as its visible panels, and a transparent gap would show what is behind it.
-     Hot only — the cold launcher is the search column alone. -->
+     Hot only — the cold launcher is the search column alone. With an answer on
+     screen `Selection` draws the source panel, empty or not. -->
 {#if heat === 'hot' && answerState === null}
   <section class="float results" data-testid="card-results-empty"></section>
 {/if}
-{#if showSource && selected === null}
+{#if showSource && answerState === null}
   <section class="float doc" data-testid="card-source-empty"></section>
 {/if}

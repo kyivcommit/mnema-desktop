@@ -135,3 +135,29 @@ test('the left switch hides the tree by the UA [hidden] rule, and the stylesheet
   tree.setAttribute('hidden', '');
   expect(getComputedStyle(tree).display).toBe('none');
 });
+
+// Placement in every layout, not only the widest: a wrong rule would put a
+// panel into an implicit track with the other three layouts untested.
+test('each data-cols layout places the tree, search, results and source in its own tracks', async () => {
+  const { container } = render(Launcher);
+  const main = container.querySelector('main')!;
+  const box = screen.getByRole('textbox');
+  await fireEvent.input(box, { target: { value: 'question' } });
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  await screen.findByTestId('card-source');
+  const col = (el: Element) => getComputedStyle(el).gridColumn;
+  const bar = container.querySelector('.searchbar')!;
+  const expected: Record<string, { bar: string; results: string; tree?: string; source?: string }> = {
+    s: { bar: '1', results: '1' },
+    ls: { bar: '2', results: '2', tree: '1' },
+    sr: { bar: '1', results: '1', source: '2' },
+    lsr: { bar: '2', results: '2', tree: '1', source: '3' },
+  };
+  for (const [cols, want] of Object.entries(expected)) {
+    main.setAttribute('data-cols', cols);
+    expect(col(bar), `${cols} searchbar`).toBe(want.bar);
+    expect(col(screen.getByTestId('card-centre')), `${cols} results`).toBe(want.results);
+    if (want.tree) expect(col(screen.getByTestId('card-tree')), `${cols} tree`).toBe(want.tree);
+    if (want.source) expect(col(screen.getByTestId('card-source')), `${cols} source`).toBe(want.source);
+  }
+});
