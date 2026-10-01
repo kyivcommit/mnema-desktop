@@ -803,6 +803,8 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
   render(Launcher);
