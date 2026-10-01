@@ -71,6 +71,75 @@ pub fn resize<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, l: Layout) {
     let _ = window.set_size(tauri::LogicalSize::new(width(l), HEIGHT));
 }
 
+/// The window frame a layout change asks for: the corner `relayout` returns
+/// and the size `width`/`HEIGHT` give, top-left origin as everywhere else in
+/// this module. The macOS branch hands all of it to AppKit in one call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub origin: crate::launcher_position::Point,
+    pub width: f64,
+    pub height: f64,
+}
+
+pub fn target_frame(
+    corner: crate::launcher_position::Point,
+    before: Layout,
+    next: Layout,
+    factor: f64,
+) -> Frame {
+    Frame {
+        origin: crate::launcher_position::relayout(corner, before, next, factor),
+        width: width(next),
+        height: HEIGHT,
+    }
+}
+
+/// AppKit's y for a frame whose top edge is `top` below the top of the
+/// primary screen: AppKit measures up from the primary screen's bottom edge.
+pub fn appkit_origin_y(top: f64, height: f64, primary_height: f64) -> f64 {
+    primary_height - top - height
+}
+
+/// Applies `frame` in ONE `setFrame:display:` call, so AppKit never draws the
+/// in-between window (wider, still at the old x) that `set_size` followed by
+/// `set_position` produces. Returns false if the call could not be made
+/// (off the main thread, no handle), and the caller falls back to two steps.
+///
+/// The y flip uses the PRIMARY screen's height (`NSScreen.screens[0]`), not
+/// the window's own screen: AppKit's global space has its origin at the
+/// primary screen's bottom-left whichever monitor the window is on, and that
+/// is also what tao's `outer_position` flips by, so the corner read there and
+/// the frame written here agree on every monitor.
+#[cfg(target_os = "macos")]
+fn set_frame_once<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, frame: Frame) -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSScreen, NSWindow};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let Ok(ptr) = window.ns_window() else {
+        return false;
+    };
+    let Some(primary) = NSScreen::screens(mtm).firstObject() else {
+        return false;
+    };
+    // SAFETY: tauri hands out the window's live `NSWindow*`; it is used only
+    // here, on the main thread, within this command.
+    let ns_window: &NSWindow = unsafe { &*ptr.cast::<NSWindow>() };
+    let y = appkit_origin_y(
+        frame.origin.y.into(),
+        frame.height,
+        primary.frame().size.height,
+    );
+    let rect = NSRect::new(
+        NSPoint::new(f64::from(frame.origin.x), y),
+        NSSize::new(frame.width, frame.height),
+    );
+    ns_window.setFrame_display(rect, true);
+    true
+}
+
 /// Resizes the launcher to its visible panels; the search column keeps its
 /// place on screen (owner, 2026-09-25). Synchronous: AppKit wants the window
 /// size from the main thread, as `open_settings`.
@@ -95,6 +164,17 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
         } else {
             window_corner(&window.as_ref().window())
         };
+        // macOS: origin and size in one AppKit call (see `set_frame_once`).
+        // ponytail: Windows and Linux keep two steps, `set_size` then
+        // `set_position`; no flicker was reported there. If one shows up, give
+        // them a single native call too (SetWindowPos / gtk_window_move_resize).
+        #[cfg(target_os = "macos")]
+        if let Some((c, factor)) = corner
+            && set_frame_once(&window, target_frame(c, before, next, factor))
+        {
+            current.set(next);
+            return;
+        }
         resize(&window, next);
         if let Some((c, factor)) = corner {
             let _ = window
@@ -126,6 +206,29 @@ mod tests {
         assert_eq!(width(l(true, false)), 760.0);
         assert_eq!(width(l(false, true)), 841.0);
         assert_eq!(width(l(true, true)), 1131.0);
+    }
+
+    #[test]
+    fn the_frame_is_the_relayout_corner_and_the_new_width() {
+        use crate::launcher_position::{Point, relayout};
+        let l = |left, right| Layout { left, right };
+        let corner = Point { x: 100, y: 50 };
+        let f = target_frame(corner, l(true, false), l(false, true), 1.0);
+        assert_eq!(
+            f.origin,
+            relayout(corner, l(true, false), l(false, true), 1.0)
+        );
+        assert_eq!(f.origin, Point { x: 390, y: 50 });
+        assert_eq!((f.width, f.height), (841.0, 592.0));
+    }
+
+    #[test]
+    fn appkit_counts_up_from_the_primary_screens_bottom() {
+        // A window whose top is 50 below a 900-high primary screen's top, 592
+        // tall, has its bottom edge 258 above the primary screen's bottom.
+        assert_eq!(appkit_origin_y(50.0, 592.0, 900.0), 258.0);
+        // Above the primary screen (a monitor stacked over it): negative top.
+        assert_eq!(appkit_origin_y(-700.0, 592.0, 900.0), 1008.0);
     }
 
     #[test]
