@@ -45,7 +45,9 @@
   // ONE condition, and it is grounded in the one thing §7's state table actually
   // says (`…interface-design.md:196-205`): row A is the only row whose "shows"
   // column carries the word "only" — only the search line. Row D names a
-  // placeholder and the progress line; row F names a quiet message; neither asks for
+  // placeholder and a progress indication, which the search line no longer
+  // draws (the input carries `aria-busy` instead); row F names a quiet
+  // message; neither asks for
   // anything to be torn down. (The spec is in Ukrainian and the guard reads this
   // file, so the wording is glossed rather than quoted — `guard.test.ts:19-21`.)
   //

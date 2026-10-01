@@ -157,9 +157,7 @@ mod wire {
         state.forget_provider_status();
         state.store_provider_status(
             epoch,
-            ProviderStatus::Unreachable {
-                reason: "old".into(),
-            },
+            ProviderStatus::Ok, // an Ok: an Unreachable is never stored, so it could not tell
         );
         assert_eq!(state.cached_provider_status(), None);
         // Positive control: a write under the current generation lands.

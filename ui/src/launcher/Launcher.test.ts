@@ -247,6 +247,22 @@ test('a failed ask in the hot state brings the previous answer back and shows th
   err.mockRestore();
 });
 
+test('two failed asks in a row keep the answer and its echo', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await submit('second');
+  await screen.findByRole('alert');
+  await submit('third');
+  await waitFor(() => expect(askCalls()).toHaveLength(3));
+  await screen.findByRole('alert');
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  err.mockRestore();
+});
+
 test('a failed ask in the cold state stays an error with no answer cards', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockBackend('offline', { reject: true });

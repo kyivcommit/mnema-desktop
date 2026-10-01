@@ -89,6 +89,12 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 }
 /* The search column is the first track unless the tree is on screen. */
 main > .col-side { grid-column: 1; grid-row: 1 / 3; }
+/* The two cards that span both rows must not size row 1. WebKit feeds a
+   spanning item's content height into the `auto` first row (Chromium does not,
+   because the span crosses the flexible row), which grew the search row and
+   opened a band under the toolbar. `contain: size` makes the item's intrinsic
+   height zero, so it contributes nothing and `stretch` fills the span. */
+main > :is(.col-side, .doc) { contain: size; min-height: 0; }
 main > .searchbar, main > .results { grid-column: 1; }
 main.panels:is([data-cols="ls"], [data-cols="lsr"]) > :is(.searchbar, .results) { grid-column: 2; }
 main > .results { grid-row: 2; }

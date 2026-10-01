@@ -121,6 +121,9 @@ fn set_frame_once<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, frame: Fr
     let Ok(ptr) = window.ns_window() else {
         return false;
     };
+    if ptr.is_null() {
+        return false;
+    }
     let Some(primary) = NSScreen::screens(mtm).firstObject() else {
         return false;
     };

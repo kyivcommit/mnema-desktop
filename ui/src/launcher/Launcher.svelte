@@ -98,7 +98,10 @@
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
-    const shown = launcherState;
+    // What is on screen, not what the machine holds: after a failed ask the
+    // machine says `error` while the restored answer is still showing, and a
+    // second failure must restore that same answer again.
+    const shown = cardsState;
     previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
     const shownEcho = echo;
     echo = '';

@@ -1,8 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { expect, test, vi } from 'vitest';
-import { tick } from 'svelte';
 import SearchLine from './SearchLine.svelte';
-import { setLocale } from '../i18n';
 import { MAX_ASK_QUERY, type LauncherState } from './state';
 
 test('state A shows only the search input, no message', () => {
