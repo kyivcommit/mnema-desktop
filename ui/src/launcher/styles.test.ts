@@ -162,3 +162,10 @@ test('each data-cols layout places the tree, search, results and source in its o
     if (want.source) expect(col(screen.getByTestId('card-source')), `${cols} source`).toBe(want.source);
   }
 });
+
+test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.cloud\[data-status="unreachable"\]\s*\{[^}]*color:\s*var\(--err\)/);
+  expect(css).toMatch(/\.cloud\[data-status="notConfigured"\][^{]*\{[^}]*stroke-dasharray/);
+  expect(css).toMatch(/button:hover[^{]*:not\(\[aria-disabled="true"\]\)[^{]*\{/);
+});

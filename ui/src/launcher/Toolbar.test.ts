@@ -37,7 +37,7 @@ test('every button has a non-empty title equal to its aria-label, in both langua
 });
 
 test('cold: the panel toggles are disabled and not pressed', () => {
-  render(Toolbar, props({ heat: 'cold', left: false, right: false }));
+  render(Toolbar, props({ heat: 'cold', left: true, right: true }));
   for (const id of ['toggle-left', 'toggle-right']) {
     const b = screen.getByTestId(id) as HTMLButtonElement;
     expect(b.disabled).toBe(true);
@@ -92,6 +92,9 @@ test('the cloud title says what is missing, and why it is unreachable', () => {
   expect(key).not.toBe(model);
   expect(title({ kind: 'unreachable', reason: 'connection refused' })).toContain('connection refused');
   expect(title(OK)).not.toBe(key);
+  expect(title(OK)).toContain('OpenRouter');
+  setLocale('uk');
+  expect(title(OK)).toContain('OpenRouter');
 });
 
 test('settings opens without a section', async () => {

@@ -42,9 +42,13 @@
   // model are changed in another window, and the launcher is hidden, not
   // closed, so nothing else would tell it. Non-fatal: on failure the arms row
   // keeps its last value and the cloud its last state — log, do not swallow.
+  // A later call supersedes an earlier one still in flight: a slow probe that
+  // lands after a newer answer must not put the old state back on the cloud.
+  let providerGen = 0;
   function refreshProvider() {
+    const gen = ++providerGen;
     providerStatus()
-      .then((s) => { status = s; })
+      .then((s) => { if (gen === providerGen) status = s; })
       .catch((e) => console.error('provider_status failed', e));
     modelSettings()
       .then((s) => {
@@ -164,7 +168,7 @@
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
-       click inside it except the input, the pin and the Arms labels — Tauri's
+       click inside it except the input, the toolbar buttons and the Arms labels — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
   <div class="searchbar" data-tauri-drag-region="deep">
     <div class="sb-row">

@@ -34,7 +34,7 @@ main :is(button, input):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: var(--surface-3); }
+main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="true"]) { background-color: var(--surface-3); }
 /* Opaque (owner, 2026-09-25): a 90% fill with a backdrop blur let the window
  * behind show through every panel, and WebKit dropped and re-drew the blur
  * with a delay each time the window gained or lost focus. */
@@ -67,8 +67,10 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
   border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft);
 }
 .tb:disabled { opacity: 0.4; }
-/* --ink-faint is below the text contrast this sheet holds itself to; a dimmed --ink-soft says "not set up" without it. */
-.cloud[data-status="notConfigured"] { opacity: 0.55; }
+/* --ink-faint is below the text contrast this sheet holds itself to, and a dimmed
+   --ink-soft falls under the 3:1 a non-text graphic needs (WCAG 1.4.11) in both
+   themes, so "not set up" is told by a dashed outline rather than by colour. */
+.cloud[data-status="notConfigured"] svg { stroke-dasharray: 2 2; }
 .cloud[data-status="unreachable"] { color: var(--err); }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }

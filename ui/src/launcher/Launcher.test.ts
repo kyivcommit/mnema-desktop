@@ -22,6 +22,9 @@ vi.mock('@tauri-apps/api/event', () => ({
 const fireCold = () => cold.handlers.at(-1)!();
 
 const invoke = vi.fn();
+// What `provider_status` answers; a test swaps it to drive the cloud.
+const okStatus = () => Promise.resolve({ kind: 'ok' });
+let providerReply: () => Promise<unknown> = okStatus;
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
 // Answers each command separately. `model_settings` (the launcher's mount
@@ -45,6 +48,7 @@ const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddedCh
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
@@ -62,6 +66,7 @@ function mockAsks(...replies: unknown[]) {
   let next = 0;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
@@ -85,6 +90,7 @@ function mockAsks(...replies: unknown[]) {
 function mockSettings(settings: unknown) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(settings);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
@@ -112,7 +118,7 @@ async function askAndOpenAFolder() {
 
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
-beforeEach(() => { hide.mockClear(); invoke.mockReset(); cold.handlers.length = 0; cold.names.length = 0; mockBackend(undefined); });
+beforeEach(() => { providerReply = okStatus; hide.mockClear(); invoke.mockReset(); cold.handlers.length = 0; cold.names.length = 0; mockBackend(undefined); });
 
 async function submit(value: string) {
   const box = screen.getByRole('textbox');
@@ -183,6 +189,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   // still passes.
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return pending;
@@ -552,7 +559,7 @@ test('the search panel is the drag handle and nothing else is', async () => {
     } else {
       await screen.findByRole('status');
     }
-    // "deep": any click inside the panel drags, except on the input, the pin
+    // "deep": any click inside the panel drags, except on the input, the toolbar buttons
     // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
     const handles = container.querySelectorAll('[data-tauri-drag-region]');
     expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
@@ -785,6 +792,7 @@ test('an ask in flight when launcher-cold arrives is dropped when it resolves', 
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
@@ -808,6 +816,7 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((_, r) => { rejectAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     return Promise.resolve();
   });
@@ -882,4 +891,45 @@ test('provider_status and model_settings are asked again when the window gains f
   await fireEvent.focus(window);
   await waitFor(() => expect(count('provider_status')).toBe(2));
   expect(count('model_settings')).toBe(2);
+});
+
+const cloud = () => screen.getByTestId('provider-cloud');
+
+test('the cloud shows what provider_status said at mount, and the next focus replaces it', async () => {
+  providerReply = () => Promise.resolve({ kind: 'notConfigured', missing: 'key' });
+  render(Launcher);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('notConfigured'));
+  const before = cloud().getAttribute('title');
+  expect(before).toBeTruthy();
+
+  providerReply = okStatus;
+  await fireEvent.focus(window);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('ok'));
+  expect(cloud().getAttribute('title')).not.toBe(before);
+});
+
+test('a slow earlier provider probe cannot overwrite a newer one', async () => {
+  let slow!: (v: unknown) => void;
+  providerReply = () => new Promise((r) => { slow = r; }); // the mount probe, held open
+  render(Launcher);
+  await waitFor(() => expect(invoke.mock.calls.filter((c) => c[0] === 'provider_status')).toHaveLength(1));
+
+  providerReply = okStatus;
+  await fireEvent.focus(window);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('ok'));
+
+  slow({ kind: 'unreachable', reason: 'late' });
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(cloud().getAttribute('data-status')).toBe('ok');
+});
+
+test('turning the right panel off in the hot state tells Rust', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await screen.findByTestId('card-source');
+  await fireEvent.click(toggle('right'));
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual({ left: true, right: false }));
+  expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });

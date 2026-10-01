@@ -183,11 +183,11 @@ pub const KEY: &str = "launcher_position";
 /// top-left corner — not the window's: the window's corner moves under
 /// `Layout` (a visible left column pushes it left of the search column, see
 /// [`to_window`]), the search column's does not. The point is the middle of
-/// the search panel's first row (the input and the pin). Every number is a
+/// the search panel's first row (the input; the toolbar buttons sit in the second row). Every number is a
 /// declaration in `ui/src/styles/launcher.css` — `main.panels` padding
 /// `0px 0px` (owner, 2026-09-25: no hidden margin round the panels, so the
 /// window goes flush to a screen edge), the search column's own width 470,
-/// then the panel's own padding-top 11 and the pin's height 26. The owner
+/// then the panel's own padding-top 11 and the first row's `min-height` 26. The owner
 /// narrowed the gap (16 → 8 → 5) and widened the side columns by half
 /// (190 → 285, 244 → 366) on 2026-09-25.
 ///
