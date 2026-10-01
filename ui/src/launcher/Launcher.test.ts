@@ -585,7 +585,8 @@ test('the handle offset matches the stylesheet', () => {
   };
   const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
   const searchbar = css.match(/\.searchbar\s*\{[^}]*\}/)![0];
-  const pin = css.match(/\.pin\s*\{[^}]*\}/)![0];
+  // The first row is as tall as a toolbar button was when the pin lived in it.
+  const pin = css.match(/\.sb-row\s*\{[^}]*\}/)![0];
   // The tracks of one layout, as the stylesheet declares them.
   const tracks = (cols: string) => {
     const block = css.match(new RegExp(`main\\.panels\\[data-cols="${cols}"\\]\\s*\\{[^}]*\\}`));
@@ -603,7 +604,7 @@ test('the handle offset matches the stylesheet', () => {
     padX: num(/padding:\s*\d+px (\d+)px;/, panels, 'main.panels padding-x'),
     gap: num(/gap:\s*(\d+)px;/, panels, 'gap'),
     barPadTop: num(/padding:\s*(\d+)px/, searchbar, '.searchbar padding-top'),
-    pinH: num(/height:\s*(\d+)px/, pin, '.pin height'),
+    pinH: num(/min-height:\s*(\d+)px/, pin, '.sb-row min-height'),
   };
   // (1) The widths come from the `lsr` block, not from `main.panels`.
   const [col1, col2, col3] = tracks('lsr');
@@ -820,4 +821,65 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
   expect(screen.queryByRole('alert')).toBeNull();
   expect(err).not.toHaveBeenCalledWith('ask failed', expect.anything());
   err.mockRestore();
+});
+
+// --- the toolbar -------------------------------------------------------------
+
+const toggle = (side: 'left' | 'right') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
+
+test('the pin is in the toolbar, not in the first row', () => {
+  const { container } = render(Launcher);
+  expect(container.querySelector('.sb-row')).not.toBeNull(); // positive control
+  expect(container.querySelector('.sb-row [data-testid="pin"]')).toBeNull();
+  expect(container.querySelector('.toolbar [data-testid="pin"]')).not.toBeNull();
+});
+
+test('a cold launcher: both toggles are disabled and not pressed', () => {
+  render(Launcher);
+  for (const side of ['left', 'right'] as const) {
+    expect(toggle(side).disabled).toBe(true);
+    expect(toggle(side).getAttribute('aria-pressed')).toBe('false');
+  }
+});
+
+test('turning the left panel off in the hot state tells Rust, and the next answer leaves it off', async () => {
+  mockAsks(generated, generated);
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-source');
+  expect(toggle('left').disabled).toBe(false);
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+
+  await fireEvent.click(toggle('left'));
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual({ left: false, right: true }));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+
+  await submit('second question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+  expect(layoutCalls().at(-1)).toEqual({ left: false, right: true });
+});
+
+test('the left panel off and on again keeps the tree: hidden, not unmounted (Ruling C1)', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+  expect(listTreeCalls()).toHaveLength(1);
+
+  await fireEvent.click(toggle('left'));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  await fireEvent.click(toggle('left'));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(listTreeCalls()).toHaveLength(1);
+});
+
+test('provider_status and model_settings are asked again when the window gains focus', async () => {
+  render(Launcher);
+  const count = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).length;
+  await waitFor(() => expect(count('provider_status')).toBe(1));
+  expect(count('model_settings')).toBe(1);
+  await fireEvent.focus(window);
+  await waitFor(() => expect(count('provider_status')).toBe(2));
+  expect(count('model_settings')).toBe(2);
 });

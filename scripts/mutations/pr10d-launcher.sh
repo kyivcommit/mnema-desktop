@@ -41,8 +41,8 @@ case_ "launcher: the selected tab looks inactive" \
 
 case_ "launcher: pinned state loses its style" \
   ui/src/styles/launcher.css \
-  's~\.pin\[aria-pressed="true"\]~.pin[aria-pressed="never"]~' \
-  '.pin[aria-pressed="never"]' \
+  's~\.tb\[aria-pressed="true"\]~.tb[aria-pressed="never"]~' \
+  '.tb[aria-pressed="never"]' \
   src/launcher/styles.test.ts 'real pin exposes pressed state through its style' runner=vitest
 
 case_ "launcher: entry omits its stylesheet" \

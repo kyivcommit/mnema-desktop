@@ -34,6 +34,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
+  | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
+  | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -345,6 +347,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
+    toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
+    provider_ok: 'Постачальник відповідає',
+    provider_unreachable: 'Постачальник не відповідає: {reason}',
+    provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
+    provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
@@ -1173,6 +1180,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
+    toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
+    provider_ok: 'The provider is reachable',
+    provider_unreachable: 'The provider is unreachable: {reason}',
+    provider_missing_key: 'No provider key — open the model settings',
+    provider_missing_model: 'No embedding model chosen — open the model settings',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',

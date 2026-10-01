@@ -22,6 +22,7 @@ beforeEach(() => {
       key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0,
         embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     });
+    if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return Promise.resolve(generated);
     if (cmd === 'set_launcher_layout') return Promise.resolve();

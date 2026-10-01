@@ -52,18 +52,26 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
   gap: 9px;
   box-shadow: 0 22px 50px -20px var(--glow), 0 6px 16px -8px var(--shadow);
 }
-.sb-row { display: flex; align-items: flex-start; gap: 12px; }
+.sb-row { display: flex; align-items: flex-start; gap: 12px; min-height: 26px; } /* the handle offset assumes this row is `.tb` tall */
+.sb-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.toolbar { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .search-line { flex: 1; min-width: 0; }
 .search-line input {
   width: 100%; min-width: 0; border: 0; background: transparent;
   padding: 2px 0; font-size: 15.5px;
 }
 .search-line input::placeholder { color: var(--ink-soft); }
-.pin {
+.tb {
   flex: none; width: 26px; height: 26px; padding: 0;
-  border: 0; border-radius: 7px; background: transparent;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft);
 }
-.pin[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.tb:disabled { opacity: 0.4; }
+/* --ink-faint is below the text contrast this sheet holds itself to; a dimmed --ink-soft says "not set up" without it. */
+.cloud[data-status="notConfigured"] { opacity: 0.55; }
+.cloud[data-status="unreachable"] { color: var(--err); }
+.cloud[aria-disabled="true"] { cursor: default; }
+.tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .arms { display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-soft); font-size: 12.5px; }
 .arms label { display: inline-flex; align-items: center; gap: 6px; }
 .arms input { accent-color: var(--accent); }

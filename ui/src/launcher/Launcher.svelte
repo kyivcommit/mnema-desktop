@@ -2,9 +2,10 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, listenLauncherCold, modelSettings, openSettings, setLauncherLayout } from '../lib/ipc';
+  import { ask, listenLauncherCold, modelSettings, openSettings, providerStatus, setLauncherLayout, type ProviderStatus } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Arms from './Arms.svelte';
+  import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
 
@@ -13,6 +14,7 @@
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
   let provider = $state(false);
+  let status = $state<ProviderStatus | null>(null);
   let textOn = $state(true);
   let contentOn = $state(false);
   // Cold: the search column alone. The first answer with something to show
@@ -35,18 +37,25 @@
   });
 
   const appWindow = getCurrentWebviewWindow();
-  const pinLabel = $derived.by(() => { void $locale; return `${t('pin')} 📌`; });
 
-  onMount(() => {
-    // Seed the arms row once. Non-fatal: on failure the row stays on its
-    // text-only default rather than blocking the launcher — log, do not
-    // swallow.
+  // Read on mount and again whenever the window gains focus: the key and the
+  // model are changed in another window, and the launcher is hidden, not
+  // closed, so nothing else would tell it. Non-fatal: on failure the arms row
+  // keeps its last value and the cloud its last state — log, do not swallow.
+  function refreshProvider() {
+    providerStatus()
+      .then((s) => { status = s; })
+      .catch((e) => console.error('provider_status failed', e));
     modelSettings()
       .then((s) => {
         provider = providerReady(s);
         if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
       })
       .catch((e) => console.error('model_settings failed', e));
+  }
+
+  onMount(() => {
+    refreshProvider();
 
     // The window was hidden past the threshold: forget the answer, keep the
     // text in the line (the person may still want to ask it).
@@ -151,7 +160,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
+<svelte:window onfocus={refreshProvider} onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
@@ -160,21 +169,11 @@
   <div class="searchbar" data-tauri-drag-region="deep">
     <div class="sb-row">
       <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
-      <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
-           aria-label to prove the locale switch reached the DOM. It used to find the
-           button as "the first element with any aria-label", which was true only
-           while no labelled card rendered — and the cards are now labelled in five
-           of six states. The accessible name cannot be the selector when it is the
-           thing under test. -->
-      <button
-        class="pin"
-        data-testid="pin"
-        class:active={pinned}
-        aria-pressed={pinned}
-        aria-label={pinLabel}
-        onclick={() => (pinned = !pinned)}>📌</button>
     </div>
-    <Arms bind:textOn bind:contentOn {provider} />
+    <div class="sb-tools">
+      <Arms bind:textOn bind:contentOn {provider} />
+      <Toolbar {heat} bind:left bind:right bind:pinned {status} />
+    </div>
   </div>
   <Cards state={launcherState} query={echo} {left} {right} {heat} />
 </main>
