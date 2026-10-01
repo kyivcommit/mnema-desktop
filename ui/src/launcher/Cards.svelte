@@ -1,7 +1,9 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
   import Selection from './Selection.svelte';
+  import Source from './Source.svelte';
   import Tree from './Tree.svelte';
+  import type { Snippet } from 'svelte';
   import type { AskCitation, Hit } from '../lib/ipc';
   import type { Heat, LauncherState } from './state';
 
@@ -9,12 +11,15 @@
   // as a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { state: launcherState, query, left, right, heat }: {
+  let { state: launcherState, query, left, right, heat, search }: {
     state: LauncherState;
     query: string;
     left: boolean;
     right: boolean;
     heat: Heat;
+    // The search panel. It lives in the centre column with the results, so
+    // that no card spans two grid rows (see `launcher.css`).
+    search?: Snippet;
   } = $props();
 
   // The two ANSWER cards appear for the two states that HAVE an answer to show:
@@ -99,6 +104,7 @@
   );
 
   const treeLabel = $derived.by(() => { void $locale; return t('card_tree'); });
+  const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 
 <!-- 🔴 Ruling AC + C1: the tree is NOT keyed AND it is not gated on the answer.
@@ -116,29 +122,50 @@
   </section>
 {/if}
 
-{#if answerState !== null}
-  <!-- Only the answer-and-source pair is keyed, and the key is on the component
-       that owns the selection (Ruling AC) — see `Selection.svelte` for why a key
-       around the cards alone resets nothing. The key is the STATE object, so a
-       generated answer followed by a citations-only one recreates the selection
-       just as two generated answers do. -->
-  {#key answerState}
-    <Selection
-      answer={answerState.answer}
-      {query}
-      {showSource}
-      onSelected={(value) => (reported = { state: launcherState, value })} />
-  {/key}
-{/if}
+<!-- The centre column: the search panel above the results, one flex column in
+     one grid track. The search panel is rendered outside the keyed block, so a
+     new answer never remounts the input. -->
+<div class="col-centre">
+  {@render search?.()}
+  {#if answerState !== null}
+    <!-- Only the answer card is keyed, and the key is on the component that
+         owns the selection (Ruling AC) — see `Selection.svelte` for why a key
+         around the cards alone resets nothing. The key is the STATE object, so
+         a generated answer followed by a citations-only one recreates the
+         selection just as two generated answers do. -->
+    {#key answerState}
+      <Selection
+        answer={answerState.answer}
+        {query}
+        onSelected={(value) => (reported = { state: launcherState, value })} />
+    {/key}
+  {:else if heat === 'hot'}
+    <!-- A column that is on screen with nothing to put in it is an opaque empty
+         panel, not a hole in the window (owner, 2026-09-25): the window is as
+         wide as its visible panels, and a transparent gap would show what is
+         behind it. Hot only — the cold launcher is the search column alone. -->
+    <section class="float results" data-testid="card-results-empty"></section>
+  {/if}
+</div>
 
-<!-- A column that is on screen with nothing to put in it is an opaque empty
-     panel, not a hole in the window (owner, 2026-09-25): the window is as wide
-     as its visible panels, and a transparent gap would show what is behind it.
-     Hot only — the cold launcher is the search column alone. With an answer on
-     screen `Selection` draws the source panel, empty or not. -->
-{#if heat === 'hot' && answerState === null}
-  <section class="float results" data-testid="card-results-empty"></section>
-{/if}
-{#if showSource && answerState === null}
-  <section class="float doc" data-testid="card-source-empty"></section>
+{#if showSource}
+  {#if answerState !== null && selected !== null}
+    <!-- §7: the source card needs a selection, and `Source` takes a
+         non-nullable one, so this guard is what the type asks for as well as
+         what the mockup shows. The answer's first card is preselected (it is
+         reported on mount), so the card is normally drawn whenever the panel is
+         on. `selected` is trusted only for the state on screen (see `reported`),
+         and the key recreates `Source` for each answer. `siblings` is the whole
+         citation list: `Source` drops the clicked one and everything in another
+         document itself (Decision 4, Ruling U). -->
+    {#key answerState}
+      <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
+        <Source {selected} siblings={answerState.answer.citations} />
+      </section>
+    {/key}
+  {:else}
+    <!-- Nothing to show, but the panel is on: an opaque empty one rather than a
+         hole in the window. -->
+    <section class="float doc" data-testid="card-source-empty"></section>
+  {/if}
 {/if}

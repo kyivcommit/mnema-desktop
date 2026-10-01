@@ -3,8 +3,7 @@
   import { locale, t } from '../i18n';
   import Answer from './Answer.svelte';
   import Passages from './Passages.svelte';
-  import Source from './Source.svelte';
-  import type { AskCitation, Hit } from '../lib/ipc';
+    import type { AskCitation, Hit } from '../lib/ipc';
   import { firstCard, type CardAnswer } from './state';
 
   // 🔴 Ruling AC — why this component exists at all. The selection lives HERE,
@@ -23,12 +22,9 @@
   // and `Source` already takes `AskCitation | Hit` (`Source.svelte:83-86`) so a
   // `Hit` needs no adaptation. A second selection path would be a second copy of
   // the reset rule above, and the two would drift.
-  let { answer, query, showSource, onSelected }: {
+  let { answer, query, onSelected }: {
     answer: CardAnswer;
     query: string;
-    // Whether the right-hand panel is on screen. The selection survives it
-    // being off; only the card is not drawn.
-    showSource: boolean;
     onSelected: (selection: AskCitation | Hit | null) => void;
   } = $props();
 
@@ -84,7 +80,6 @@
   }
 
   const centreLabel = $derived.by(() => { void $locale; return labelFor(answer); });
-  const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 
 <section class="float results" data-testid="card-centre" aria-label={centreLabel}>
@@ -94,23 +89,3 @@
     <Passages answer={passagesAnswer} onSelect={(passage) => (selected = passage)} />
   {/if}
 </section>
-
-{#if showSource}
-  {#if selected !== null}
-    <!-- §7: the source card needs a selection, and `Source` takes a
-         non-nullable one (`Source.svelte:83-86`), so this guard is what the type
-         asks for as well as what the mockup shows. The answer's first card is
-         preselected, so the card is normally drawn whenever the panel is on.
-         `siblings` is the whole citation list: `Source` drops the clicked one and
-         everything in another document itself (Decision 4, Ruling U), and that
-         rule stays in one place. -->
-    <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
-      <Source {selected} siblings={answer.citations} />
-    </section>
-  {:else}
-    <!-- An answer with no passages: the panel is on, so it is an opaque empty
-         one rather than a hole in the window. Decided HERE, beside the card, so
-         the two cannot disagree for the length of a flush. -->
-    <section class="float doc" data-testid="card-source-empty"></section>
-  {/if}
-{/if}

@@ -192,14 +192,17 @@
   <!-- D155: the search panel is the drag handle. "deep" drags from any
        click inside it except the input, the toolbar buttons and the Arms labels — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
-  <div class="searchbar" data-tauri-drag-region="deep">
-    <div class="sb-row">
-      <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+  <Cards state={cardsState} query={echo} {left} {right} {heat}>
+    {#snippet search()}
+    <div class="searchbar" data-tauri-drag-region="deep">
+      <div class="sb-row">
+        <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+      </div>
+      <div class="sb-tools">
+        <Arms bind:textOn bind:contentOn {provider} />
+        <Toolbar {heat} bind:left bind:right bind:pinned {status} />
+      </div>
     </div>
-    <div class="sb-tools">
-      <Arms bind:textOn bind:contentOn {provider} />
-      <Toolbar {heat} bind:left bind:right bind:pinned {status} />
-    </div>
-  </div>
-  <Cards state={cardsState} query={echo} {left} {right} {heat} />
+    {/snippet}
+  </Cards>
 </main>

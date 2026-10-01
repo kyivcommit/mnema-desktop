@@ -67,18 +67,20 @@ test('real launcher places all cards and keeps the document transparent', async 
   await fireEvent.click(screen.getByTestId('preview-3'));
   await waitFor(() => expect(screen.getByTestId('source-body').getAttribute('data-pending')).toBe('0'));
   expect(screen.getAllByTestId('source-block').length).toBeGreaterThan(0);
-  for (const [id, column, row] of [
-    ['card-tree', '1', '1 / 3'], ['card-centre', '2', '2'], ['card-source', '3', '1 / 3'],
-  ]) {
+  const centre = bar.parentElement!;
+  expect(centre.className).toBe('col-centre');
+  expect(centre.parentElement).toBe(main);
+  expect(screen.getByTestId('card-centre').parentElement).toBe(centre);
+  for (const [id, column] of [['card-tree', '1'], ['card-source', '3']]) {
     const el = screen.getByTestId(id);
     expect(el.parentElement).toBe(main);
     const style = getComputedStyle(el);
     expect(style.gridColumn).toBe(column);
-    expect(style.gridRow).toBe(row);
     expect(style.overflow).toBe('auto');
   }
-  expect(getComputedStyle(bar).gridColumn).toBe('2');
-  expect(getComputedStyle(bar).gridRow).toBe('1');
+  expect(getComputedStyle(centre).gridColumn).toBe('2');
+  expect(getComputedStyle(centre).display).toBe('flex');
+  expect(getComputedStyle(screen.getByTestId('card-centre')).overflow).toBe('auto');
 });
 
 test('real tree marks current file and recent while leaving neighbours plain', async () => {
@@ -147,7 +149,7 @@ test('each data-cols layout places the tree, search, results and source in its o
   await fireEvent.keyDown(box, { key: 'Enter' });
   await screen.findByTestId('card-source');
   const col = (el: Element) => getComputedStyle(el).gridColumn;
-  const bar = container.querySelector('.searchbar')!;
+  const bar = container.querySelector('.col-centre')!;
   const expected: Record<string, { bar: string; results: string; tree?: string; source?: string }> = {
     s: { bar: '1', results: '1' },
     ls: { bar: '2', results: '2', tree: '1' },
@@ -156,18 +158,20 @@ test('each data-cols layout places the tree, search, results and source in its o
   };
   for (const [cols, want] of Object.entries(expected)) {
     main.setAttribute('data-cols', cols);
-    expect(col(bar), `${cols} searchbar`).toBe(want.bar);
-    expect(col(screen.getByTestId('card-centre')), `${cols} results`).toBe(want.results);
+    expect(col(bar), `${cols} centre column`).toBe(want.bar);
+    expect(screen.getByTestId('card-centre').parentElement, `${cols} results`).toBe(bar);
     if (want.tree) expect(col(screen.getByTestId('card-tree')), `${cols} tree`).toBe(want.tree);
     if (want.source) expect(col(screen.getByTestId('card-source')), `${cols} source`).toBe(want.source);
   }
 });
 
-test('the cards spanning both rows cannot size the search row (WebKit spanning-item distribution)', () => {
+test('nothing spans two grid rows, so no card can size the search panel (WebKit spanning-item distribution)', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  expect(css).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\)/);
-  expect(css).toMatch(/main > :is\(\.col-side, \.doc\)\s*\{[^}]*contain:\s*size/);
-  expect(css).toMatch(/main > :is\(\.col-side, \.doc\)\s*\{[^}]*min-height:\s*0/);
+  expect(css).toMatch(/main\.panels\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\);/);
+  expect(css).not.toMatch(/(^|\n)main[^{]*\{[^}]*grid-row/); // the card-internal grids below may use rows
+  expect(css).toMatch(/\.col-centre\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*5px/);
+  expect(css).toMatch(/\.col-centre > \.results\s*\{[^}]*flex:\s*1 1 auto/);
+  expect(css).toMatch(/\.searchbar\s*\{[^}]*flex:\s*none/);
 });
 
 test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {

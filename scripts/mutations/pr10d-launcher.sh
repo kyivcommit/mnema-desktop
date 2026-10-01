@@ -22,7 +22,7 @@ case_ "launcher: source is placed into the tree column" \
   src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
 
 case_ "launcher: source loses its grid hook" \
-  ui/src/launcher/Selection.svelte \
+  ui/src/launcher/Cards.svelte \
   's~class="float doc" data-testid="card-source"~class="float" data-testid="card-source"~' \
   'class="float" data-testid="card-source"' \
   src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
