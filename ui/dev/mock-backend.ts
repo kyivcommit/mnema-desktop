@@ -14,6 +14,7 @@
 // live state and `mnemaMock.emit(event, payload)` fires a backend event.
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
+import { LAUNCHER_COLD_EVENT } from '../src/lib/ipc';
 import { excerptSpanA, generated, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, Catalogue, IndexRead, KeyState, LocaleChoice, ModelRole, ScanState, ThemeChoice,
@@ -96,7 +97,10 @@ const catalogue = (role: ModelRole): Catalogue => {
 };
 
 export function installMockBackend(win: 'settings' | 'launcher') {
-  const scenario = new URLSearchParams(location.search).get('scenario') ?? 'configured';
+  const query = new URLSearchParams(location.search);
+  const scenario = query.get('scenario') ?? 'configured';
+  // ?provider=ok|unreachable|missing picks what the launcher's cloud shows.
+  const provider = query.get('provider') ?? 'ok';
   const s = initialState(scenario);
   const bump = () => { s.scan = { ...s.scan, revision: s.scan.revision + 1 }; };
   const settings = () => ({ key: s.key, index: s.index, platform: 'mac' as const });
@@ -230,10 +234,13 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
     },
-    provider_status: () => ({ kind: 'ok' }),
+    provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
+      : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
+      : { kind: 'ok' },
     open_settings: (a) => {
       win === 'launcher' && open('/dev/settings.html' + location.search, '_blank');
-      // An already-open settings page hears it; a fresh one starts on Models.
+      // The bench's event bus is page-local, so the section reaches only this
+      // page; the settings tab opened above starts on its default section.
       if (a.section) void emit('settings-section', a.section);
     },
 
@@ -256,5 +263,5 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     throw new Error(`mock backend: no handler for ${cmd}`);
   }, { shouldMockEvents: true });
 
-  Object.assign(globalThis, { mnemaMock: { state: s, emit } });
+  Object.assign(globalThis, { mnemaMock: { state: s, emit, cold: () => emit(LAUNCHER_COLD_EVENT) } });
 }
