@@ -801,6 +801,22 @@ export const listenScanProgress = async (cb: (state: ScanState) => void): Promis
   return listen<ScanState>(SCAN_PROGRESS_EVENT, (e) => cb(e.payload));
 };
 
+// The launcher window forgot its last answer after being hidden past the cold
+// threshold (`lib.rs`). Emitted to the launcher window only, with no payload,
+// before the window is shown again.
+export const LAUNCHER_COLD_EVENT = 'launcher-cold';
+
+export const listenLauncherCold = async (cb: () => void): Promise<UnlistenFn> => {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen(LAUNCHER_COLD_EVENT, () => cb());
+};
+
+// Which side panels the launcher shows; the window is resized to match
+// (`launcher_layout.rs`). Idempotent on the Rust side, but callers still send
+// one call per change.
+export const setLauncherLayout = (left: boolean, right: boolean) =>
+  invoke<void>('set_launcher_layout', { left, right });
+
 // Takes no channel at all (bridge.rs): stopping a job never depends on owning
 // the channel it reports on, which is why a page that has lost the channel must
 // still offer this.

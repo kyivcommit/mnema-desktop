@@ -2,17 +2,25 @@
 body { background: transparent; }
 
 /* No margin round the panels (owner, 2026-09-25): a transparent band here kept
- * the window from going flush to a screen edge. Both numbers stay written out
- * because `launcher_position::HANDLE_CENTRE` and its guard read them. */
+ * the window from going flush to a screen edge. The widths stay written out
+ * because `launcher_position::HANDLE_CENTRE` and its guard read them.
+ *
+ * The window is as wide as the panels on screen, so the tracks are set per
+ * `data-cols` (l = tree, s = search, r = source) and each layout adds up to
+ * `launcher_layout::width` for it; the guard in `Launcher.test.ts` checks all
+ * four. No `@media` rule narrows these: the window is not resizable. */
 main.panels {
   height: 100dvh;
   padding: 0px 0px;
   display: grid;
-  grid-template-columns: 285px minmax(0, 470px) 366px;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 5px;
   justify-content: center;
 }
+main.panels[data-cols="s"] { grid-template-columns: 470px; }
+main.panels[data-cols="ls"] { grid-template-columns: 285px 470px; }
+main.panels[data-cols="sr"] { grid-template-columns: 470px 366px; }
+main.panels[data-cols="lsr"] { grid-template-columns: 285px minmax(0, 470px) 366px; }
 main button, main input {
   font: inherit;
   font-family: var(--sans);
@@ -37,7 +45,6 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
   border-radius: 14px;
 }
 .searchbar {
-  grid-column: 2;
   grid-row: 1;
   padding: 11px 13px 10px;
   display: flex;
@@ -78,9 +85,14 @@ main button:hover:not(:disabled):not([aria-pressed="true"]) { background-color: 
   padding: 14px; overflow: auto;
   box-shadow: 0 20px 46px -20px var(--shadow), 0 3px 8px -4px var(--shadow);
 }
+/* The search column is the first track unless the tree is on screen. */
 main > .col-side { grid-column: 1; grid-row: 1 / 3; }
-main > .results { grid-column: 2; grid-row: 2; }
-main > .doc { grid-column: 3; grid-row: 1 / 3; }
+main > .searchbar, main > .results { grid-column: 1; }
+main.panels:is([data-cols="ls"], [data-cols="lsr"]) > :is(.searchbar, .results) { grid-column: 2; }
+main > .results { grid-row: 2; }
+main > .doc { grid-row: 1 / 3; }
+main.panels[data-cols="sr"] > .doc { grid-column: 2; }
+main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 
 .tree { font-size: 13px; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
@@ -163,13 +175,4 @@ main > .doc { grid-column: 3; grid-row: 1 / 3; }
   outline: none; box-decoration-break: clone; -webkit-box-decoration-break: clone;
 }
 .source-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
-/* Narrower than the window as designed (1131, `tauri.conf.json`) — the guard in
- * `Launcher.test.ts` holds this threshold under that width, since a window
- * that met it would lose the designed layout without a word (2026-09-25). */
-@media (max-width: 1130px) {
-  main.panels { gap: 3px; grid-template-columns: 150px minmax(0, 1fr) 180px; }
-}
-@media (max-width: 599px) {
-  main.panels { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1.4fr); }
-  .tree .tabs { flex-direction: column; }
-}
+

@@ -3,13 +3,19 @@
   import Selection from './Selection.svelte';
   import Tree from './Tree.svelte';
   import type { AskCitation, Hit } from '../lib/ipc';
-  import type { LauncherState } from './state';
+  import type { Heat, LauncherState } from './state';
 
   // The prop is `state`; the LOCAL binding is renamed. Svelte reads `$state`
   // as a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { state: launcherState, query }: { state: LauncherState; query: string } = $props();
+  let { state: launcherState, query, left, right, heat }: {
+    state: LauncherState;
+    query: string;
+    left: boolean;
+    right: boolean;
+    heat: Heat;
+  } = $props();
 
   // The two ANSWER cards appear for the two states that HAVE an answer to show:
   // `generated` (state B) and `citationsOnly` (state E, Task 9). idle, inFlight,
@@ -51,22 +57,24 @@
   // 🔴 Ruling I-C — the known cost of taking `error` whole, stated rather than
   // discovered. `error` carries three reasons (`state.ts:25`) and only
   // `askFailed` is an answer state: `blank` and `tooLong` come from `checkQuery`
-  // BEFORE any ask. So one Enter on an empty line, as the first thing a person
-  // does, draws this card and fires `list_tree` — and `idle` is assigned in
-  // exactly one place, the initial value at `Launcher.svelte:14`, with no path
-  // back, while §6 keeps state across a hide (`…interface-design.md:186`, not §7.3, which is
-  // dismissal mechanics only). **State A's bareness therefore
-  // ends on a stray Enter and does not come back that session.** That is the
-  // price, and it is accepted, not overlooked.
+  // BEFORE any ask, so one Enter on an empty line is `error` with no answer
+  // behind it. In the cold launcher that Enter draws nothing: the tree is
+  // mounted only while the launcher is hot, and a stray Enter does not warm it.
+  // In the hot one the state was never `idle` to begin with (`launcher-cold` is
+  // the way back, and it resets the launcher whole).
   //
   // Narrowing to `reason === 'askFailed'` was considered and rejected: a blank
   // query typed from state B is ALSO `error: 'blank'`, so a gate keyed on the
   // reason would tear the tree down when a person with three cards on screen
   // mistypes an Enter — C1's exact defect, reintroduced through the gate that
-  // was widened to fix it. A "has ever shown cards" flag buys the bareness back
-  // at the price of another reset to get wrong, and this task has already spent
-  // two rounds on one. One condition, no state, cost declared.
-  const showTree = $derived(launcherState.kind !== 'idle');
+  // was widened to fix it. One condition, no state, cost declared.
+  //
+  // MOUNTING and SEEING are two decisions. Mounting is this condition; seeing is
+  // the left toggle, a `hidden` attribute on the section below. A switch that
+  // unmounted the tree would refetch it and shut every folder on the way back
+  // on — C1 again, reached through a button.
+  const showTree = $derived(heat === 'hot' && launcherState.kind !== 'idle');
+  const showSource = $derived(heat === 'hot' && right);
 
   // What `Selection` reports up, tagged with the state it belongs to. Read by
   // the tree ONLY — the tree lives outside the keyed block, so it cannot read
@@ -96,7 +104,12 @@
      and this is the card whose whole purpose is browsing the cited file's folder
      neighbours (§7). -->
 {#if showTree}
-  <section class="float col-side" data-testid="card-tree" aria-label={treeLabel}>
+  <!-- `.col-side` sets no `display`, so the UA rule for `[hidden]` applies. -->
+  <section
+    class="float col-side"
+    data-testid="card-tree"
+    aria-label={treeLabel}
+    hidden={!left}>
     <Tree {selected} />
   </section>
 {/if}
@@ -111,6 +124,18 @@
     <Selection
       answer={answerState.answer}
       {query}
+      {showSource}
       onSelected={(value) => (reported = { state: launcherState, value })} />
   {/key}
+{/if}
+
+<!-- A column that is on screen with nothing to put in it is an opaque empty
+     panel, not a hole in the window (owner, 2026-09-25): the window is as wide
+     as its visible panels, and a transparent gap would show what is behind it.
+     Hot only — the cold launcher is the search column alone. -->
+{#if heat === 'hot' && answerState === null}
+  <section class="float results" data-testid="card-results-empty"></section>
+{/if}
+{#if showSource && selected === null}
+  <section class="float doc" data-testid="card-source-empty"></section>
 {/if}

@@ -11,6 +11,7 @@ import { citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excer
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide: vi.fn() }) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 let sheets: HTMLStyleElement[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -23,6 +24,7 @@ beforeEach(() => {
     });
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return Promise.resolve(generated);
+    if (cmd === 'set_launcher_layout') return Promise.resolve();
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
     if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
     throw new Error(`unexpected command ${cmd}`);
@@ -59,7 +61,8 @@ test('real launcher places all cards and keeps the document transparent', async 
   await fireEvent.input(box, { target: { value: 'question' } });
   await fireEvent.keyDown(box, { key: 'Enter' });
   await screen.findByTestId('card-centre');
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  // The first card is preselected, so the source card is up before any click.
+  expect(screen.getByTestId('card-source')).toBeTruthy();
   await fireEvent.click(screen.getByTestId('preview-3'));
   await waitFor(() => expect(screen.getByTestId('source-body').getAttribute('data-pending')).toBe('0'));
   expect(screen.getAllByTestId('source-block').length).toBeGreaterThan(0);
@@ -120,4 +123,15 @@ test('real pin exposes pressed state through its style', async () => {
   expect(pin.getAttribute('aria-pressed')).toBe('true');
   expect(getComputedStyle(pin).background).toBe('var(--accent-soft)');
   expect(getComputedStyle(pin).background).not.toBe(before);
+});
+
+test('the left switch hides the tree by the UA [hidden] rule, and the stylesheet does not override it', async () => {
+  render(Launcher);
+  const box = screen.getByRole('textbox');
+  await fireEvent.input(box, { target: { value: 'question' } });
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  const tree = await screen.findByTestId('card-tree');
+  expect(getComputedStyle(tree).display).not.toBe('none');
+  tree.setAttribute('hidden', '');
+  expect(getComputedStyle(tree).display).toBe('none');
 });

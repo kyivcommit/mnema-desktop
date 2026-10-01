@@ -17,8 +17,8 @@ case_ "launcher: primary source highlight loses its outline" \
 
 case_ "launcher: source is placed into the tree column" \
   ui/src/styles/launcher.css \
-  's~(main > \.doc \{ grid-column: )3~${1}1~' \
-  'main > .doc { grid-column: 1;' \
+  's~(\[data-cols="lsr"\] > \.doc \{ grid-column: )3~${1}1~' \
+  '[data-cols="lsr"] > .doc { grid-column: 1;' \
   src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
 
 case_ "launcher: source loses its grid hook" \

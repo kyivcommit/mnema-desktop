@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, modelSettings, openSettings } from '../lib/ipc';
-  import { checkQuery, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type LauncherState } from './state';
+  import { ask, listenLauncherCold, modelSettings, openSettings, setLauncherLayout } from '../lib/ipc';
+  import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -15,6 +15,24 @@
   let provider = $state(false);
   let textOn = $state(true);
   let contentOn = $state(false);
+  // Cold: the search column alone. The first answer with something to show
+  // makes it hot and opens both side panels; after that the person's choice
+  // stands across questions. `launcher-cold` is the only way back.
+  let heat = $state<Heat>('cold');
+  let left = $state(false);
+  let right = $state(false);
+
+  // What is on screen, not what was asked for: cold shows no side panel
+  // whatever the switches say, and the switches themselves are left alone.
+  const showLeft = $derived(heat === 'hot' && left);
+  const showRight = $derived(heat === 'hot' && right);
+  const cols = $derived(`${showLeft ? 'l' : ''}s${showRight ? 'r' : ''}`);
+
+  // Derived booleans, so this runs once per change of what is shown and not
+  // once per write to `left`, `right` or `heat`.
+  $effect(() => {
+    setLauncherLayout(showLeft, showRight).catch((e) => console.error('set_launcher_layout failed', e));
+  });
 
   const appWindow = getCurrentWebviewWindow();
   const pinLabel = $derived.by(() => { void $locale; return `${t('pin')} 📌`; });
@@ -29,6 +47,20 @@
         if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
       })
       .catch((e) => console.error('model_settings failed', e));
+
+    // The window was hidden past the threshold: forget the answer, keep the
+    // text in the line (the person may still want to ask it).
+    let unlisten: (() => void) | null = null;
+    let gone = false;
+    listenLauncherCold(() => {
+      heat = 'cold';
+      left = right = false;
+      launcherState = { kind: 'idle' };
+      echo = '';
+    })
+      .then((u) => { if (gone) u(); else unlisten = u; })
+      .catch((e) => console.error('listen launcher-cold failed', e));
+    return () => { gone = true; unlisten?.(); };
   });
 
   // The owner validates and calls ask — the whole machine goes through
@@ -43,6 +75,10 @@
     try {
       const answer = await ask(check.query);
       launcherState = stateFromAnswer(check.query, answer);
+      // Only the cold-to-hot step opens the panels; a hot launcher keeps
+      // whichever the person switched off.
+      const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
+      if (warmed) { heat = 'hot'; left = right = true; }
       // §7: line clears on ready — but only if it still holds the submitted
       // query. A draft typed while the ask was in flight is kept, not wiped
       // (Codex #3).
@@ -109,7 +145,7 @@
 
 <svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
-<main class="panels">
+<main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
        click inside it except the input, the pin and the Arms labels — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
@@ -132,5 +168,5 @@
     </div>
     <Arms bind:textOn bind:contentOn {provider} />
   </div>
-  <Cards state={launcherState} query={echo} />
+  <Cards state={launcherState} query={echo} {left} {right} {heat} />
 </main>
