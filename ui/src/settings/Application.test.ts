@@ -3070,3 +3070,35 @@ test('a second threshold change during a write waits for it, and the last one wi
   await waitFor(() => expect(coldField().value).toBe('3'));
   expect(setColdAfter).toHaveBeenCalledTimes(2);
 });
+
+test('the field keeps the newest typed value while a queued write follows the first', async () => {
+  const first = deferred<number>();
+  const second = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('2');
+  await typeCold('3');
+  first.resolve(2);
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledTimes(2));
+  await tick();
+  expect(coldField().value).toBe('3');
+  second.resolve(3);
+  await waitFor(() => expect(coldField().value).toBe('3'));
+});
+
+test('a refusal goes away when the person steps back to the stored value during the write', async () => {
+  const first = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise);
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 9 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+  await typeCold('9');
+  first.reject(new Error('at least one minute'));
+  await waitFor(() => expect(coldField().value).toBe('9'));
+  expect(setColdAfter).toHaveBeenCalledTimes(1);
+  expect(screen.queryByTestId('application-launcher-cold-error')).toBeNull();
+});

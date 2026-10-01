@@ -608,7 +608,9 @@
   let coldBusy = $state(false);
   let coldText = $state('');
   const storedCold = $derived(prefs?.coldAfterMinutes);
-  $effect(() => { if (storedCold !== undefined) coldText = String(storedCold); });
+  // Not while a write is in flight: the field then holds what the person has
+  // typed since, and `changeCold` puts the stored value back when it is done.
+  $effect(() => { if (storedCold !== undefined && !coldBusy) coldText = String(storedCold); });
 
   // At most one write is in flight and the field is never disabled for it: a
   // disabled input loses focus, which ends the arrow keys. A change made while
@@ -650,9 +652,16 @@
         }
         const stored = prefs!.coldAfterMinutes;
         next = coldQueued !== null && coldQueued !== stored ? coldQueued : null;
+        // A newer value that equals the stored one is not written, and a
+        // refusal for a value no longer in the field goes with it.
+        if (coldQueued !== null && next === null) coldError = null;
         coldQueued = null;
-        coldText = String(stored);
-        field.value = coldText;
+        // Mid-chain the field keeps what the person typed, so the next arrow
+        // step starts from there and not from the intermediate stored value.
+        if (next === null) {
+          coldText = String(stored);
+          field.value = coldText;
+        }
       }
     } finally {
       coldBusy = false;
