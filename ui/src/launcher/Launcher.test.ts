@@ -4,13 +4,27 @@ import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, generated, oneRootTwoFolders } from '../lib/fixtures';
+import { refusedNoCandidates, generated, citationsOnly, emptyCitationsOnly, oneRootTwoFolders, excerptSpanA } from '../lib/fixtures';
 import { DRAG_GRAB_WINDOW_MS } from './state';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide }) }));
+// The launcher listens for `launcher-cold`; the test fires it by hand.
+const cold = vi.hoisted(() => ({ handlers: [] as Array<() => void>, names: [] as string[] }));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (name: string, cb: () => void) => {
+    cold.names.push(name);
+    cold.handlers.push(cb);
+    return Promise.resolve(() => {});
+  },
+}));
+const fireCold = () => cold.handlers.at(-1)!();
+
 const invoke = vi.fn();
+// What `provider_status` answers; a test swaps it to drive the cloud.
+const okStatus = () => Promise.resolve({ kind: 'ok' });
+let providerReply: () => Promise<unknown> = okStatus;
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
 // Answers each command separately. `model_settings` (the launcher's mount
@@ -34,12 +48,15 @@ const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddedCh
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
     return Promise.resolve();
   });
 }
 const askCalls = () => invoke.mock.calls.filter((c) => c[0] === 'ask');
+const layoutCalls = () => invoke.mock.calls.filter((c) => c[0] === 'set_launcher_layout').map((c) => c[1]);
 const listTreeCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_tree');
 
 // Answers each `ask` in turn, so one test can drive two questions with different
@@ -49,7 +66,9 @@ function mockAsks(...replies: unknown[]) {
   let next = 0;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
     // same policy for the same reason: a test that asks once more than its
     // author intended would get the previous answer back and attribute whatever
@@ -71,7 +90,9 @@ function mockAsks(...replies: unknown[]) {
 function mockSettings(settings: unknown) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(settings);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
 }
@@ -97,7 +118,7 @@ async function askAndOpenAFolder() {
 
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
-beforeEach(() => { hide.mockClear(); invoke.mockReset(); mockBackend(undefined); });
+beforeEach(() => { providerReply = okStatus; hide.mockClear(); invoke.mockReset(); cold.handlers.length = 0; cold.names.length = 0; mockBackend(undefined); });
 
 async function submit(value: string) {
   const box = screen.getByRole('textbox');
@@ -168,7 +189,9 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   // still passes.
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return pending;
     return Promise.resolve();
   });
@@ -195,22 +218,92 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
   err.mockRestore();
 });
 
+// A failed ask is an error, not an answer: a hot launcher keeps the answer it
+// already showed and says what failed in the search line. A refusal is an
+// answer ("nothing found") and still replaces it.
+function mockAsksThenReject(first: unknown) {
+  let n = 0;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'ask') return n++ === 0 ? Promise.resolve(first) : Promise.reject('offline');
+    return Promise.resolve();
+  });
+}
+
+test('a failed ask in the hot state brings the previous answer back and shows the error in the line', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await submit('second');
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  err.mockRestore();
+});
+
+test('two failed asks in a row keep the answer and its echo', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await submit('second');
+  await screen.findByRole('alert');
+  await submit('third');
+  await waitFor(() => expect(askCalls()).toHaveLength(3));
+  await screen.findByRole('alert');
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  err.mockRestore();
+});
+
+test('a failed ask in the cold state stays an error with no answer cards', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockBackend('offline', { reject: true });
+  render(Launcher);
+  await submit('q');
+  await screen.findByRole('alert');
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  err.mockRestore();
+});
+
+test('a failed ask does not restart the idle clock', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockAsksThenReject(generated);
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await submit('second');
+  await screen.findByRole('alert');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'launcher_answered')).toHaveLength(1);
+  err.mockRestore();
+});
+
 test('a generated answer renders the centre card, not a refusal', async () => {
   mockBackend(generated);
   render(Launcher);
   await submit('q');
   await screen.findByTestId('card-centre');
-  expect(screen.queryByRole('status')).toBeNull(); // not a refusal
+  // Not a refusal. The source card carries a `status` of its own, so the role
+  // alone says nothing: the refusal is the line's message.
+  expect(screen.queryAllByRole('status').filter((el) => /found|знайдено/i.test(el.textContent ?? ''))).toHaveLength(0);
 });
 
 // 🔴 C1, and the only place it can be seen: `Cards.test.ts` drives `Cards` by
 // hand and can build a transition the product never performs, while these tests
 // drive the real `runSearch`. `Cards` gates its cards on the launcher's state
-// and `runSearch` sets `inFlight` before EVERY ask (`Launcher.svelte:42`), so a
+// and `runSearch` sets `inFlight` before EVERY ask (`runSearch` in `Launcher.svelte`), so a
 // tree drawn only for a generated answer is torn down and refetched in the
 // middle of every question — the outcome Ruling AC forbids, reached with no
 // `{#key}` anywhere. Both are anchored on the echo, which only a RESOLVED ask
-// can write (`Launcher.svelte:53`).
+// can write (`runSearch` in `Launcher.svelte`).
 //
 // 🔴 I-A: two tests, not one with two assertions. Against the only mutant that
 // exists for them — the pre-fix gate — a single test fails on the `list_tree`
@@ -238,8 +331,7 @@ test('a second question does not shut a hand-opened folder', async () => {
 });
 
 // 🔴 Ruling I-B, the refusal path. §7 calls only state A «лише рядок пошуку»;
-// row F says «тихе повідомлення», which is no more "only the line" than row D's
-// spinner is — and the reason the tree survives D (its content is the INDEX, not
+// row F says «тихе повідомлення», which is no more "only the line" than row D is — and the reason the tree survives D (its content is the INDEX, not
 // the answer) never depended on which answer came back. Measured before the
 // widening: a question that finds nothing destroyed the whole tree card and
 // every folder the person had opened. Anchored on the refusal text, which is
@@ -315,15 +407,30 @@ test('a blank Enter from state B does not shut a hand-opened folder', async () =
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a blank Enter from state B drops the answer and source cards', async () => {
+test('a blank Enter from state B keeps the answer and source cards', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
+  const before = screen.getByTestId('card-centre').textContent;
 
   await submit('   ');
   await screen.findByRole('alert');
 
-  expect(screen.queryByTestId('card-centre')).toBeNull();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('query-echo').textContent).toBe('first question');
+});
+
+test('a too-long Enter from state B keeps the answer and source cards', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+  const before = screen.getByTestId('card-centre').textContent;
+
+  await submit('x'.repeat(2049));
+  await screen.findByRole('alert');
+
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('query-echo').textContent).toBe('first question');
 });
 
 test('the launcher renders a search input', () => {
@@ -534,7 +641,7 @@ test('the search panel is the drag handle and nothing else is', async () => {
     } else {
       await screen.findByRole('status');
     }
-    // "deep": any click inside the panel drags, except on the input, the pin
+    // "deep": any click inside the panel drags, except on the input, the toolbar buttons
     // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
     const handles = container.querySelectorAll('[data-tauri-drag-region]');
     expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
@@ -555,9 +662,9 @@ test('the handle offset matches the stylesheet', () => {
   // shape; each one is a declaration in launcher.css. Read both sides and
   // compare numbers, so a change to either without the other goes red — this
   // is the only place the Rust constant and the stylesheet meet (review P2-4).
-  // The offset also depends on the window width: the constant is only this
-  // fixed value because the three grid tracks plus their gaps exactly fill
-  // the launcher window's content box (see the sum check below).
+  // The window is as wide as the panels on screen, so the stylesheet states the
+  // tracks once per `data-cols` and every one of them must add up to
+  // `launcher_layout::width` for that layout (sum check below).
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
   const rust = readFileSync(join(HERE, '../../../src-tauri/src/launcher_position.rs'), 'utf8');
   const num = (re: RegExp, text: string, what: string) => {
@@ -567,35 +674,388 @@ test('the handle offset matches the stylesheet', () => {
   };
   const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
   const searchbar = css.match(/\.searchbar\s*\{[^}]*\}/)![0];
-  const pin = css.match(/\.pin\s*\{[^}]*\}/)![0];
+  // The first row is as tall as a toolbar button was when the pin lived in it.
+  const pin = css.match(/\.sb-row\s*\{[^}]*\}/)![0];
+  // The tracks of one layout, as the stylesheet declares them.
+  const tracks = (cols: string) => {
+    const block = css.match(new RegExp(`main\\.panels\\[data-cols="${cols}"\\]\\s*\\{[^}]*\\}`));
+    if (!block) throw new Error(`no block for data-cols="${cols}"`);
+    const value = block[0].match(/grid-template-columns:\s*([^;]+);/);
+    if (!value) throw new Error(`no grid-template-columns for data-cols="${cols}"`);
+    return value[1].trim().split(/\s+(?![^(]*\))/).map((t) => {
+      const px = t.match(/^(?:minmax\(0, )?(\d+)px\)?$/);
+      if (!px) throw new Error(`unreadable track ${t} in data-cols="${cols}"`);
+      return Number(px[1]);
+    });
+  };
   const fromCss = {
     padY: num(/padding:\s*(\d+)px \d+px;/, panels, 'main.panels padding-y'),
     padX: num(/padding:\s*\d+px (\d+)px;/, panels, 'main.panels padding-x'),
-    col1: num(/grid-template-columns:\s*(\d+)px/, panels, 'first column'),
-    col2: num(/minmax\(0, (\d+)px\)/, panels, 'second column'),
     gap: num(/gap:\s*(\d+)px;/, panels, 'gap'),
     barPadTop: num(/padding:\s*(\d+)px/, searchbar, '.searchbar padding-top'),
-    pinH: num(/height:\s*(\d+)px/, pin, '.pin height'),
+    pinH: num(/min-height:\s*(\d+)px/, pin, '.sb-row min-height'),
   };
-  const shape =
-    /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
+  // (1) The widths come from the `lsr` block, not from `main.panels`.
+  const [col1, col2, col3] = tracks('lsr');
+  const shape = /HANDLE_CENTRE: \(f64, f64\) = \(([\d.]+) \/ 2\.0, ([\d.]+) \+ ([\d.]+) \+ ([\d.]+) \/ 2\.0\);/;
   const m = rust.match(shape);
   if (!m) throw new Error('HANDLE_CENTRE is not written in the guarded shape');
-  const fromRust = m.slice(1, 8).map(Number);
-  expect(fromRust).toEqual([
-    fromCss.padX, fromCss.col1, fromCss.gap, fromCss.col2,
-    fromCss.padY, fromCss.barPadTop, fromCss.pinH,
-  ]);
+  const fromRust = m.slice(1, 5).map(Number);
+  expect(fromRust).toEqual([col2, fromCss.padY, fromCss.barPadTop, fromCss.pinH]);
   // And the numbers are what the spec says today, so a wrong regex that
   // captured the wrong declaration cannot pass by coincidence.
-  expect(fromRust).toEqual([32, 190, 16, 470, 24, 11, 26]);
-  // The offset is only this fixed because the tracks plus gaps exactly fill the
-  // content box: then `justify-content: center` and the minmax floor never engage.
+  expect(fromRust).toEqual([470, 0, 11, 26]);
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
     app: { windows: Array<{ label: string; width: number; resizable?: boolean }> };
   };
   const launcher = conf.app.windows.find((w) => w.label === 'launcher')!;
   expect(launcher.resizable).toBe(false);
-  const col3 = num(/grid-template-columns:\s*\d+px minmax\(0, \d+px\) (\d+)px/, panels, 'third column');
-  expect(2 * fromCss.padX + fromCss.col1 + fromCss.col2 + col3 + 2 * fromCss.gap).toBe(launcher.width);
+  // `launcher_layout::{SEARCH_WIDTH, LEFT_SPAN, RIGHT_SPAN}` restate the same
+  // columns for the width/offset math — read the Rust file with a regex, as
+  // `launcher_position.rs` already is.
+  const layout = readFileSync(join(HERE, '../../../src-tauri/src/launcher_layout.rs'), 'utf8');
+  const oneConst = (name: string) => {
+    const re = new RegExp(`pub const ${name}: f64 = ([\\d.]+);`);
+    const mm = layout.match(re);
+    if (!mm) throw new Error(`${name} is not written in the guarded shape`);
+    return Number(mm[1]);
+  };
+  const spanConst = (name: string) => {
+    const re = new RegExp(`pub const ${name}: f64 = ([\\d.]+) \\+ ([\\d.]+);`);
+    const mm = layout.match(re);
+    if (!mm) throw new Error(`${name} is not written in the guarded shape`);
+    return Number(mm[1]) + Number(mm[2]);
+  };
+  const SEARCH_WIDTH = oneConst('SEARCH_WIDTH');
+  const LEFT_SPAN = spanConst('LEFT_SPAN');
+  const RIGHT_SPAN = spanConst('RIGHT_SPAN');
+  expect(SEARCH_WIDTH).toBe(col2);
+  expect(LEFT_SPAN).toBe(col1 + fromCss.gap);
+  expect(RIGHT_SPAN).toBe(col3 + fromCss.gap);
+  // (2) EVERY layout: its tracks and gaps add up to the width Rust gives the
+  // window for it, and the grid starts at the left edge, so `search_offset` stays exact.
+  const layouts: Array<[string, boolean, boolean]> = [
+    ['s', false, false], ['ls', true, false], ['sr', false, true], ['lsr', true, true],
+  ];
+  for (const [cols, l, r] of layouts) {
+    const t = tracks(cols);
+    const width = SEARCH_WIDTH + (l ? LEFT_SPAN : 0) + (r ? RIGHT_SPAN : 0);
+    expect(t.length, `tracks in ${cols}`).toBe(cols.length);
+    expect(2 * fromCss.padX + t.reduce((a, b) => a + b, 0) + (t.length - 1) * fromCss.gap, `width of ${cols}`).toBe(width);
+  }
+  // (3) The window starts as wide as the cold layout.
+  expect(launcher.width).toBe(SEARCH_WIDTH);
+  // (4) No narrow-window rule applies at any width the launcher can take: a
+  // `max-width` breakpoint at or past the narrowest window swaps the tracks and
+  // padding under the constants above. It happened (2026-09-25): the window
+  // shrank to 936 under a 959px breakpoint. Zero rules is fine.
+  const breakpoints = [...css.matchAll(/@media \(max-width: (\d+)px\)/g)].map((b) => Number(b[1]));
+  for (const bp of breakpoints) expect(bp, `breakpoint ${bp}px`).toBeLessThan(SEARCH_WIDTH);
+});
+
+test('the grid starts at the window edge and follows data-cols alone', () => {
+  // The new window frame shows the new `data-cols` laid out at the old width
+  // for one frame. A grid that starts at the left edge is right in that frame;
+  // a centred one jumped, and viewport-based margins landed 290 off. So: no
+  // centring, no margin, no width media query to place the grid.
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
+  expect(panels).not.toMatch(/justify-content:\s*center/);
+  expect(panels).toMatch(/justify-content:\s*start/);
+  expect(css).not.toMatch(/main\.panels[^{]*\{[^}]*margin-left/);
+  expect(css).not.toMatch(/@media[^{]*width/);
+  expect(css).not.toMatch(/minmax\(0, 470px\)/);
+});
+
+// --- cold and hot ------------------------------------------------------------
+
+const OFF = { left: false, right: false };
+const ON = { left: true, right: true };
+
+test('a cold launcher is the search column alone and asks for the narrow window', async () => {
+  render(Launcher);
+  await waitFor(() => expect(layoutCalls().length).toBeGreaterThan(0));
+  for (const id of ['card-tree', 'card-source', 'card-source-empty', 'card-results-empty']) {
+    expect(screen.queryByTestId(id), id).toBeNull();
+  }
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  expect(layoutCalls().every((c) => JSON.stringify(c) === JSON.stringify(OFF))).toBe(true);
+});
+
+test('the first answer warms the launcher: both panels, the first card open, the wide window', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await screen.findByTestId('card-source');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/a\.md/);
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual(ON));
+});
+
+test('the layout is sent once per change, not once per render', async () => {
+  mockAsks(generated, citationsOnly);
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-source');
+  const wide = () => layoutCalls().filter((c) => JSON.stringify(c) === JSON.stringify(ON));
+  await waitFor(() => expect(wide()).toHaveLength(1));
+  await submit('two');
+  await waitFor(() => expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toMatch(/passages|уривки|фрагмент/i));
+  expect(wide()).toHaveLength(1);
+});
+
+test('a refusal from the cold state leaves it cold: no source, no empty panels, the tree not drawn', async () => {
+  mockBackend(refusedNoCandidates);
+  render(Launcher);
+  await submit('nothing');
+  await screen.findByRole('status');
+  for (const id of ['card-source', 'card-source-empty', 'card-results-empty']) {
+    expect(screen.queryByTestId(id), id).toBeNull();
+  }
+  // Mounted (C1: mounting follows the state) but not drawn.
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  expect(layoutCalls().every((c) => JSON.stringify(c) === JSON.stringify(OFF))).toBe(true);
+});
+
+test('an answer with no passages does not warm a cold launcher', async () => {
+  mockBackend(emptyCitationsOnly);
+  render(Launcher);
+  await submit('q');
+  await screen.findByTestId('card-centre');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+});
+
+test('launcher-cold forgets the answer and the panels but keeps the text in the line', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await screen.findByTestId('card-source');
+  await fireEvent.input(screen.getByRole('textbox'), { target: { value: 'a draft' } });
+
+  fireCold();
+
+  await waitFor(() => expect(screen.queryByTestId('card-source')).toBeNull());
+  for (const id of ['card-tree', 'card-centre', 'card-source-empty', 'card-results-empty']) {
+    expect(screen.queryByTestId(id), id).toBeNull();
+  }
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('a draft');
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual(OFF));
+});
+
+test('a cold launcher warms again on the next answer, with both panels on', async () => {
+  mockAsks(generated, generated);
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-source');
+  fireCold();
+  await waitFor(() => expect(screen.queryByTestId('card-tree')).toBeNull());
+  await submit('two');
+  await screen.findByTestId('card-source');
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
+});
+
+test('a failed ask in the hot state keeps it hot', async () => {
+  mockAsks(generated);
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-source');
+  mockBackend(new Error('boom'), { reject: true });
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  await submit('two');
+  await screen.findByRole('alert');
+  err.mockRestore();
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  // The previous answer is back, so neither side shows its empty placeholder.
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+  expect(screen.queryByTestId('card-results-empty')).toBeNull();
+  expect(screen.queryByTestId('card-source-empty')).toBeNull();
+});
+
+test('the launcher listens for the event Rust emits', async () => {
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+});
+
+const answeredCalls = () => invoke.mock.calls.filter((c) => c[0] === 'launcher_answered');
+
+test('an applied answer restarts the idle clock exactly once', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await waitFor(() => expect(screen.getByTestId('card-centre')).toBeTruthy());
+  expect(answeredCalls()).toHaveLength(1);
+});
+
+test('an answer dropped after launcher-cold does not restart the idle clock', async () => {
+  let resolveAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  resolveAsk(generated);
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(answeredCalls()).toHaveLength(0);
+});
+
+// An ask still on the wire when the launcher goes cold must not bring the
+// forgotten answer back, and must not hold the one-ask-at-a-time guard.
+test('an ask in flight when launcher-cold arrives is dropped when it resolves', async () => {
+  let resolveAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  resolveAsk(generated);
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await waitFor(() => expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s'));
+  for (const id of ['card-centre', 'card-source', 'card-tree']) expect(screen.queryByTestId(id), id).toBeNull();
+  expect(layoutCalls().some((c) => JSON.stringify(c) === JSON.stringify(ON))).toBe(false);
+  // The guard is open again: a new question goes out.
+  await submit('fresh');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+});
+
+test('an ask rejected after launcher-cold leaves the cold idle state alone', async () => {
+  let rejectAsk!: (v: unknown) => void;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'ask') return new Promise((_, r) => { rejectAsk = r; });
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    return Promise.resolve();
+  });
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  fireCold();
+  rejectAsk(new Error('late'));
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(err).not.toHaveBeenCalledWith('ask failed', expect.anything());
+  err.mockRestore();
+});
+
+// --- the toolbar -------------------------------------------------------------
+
+const toggle = (side: 'left' | 'right') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
+
+test('the pin is in the toolbar, not in the first row', () => {
+  const { container } = render(Launcher);
+  expect(container.querySelector('.sb-row')).not.toBeNull(); // positive control
+  expect(container.querySelector('.sb-row [data-testid="pin"]')).toBeNull();
+  expect(container.querySelector('.toolbar [data-testid="pin"]')).not.toBeNull();
+});
+
+test('a cold launcher: both toggles are disabled and not pressed', () => {
+  render(Launcher);
+  for (const side of ['left', 'right'] as const) {
+    expect(toggle(side).disabled).toBe(true);
+    expect(toggle(side).getAttribute('aria-pressed')).toBe('false');
+  }
+});
+
+test('turning the left panel off in the hot state tells Rust, and the next answer leaves it off', async () => {
+  mockAsks(generated, generated);
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-source');
+  expect(toggle('left').disabled).toBe(false);
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+
+  await fireEvent.click(toggle('left'));
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual({ left: false, right: true }));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+
+  await submit('second question');
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+  expect(layoutCalls().at(-1)).toEqual({ left: false, right: true });
+});
+
+test('the left panel off and on again keeps the tree: hidden, not unmounted (Ruling C1)', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+  expect(listTreeCalls()).toHaveLength(1);
+
+  await fireEvent.click(toggle('left'));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  await fireEvent.click(toggle('left'));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(listTreeCalls()).toHaveLength(1);
+});
+
+test('provider_status and model_settings are asked again when the window gains focus', async () => {
+  render(Launcher);
+  const count = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).length;
+  await waitFor(() => expect(count('provider_status')).toBe(1));
+  expect(count('model_settings')).toBe(1);
+  await fireEvent.focus(window);
+  await waitFor(() => expect(count('provider_status')).toBe(2));
+  expect(count('model_settings')).toBe(2);
+});
+
+const cloud = () => screen.getByTestId('provider-cloud');
+
+test('the cloud shows what provider_status said at mount, and the next focus replaces it', async () => {
+  providerReply = () => Promise.resolve({ kind: 'notConfigured', missing: 'key' });
+  render(Launcher);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('notConfigured'));
+  const before = cloud().getAttribute('title');
+  expect(before).toBeTruthy();
+
+  providerReply = okStatus;
+  await fireEvent.focus(window);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('ok'));
+  expect(cloud().getAttribute('title')).not.toBe(before);
+});
+
+test('a slow earlier provider probe cannot overwrite a newer one', async () => {
+  let slow!: (v: unknown) => void;
+  providerReply = () => new Promise((r) => { slow = r; }); // the mount probe, held open
+  render(Launcher);
+  await waitFor(() => expect(invoke.mock.calls.filter((c) => c[0] === 'provider_status')).toHaveLength(1));
+
+  providerReply = okStatus;
+  await fireEvent.focus(window);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('ok'));
+
+  slow({ kind: 'unreachable', reason: 'late' });
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  expect(cloud().getAttribute('data-status')).toBe('ok');
+});
+
+test('turning the right panel off in the hot state tells Rust', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('q');
+  await screen.findByTestId('card-source');
+  await fireEvent.click(toggle('right'));
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual({ left: true, right: false }));
+  expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });

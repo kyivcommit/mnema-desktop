@@ -9,12 +9,14 @@ pub mod bridge;
 pub mod embed_job;
 pub mod error;
 pub mod job;
+pub mod launcher_layout;
 pub mod launcher_position;
 pub mod locale;
 pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod provider_status;
 pub mod scan_job;
 pub mod scan_state;
 pub mod shortcut;
@@ -44,6 +46,10 @@ use tauri::Manager as _;
 /// `ui/src/lib/ipc.test.ts` can read THIS file and compare the name that is
 /// actually emitted, rather than a second copy kept beside it.
 pub const SCAN_PROGRESS_EVENT: &str = "scan-progress";
+
+/// Emitted to the launcher window when it was hidden past the cold threshold;
+/// `ipc.test.ts` compares it with the UI's name for it.
+pub const LAUNCHER_COLD_EVENT: &str = "launcher-cold";
 
 /// Everything the webview is allowed to call, in one place.
 ///
@@ -81,6 +87,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_rerank_model,
         models::set_chat_model,
         models::model_settings,
+        provider_status::provider_status,
         scan_job::start_scan_job,
         locale::get_locale,
         locale::set_locale,
@@ -89,7 +96,10 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::app_prefs,
         prefs::set_hotkey,
         prefs::set_autostart,
+        prefs::set_cold_after,
         open_settings,
+        launcher_layout::set_launcher_layout,
+        launcher_layout::launcher_answered,
     ]
 }
 
@@ -253,6 +263,32 @@ pub fn boot_files(state: &state::AppState) -> i64 {
     state.with_index(|db| db.indexed_file_count()).unwrap_or(0)
 }
 
+/// If the launcher has been hidden for at least the idle threshold at `now`,
+/// makes it cold: the default layout, its window size, and a `launcher-cold`
+/// event to the launcher so the UI drops its answer. Returns whether it did.
+/// The clock is the last hide or the last answer to land, whichever is later
+/// (`launcher_layout::launcher_answered`).
+/// `try_state`: the shell tests build no `AppState`; there the threshold is
+/// its default.
+pub fn go_cold_if_idle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    window: &tauri::WebviewWindow<R>,
+    now: std::time::SystemTime,
+) -> bool {
+    let minutes = app
+        .try_state::<state::AppState>()
+        .map_or(5, |s| prefs::cold_after_minutes(s.data_dir()));
+    let hidden_at = app.state::<launcher_layout::HiddenAt>().get();
+    if !launcher_layout::goes_cold(hidden_at, now, minutes) {
+        return false;
+    }
+    let cold = launcher_layout::Layout::default();
+    app.state::<launcher_layout::Current>().set(cold);
+    launcher_layout::resize(window, cold);
+    let _ = app.emit_to("launcher", LAUNCHER_COLD_EVENT, ());
+    true
+}
+
 /// Shows the launcher and focuses it, returning whether the launcher window was
 /// there to act on. The single-instance callback, the tray's "show search"
 /// item and the shortcut share this — it is the ONE show path (D155):
@@ -272,21 +308,37 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
                 let _ = window.set_focus();
                 return true;
             }
-            let memory = app.state::<launcher_position::Memory>();
-            // `try_state`: the shell tests build no `AppState`; there the
-            // file is simply "nothing saved".
+            // Cold before `place` and `show`: the window never appears wide,
+            // and the UI clears its answer on `launcher-cold`. `place` then
+            // uses the cold layout.
+            go_cold_if_idle(app, &window, std::time::SystemTime::now());
             let data_dir = app
                 .try_state::<state::AppState>()
                 .map(|s| s.data_dir().to_path_buf());
+            let memory = app.state::<launcher_position::Memory>();
+            // `try_state`: the shell tests build no `AppState`; there the
+            // file is simply "nothing saved".
             launcher_position::place(
                 &window,
                 &memory,
                 data_dir.as_deref(),
                 os_services::wayland_session(),
+                app.state::<launcher_layout::Current>().get(),
             );
             true
         }
         None => false,
+    }
+}
+
+/// Hides the launcher and records when, so the next show can tell how long it
+/// was away (`launcher_layout::goes_cold`). The shortcut and a window close
+/// hide through here; Esc and blur hide from the UI, and the `Focused(false)`
+/// arm marks those.
+pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("launcher") {
+        let _ = window.hide();
+        app.state::<launcher_layout::HiddenAt>().mark();
     }
 }
 
@@ -297,7 +349,7 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         if window.is_visible().unwrap_or(false) {
-            let _ = window.hide();
+            hide_launcher(app);
         } else {
             focus_launcher(app);
         }
@@ -374,10 +426,16 @@ pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 
 /// The launcher's ⌘, (Ctrl+, off macOS). Synchronous on purpose: Tauri runs a
 /// non-async command on the main thread, where AppKit wants the activation
-/// policy changed.
+/// policy changed. A `section` is sent to the settings window alone, after the
+/// show, so an already-open window moves to it; a fresh one starts on Models,
+/// which is the only section named today, so an event sent before its listener
+/// is up loses nothing.
 #[tauri::command]
-fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, section: Option<String>) {
     show_settings(&app, true);
+    if let Some(section) = section {
+        let _ = app.emit_to("settings", "settings-section", section);
+    }
 }
 
 /// Keeps the macOS activation policy in step with the settings window: the app
@@ -655,6 +713,7 @@ pub fn run() -> anyhow::Result<()> {
                         &memory,
                         &data_dir,
                         os_services::wayland_session(),
+                        app.state::<launcher_layout::Current>().get(),
                     );
                 }
                 app.exit(0)
@@ -679,7 +738,11 @@ pub fn run() -> anyhow::Result<()> {
                 if window.label() == "settings" {
                     hide_settings(window.app_handle());
                 } else {
-                    let _ = window.hide();
+                    if window.label() == "launcher" {
+                        hide_launcher(window.app_handle());
+                    } else {
+                        let _ = window.hide();
+                    }
                     // Hiding the launcher while settings is still up leaves the
                     // policy unchanged. §6/§8.
                     sync_activation_policy(window.app_handle());
@@ -695,6 +758,8 @@ pub fn run() -> anyhow::Result<()> {
             // it (see `launcher_position::remember`).
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 let app = window.app_handle();
+                // Esc and blur hide from the UI, not through `hide_launcher`.
+                app.state::<launcher_layout::HiddenAt>().mark();
                 let memory = app.state::<launcher_position::Memory>();
                 let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
                 launcher_position::remember(
@@ -702,6 +767,7 @@ pub fn run() -> anyhow::Result<()> {
                     &memory,
                     &data_dir,
                     os_services::wayland_session(),
+                    app.state::<launcher_layout::Current>().get(),
                 );
             }
             // D155: the show cannot know where the window manager put the
@@ -714,7 +780,10 @@ pub fn run() -> anyhow::Result<()> {
             tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 let memory = app.state::<launcher_position::Memory>();
-                memory.settled(launcher_position::here(window));
+                memory.settled(launcher_position::here(
+                    window,
+                    app.state::<launcher_layout::Current>().get(),
+                ));
             }
             _ => {}
         })
@@ -723,6 +792,8 @@ pub fn run() -> anyhow::Result<()> {
             // D155: what the launcher's last show applied and where the person
             // left it. Managed before any window can show or lose focus.
             app.manage(launcher_position::Memory::default());
+            app.manage(launcher_layout::Current::default());
+            app.manage(launcher_layout::HiddenAt::default());
             app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `Memory::default()` above touches

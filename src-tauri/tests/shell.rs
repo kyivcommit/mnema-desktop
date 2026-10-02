@@ -23,10 +23,14 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
 
 fn mock_app_with_memory() -> tauri::App<tauri::test::MockRuntime> {
     // `focus_launcher` reads the launcher-position memory from managed state
-    // (D155), and `show_settings`/`hide_settings` the return-to-launcher mark;
-    // the production builder manages both, a test does it here.
+    // (D155), `show_settings`/`hide_settings` the return-to-launcher mark, and
+    // `focus_launcher` the launcher's layout and hide time (`Current`,
+    // `HiddenAt`); the production builder manages all of them, a test does it
+    // here.
     mock_builder()
         .manage(mnema_desktop::launcher_position::Memory::default())
+        .manage(mnema_desktop::launcher_layout::Current::default())
+        .manage(mnema_desktop::launcher_layout::HiddenAt::default())
         .manage(mnema_desktop::ReturnToLauncher::default())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")
@@ -162,7 +166,13 @@ fn place_leaves_the_position_to_the_focus_in() {
     let memory = app.state::<mnema_desktop::launcher_position::Memory>();
     assert_eq!(memory.applied(), None, "applied before any show?");
 
-    mnema_desktop::launcher_position::place(&window, &memory, None, false);
+    mnema_desktop::launcher_position::place(
+        &window,
+        &memory,
+        None,
+        false,
+        mnema_desktop::launcher_layout::Layout::default(),
+    );
 
     assert_eq!(
         memory.applied(),
@@ -176,6 +186,7 @@ fn place_leaves_the_position_to_the_focus_in() {
 
     memory.settled(mnema_desktop::launcher_position::here(
         &window.as_ref().window(),
+        mnema_desktop::launcher_layout::Layout::default(),
     ));
 
     assert_eq!(
@@ -228,7 +239,13 @@ fn a_wayland_show_leaves_nothing_awaiting() {
         .expect("no launcher window");
     let memory = app.state::<mnema_desktop::launcher_position::Memory>();
 
-    mnema_desktop::launcher_position::place(&window, &memory, None, true);
+    mnema_desktop::launcher_position::place(
+        &window,
+        &memory,
+        None,
+        true,
+        mnema_desktop::launcher_layout::Layout::default(),
+    );
 
     assert!(
         !memory.awaiting(),
@@ -246,6 +263,7 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     // the new default against the stale drag, scored it as a move, and
     // overwrote the file with the default (0, 0) — losing the saved position
     // with no drag anywhere in the sequence.
+    use mnema_desktop::launcher_layout::Layout;
     use mnema_desktop::launcher_position::{self, Memory};
     use tauri::Manager;
     let app = mock_app_with_memory();
@@ -265,9 +283,18 @@ fn a_fallback_show_then_an_untouched_hide_keeps_the_saved_position() {
     memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
     memory.moved(launcher_position::Point { x: 640, y: 80 });
 
-    launcher_position::place(&window, &memory, Some(dir.path()), false);
-    memory.settled(launcher_position::here(&window.as_ref().window()));
-    launcher_position::remember(&window.as_ref().window(), &memory, dir.path(), false);
+    launcher_position::place(&window, &memory, Some(dir.path()), false, Layout::default());
+    memory.settled(launcher_position::here(
+        &window.as_ref().window(),
+        Layout::default(),
+    ));
+    launcher_position::remember(
+        &window.as_ref().window(),
+        &memory,
+        dir.path(),
+        false,
+        Layout::default(),
+    );
 
     let after = std::fs::read(&prefs_path).unwrap();
     assert_eq!(
@@ -301,6 +328,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     // answers `outer_position` with (0, 0); with (5, 5) recorded as applied,
     // that is a move, and the file must say so. Deleting `remember`'s body —
     // or its `outer_position` read — leaves the file without the key.
+    use mnema_desktop::launcher_layout::Layout;
     use mnema_desktop::launcher_position::{self, Memory};
     use tauri::Manager;
     let app = mock_app();
@@ -318,7 +346,7 @@ fn remember_writes_the_launcher_position_it_finds() {
     let memory = Memory::default();
     memory.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
 
-    launcher_position::remember(&window, &memory, dir.path(), false);
+    launcher_position::remember(&window, &memory, dir.path(), false, Layout::default());
 
     assert_eq!(
         launcher_position::read(dir.path()),
@@ -331,11 +359,57 @@ fn remember_writes_the_launcher_position_it_finds() {
     let dir2 = tempfile::tempdir().unwrap();
     let fresh = Memory::default();
     fresh.set_applied(Some(launcher_position::Point { x: 5, y: 5 }));
-    launcher_position::remember(&window, &fresh, dir2.path(), true);
+    launcher_position::remember(&window, &fresh, dir2.path(), true, Layout::default());
     assert_eq!(
         launcher_position::read(dir2.path()),
         None,
         "wrote under Wayland"
     );
     assert_eq!(fresh.left(), None, "Wayland recorded a move in memory");
+}
+
+#[test]
+fn here_reports_the_search_column_corner() {
+    // The mock runtime puts every window at (0, 0) with scale 1. With the left
+    // column shown the search column is 290 logical px to the right of the
+    // window's corner, so that is the point `here` must report.
+    use mnema_desktop::launcher_layout::Layout;
+    use mnema_desktop::launcher_position::{self, Point};
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let window = app
+        .get_webview_window("launcher")
+        .expect("no launcher window");
+    let left = Layout {
+        left: true,
+        right: false,
+    };
+    assert_eq!(
+        launcher_position::here(&window.as_ref().window(), left),
+        Some(Point { x: 290, y: 0 })
+    );
+}
+
+#[test]
+fn hide_launcher_records_when_it_hid() {
+    // The primitive, not the mechanism: the mock cannot tell visible from
+    // hidden, so the hotkey-while-pinned-and-unfocused path is the live run's.
+    use tauri::Manager;
+    let app = mock_app_with_memory();
+    WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher webview");
+    let hidden_at = app.state::<mnema_desktop::launcher_layout::HiddenAt>();
+    assert_eq!(hidden_at.get(), None);
+
+    mnema_desktop::hide_launcher(app.handle());
+    let first = hidden_at.get().expect("the hide left no mark");
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    mnema_desktop::hide_launcher(app.handle());
+    let second = hidden_at.get().unwrap();
+    assert!(second > first, "a second hide did not move the mark");
 }

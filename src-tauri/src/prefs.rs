@@ -90,6 +90,9 @@ pub enum AutostartState {
 pub struct AppPrefs {
     pub hotkey: HotkeyState,
     pub autostart: AutostartState,
+    /// Minutes of idleness after which the launcher forgets its last answer;
+    /// [`cold_after_minutes`] is its one reader.
+    pub cold_after_minutes: u32,
     pub version: String,
     pub platform: crate::models::Platform,
 }
@@ -147,6 +150,17 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
         return serde_json::Map::new();
     };
     serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Minutes the launcher may stay hidden before its next show is cold
+/// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
+pub fn cold_after_minutes(data_dir: &Path) -> u32 {
+    read_all(data_dir)
+        .get("launcher_cold_after_minutes")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&m| m >= 1)
+        .and_then(|m| u32::try_from(m).ok())
+        .unwrap_or(5)
 }
 
 /// Writes one key, preserving every other key already in the file.
@@ -393,6 +407,7 @@ pub fn app_prefs<R: tauri::Runtime>(
     AppPrefs {
         hotkey: state.hotkey(),
         autostart: read_autostart(&state),
+        cold_after_minutes: cold_after_minutes(state.data_dir()),
         // The same version the macOS About box shows (`build_app_menu`), which
         // is the one the bundle carries rather than this crate's own constant.
         version: app.package_info().version.to_string(),
@@ -608,6 +623,25 @@ pub fn set_autostart(
     Ok(read_autostart(&state))
 }
 
+/// Sets the idle threshold after which the launcher forgets its last answer,
+/// and answers with the stored value. `go_cold_if_idle` reads the key on every
+/// show, so the next show already uses it.
+///
+/// Refuses `0`: [`cold_after_minutes`] would read it back as the default, so
+/// accepting it would store a value that means something else.
+#[tauri::command(async)]
+pub fn set_cold_after(state: tauri::State<'_, AppState>, minutes: u32) -> Result<u32, Error> {
+    if minutes == 0 {
+        return Err(Error::ColdAfterTooShort);
+    }
+    write_key(
+        state.data_dir(),
+        "launcher_cold_after_minutes",
+        serde_json::Value::from(minutes),
+    )?;
+    Ok(cold_after_minutes(state.data_dir()))
+}
+
 /// What a test installs to be called from inside [`write_key`]'s critical
 /// section. It is handed the data directory, so a hook belonging to one test
 /// ignores every other test's writes in the same binary.
@@ -692,6 +726,20 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn the_cold_threshold_is_a_whole_number_of_minutes_from_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cold_after_minutes(dir.path()), 5, "no file");
+        let set = |v: serde_json::Value| {
+            write_key(dir.path(), "launcher_cold_after_minutes", v).unwrap();
+            cold_after_minutes(dir.path())
+        };
+        for bad in [json!(0), json!(-3), json!("7"), json!(1.5)] {
+            assert_eq!(set(bad.clone()), 5, "{bad} must fall back to 5");
+        }
+        assert_eq!(set(json!(7)), 7);
     }
 
     #[test]

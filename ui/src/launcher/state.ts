@@ -1,4 +1,4 @@
-import type { AskAnswer, Refusal, ModelSettings } from '../lib/ipc';
+import type { AskAnswer, AskCitation, Hit, Refusal, ModelSettings } from '../lib/ipc';
 
 // Mirrors MAX_ASK_QUERY (bridge.rs:486). Backend is the source of truth; this
 // is the convenience mirror so a blank/over-long query never reaches `ask`.
@@ -57,4 +57,29 @@ export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
     case 'citationsOnly': return { kind: 'citationsOnly', query, answer: a };
     case 'refused': return { kind: 'refused', reason: a.reason };
   }
+}
+
+// The two answers that draw cards. `refused` is not one of them and the type
+// says so, so a refusal cannot reach a card component by accident.
+export type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
+
+// The launcher is cold until an answer with something to show arrives, and
+// the first such answer is the only way in; going back is the `launcher-cold`
+// event, not a state. A refusal, an error and a citations-only answer with no
+// passages leave a cold launcher as narrow as it was, and a hot one stays hot
+// through everything.
+export type Heat = 'cold' | 'hot';
+
+export function heatAfter(prev: Heat, s: LauncherState): Heat {
+  if ((s.kind === 'generated' || s.kind === 'citationsOnly') && s.answer.citations.length > 0) {
+    return 'hot';
+  }
+  return prev;
+}
+
+// The card the source panel opens on. The centre lists previews (generated) or
+// ranked passages (citations only) in `citations` order, so the first of that
+// list is the first card it draws; `Cards.test.ts` holds this against the DOM.
+export function firstCard(a: CardAnswer): AskCitation | Hit | null {
+  return a.citations[0] ?? null;
 }

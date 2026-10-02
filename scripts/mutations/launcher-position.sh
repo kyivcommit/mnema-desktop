@@ -25,14 +25,14 @@ case_ "launcher position: the corner is checked instead of the handle" \
 
 case_ "launcher position: a hide without a drag is written anyway" \
   src-tauri/src/launcher_position.rs \
-  's~if reference == now \{\n            return None;~if false {\n            return None;~' \
+  's~if reference == anchored \{\n            return None;~if false {\n            return None;~' \
   'if false {
             return None;' \
   mnema-desktop 'launcher_position::tests::a_hide_without_a_drag_writes_nothing' --lib
 
 case_ "launcher position: a failed write forgets the drag" \
   src-tauri/src/launcher_position.rs \
-  's~slots\.left = Some\(now\);\n        Some\(now\)~slots.left = slots.left;\n        Some(now)~' \
+  's~slots\.left = Some\(now\);\n        slots\.nudge = 0;~slots.left = slots.left;\n        slots.nudge = 0;~' \
   'slots.left = slots.left;' \
   mnema-desktop 'launcher_position::tests::a_failed_write_still_updates_memory' --lib
 
@@ -44,14 +44,14 @@ case_ "launcher position: y is not read" \
 
 case_ "launcher position: the show does not record where it put the window" \
   src-tauri/src/launcher_position.rs \
-  's~memory\.placed\(restored\);~let _ = restored;~' \
-  'let _ = restored;' \
+  's~memory\.placed\(restored_search\);~let _ = restored_search;~' \
+  'let _ = restored_search;' \
   mnema-desktop 'place_leaves_the_position_to_the_focus_in' --test shell
 
 case_ "launcher position: placed runs even on Wayland" \
   src-tauri/src/launcher_position.rs \
-  's~if !wayland \{\n        memory\.placed\(restored\);\n    \}~memory.placed(restored);\n    if !wayland {\n    }~' \
-  'memory.placed(restored);
+  's~if !wayland \{\n        memory\.placed\(restored_search\);\n    \}~memory.placed(restored_search);\n    if !wayland {\n    }~' \
+  'memory.placed(restored_search);
     if !wayland {' \
   mnema-desktop 'a_wayland_show_leaves_nothing_awaiting' --test shell
 
@@ -90,8 +90,8 @@ case_ "launcher position: a drag back to the applied place is not a move" \
 
 case_ "launcher position: the handle's y offset drifts" \
   src-tauri/src/launcher_position.rs \
-  's~24\.0 \+ 11\.0 \+ 26\.0 / 2\.0\);~24.0 + 111.0 + 26.0 / 2.0);~' \
-  '24.0 + 111.0 + 26.0 / 2.0);' \
+  's~0\.0 \+ 11\.0 \+ 26\.0 / 2\.0\);~0.0 + 111.0 + 26.0 / 2.0);~' \
+  '0.0 + 111.0 + 26.0 / 2.0);' \
   mnema-desktop 'launcher_position::tests::the_work_area_bottom_edge_is_outside' --lib
 
 case_ "launcher position: the handle's y offset is ignored" \
@@ -194,3 +194,84 @@ case_ "launcher: a release does not disarm the drag window" \
   's~function onPointerUp\(\) \{ handlePressedAt = -Infinity; \}~function onPointerUp() { void handlePressedAt; }~' \
   'function onPointerUp() { void handlePressedAt; }' \
   src/launcher/Launcher.test.ts 'a release after the press disarms the drag window: a click on the handle, then a blur, hides' runner=vitest
+
+case_ "launcher position: restore_to hands set_position the search corner" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(\(p, corner, nudge\)\)~Some((p, p, 0))~' \
+  'Some((p, p, 0))' \
+  mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
+
+case_ "launcher position: restore_to takes the factor from the wrong monitor" \
+  src-tauri/src/launcher_position.rs \
+  's~fit\(p, l, area, \*factor\)~fit(p, l, area, 1.0)~' \
+  'fit(p, l, area, 1.0)' \
+  mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
+
+case_ "launcher position: here reports the window corner, not the search column's" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(to_search\(corner, l, f\)\)~Some(corner)~' \
+  'Some(corner)' \
+  mnema-desktop 'here_reports_the_search_column_corner' --test shell
+
+case_ "launcher position: relayout reads the window in the new layout" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, next, factor), next, factor)~' \
+  'to_window(to_search(window_corner, next, factor), next, factor)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher position: relayout puts the window round the search column in the old layout" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, before, factor), before, factor)~' \
+  'to_window(to_search(window_corner, before, factor), before, factor)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher position: relayout ignores the monitor's factor" \
+  src-tauri/src/launcher_position.rs \
+  's~to_window\(to_search\(window_corner, before, factor\), next, factor\)~to_window(to_search(window_corner, before, 1.0), next, 1.0)~' \
+  'to_window(to_search(window_corner, before, 1.0), next, 1.0)' \
+  mnema-desktop 'launcher_position::tests::relayout_keeps_the_search_column_where_it_was' --lib
+
+case_ "launcher cold: the threshold second itself is not yet cold" \
+  src-tauri/src/launcher_layout.rs \
+  's~>= Duration::from_secs\(u64::from\(minutes\) \* 60\)~> Duration::from_secs(u64::from(minutes) * 60)~' \
+  '> Duration::from_secs(u64::from(minutes) * 60)' \
+  mnema-desktop 'launcher_layout::tests::cold_exactly_at_the_threshold_not_a_second_before' --lib
+
+case_ "launcher cold: hide_launcher records no hide" \
+  src-tauri/src/lib.rs \
+  's~        app\.state::<launcher_layout::HiddenAt>\(\)\.mark\(\);\n    \}\n\}~    }\n}~' \
+  'let _ = window.hide();
+    }
+}' \
+  mnema-desktop 'hide_launcher_records_when_it_hid' --test shell
+
+case_ "launcher cold: a threshold of 0 minutes is accepted" \
+  src-tauri/src/prefs.rs \
+  's~\.filter\(\|&m\| m >= 1\)~.filter(|\&m| m >= 0)~' \
+  '.filter(|&m| m >= 0)' \
+  mnema-desktop 'prefs::tests::the_cold_threshold_is_a_whole_number_of_minutes_from_one' --lib
+
+case_ "launcher cold: the cold show keeps the old layout" \
+  src-tauri/src/lib.rs \
+  's~app\.state::<launcher_layout::Current>\(\)\.set\(cold\);~let _ = cold;~' \
+  'let _ = cold;' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher cold: the cold show does not tell the launcher" \
+  src-tauri/src/lib.rs \
+  's~    let _ = app\.emit_to\("launcher", LAUNCHER_COLD_EVENT, \(\)\);\n~~' \
+  'launcher_layout::resize(window, cold);
+    true' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher cold: the threshold ignores the preference" \
+  src-tauri/src/lib.rs \
+  's~prefs::cold_after_minutes\(s\.data_dir\(\)\)~{ let _ = s; 5 }~' \
+  '{ let _ = s; 5 }' \
+  mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher position: a nudge outlives a drag" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(p\) if \(now\.x - p\.x\)\.abs\(\) <= 1~Some(p) if (now.x - p.x).abs() <= 1000~' \
+  '<= 1000' \
+  mnema-desktop 'launcher_position::tests::a_nudge_is_kept_only_while_the_window_is_where_it_was_put' --lib

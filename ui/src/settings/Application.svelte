@@ -4,7 +4,7 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    appPrefs, setHotkey, setAutostart, type AppPrefs, type AutostartState, type LocaleChoice, type ThemeChoice,
+    appPrefs, setHotkey, setAutostart, setColdAfter, type AppPrefs, type AutostartState, type LocaleChoice, type ThemeChoice,
   } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
   import { theme, changeTheme } from '../theme';
@@ -599,6 +599,75 @@
 
   const loadFailedLabel = $derived.by(() => { void $locale; return t('application_load_failed'); });
 
+  // The launcher's idle threshold. The field is a text the person edits and
+  // `prefs.coldAfterMinutes` is what is stored; they meet again after every
+  // change, accepted or not, so a refused `0` never stays on screen.
+  const coldLabelText = $derived.by(() => { void $locale; return t('application_launcher_cold_label'); });
+  const coldFailedLabel = $derived.by(() => { void $locale; return t('application_launcher_cold_failed'); });
+  let coldError = $state<string | null>(null);
+  let coldBusy = $state(false);
+  let coldText = $state('');
+  const storedCold = $derived(prefs?.coldAfterMinutes);
+  // Not while a write is in flight: the field then holds what the person has
+  // typed since, and `changeCold` puts the stored value back when it is done.
+  $effect(() => { if (storedCold !== undefined && !coldBusy) coldText = String(storedCold); });
+
+  // At most one write is in flight and the field is never disabled for it: a
+  // disabled input loses focus, which ends the arrow keys. A change made while
+  // a write is in flight is remembered (the last one wins) and written when
+  // that write settles, if it differs from what was just stored.
+  let coldQueued: number | null = null;
+
+  async function changeCold(field: HTMLInputElement) {
+    if (prefs === null) return;
+    const text = field.value;
+    const minutes = Number(text);
+    // `coldText` alone cannot put the stored value back: it still holds it, so
+    // assigning it again changes nothing and the field keeps what was typed.
+    const showStored = () => { coldText = String(prefs!.coldAfterMinutes); field.value = coldText; };
+    // Only what `u32` deserialises is sent: an empty field is `0` to `Number`,
+    // so it is checked as text; a negative, fractional or over-`u32` number
+    // would fail before the command ran. `0` is sent on purpose — refusing it
+    // is Rust's.
+    if (text.trim() === '' || !Number.isInteger(minutes) || minutes < 0 || minutes > 4294967295) {
+      showStored();
+      return;
+    }
+    if (coldBusy) {
+      coldQueued = minutes;
+      return;
+    }
+    coldBusy = true;
+    try {
+      let next: number | null = minutes;
+      while (next !== null) {
+        coldError = null;
+        try {
+          const stored = await setColdAfter(next);
+          prefs = { ...prefs!, coldAfterMinutes: stored };
+        } catch (err) {
+          coldError = err instanceof Error ? err.message : String(err);
+          // No re-read, as for the theme: a refusal writes nothing, so the
+          // stored value is already what `prefs` holds.
+        }
+        const stored = prefs!.coldAfterMinutes;
+        next = coldQueued !== null && coldQueued !== stored ? coldQueued : null;
+        // A newer value that equals the stored one is not written, and a
+        // refusal for a value no longer in the field goes with it.
+        if (coldQueued !== null && next === null) coldError = null;
+        coldQueued = null;
+        // Mid-chain the field keeps what the person typed, so the next arrow
+        // step starts from there and not from the intermediate stored value.
+        if (next === null) {
+          coldText = String(stored);
+          field.value = coldText;
+        }
+      }
+    } finally {
+      coldBusy = false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Task 6: the four group headings the mockup arranges this section into.
   // The controls under each keep their own handlers and guards unchanged —
@@ -607,6 +676,7 @@
 
   const groupShortcutLabel = $derived.by(() => { void $locale; return t('application_group_shortcut'); });
   const groupAppearanceLabel = $derived.by(() => { void $locale; return t('application_group_appearance'); });
+  const groupLauncherLabel = $derived.by(() => { void $locale; return t('application_group_launcher'); });
   const groupStartupLabel = $derived.by(() => { void $locale; return t('application_group_startup'); });
   const groupVersionLabel = $derived.by(() => { void $locale; return t('application_group_version'); });
 
@@ -625,6 +695,7 @@
       : autostartQuoteRepeats ? 'application-autostart-failed application-autostart-reason'
       : 'application-autostart-failed application-autostart-error',
   );
+  const coldDescribedBy = $derived(coldError === null ? undefined : 'application-launcher-cold-failed application-launcher-cold-error');
   const themeDescribedBy = $derived(themeError === null ? undefined : 'application-theme-failed application-theme-error');
   // Language has two independent rejections (a failed READ, a failed CHANGE)
   // plus two non-error outcomes worth describing (`partial`, `unknown`) —
@@ -739,6 +810,10 @@
     if (themeError !== null) {
       out.push({ key: 'theme-failed', text: themeFailedLabel });
       out.push({ key: 'theme-error', text: themeError });
+    }
+    if (coldError !== null) {
+      out.push({ key: 'cold-failed', text: coldFailedLabel });
+      out.push({ key: 'cold-error', text: coldError });
     }
     if (languageApplication.kind === 'partial') {
       out.push({ key: `language-partial#${languageApplyStamp}`, text: languagePartialLabel });
@@ -965,6 +1040,25 @@
         onclick={() => void loadLocaleChoice('press')}
       >{languageRetryReadLabel}</button>
     {/if}
+  </div>
+
+  <div role="group" aria-labelledby="application-group-launcher">
+    <h3 id="application-group-launcher">{groupLauncherLabel}</h3>
+    <p id="application-launcher-cold-label" data-testid="application-launcher-cold-label">{coldLabelText}</p>
+    {#if coldError !== null}
+      <p id="application-launcher-cold-failed" data-testid="application-launcher-cold-failed" data-announced-by={ASSERTIVE_ID}>{coldFailedLabel}</p>
+      <p id="application-launcher-cold-error" data-testid="application-launcher-cold-error" data-announced-by={ASSERTIVE_ID}>{coldError}</p>
+    {/if}
+    <input
+      type="number"
+      min="1"
+      step="1"
+      data-testid="application-launcher-cold"
+      aria-labelledby="application-launcher-cold-label"
+      aria-describedby={coldDescribedBy}
+      value={coldText}
+      onchange={(e) => changeCold(e.currentTarget)}
+    />
   </div>
 
   <div role="group" aria-labelledby="application-group-startup">

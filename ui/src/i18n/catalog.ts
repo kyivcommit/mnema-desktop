@@ -34,6 +34,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
+  | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
+  | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -68,7 +70,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'settings_folders_removing' | 'settings_folders_remove_blocked'
   | 'settings_folders_remove_question_withdrawn'
   | 'settings_folders_added_note'
-  | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_none'
+  | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
@@ -112,6 +114,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_index_pending_chunks'
   | 'indexing_statcard_documents' | 'indexing_statcard_updated'
   | 'application_group_shortcut' | 'application_group_appearance'
+  | 'application_group_launcher' | 'application_launcher_cold_label' | 'application_launcher_cold_failed'
   | 'application_group_startup' | 'application_group_version'
   | 'application_shortcut_label' | 'application_shortcut_registered'
   | 'application_shortcut_unavailable' | 'application_shortcut_reason'
@@ -344,6 +347,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
+    toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
+    provider_ok: 'З\'єднано з OpenRouter',
+    provider_unreachable: 'Постачальник не відповідає: {reason}',
+    provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
+    provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
@@ -603,6 +611,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // implicit promise used to be, and names the one place a scan now starts.
     settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
     settings_masks_heading: 'Маски файлів',
+    settings_masks_info_label: 'Як працюють маски',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
     // маска глобальна (D-c), тому не стосується тієї теки, поруч з якою вона
     // намальована; кожна тека застосує її на СВОЄМУ наступному скануванні,
@@ -1000,6 +1009,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // unchanged; only the labelled `role="group"` wrapper around them is new.
     application_group_shortcut: 'Виклик',
     application_group_appearance: 'Вигляд',
+    application_group_launcher: 'Лаунчер',
+    application_launcher_cold_label: 'Лаунчер забуває останню відповідь через (хвилин):',
+    application_launcher_cold_failed: 'Час не змінено. Ось що відповів застосунок:',
     application_group_startup: 'Запуск',
     application_group_version: 'Версія',
     application_shortcut_label: 'Скорочення для відкриття пошуку:',
@@ -1168,6 +1180,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
+    toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
+    provider_ok: 'Connected to OpenRouter',
+    provider_unreachable: 'The provider is unreachable: {reason}',
+    provider_missing_key: 'No provider key — open the model settings',
+    provider_missing_model: 'No embedding model chosen — open the model settings',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
@@ -1242,6 +1259,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
     settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
     settings_masks_heading: 'File masks',
+    settings_masks_info_label: 'How masks work',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',
@@ -1341,6 +1359,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // these and is English, like every other rejection in this product.
     application_group_shortcut: 'Shortcut',
     application_group_appearance: 'Appearance',
+    application_group_launcher: 'Launcher',
+    application_launcher_cold_label: 'Launcher forgets the last answer after (minutes):',
+    application_launcher_cold_failed: 'The time was not changed. This is what the application answered:',
     application_group_startup: 'Startup',
     application_group_version: 'Version',
     application_shortcut_label: 'Shortcut for opening the search:',

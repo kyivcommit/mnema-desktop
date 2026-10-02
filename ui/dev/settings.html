@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>Mnema (mock)</title></head>
+  <body><div id="app"></div><script type="module">
+    import { installMockBackend } from './mock-backend.ts';
+    installMockBackend('settings');
+    await import('../src/settings/main.ts');
+  </script></body>
+</html>

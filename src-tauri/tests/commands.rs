@@ -403,6 +403,10 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "app_prefs",
         "set_hotkey",
         "set_autostart",
+        // The launcher's idle threshold: a read-modify-write of `prefs.json`.
+        "set_cold_after",
+        // A network call (`/credits`) and a credential-store read.
+        "provider_status",
     ] {
         assert_ne!(
             responding_thread(&webview, cmd),
@@ -4236,6 +4240,160 @@ fn every_model_command_the_window_calls_is_registered() {
              {message}"
         );
     }
+}
+
+/// The cold show: past the threshold read from `prefs.json` the launcher takes
+/// the default layout and the launcher window hears `launcher-cold`; short of
+/// it, nothing changes. The mock runtime reports every window visible, so the
+/// test calls `go_cold_if_idle` itself; `focus_launcher` calling it before
+/// `place` is the live run's, and so is the window's size: the mock's
+/// `set_size` does nothing, so `resize` cannot be observed here.
+#[test]
+fn go_cold_if_idle_follows_the_prefs_threshold() {
+    use mnema_desktop::launcher_layout::{Current, HiddenAt, Layout};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tauri::{Listener, Manager, WebviewWindowBuilder};
+
+    let wide = Layout {
+        left: true,
+        right: true,
+    };
+    let run = |after: u64| {
+        let dir = tempfile::tempdir().unwrap();
+        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
+            .unwrap();
+        let app = app_in(dir.path());
+        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+            .build()
+            .unwrap();
+        let heard = Arc::new(AtomicUsize::new(0));
+        let h = heard.clone();
+        window.listen("launcher-cold", move |_| {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        app.state::<Current>().set(wide);
+        app.state::<HiddenAt>().mark();
+        let marked = app.state::<HiddenAt>().get().unwrap();
+        let cold = mnema_desktop::go_cold_if_idle(
+            app.handle(),
+            &window,
+            marked + Duration::from_secs(after),
+        );
+        // The mock delivers synchronously; give a queued one a moment anyway.
+        std::thread::sleep(Duration::from_millis(50));
+        (
+            cold,
+            app.state::<Current>().get(),
+            heard.load(Ordering::SeqCst),
+        )
+    };
+
+    assert_eq!(run(61), (true, Layout::default(), 1));
+    assert_eq!(run(59), (false, wide, 0));
+}
+
+/// An answer that lands restarts the idle clock: hidden at t0, answered one
+/// second short of the threshold, a show past the threshold from the hide is
+/// still hot; without the answer the same show is cold.
+#[test]
+fn an_answer_restarts_the_idle_clock() {
+    use mnema_desktop::launcher_layout::HiddenAt;
+    use tauri::{Manager, WebviewWindowBuilder};
+
+    let run = |answered: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
+            .unwrap();
+        let app = app_in(dir.path());
+        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+            .build()
+            .unwrap();
+        // Hidden "at t0": the clock the answer must move past.
+        app.state::<HiddenAt>().mark();
+        std::thread::sleep(Duration::from_millis(1100));
+        let t0 = app.state::<HiddenAt>().get().unwrap();
+        if answered {
+            call(&main_webview(&app), "launcher_answered", json!({}))
+                .expect("launcher_answered was rejected");
+        }
+        // The answer landed 1.1 s after the hide; 61 s after the hide is past
+        // the threshold for the hide, 59.9 s short of it for the answer.
+        mnema_desktop::go_cold_if_idle(app.handle(), &window, t0 + Duration::from_secs(61))
+    };
+    assert!(run(false));
+    assert!(!run(true));
+}
+
+/// `set_launcher_layout` is reachable through the IPC, binds `left` and
+/// `right`, and records the layout even with no launcher window (the mock app
+/// has none, so only the bookkeeping runs).
+#[test]
+fn every_launcher_command_is_registered() {
+    use mnema_desktop::launcher_layout::{Current, Layout};
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let unbound = error_text(
+        &call(&webview, "set_launcher_layout", json!({}))
+            .expect_err("a command was accepted without the arguments it declares"),
+    );
+    assert_ne!(unbound, not_registered("set_launcher_layout"));
+    assert!(unbound.contains(INVALID_ARGS), "{unbound}");
+    assert!(unbound.contains("`left`"), "{unbound}");
+
+    call(
+        &webview,
+        "set_launcher_layout",
+        json!({ "left": true, "right": false }),
+    )
+    .expect("set_launcher_layout was rejected");
+    assert_eq!(
+        app.state::<Current>().get(),
+        Layout {
+            left: true,
+            right: false
+        }
+    );
+}
+
+/// `open_settings` takes an optional section: without one it opens the window
+/// and says nothing, with one the SETTINGS window — not the launcher, not every
+/// window — hears `settings-section` carrying it.
+#[test]
+fn open_settings_names_a_section_to_the_settings_window_only() {
+    use std::sync::{Arc, Mutex};
+    use tauri::{Listener, WebviewWindowBuilder};
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let heard: Arc<Mutex<Vec<(&'static str, String)>>> = Arc::default();
+    for label in ["settings", "launcher"] {
+        let window = WebviewWindowBuilder::new(&app, label, Default::default())
+            .build()
+            .unwrap();
+        let h = heard.clone();
+        window.listen("settings-section", move |e| {
+            h.lock().unwrap().push((label, e.payload().to_string()));
+        });
+    }
+
+    call(&webview, "open_settings", json!({})).expect("open_settings was rejected without one");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        heard.lock().unwrap().is_empty(),
+        "an event without a section"
+    );
+
+    call(&webview, "open_settings", json!({ "section": "models" }))
+        .expect("open_settings was rejected with a section");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        *heard.lock().unwrap(),
+        vec![("settings", "\"models\"".to_string())]
+    );
 }
 
 /// A model change that says nothing about the embeddings already there is
@@ -10648,6 +10806,65 @@ fn a_stored_shortcut_with_no_modifier_is_not_registered_at_boot_either() {
         vec!["register(Alt+Space)".to_string()],
         "the space bar must never be handed to the operating system"
     );
+}
+
+#[test]
+fn set_cold_after_writes_the_key_and_app_prefs_reads_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let before = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(
+        before["coldAfterMinutes"],
+        json!(5),
+        "the default: {before}"
+    );
+
+    let reply =
+        call(&webview, "set_cold_after", json!({ "minutes": 7 })).expect("set_cold_after rejected");
+    assert_eq!(reply, json!(7));
+
+    let after = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(after["coldAfterMinutes"], json!(7), "{after}");
+    assert_eq!(prefs::cold_after_minutes(dir.path()), 7, "the key on disk");
+}
+
+#[test]
+fn set_cold_after_refuses_zero_and_leaves_the_stored_value() {
+    let dir = tempfile::tempdir().unwrap();
+    prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(9)).unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let rejected = call(&webview, "set_cold_after", json!({ "minutes": 0 }))
+        .expect_err("a zero-minute threshold was accepted");
+
+    assert_eq!(
+        error_text(&rejected),
+        "the launcher needs at least one minute before it forgets the last answer"
+    );
+    assert_eq!(
+        prefs::cold_after_minutes(dir.path()),
+        9,
+        "the key was touched"
+    );
+}
+
+#[test]
+fn set_cold_after_rejects_a_negative_or_fractional_number_before_it_runs() {
+    // The window must never send one; this pins what happens if it does:
+    // argument deserialisation refuses, and nothing is written.
+    let dir = tempfile::tempdir().unwrap();
+    prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(9)).unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    for bad in [json!(-1), json!(2.5)] {
+        call(&webview, "set_cold_after", json!({ "minutes": bad }))
+            .expect_err("a non-u32 number reached the command");
+    }
+    assert_eq!(prefs::cold_after_minutes(dir.path()), 9);
 }
 
 #[test]

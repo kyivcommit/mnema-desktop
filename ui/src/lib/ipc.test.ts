@@ -24,7 +24,7 @@ import type {
   SubfolderListing,
   SubfolderState,
 } from './ipc';
-import { OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
+import { LAUNCHER_COLD_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -156,6 +156,16 @@ test('cancelJob invokes cancel_job with no arguments and no channel', async () =
 
   expect(invoke).toHaveBeenCalledWith('cancel_job');
   expect(invoke.mock.calls.at(-1)).toHaveLength(1);
+});
+
+test('openSettings sends no arguments alone, and the section beside it when given one', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.openSettings();
+  expect(invoke).toHaveBeenLastCalledWith('open_settings', {});
+
+  await ipc.openSettings('models');
+  expect(invoke).toHaveBeenLastCalledWith('open_settings', { section: 'models' });
 });
 
 test('forgetKey invokes forget_key with no arguments', async () => {
@@ -582,6 +592,7 @@ test('the index read arm rejects Rust snake_case spellings', () => {
 const REGISTERED: AppPrefs = {
   hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
   autostart: { kind: 'disabled' },
+  coldAfterMinutes: 5,
   version: '0.0.0',
   platform: 'mac',
 };
@@ -812,6 +823,13 @@ const LIB_RS = readFileSync(join(HERE, '../../../src-tauri/src/lib.rs'), 'utf8')
 
 test('the scan-progress event name is the one lib.rs actually emits', () => {
   expect(SCAN_PROGRESS_EVENT).toBe(rustStrConst(LIB_RS, 'SCAN_PROGRESS_EVENT'));
+});
+
+// The same failure for `launcher-cold`: rename one side and the launcher keeps
+// its last answer inside a window Rust has already narrowed.
+test('the launcher-cold event name is the one lib.rs actually emits', () => {
+  expect(LAUNCHER_COLD_EVENT).toBe(rustStrConst(LIB_RS, 'LAUNCHER_COLD_EVENT'));
+  expect(LIB_RS).toMatch(/emit_to\("launcher", LAUNCHER_COLD_EVENT,/);
 });
 
 test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {

@@ -1,8 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { expect, test, vi } from 'vitest';
-import { tick } from 'svelte';
 import SearchLine from './SearchLine.svelte';
-import { setLocale } from '../i18n';
 import { MAX_ASK_QUERY, type LauncherState } from './state';
 
 test('state A shows only the search input, no message', () => {
@@ -53,41 +51,21 @@ test('state F shows the refusal message, not an alert', () => {
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
-test('state D shows a spinner and the phase line, query stays in the input', () => {
+test('state D draws no extra row and no spinner; the input is the only busy signal', () => {
   const { container } = render(SearchLine, { state: { kind: 'inFlight', query: 'my question' }, onSubmit: vi.fn(), query: 'my question' });
-  // Reached by class, asserted as a role — see the blank test above.
-  expect(container.querySelector('.spinner')!.getAttribute('role')).toBe('progressbar');
-  expect(screen.getByRole('progressbar')).toBeTruthy();
-  const phases = screen.getByTestId('phases').textContent ?? '';
-  expect(phases).toMatch(/чат|chat/i);
-  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('my question');
+  // The search panel must not change height while an ask runs: the line holds
+  // the input and nothing else.
+  expect(screen.queryByTestId('phases')).toBeNull();
+  expect(container.querySelector('.spinner')).toBeNull();
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  expect(container.querySelector('.search-line')!.children).toHaveLength(1);
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  expect(box.value).toBe('my question');
+  expect(box.getAttribute('aria-busy')).toBe('true');
   expect(screen.queryByRole('alert')).toBeNull(); // in flight is not also an error (assert both directions)
 });
 
-test('state D announces the phase line, it is not silent decoration', () => {
-  // `role="status"` on the phase line is the whole of what a screen reader gets
-  // told while a search runs — every other test in this file reaches that
-  // element by its testid, so deleting the role left the suite green.
-  render(SearchLine, { state: { kind: 'inFlight', query: 'q' }, onSubmit: vi.fn(), query: 'q' });
-  expect(screen.getByRole('status')).toBe(screen.getByTestId('phases'));
-});
-
-test('state D phase line and spinner label follow a live language switch (Codex #4)', async () => {
-  // The phase line and the spinner aria-label were bare `t()` calls with no
-  // `$locale` dependency, so a switch during an in-flight search left them in
-  // the old language while the placeholder/error strings updated. Both
-  // directions: English first, then the switch must reach BOTH the line and
-  // the aria-label.
-  setLocale('en');
-  render(SearchLine, { state: { kind: 'inFlight', query: 'q' }, onSubmit: vi.fn(), query: 'q' });
-  const phases = () => screen.getByTestId('phases').textContent ?? '';
-  const spinnerLabel = () => screen.getByRole('progressbar').getAttribute('aria-label') ?? '';
-  expect(phases()).toContain('text'); // en
-  expect(spinnerLabel()).toBe('chat'); // en
-  setLocale('uk');
-  await tick();
-  expect(phases()).toContain('текст'); // uk — the live switch reached the phase line
-  expect(phases()).toContain('зміст');
-  expect(spinnerLabel()).toBe('чат'); // uk — and the spinner aria-label
-  setLocale('en'); // leave the shared store as it was found
+test('the input is not busy outside state D', () => {
+  render(SearchLine, { state: { kind: 'idle' }, onSubmit: vi.fn(), query: '' });
+  expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBeNull();
 });

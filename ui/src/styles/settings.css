@@ -200,11 +200,12 @@ main select:focus-visible {
 .model-row button {
   white-space: nowrap;
 }
-/* the ⓘ beside the sort button, and the popover it opens (owner, 2026-09-16) */
-.model-row .info {
+/* the ⓘ beside the sort button and beside the masks heading, and the popover
+   it opens (owner, 2026-09-16; masks 2026-09-25) */
+.info {
   padding: 0 4px;
   border: 0;
-  font-size: 22px;
+  font-size: 16px;
   line-height: 1;
   color: var(--ink-soft);
 }
@@ -275,15 +276,44 @@ main select:focus-visible {
   cursor: pointer;
 }
 
-/* the active section (mockup .snav .item.on) */
+/* the active section, a filled row (owner, 2026-09-25, a macOS-style sidebar;
+ * was the mockup's .snav .item.on card). Its own pair of tokens, because the
+ * accent itself drew the eye in both themes: a pale tint with ink on it in the
+ * light theme, a muted indigo with light ink in the dark one. */
 .snav .item[aria-pressed="true"] {
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--select);
+  color: var(--on-select);
   font-family: var(--sans);
   font-weight: 600;
   font-style: normal;
-  box-shadow: 0 1px 3px -1px var(--shadow), inset 0 0 0 1px var(--line);
 }
+
+/* the section's tile: a theme token for the fill, the surface for the glyph,
+ * so the pair flips with the theme. `--tile-wash` softens the fill toward the
+ * surface, lighter in the light theme and dimmer in the dark (owner, 2026-09-25). */
+.snav .item {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 7px;
+}
+
+.nav-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--shadow);
+}
+
+.nav-icon[data-section="models"] { background: color-mix(in srgb, var(--accent), var(--surface) var(--tile-wash)); }
+.nav-icon[data-section="folders"] { background: color-mix(in srgb, var(--cite), var(--surface) var(--tile-wash)); }
+.nav-icon[data-section="indexing"] { background: color-mix(in srgb, var(--ok), var(--surface) var(--tile-wash)); }
+.nav-icon[data-section="application"] { background: color-mix(in srgb, var(--ink-soft), var(--surface) var(--tile-wash)); }
 
 .spane {
   flex: 1;
@@ -293,6 +323,36 @@ main select:focus-visible {
   flex-direction: column;
   gap: 16px;
   overflow: auto;
+}
+
+/* blocks one level below the pane (owner, 2026-09-25): `.spane`'s gap reaches
+ * only its own children, so the two kept-mounted panels (Settings.svelte), the
+ * folder and mask editors and Application's groups stack their own. The
+ * mockup's .field (gap 6px) played that part inside a group; our markup has
+ * no .field, so the group does it. `:not([hidden])` because an author
+ * `display` beats the browser's own `[hidden] { display: none }`. */
+.spane > .panel:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.folders,
+.masks,
+.spane > [role="group"] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* `main button` already holds its own width; a select or number field in a column would not */
+.spane > [role="group"] > select,
+.spane > [role="group"] > input[type="number"] {
+  align-self: flex-start;
+}
+
+.spane > [role="group"] > input[type="number"] {
+  width: 16ch;
 }
 
 /* section title (mockup .stitle .t) */
@@ -344,10 +404,17 @@ main select:focus-visible {
   gap: 15px;
 }
 
+/* tabs on their panel (owner, 2026-09-25, GitHub's Write/Preview): the strip
+ * overlaps the panel's top border by one pixel, and the pressed tab — panel
+ * background, no bottom edge — covers that border where it stands, so tab and
+ * panel read as one shape. An unpressed tab is bare text over the border. */
 .mtabs {
+  position: relative;
+  z-index: 1;
+  margin-bottom: -1px;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-end;
+  gap: 2px;
 }
 
 /* Task 9 (owner's ruling, live run 2026-09-10): the dot moved inside its own
@@ -355,6 +422,32 @@ main select:focus-visible {
  * rather than the base `main button` rule's own 7px. */
 .mtab {
   gap: 9px;
+  border-color: transparent;
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+}
+
+/* over `main button[aria-pressed="true"]`'s accent: a tab is marked by the
+ * shape it shares with the panel, not by the pressed-button colour */
+.mtab[aria-pressed="true"] {
+  border-color: var(--line);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.tabpanel {
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* square only under the first tab, where tab and panel share the left edge */
+.mtabset:has(.mtab:first-child[aria-pressed="true"]) > .tabpanel {
+  border-top-left-radius: 0;
 }
 
 /* the per-role configured dot (Task 4, review P2-1; Task 9 moved it inside

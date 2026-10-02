@@ -2,9 +2,10 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, modelSettings, openSettings } from '../lib/ipc';
-  import { checkQuery, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type LauncherState } from './state';
+  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerStatus, setLauncherLayout, type ProviderStatus } from '../lib/ipc';
+  import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Arms from './Arms.svelte';
+  import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
 
@@ -12,37 +13,115 @@
   let echo = $state('');
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
+  // The answer a hot launcher was showing when the current submit started. Any
+  // error puts it back (a blank or too-long line, a failed ask): the error is
+  // told in the search line, and the person keeps what they were reading. Null
+  // when there was none, and for every submit that did not start from a hot
+  // launcher's answer.
+  let previous = $state<LauncherState | null>(null);
+  // What the cards draw. The search line always gets `launcherState` itself.
+  const cardsState = $derived(
+    launcherState.kind === 'error' && previous
+      ? previous
+      : launcherState,
+  );
   let provider = $state(false);
+  let status = $state<ProviderStatus | null>(null);
   let textOn = $state(true);
   let contentOn = $state(false);
+  // Cold: the search column alone. The first answer with something to show
+  // makes it hot and opens both side panels; after that the person's choice
+  // stands across questions. `launcher-cold` is the only way back.
+  let heat = $state<Heat>('cold');
+  let left = $state(false);
+  let right = $state(false);
+
+  // What is on screen, not what was asked for: cold shows no side panel
+  // whatever the switches say, and the switches themselves are left alone.
+  const showLeft = $derived(heat === 'hot' && left);
+  const showRight = $derived(heat === 'hot' && right);
+  const cols = $derived(`${showLeft ? 'l' : ''}s${showRight ? 'r' : ''}`);
+
+  // Derived booleans, so this runs once per change of what is shown and not
+  // once per write to `left`, `right` or `heat`.
+  $effect(() => {
+    setLauncherLayout(showLeft, showRight).catch((e) => console.error('set_launcher_layout failed', e));
+  });
 
   const appWindow = getCurrentWebviewWindow();
-  const pinLabel = $derived.by(() => { void $locale; return `${t('pin')} 📌`; });
 
-  onMount(() => {
-    // Seed the arms row once. Non-fatal: on failure the row stays on its
-    // text-only default rather than blocking the launcher — log, do not
-    // swallow.
+  // Read on mount and again whenever the window gains focus: the key and the
+  // model are changed in another window, and the launcher is hidden, not
+  // closed, so nothing else would tell it. Non-fatal: on failure the arms row
+  // keeps its last value and the cloud its last state — log, do not swallow.
+  // A later call supersedes an earlier one still in flight: a slow probe that
+  // lands after a newer answer must not put the old state back on the cloud.
+  let providerGen = 0;
+  function refreshProvider() {
+    const gen = ++providerGen;
+    providerStatus()
+      .then((s) => { if (gen === providerGen) status = s; })
+      .catch((e) => console.error('provider_status failed', e));
     modelSettings()
       .then((s) => {
         provider = providerReady(s);
         if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
       })
       .catch((e) => console.error('model_settings failed', e));
+  }
+
+  onMount(() => {
+    refreshProvider();
+
+    // The window was hidden past the threshold: forget the answer, keep the
+    // text in the line (the person may still want to ask it).
+    let unlisten: (() => void) | null = null;
+    let gone = false;
+    listenLauncherCold(() => {
+      coldGen += 1;
+      heat = 'cold';
+      left = right = false;
+      launcherState = { kind: 'idle' };
+      previous = null;
+      echo = '';
+    })
+      .then((u) => { if (gone) u(); else unlisten = u; })
+      .catch((e) => console.error('listen launcher-cold failed', e));
+    return () => { gone = true; unlisten?.(); };
   });
 
   // The owner validates and calls ask — the whole machine goes through
   // state.ts. A rejected ask becomes a visible error, never a silent reset:
   // an eaten error is easy to miss.
+  // Bumped by `launcher-cold`: an ask that was in flight when the launcher went
+  // cold belongs to an answer the person has been told is forgotten.
+  let coldGen = 0;
+
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
-    echo = '';
+    // What is on screen, not what the machine holds: after an error the
+    // machine says `error` while the restored answer is still showing, and a
+    // second error must restore that same answer again.
+    const shown = cardsState;
+    previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
+    const shownEcho = echo;
     const check = checkQuery(raw);
+    // A rejected line keeps the echo: the answer it belongs to stays drawn.
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
+    echo = '';
     launcherState = { kind: 'inFlight', query: check.query };
+    const gen = coldGen;
     try {
       const answer = await ask(check.query);
+      if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      // The idle clock restarts when an answer lands, so one that arrived while
+      // the launcher was hidden is not dropped by the hide's older clock.
+      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
+      // Only the cold-to-hot step opens the panels; a hot launcher keeps
+      // whichever the person switched off.
+      const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
+      if (warmed) { heat = 'hot'; left = right = true; }
       // §7: line clears on ready — but only if it still holds the submitted
       // query. A draft typed while the ask was in flight is kept, not wiped
       // (Codex #3).
@@ -52,8 +131,10 @@
       // second one of its own here, and in state B both were on screen at once.
       echo = check.query;
     } catch (e) {
+      if (gen !== coldGen) return;
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
+      if (previous) echo = shownEcho; // the restored answer's own question
     }
   }
 
@@ -107,30 +188,23 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
+<svelte:window onfocus={refreshProvider} onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
-<main class="panels">
+<main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
-       click inside it except the input, the pin and the Arms labels — Tauri's
+       click inside it except the input, the toolbar buttons and the Arms labels — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
-  <div class="searchbar" data-tauri-drag-region="deep">
-    <div class="sb-row">
-      <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
-      <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
-           aria-label to prove the locale switch reached the DOM. It used to find the
-           button as "the first element with any aria-label", which was true only
-           while no labelled card rendered — and the cards are now labelled in five
-           of six states. The accessible name cannot be the selector when it is the
-           thing under test. -->
-      <button
-        class="pin"
-        data-testid="pin"
-        class:active={pinned}
-        aria-pressed={pinned}
-        aria-label={pinLabel}
-        onclick={() => (pinned = !pinned)}>📌</button>
+  <Cards state={cardsState} query={echo} {left} {right} {heat}>
+    {#snippet search()}
+    <div class="searchbar" data-tauri-drag-region="deep">
+      <div class="sb-row">
+        <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+      </div>
+      <div class="sb-tools">
+        <Arms bind:textOn bind:contentOn {provider} />
+        <Toolbar {heat} bind:left bind:right bind:pinned {status} />
+      </div>
     </div>
-    <Arms bind:textOn bind:contentOn {provider} />
-  </div>
-  <Cards state={launcherState} query={echo} />
+    {/snippet}
+  </Cards>
 </main>

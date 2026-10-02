@@ -33,6 +33,7 @@ const SETTINGS: ModelSettings = {
 const APP_PREFS: AppPrefs = {
   hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
   autostart: { kind: 'disabled' },
+  coldAfterMinutes: 5,
   version: '0.0.0',
   platform: 'linux',
 };
@@ -87,6 +88,17 @@ const listMasks = vi.fn();
 const maskPreview = vi.fn();
 const addMask = vi.fn();
 let deliver: ((state: ScanState) => void) | null = null;
+
+// The window listens for `settings-section` straight from the event module, so
+// the mock keeps the handler for a test to fire and the unlisten to count.
+let sectionHandler: ((e: { payload: unknown }) => void) | null = null;
+const unlistenSection = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    if (name === 'settings-section') sectionHandler = cb;
+    return Promise.resolve(unlistenSection);
+  },
+}));
 vi.mock('../lib/ipc', () => ({
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
@@ -167,6 +179,8 @@ beforeEach(() => {
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
   addMask.mockReset();
   deliver = null;
+  sectionHandler = null;
+  unlistenSection.mockReset();
 });
 
 afterEach(() => {
@@ -369,9 +383,13 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // reads as a comma-separated pair rather than one run-together word. Read
   // off a real render rather than hand-edited, the same rule every earlier
   // version of this string followed.
+  //
+  // 2026-09-25 (owner): the tabs and their panel are wrapped together so the
+  // pressed tab can share the panel's border — one more space before
+  // "Embedding", the wrapper's own indentation, and no new word.
   expect(panel()?.textContent).toBe(
     ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
-    + ' Create one in your OpenRouter account and paste it here.  Save    '
+    + ' Create one in your OpenRouter account and paste it here.  Save     '
     + ' Embedding, Not configured Chat, Not configured   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
     + '      ',
@@ -1549,4 +1567,32 @@ test('forget_question_survives_a_section_switch', async () => {
 
   expect(screen.getByTestId('model-key-forget-confirm')).toBeTruthy();
   expect(forgetKey).not.toHaveBeenCalled();
+});
+
+// Task 8 of the launcher panels: the launcher's cloud opens Settings on Models
+// even when the window is already open on another section.
+test('a settings-section event moves the open window to that section', async () => {
+  render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('true');
+  await waitFor(() => expect(sectionHandler).not.toBeNull());
+
+  sectionHandler!({ payload: 'models' });
+  await tick();
+
+  expect(screen.getByTestId('settings-nav-models').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('false');
+});
+
+test('a settings-section event naming no section changes nothing, and unmount stops listening', async () => {
+  const { unmount } = render(Settings);
+  await fireEvent.click(screen.getByTestId('settings-nav-folders'));
+  await waitFor(() => expect(sectionHandler).not.toBeNull());
+
+  sectionHandler!({ payload: 'nope' });
+  await tick();
+  expect(screen.getByTestId('settings-nav-folders').getAttribute('aria-pressed')).toBe('true');
+
+  unmount();
+  await waitFor(() => expect(unlistenSection).toHaveBeenCalledTimes(1));
 });

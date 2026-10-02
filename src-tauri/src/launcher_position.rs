@@ -11,6 +11,7 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::launcher_layout::{Layout, search_offset, width};
 use crate::models::Platform;
 use tauri::{LogicalPosition, PhysicalPosition, PhysicalRect, Position};
 use tauri_plugin_positioner::{Position as TrayPosition, WindowExt};
@@ -115,36 +116,93 @@ impl Space {
     }
 }
 
-/// Where the window is now, in the space of this build; `None` when the
-/// runtime cannot say. The one read shared by `remember` and the focus-in
-/// settle — both must convert the same way, or a settle and a blur disagree.
-pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<Point> {
+/// The factor [`HANDLE_CENTRE`] and [`search_offset`] take when converting
+/// between the window's corner and the search column's, in the space
+/// `space`: the scale itself in the physical space (Windows), `1.0` in the
+/// logical one (macOS/Linux) — the same choice [`Space::area`] already makes
+/// for a monitor's own factor. `pub`: Task 4 reads it too.
+pub fn factor(space: Space, scale: f64) -> f64 {
+    match space {
+        Space::Physical => scale,
+        Space::Logical => 1.0,
+    }
+}
+
+/// A window corner shifted to the search column's corner: `Layout`'s left
+/// column pushes the search column right by `search_offset(l)`, scaled into
+/// `factor`'s space. The identity when `l` shows no left column.
+pub fn to_search(p: Point, l: Layout, factor: f64) -> Point {
+    Point {
+        x: p.x + (search_offset(l) * factor).round() as i32,
+        y: p.y,
+    }
+}
+
+/// The inverse of [`to_search`]: a search column corner shifted back to the
+/// window's own corner, the point `set_position` takes.
+pub fn to_window(p: Point, l: Layout, factor: f64) -> Point {
+    Point {
+        x: p.x - (search_offset(l) * factor).round() as i32,
+        y: p.y,
+    }
+}
+
+/// The search column's top-left corner right now, in the space of this
+/// build; `None` when the runtime cannot say. Every point this module reads,
+/// stores or compares is the search column's corner, never the window's —
+/// `here` converts the runtime's window-corner report through [`to_search`]
+/// for the launcher's current `Layout`. The one read shared by `remember` and
+/// the focus-in settle — both must convert the same way, or a settle and a
+/// blur disagree.
+pub fn here<R: tauri::Runtime>(window: &tauri::Window<R>, l: Layout) -> Option<Point> {
+    let (corner, f) = window_corner(window)?;
+    Some(to_search(corner, l, f))
+}
+
+/// The window's own top-left corner in the space of this build, with the
+/// factor [`to_search`]/[`to_window`] take for it. The one raw read `here` and
+/// `set_launcher_layout` share.
+pub fn window_corner<R: tauri::Runtime>(window: &tauri::Window<R>) -> Option<(Point, f64)> {
     let p = window.outer_position().ok()?;
     let scale = window.scale_factor().ok()?;
-    Some(Space::of_this_build().point(p, scale))
+    let space = Space::of_this_build();
+    Some((space.point(p, scale), factor(space, scale)))
+}
+
+/// Where the window's corner goes when the layout changes from `before` to
+/// `next` and the search column stays put on screen, with no check against
+/// the monitor: `refit` is that plus the clamp.
+pub fn relayout(window_corner: Point, before: Layout, next: Layout, factor: f64) -> Point {
+    to_window(to_search(window_corner, before, factor), next, factor)
 }
 
 /// The `prefs.json` key: `{"x": <i32>, "y": <i32>}` in [`Space::of_this_build`]
 /// — physical pixels on Windows, logical points on macOS and Linux.
 pub const KEY: &str = "launcher_position";
 
-/// A point on the drag handle, in logical pixels from the window's top-left
-/// corner: the middle of the search panel's first row (the input and the pin).
-/// Every number is a declaration in `ui/src/styles/launcher.css` — `main.panels`
-/// padding `24px 32px`, first column 190, gap 16, second column 470, then the
-/// panel's own padding-top 11 and the pin's height 26.
+/// A point on the drag handle, in logical pixels from the search column's own
+/// top-left corner — not the window's: the window's corner moves under
+/// `Layout` (a visible left column pushes it left of the search column, see
+/// [`to_window`]), the search column's does not. The point is the middle of
+/// the search panel's first row (the input; the toolbar buttons sit in the
+/// second row). Every number is a declaration in
+/// `ui/src/styles/launcher.css` — `main.panels` padding `0px 0px` (owner,
+/// 2026-09-25: no hidden margin round the panels, so the window goes flush to
+/// a screen edge), the search column's own width 470, then the panel's own
+/// padding-top 11 and the first row's `min-height` 26. The owner narrowed the
+/// gap (16 → 8 → 5) and widened the side columns by half (190 → 285,
+/// 244 → 366) on 2026-09-25.
 ///
-/// The offset is only this fixed because the window is: `"width": 1000` and
-/// `"resizable": false` in `src-tauri/tauri.conf.json`. The three grid tracks
-/// plus their two 16px gaps (190 + 470 + 244 + 2 × 16 = 936) exactly fill the
-/// content box (1000 − 2 × 32 = 936), which is why `main.panels`'
-/// `justify-content: center` and the middle column's `minmax(0, …)` floor never
-/// actually engage — either one becoming live would shift the panel and make
-/// this offset wrong.
+/// The search column is always 470 wide (`launcher_layout::SEARCH_WIDTH`),
+/// whatever side panels `Layout` shows next to it, so this offset is the same
+/// constant in every layout — `to_search`/`to_window` carry the per-layout
+/// shift between the window's corner and this one.
 /// `the_handle_offset_matches_the_stylesheet` in `Launcher.test.ts` reads both
-/// this line and the stylesheet, and checks that same sum against the window
-/// width, failing if any of them disagree.
-pub const HANDLE_CENTRE: (f64, f64) = (32.0 + 190.0 + 16.0 + 470.0 / 2.0, 24.0 + 11.0 + 26.0 / 2.0);
+/// this line and the stylesheet. It also checks each `data-cols` layout's
+/// track-and-gap sum against `launcher_layout::width` (built from
+/// `SEARCH_WIDTH`, `LEFT_SPAN`, `RIGHT_SPAN`) and the width in
+/// `tauri.conf.json` against `SEARCH_WIDTH`, failing if any of them disagree.
+pub const HANDLE_CENTRE: (f64, f64) = (470.0 / 2.0, 0.0 + 11.0 + 26.0 / 2.0);
 
 /// The saved position, or `None` for anything that is not two integers under
 /// `KEY`. Tolerant on purpose: this runs on show, with nowhere to report to,
@@ -163,29 +221,116 @@ pub fn write(data_dir: &Path, p: Point) -> std::io::Result<()> {
     crate::prefs::write_key(data_dir, KEY, serde_json::json!({ "x": p.x, "y": p.y }))
 }
 
-/// `Some(saved)` when the drag handle's reference point would land inside some
-/// monitor's work area — `(x + HANDLE_CENTRE.0 * scale, y + HANDLE_CENTRE.1 * scale)`
-/// with *that* monitor's factor, since `HANDLE_CENTRE` is always logical while
-/// `saved` and each area are in `Space::of_this_build()`. Monitors arrive from
-/// [`Space::area`], each paired with the factor the handle offset takes there —
-/// the monitor's scale in the physical space, 1 in the logical one. Each
-/// monitor is tried with its own factor (the physical space only — in the
-/// logical one every factor is 1): a window straddling a 1× and a 2× monitor
-/// takes the factor of whichever holds most of it, and the monitor that holds
-/// the handle is the one whose factor put it there — the approximation errs
-/// towards keeping a saved position, and
-/// `adjacent_monitors_with_different_scales_each_use_their_own` pins it. Otherwise `None`: a monitor that was unplugged,
-/// or a resolution / DPI change that left only the window's corner on screen.
-/// The whole window need not be visible — a window the person left half off
-/// the edge comes back half off the edge.
-pub fn reachable(saved: Option<Point>, monitors: &[(Area, f64)]) -> Option<Point> {
-    let p = saved?;
-    let on_some_monitor = monitors.iter().any(|(area, scale)| {
+/// The factor [`HANDLE_CENTRE`] takes on whichever monitor holds the drag
+/// handle's reference point — `(x + HANDLE_CENTRE.0 * scale, y + HANDLE_CENTRE.1 * scale)`
+/// landing inside that monitor's work area — or `None` off every monitor.
+/// `HANDLE_CENTRE` is always logical while `p` and each area are in
+/// `Space::of_this_build()`. Monitors arrive from [`Space::area`], each
+/// paired with the factor the handle offset takes there — the monitor's scale
+/// in the physical space, 1 in the logical one. Each monitor is tried with
+/// its own factor (the physical space only — in the logical one every factor
+/// is 1): a window straddling a 1× and a 2× monitor takes the factor of
+/// whichever holds most of it, and the monitor that holds the handle is the
+/// one whose factor put it there — the approximation errs towards keeping a
+/// saved position, and `adjacent_monitors_with_different_scales_each_use_their_own`
+/// pins it. The same approximation means two adjacent monitors can both
+/// "hold" one handle, since its position depends on each one's scale: the
+/// first in `monitors` wins, and `place` uses that scale to decide where the
+/// window goes, not only whether a saved position is kept.
+pub fn handle_factor(p: Point, monitors: &[(Area, f64)]) -> Option<f64> {
+    handle_monitor(p, monitors).map(|(_, scale)| *scale)
+}
+
+/// The monitor [`handle_factor`] found, with its area: what [`fit`] clamps to.
+pub fn handle_monitor(p: Point, monitors: &[(Area, f64)]) -> Option<&(Area, f64)> {
+    monitors.iter().find(|(area, scale)| {
         let hx = f64::from(p.x) + HANDLE_CENTRE.0 * scale;
         let hy = f64::from(p.y) + HANDLE_CENTRE.1 * scale;
         hx >= area.x && hx < area.x + area.width && hy >= area.y && hy < area.y + area.height
-    });
-    on_some_monitor.then_some(p)
+    })
+}
+
+/// Every monitor's work area in this build's [`Space`], each with its handle
+/// factor. The one conversion `place` and `set_launcher_layout` share.
+pub fn monitors<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Vec<(Area, f64)> {
+    let space = Space::of_this_build();
+    window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| space.area(*m.work_area(), m.scale_factor()))
+        .collect()
+}
+
+/// Where the window goes for layout `next` when the person's place for the
+/// search column is `anchor`: that place, unless the window would leave the
+/// monitor's work area horizontally; then it is moved just enough to fit
+/// (aligned to the left edge when it is wider than the area). Returns the
+/// window corner and the nudge: how far the search column ended up from the
+/// anchor, in [`Space`] units. `factor` is the monitor's own (see
+/// [`handle_factor`]). Vertical never changes: the height is constant.
+pub fn fit(anchor: Point, next: Layout, area: &Area, factor: f64) -> (Point, i32) {
+    let x = anchor.x - (search_offset(next) * factor).round() as i32;
+    let right = area.x + area.width - width(next) * factor;
+    let fitted = if right < area.x {
+        area.x
+    } else {
+        f64::from(x).clamp(area.x, right)
+    };
+    let fitted = fitted.round() as i32;
+    (
+        Point {
+            x: fitted,
+            y: anchor.y,
+        },
+        fitted - x,
+    )
+}
+
+/// The nudge to use for a layout change: the one in force while the window is
+/// still where the application last put it (`placed`), else 0 — the person
+/// moved it (a macOS drag loses no focus, so no blur has recorded it yet) and
+/// where they dropped it is the anchor. One unit of slack either way absorbs
+/// the rounding between logical and physical readings. No `placed` (a default
+/// placement the OS moves after show) means no nudge.
+pub fn effective_nudge(now: Point, placed: Option<Point>, nudge: i32) -> i32 {
+    match placed {
+        Some(p) if (now.x - p.x).abs() <= 1 && (now.y - p.y).abs() <= 1 => nudge,
+        _ => 0,
+    }
+}
+
+/// The window corner and the new nudge for a change of layout from `before`
+/// to `next`, given the window's `corner` now and the nudge in force. The
+/// anchor is the search column corner less the nudge; the column returns to it
+/// whenever the window fits. With no monitor holding the anchor's handle
+/// nothing can be clamped: the search column stays where it is.
+pub fn refit(
+    corner: Point,
+    before: Layout,
+    next: Layout,
+    factor: f64,
+    nudge: i32,
+    monitors: &[(Area, f64)],
+) -> (Point, i32) {
+    let search = to_search(corner, before, factor);
+    let anchor = Point {
+        x: search.x - nudge,
+        y: search.y,
+    };
+    match handle_monitor(anchor, monitors) {
+        Some((area, f)) => fit(anchor, next, area, *f),
+        None => (relayout(corner, before, next, factor), nudge),
+    }
+}
+
+/// `Some(saved)` when the drag handle would land inside some monitor's work
+/// area — [`handle_factor`] found one. Otherwise `None`: a monitor that was
+/// unplugged, or a resolution / DPI change that left only the search column's
+/// corner on screen. The whole window need not be visible — a window the
+/// person left half off the edge comes back half off the edge.
+pub fn reachable(saved: Option<Point>, monitors: &[(Area, f64)]) -> Option<Point> {
+    saved.filter(|p| handle_factor(*p, monitors).is_some())
 }
 
 #[derive(Default)]
@@ -205,6 +350,14 @@ struct Slots {
     left: Option<Point>,
     /// A show has happened and its focus-in settle has not arrived yet.
     awaiting: bool,
+    /// How far [`fit`] moved the search column off the person's place
+    /// (`applied`/`left`, the anchor), in [`Space`] units; 0 when the window
+    /// fits where they put it. The application's move, not the person's: the
+    /// anchor is the position less this.
+    nudge: i32,
+    /// The window corner the application last set (`place`, a layout change),
+    /// which `nudge` is valid for; `None` after a default placement.
+    placed_at: Option<Point>,
 }
 
 /// Managed state (`app.manage(Memory::default())`): one launcher per process.
@@ -225,6 +378,18 @@ impl Memory {
     pub fn left(&self) -> Option<Point> {
         self.lock().left
     }
+    pub fn nudge(&self) -> i32 {
+        self.lock().nudge
+    }
+    pub fn set_nudge(&self, nudge: i32) {
+        self.lock().nudge = nudge;
+    }
+    pub fn placed_at(&self) -> Option<Point> {
+        self.lock().placed_at
+    }
+    pub fn set_placed_at(&self, corner: Option<Point>) {
+        self.lock().placed_at = corner;
+    }
     pub fn set_applied(&self, p: Option<Point>) {
         self.lock().applied = p;
     }
@@ -243,12 +408,17 @@ impl Memory {
             slots.left = None;
         }
     }
-    /// The launcher's focus-in after a show: what the show actually applied.
-    /// Ignored when no show is awaiting one (a focus-in after an alt-tab).
+    /// The launcher's focus-in after a show: what the show actually applied,
+    /// as an anchor (the reading less the nudge the show set). Ignored when no
+    /// show is awaiting one (a focus-in after an alt-tab).
     pub fn settled(&self, now: Option<Point>) {
         let mut slots = self.lock();
         if slots.awaiting {
-            slots.applied = now;
+            let nudge = slots.nudge;
+            slots.applied = now.map(|p| Point {
+                x: p.x - nudge,
+                ..p
+            });
             slots.awaiting = false;
         }
     }
@@ -259,15 +429,23 @@ impl Memory {
     /// from the last position this process knows — where the person last
     /// left it, or, before any drag, where the application put it. With no
     /// show recorded at all there is nothing to compare against, and a
-    /// position is not evidence of a drag. Records a move as `left` and
-    /// returns it; `None` means "nothing to write".
+    /// position is not evidence of a drag. `now` less the nudge is compared:
+    /// a window the application moved to fit the screen has not been dragged.
+    /// Records a move as `left` — `now` itself, where they dropped it is the
+    /// new anchor — resets the nudge, and returns it; `None` means "nothing
+    /// to write".
     pub fn moved(&self, now: Point) -> Option<Point> {
         let mut slots = self.lock();
         let reference = slots.left.or(slots.applied)?;
-        if reference == now {
+        let anchored = Point {
+            x: now.x - slots.nudge,
+            ..now
+        };
+        if reference == anchored {
             return None;
         }
         slots.left = Some(now);
+        slots.nudge = 0;
         Some(now)
     }
 }
@@ -280,6 +458,24 @@ pub fn remember_position(now: Point, memory: &Memory, data_dir: &Path) -> std::i
         Some(p) => write(data_dir, p),
         None => Ok(()),
     }
+}
+
+/// What `place` does with a saved search column corner (the anchor): `None`
+/// unless its handle is reachable ([`reachable`]); otherwise the anchor, the
+/// window corner `set_position` takes for it, and the nudge [`fit`] needed to
+/// keep the window on that monitor. The conversion uses the scale of the
+/// monitor that holds the handle ([`handle_monitor`]), not the window's own —
+/// the saved point may be on another monitor than the one the window starts
+/// on (the PR #47 class of defect).
+pub fn restore_to(
+    saved: Option<Point>,
+    monitors: &[(Area, f64)],
+    l: Layout,
+) -> Option<(Point, Point, i32)> {
+    let p = reachable(saved, monitors)?;
+    let (area, factor) = handle_monitor(p, monitors)?;
+    let (corner, nudge) = fit(p, l, area, *factor);
+    Some((p, corner, nudge))
 }
 
 /// The one show path (D155): put the window where the person left it — from
@@ -305,23 +501,22 @@ pub fn place<R: tauri::Runtime>(
     memory: &Memory,
     data_dir: Option<&Path>,
     wayland: bool,
+    l: Layout,
 ) {
     let space = Space::of_this_build();
     let restored = if wayland {
         None
     } else {
         let saved = memory.left().or_else(|| data_dir.and_then(read));
-        let monitors: Vec<(Area, f64)> = window
-            .available_monitors()
-            .unwrap_or_default()
-            .iter()
-            .map(|m| space.area(*m.work_area(), m.scale_factor()))
-            .collect();
-        reachable(saved, &monitors)
+        restore_to(saved, &monitors(window), l)
     };
+    let restored_search = restored.map(|(search, _, _)| search);
+    // The default placement is the cold search column alone and fits.
+    memory.set_nudge(restored.map_or(0, |(_, _, nudge)| nudge));
+    memory.set_placed_at(restored.map(|(_, corner, _)| corner));
     match restored {
-        Some(p) => {
-            let _ = window.set_position(space.position(p));
+        Some((_, corner, _)) => {
+            let _ = window.set_position(space.position(corner));
         }
         // §6: next to the tray on macOS, placed after `show` below.
         None if wayland || cfg!(target_os = "macos") => {}
@@ -330,7 +525,7 @@ pub fn place<R: tauri::Runtime>(
         }
     }
     if !wayland {
-        memory.placed(restored);
+        memory.placed(restored_search);
     }
     let _ = window.show();
     if restored.is_none() && !wayland && cfg!(target_os = "macos") {
@@ -348,17 +543,20 @@ pub fn place<R: tauri::Runtime>(
 /// does not arrive would need its own call site instead. Nothing on Wayland
 /// (the value GTK caches there is not a position — D153's sibling), nothing
 /// when the runtime cannot say where the window is, and a failed write is
-/// reported, not raised: this runs on the event loop.
+/// reported, not raised: this runs on the event loop. A window the application
+/// nudged onto the screen (`Memory::nudge`) is not a drag: `Memory::moved`
+/// compares the reading less the nudge.
 pub fn remember<R: tauri::Runtime>(
     window: &tauri::Window<R>,
     memory: &Memory,
     data_dir: &Path,
     wayland: bool,
+    l: Layout,
 ) {
     if wayland {
         return;
     }
-    let Some(now) = here(window) else {
+    let Some(now) = here(window, l) else {
         return;
     };
     if let Err(e) = remember_position(now, memory, data_dir) {
@@ -489,15 +687,88 @@ mod tests {
         let saved = Space::Logical.point(PhysicalPosition::new(1700, 100), 1.0);
         let restored = reachable(Some(saved), &[primary, external]);
         assert_eq!(restored, Some(Point { x: 1700, y: 100 }));
-        // Unplug the external: the handle (2173, 148) is on no monitor.
+        // Unplug the external: the handle (1935, 124) — 1700 + 235, 100 + 24 —
+        // is on no monitor.
         assert_eq!(reachable(Some(saved), &[primary]), None);
+    }
+
+    // --- to_search / to_window / handle_factor (Task 3: D155 relative to the search column) ---
+
+    #[test]
+    fn the_search_corner_round_trips_through_every_layout() {
+        for l in [(false, false), (true, false), (false, true), (true, true)] {
+            let l = Layout {
+                left: l.0,
+                right: l.1,
+            };
+            for factor in [1.0, 2.0] {
+                let p = Point { x: 600, y: 80 };
+                assert_eq!(to_search(to_window(p, l, factor), l, factor), p);
+            }
+        }
+    }
+
+    #[test]
+    fn the_left_column_moves_the_window_corner_not_the_search_corner() {
+        let search = Point { x: 600, y: 80 };
+        let hot = Layout {
+            left: true,
+            right: true,
+        };
+        assert_eq!(to_window(search, hot, 1.0), Point { x: 310, y: 80 });
+        // Review Focus 5: on a 2× monitor in the physical space the offset doubles.
+        assert_eq!(to_window(search, hot, 2.0), Point { x: 20, y: 80 });
+        assert_eq!(to_window(search, Layout::default(), 2.0), search);
+    }
+
+    #[test]
+    fn relayout_keeps_the_search_column_where_it_was() {
+        let l = |left, right| Layout { left, right };
+        let p = Point { x: 600, y: 80 };
+        // Left column off -> on: the window grows leftwards, its corner moves -290.
+        assert_eq!(
+            relayout(p, l(false, false), l(true, false), 1.0),
+            Point { x: 310, y: 80 }
+        );
+        assert_eq!(
+            relayout(p, l(false, false), l(true, false), 2.0),
+            Point { x: 20, y: 80 }
+        );
+        // on -> off: +290 (logical) / +580 (factor 2).
+        assert_eq!(
+            relayout(p, l(true, false), l(false, false), 1.0),
+            Point { x: 890, y: 80 }
+        );
+        assert_eq!(
+            relayout(p, l(true, false), l(false, false), 2.0),
+            Point { x: 1180, y: 80 }
+        );
+        // The right column grows to the right: the corner does not move.
+        assert_eq!(relayout(p, l(false, false), l(false, true), 2.0), p);
+        assert_eq!(relayout(p, l(true, false), l(true, true), 2.0), p);
+        // The same layout is the identity.
+        assert_eq!(relayout(p, l(true, true), l(true, true), 2.0), p);
+    }
+
+    #[test]
+    fn the_factor_is_the_monitor_that_holds_the_handle() {
+        // Review Focus 5: a 1× monitor and a 2× one to its right. A search corner
+        // whose handle is on the 2× monitor takes 2.0 whatever the window's own
+        // scale is now; off every monitor there is no factor.
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
+        assert_eq!(handle_factor(Point { x: 1700, y: 100 }, &two), Some(2.0)); // 1700 + 470 = 2170
+        assert_eq!(handle_factor(Point { x: 100, y: 100 }, &two), Some(1.0)); // 100 + 235 = 335
+        assert_eq!(handle_factor(Point { x: 9000, y: 100 }, &two), None);
     }
 
     // --- reachable: the two counterexamples from the spec review, then DPI ---
 
     #[test]
     fn a_handle_whose_centre_is_on_a_monitor_is_kept() {
-        // Window corner off the left edge, handle (x = 373) well inside.
+        // Window corner off the left edge, handle (x = -100 + 235 = 135) well inside.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(-100, 100), &m), at(-100, 100));
     }
@@ -505,7 +776,7 @@ mod tests {
     #[test]
     fn a_window_whose_corner_is_on_screen_but_whose_handle_is_not_is_dropped() {
         // Corner at x = 1800 is inside a 1920-wide monitor; the handle centre
-        // (1800 + 473 = 2273) is not. The old corner test kept this one.
+        // (1800 + 235 = 2035) is not. The old corner test kept this one.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
         assert_eq!(reachable(at(1800, 100), &m), None);
     }
@@ -513,11 +784,12 @@ mod tests {
     #[test]
     fn the_handle_offset_scales_with_the_monitor() {
         // Same physical point, same 3840-wide monitor: at scale 2 the handle
-        // centre is 3000 + 946 = 3946 (off), at scale 1 it is 3473 (on).
+        // centre is 3500 + 235 * 2 = 3970 (off), at scale 1 it is
+        // 3500 + 235 = 3735 (on).
         let hidpi = [monitor(0, 0, 3840, 2160, 2.0)];
         let lodpi = [monitor(0, 0, 3840, 2160, 1.0)];
-        assert_eq!(reachable(at(3000, 200), &hidpi), None);
-        assert_eq!(reachable(at(3000, 200), &lodpi), at(3000, 200));
+        assert_eq!(reachable(at(3500, 200), &hidpi), None);
+        assert_eq!(reachable(at(3500, 200), &lodpi), at(3500, 200));
     }
 
     #[test]
@@ -525,44 +797,44 @@ mod tests {
         // Centre exactly at x0 + w is the first pixel that is NOT on the
         // monitor; one to the left is the last that is. Kills `<` → `<=`.
         let m = [monitor(0, 0, 1000, 1000, 1.0)];
-        let on_edge = 1000 - 473;
+        let on_edge = 1000 - 235;
         assert_eq!(reachable(at(on_edge, 0), &m), None);
         assert_eq!(reachable(at(on_edge - 1, 0), &m), at(on_edge - 1, 0));
     }
 
     #[test]
     fn the_work_area_bottom_edge_is_outside() {
-        // The vertical twin: handle y = saved.y + 48. Kills a `y` offset that
-        // drifts (48 → 148 leaves every horizontal test green) and `<` → `<=`.
+        // The vertical twin: handle y = saved.y + 24. Kills a `y` offset that
+        // drifts (24 → 124 leaves every horizontal test green) and `<` → `<=`.
         let m = [monitor(0, 0, 1000, 1000, 1.0)];
-        let on_edge = 1000 - 48;
+        let on_edge = 1000 - 24;
         assert_eq!(reachable(at(0, on_edge), &m), None);
         assert_eq!(reachable(at(0, on_edge - 1), &m), at(0, on_edge - 1));
     }
 
     #[test]
     fn a_window_above_the_top_edge_with_its_handle_below_it_is_kept() {
-        // Corner 30 px above the monitor, handle (−30 + 48 = 18) inside. A
+        // Corner 10 px above the monitor, handle (−10 + 24 = 14) inside. A
         // `reachable` that checks the corner's y — or ignores the y offset —
         // drops it.
         let m = [monitor(0, 0, 1920, 1080, 1.0)];
-        assert_eq!(reachable(at(100, -30), &m), at(100, -30));
-        assert_eq!(reachable(at(100, -49), &m), None);
+        assert_eq!(reachable(at(100, -10), &m), at(100, -10));
+        assert_eq!(reachable(at(100, -25), &m), None);
     }
 
     #[test]
     fn adjacent_monitors_with_different_scales_each_use_their_own() {
         // A 1× monitor at 0..1920 and a 2× monitor to its right. Saved corner at
-        // x = 1600: on the 1× monitor the handle (2073) is off its edge, on the
-        // 2× monitor (1600 + 946 = 2546) it is inside — kept. Remove the 2×
-        // monitor and it is off everything.
+        // x = 1700: on the 1× monitor the handle (1700 + 235 = 1935) is off its
+        // edge, on the 2× monitor (1700 + 235 * 2 = 2170) it is inside — kept.
+        // Remove the 2× monitor and it is off everything.
         let two = [
             monitor(0, 0, 1920, 1080, 1.0),
             monitor(1920, 0, 3840, 2160, 2.0),
         ];
         let one = [monitor(0, 0, 1920, 1080, 1.0)];
-        assert_eq!(reachable(at(1600, 100), &two), at(1600, 100));
-        assert_eq!(reachable(at(1600, 100), &one), None);
+        assert_eq!(reachable(at(1700, 100), &two), at(1700, 100));
+        assert_eq!(reachable(at(1700, 100), &one), None);
     }
 
     #[test]
@@ -573,8 +845,9 @@ mod tests {
 
     #[test]
     fn a_second_monitor_with_negative_origin_counts() {
-        // Primary at 0, a second monitor to its left. The point is off the
-        // primary and on the second — and with the second removed it is off.
+        // Primary at 0, a second monitor to its left. The handle
+        // (-1500 + 235 = -1265) is off the primary [0, 1920) and inside the
+        // second [-1920, 0) — and with the second removed it is off.
         let two = [
             monitor(0, 0, 1920, 1080, 1.0),
             monitor(-1920, 0, 1920, 1080, 1.0),
@@ -615,6 +888,157 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::prefs::write_key(dir.path(), KEY, json!({"x": 12, "y": 34})).unwrap();
         assert_eq!(read(dir.path()), at(12, 34));
+    }
+
+    // --- fit: the window stays on its monitor, the search column otherwise put ---
+
+    fn lay(left: bool, right: bool) -> Layout {
+        Layout { left, right }
+    }
+
+    #[test]
+    fn a_window_that_fits_does_not_move() {
+        let (area, f) = monitor(0, 0, 1440, 900, 1.0);
+        let anchor = Point { x: 100, y: 50 };
+        assert_eq!(fit(anchor, lay(false, true), &area, f), (anchor, 0));
+    }
+
+    #[test]
+    fn a_source_panel_past_the_right_edge_moves_the_window_left_just_enough() {
+        let (area, f) = monitor(0, 0, 1440, 900, 1.0);
+        // 841 wide: the window's right edge must be 1440, so x = 599.
+        let (corner, nudge) = fit(Point { x: 1000, y: 50 }, lay(false, true), &area, f);
+        assert_eq!(corner, Point { x: 599, y: 50 });
+        assert_eq!(nudge, -401);
+    }
+
+    #[test]
+    fn a_tree_past_the_left_edge_moves_the_window_right_just_enough() {
+        let (area, f) = monitor(0, 0, 1440, 900, 1.0);
+        // The tree puts the window 290 left of the search column: -190 -> 0.
+        let (corner, nudge) = fit(Point { x: 100, y: 50 }, lay(true, false), &area, f);
+        assert_eq!(corner, Point { x: 0, y: 50 });
+        assert_eq!(nudge, 190);
+    }
+
+    #[test]
+    fn shrinking_back_returns_the_search_column_to_the_anchor() {
+        let m = [monitor(0, 0, 1440, 900, 1.0)];
+        // Anchor 900; the source panel pushes the window to 599 (nudge -301).
+        let (grown, nudge) = refit(
+            Point { x: 900, y: 50 },
+            lay(false, false),
+            lay(false, true),
+            1.0,
+            0,
+            &m,
+        );
+        assert_eq!((grown, nudge), (Point { x: 599, y: 50 }, -301));
+        let (back, nudge) = refit(grown, lay(false, true), lay(false, false), 1.0, nudge, &m);
+        assert_eq!((back, nudge), (Point { x: 900, y: 50 }, 0));
+    }
+
+    #[test]
+    fn a_window_wider_than_the_area_aligns_left() {
+        let (area, f) = monitor(0, 0, 600, 900, 1.0);
+        let (corner, nudge) = fit(Point { x: 100, y: 50 }, lay(false, true), &area, f);
+        assert_eq!(corner, Point { x: 0, y: 50 });
+        assert_eq!(nudge, -100);
+    }
+
+    #[test]
+    fn the_clamp_uses_the_scale_of_the_monitor_holding_the_anchor() {
+        // Windows: physical pixels. The anchor's handle is on the 2x monitor
+        // (5000 + 470 < 5760), so the 841-point window is 1682 px wide and its
+        // right edge is 5760 at x = 4078. Read with scale 1 it would be 4919.
+        let m = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
+        let (corner, nudge) = refit(
+            Point { x: 5000, y: 50 },
+            lay(false, false),
+            lay(false, true),
+            1.0, // the window's own scale: not the one that decides
+            0,
+            &m,
+        );
+        assert_eq!((corner, nudge), (Point { x: 4078, y: 50 }, -922));
+    }
+
+    #[test]
+    fn with_no_monitor_holding_the_anchor_nothing_is_clamped() {
+        let (corner, nudge) = refit(
+            Point { x: 9000, y: 50 },
+            lay(false, false),
+            lay(true, false),
+            1.0,
+            0,
+            &[],
+        );
+        assert_eq!((corner, nudge), (Point { x: 8710, y: 50 }, 0));
+    }
+
+    #[test]
+    fn a_nudge_is_kept_only_while_the_window_is_where_it_was_put() {
+        let put = Some(Point { x: 599, y: 50 });
+        let n = |x, y| effective_nudge(Point { x, y }, put, -301);
+        assert_eq!(n(599, 50), -301);
+        assert_eq!(n(600, 49), -301); // rounding between logical and physical
+        assert_eq!(n(601, 50), 0);
+        assert_eq!(n(599, 52), 0);
+        assert_eq!(effective_nudge(Point { x: 599, y: 50 }, None, -301), 0);
+    }
+
+    #[test]
+    fn a_drag_between_a_nudge_and_a_shrink_leaves_the_column_where_it_was_dropped() {
+        let m = [monitor(0, 0, 1440, 900, 1.0)];
+        let (grown, nudge) = refit(
+            Point { x: 900, y: 50 },
+            lay(false, false),
+            lay(false, true),
+            1.0,
+            0,
+            &m,
+        );
+        assert_eq!((grown, nudge), (Point { x: 599, y: 50 }, -301));
+        // The person drags the grown window to x = 400; no blur recorded it.
+        let dropped = Point { x: 400, y: 50 };
+        let kept = effective_nudge(dropped, Some(grown), nudge);
+        let (back, nudge) = refit(dropped, lay(false, true), lay(false, false), 1.0, kept, &m);
+        assert_eq!((back, nudge), (dropped, 0));
+    }
+
+    // --- Memory: a nudge is the application's move, not the person's ---
+
+    #[test]
+    fn a_hide_with_a_nudge_and_no_drag_writes_nothing() {
+        let memory = Memory::default();
+        memory.set_applied(at(900, 50));
+        memory.set_nudge(-301);
+        // The window sits where the clamp put it: 900 - 301.
+        assert_eq!(memory.moved(Point { x: 599, y: 50 }), None);
+        assert_eq!(memory.left(), None);
+        assert_eq!(memory.nudge(), -301);
+    }
+
+    #[test]
+    fn a_drag_while_nudged_records_the_dropped_place_and_clears_the_nudge() {
+        let memory = Memory::default();
+        memory.set_applied(at(900, 50));
+        memory.set_nudge(-301);
+        assert_eq!(memory.moved(Point { x: 700, y: 50 }), at(700, 50));
+        assert_eq!(memory.left(), at(700, 50));
+        assert_eq!(memory.nudge(), 0);
+    }
+
+    #[test]
+    fn a_settle_after_a_nudged_show_records_the_anchor() {
+        let memory = Memory::default();
+        memory.placed(at(900, 50));
+        memory.set_nudge(-301);
+        memory.settled(at(599, 50));
+        assert_eq!(memory.applied(), at(900, 50));
     }
 
     // --- Memory: a hide without a drag writes nothing; a drag is written ---
@@ -751,5 +1175,44 @@ mod tests {
         memory.set_applied(at(0, 0));
         remember_position(Point { x: 50, y: 60 }, &memory, dir.path()).unwrap();
         assert_eq!(read(dir.path()), at(50, 60));
+    }
+
+    #[test]
+    fn a_restore_moves_the_window_by_the_handles_monitor_scale() {
+        // A 1x monitor and a 2x one to its right, the left column shown. The
+        // search corner (1700, 100) has its handle on the 2x monitor
+        // (1700 + 470 = 2170), so the window corner is the search corner minus
+        // 290 * 2 = 580, not minus 290: 1120. That is left of the 2x monitor's
+        // edge (1920), so the window is moved right to 1920, nudge 800. At
+        // (100, 100) the handle
+        // is on the 1x monitor: minus 290 -> -190, which leaves the monitor, so
+        // the window is moved right to 0 and the nudge is 190. Not shown: unmoved.
+        let two = [
+            monitor(0, 0, 1920, 1080, 1.0),
+            monitor(1920, 0, 3840, 2160, 2.0),
+        ];
+        let left = Layout {
+            left: true,
+            right: false,
+        };
+        let search = Point { x: 1700, y: 100 };
+        assert_eq!(
+            restore_to(Some(search), &two, left),
+            Some((search, Point { x: 1920, y: 100 }, 800))
+        );
+        let near = Point { x: 100, y: 100 };
+        assert_eq!(
+            restore_to(Some(near), &two, left),
+            Some((near, Point { x: 0, y: 100 }, 190))
+        );
+        assert_eq!(
+            restore_to(Some(search), &two, Layout::default()),
+            // The corner is left of the 2x monitor that holds the handle: pulled onto it.
+            Some((search, Point { x: 1920, y: 100 }, 220))
+        );
+        assert_eq!(
+            restore_to(Some(Point { x: 9000, y: 100 }), &two, left),
+            None
+        );
     }
 }

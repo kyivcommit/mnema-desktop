@@ -15,7 +15,7 @@ use crate::Error;
 /// have; 30 s is well past any answer this product waits for. Named so a
 /// fast unit test can pin the value without waiting it out (Task 2 review
 /// round 2, G5) — see `agent_with` and the tests at the bottom of this file.
-const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// This builder and the `GET` path — `get()`, below — were verified against
 /// the live endpoint 2026-08-08. That is a measurement recorded in the plan,
@@ -64,7 +64,16 @@ fn agent_with(timeout: Duration) -> ureq::Agent {
 }
 
 pub(crate) fn get(base: &str, path: &str, key: Option<&str>) -> Result<(u16, String), Error> {
-    let mut request = agent()
+    get_within(base, path, key, GLOBAL_TIMEOUT)
+}
+
+pub(crate) fn get_within(
+    base: &str,
+    path: &str,
+    key: Option<&str>,
+    timeout: Duration,
+) -> Result<(u16, String), Error> {
+    let mut request = agent_with(timeout)
         .get(format!("{base}{path}"))
         .header("accept", "application/json");
     if let Some(key) = key {

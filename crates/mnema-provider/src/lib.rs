@@ -17,7 +17,7 @@ pub use catalogue::{
 pub use chat::{Message, MessageRole, complete};
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
-    check_key, embed,
+    check_key, check_key_within, embed,
 };
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).

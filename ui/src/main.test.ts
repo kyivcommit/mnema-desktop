@@ -30,6 +30,7 @@ vi.mock('./lib/ipc', async (importOriginal) => {
     Object.entries(real).map(([name, value]) => [name, typeof value === 'function' ? never : value]),
   );
 });
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide: vi.fn() }) }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 

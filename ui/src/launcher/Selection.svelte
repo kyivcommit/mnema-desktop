@@ -1,13 +1,10 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import Answer from './Answer.svelte';
   import Passages from './Passages.svelte';
-  import Source from './Source.svelte';
-  import type { AskAnswer, AskCitation, Hit } from '../lib/ipc';
-
-  // The two answers that draw cards (Task 9). `refused` is not one of them and
-  // the type says so, so a refusal cannot reach this component by accident.
-  type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
+  import type { AskCitation, Hit } from '../lib/ipc';
+  import { firstCard, type CardAnswer } from './state';
 
   // 🔴 Ruling AC — why this component exists at all. The selection lives HERE,
   // and `Cards` wraps this component in `{#key state}`. A
@@ -38,7 +35,10 @@
   const generatedAnswer = $derived(answer.kind === 'generated' ? answer : null);
   const passagesAnswer = $derived(answer.kind === 'citationsOnly' ? answer : null);
 
-  let selected = $state<AskCitation | Hit | null>(null);
+  // Starts on the answer's first card, so the right panel is never empty beside
+  // an answer that has one. Capturing the initial value is the intent: this
+  // component sits under `{#key}`, so a new answer is a new component.
+  let selected = $state<AskCitation | Hit | null>(untrack(() => firstCard(answer)));
 
   // The tree is deliberately outside the key (`Cards.svelte`) and therefore
   // cannot read `selected` from in here, so it is reported upward. This fires on
@@ -80,7 +80,6 @@
   }
 
   const centreLabel = $derived.by(() => { void $locale; return labelFor(answer); });
-  const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
 </script>
 
 <section class="float results" data-testid="card-centre" aria-label={centreLabel}>
@@ -90,15 +89,3 @@
     <Passages answer={passagesAnswer} onSelect={(passage) => (selected = passage)} />
   {/if}
 </section>
-
-{#if selected !== null}
-  <!-- §7: the source card does not exist until something is selected, and
-       `Source` takes a non-nullable selection (`Source.svelte:83-86`) — so this
-       guard is what the type asks for as well as what the mockup shows.
-       `siblings` is the whole citation list: `Source` drops the clicked one and
-       everything in another document itself (Decision 4, Ruling U), and that
-       rule stays in one place. -->
-  <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
-    <Source {selected} siblings={answer.citations} />
-  </section>
-{/if}

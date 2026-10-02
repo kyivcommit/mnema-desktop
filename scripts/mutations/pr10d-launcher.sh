@@ -17,14 +17,14 @@ case_ "launcher: primary source highlight loses its outline" \
 
 case_ "launcher: source is placed into the tree column" \
   ui/src/styles/launcher.css \
-  's~(main > \.doc \{ grid-column: )3~${1}1~' \
-  'main > .doc { grid-column: 1;' \
+  's~(\[data-cols="lsr"\] > \.doc \{ grid-column: )3~${1}1~' \
+  '[data-cols="lsr"] > .doc { grid-column: 1;' \
   src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
 
 case_ "launcher: source loses its grid hook" \
-  ui/src/launcher/Selection.svelte \
-  's~class="float doc"~class="float"~' \
-  'class="float"' \
+  ui/src/launcher/Cards.svelte \
+  's~class="float doc" data-testid="card-source"~class="float" data-testid="card-source"~' \
+  'class="float" data-testid="card-source"' \
   src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
 
 case_ "launcher: cards cannot scroll" \
@@ -41,8 +41,8 @@ case_ "launcher: the selected tab looks inactive" \
 
 case_ "launcher: pinned state loses its style" \
   ui/src/styles/launcher.css \
-  's~\.pin\[aria-pressed="true"\]~.pin[aria-pressed="never"]~' \
-  '.pin[aria-pressed="never"]' \
+  's~\.tb\[aria-pressed="true"\]~.tb[aria-pressed="never"]~' \
+  '.tb[aria-pressed="never"]' \
   src/launcher/styles.test.ts 'real pin exposes pressed state through its style' runner=vitest
 
 case_ "launcher: entry omits its stylesheet" \

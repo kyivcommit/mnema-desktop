@@ -1041,6 +1041,64 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     const b = closed!.style.getPropertyValue('transform');
     expect(a, `transform: "${a}" open, "${b}" closed — no visual difference`).not.toBe(b);
   });
+
+  // Owner, 2026-09-25: blocks inside a section ran into each other — `.spane`'s
+  // gap reaches only its own children, and the two kept-mounted panels, the
+  // folder and mask editors and Application's groups each wrap theirs in a
+  // plain block. The hidden panel is the half that can go wrong: an author
+  // `display` beats the browser's own `[hidden]` rule.
+  // Owner, 2026-09-25: a macOS-style sidebar, one coloured tile per section.
+  // A section whose tile rule went missing draws a bare glyph with nothing
+  // behind it, and nothing else on screen would say so.
+  it('gives every section its own tile colour', () => {
+    const ids = ['models', 'folders', 'indexing', 'application'];
+    mount(`<main><nav class="snav">${ids.map((id) =>
+      `<button class="item"><span class="nav-icon" data-section="${id}"></span>${id}</button>`).join('')}</nav></main>`);
+    const fills = ids.map((id) =>
+      getComputedStyle(document.querySelector(`.nav-icon[data-section="${id}"]`)!).getPropertyValue('background'));
+    fills.forEach((fill, i) => expect(fill, `${ids[i]} tile has no fill`).toMatch(/var\(--/));
+    expect(new Set(fills).size, `tiles share a colour: ${fills.join(', ')}`).toBe(ids.length);
+  });
+
+  // Owner, 2026-09-25: the role buttons are tabs on their panel. What makes
+  // them read so is the join — the pressed tab wears the panel's own
+  // background and has no bottom edge, so it covers the panel's top border
+  // where it stands. `main button[aria-pressed]`'s accent would still tell the
+  // two tabs apart without that, which is why this checks the join itself.
+  it('joins the pressed model tab to its panel', () => {
+    mount(`<main><div class="mtabset"><div class="mtabs">
+      <button type="button" class="mtab" aria-pressed="true">a</button>
+      <button type="button" class="mtab" aria-pressed="false">b</button>
+    </div><div class="tabpanel"></div></div></main>`);
+    const [on, off] = document.querySelectorAll('.mtab');
+    const panel = document.querySelector('.tabpanel')!;
+    const bg = (el: Element) => getComputedStyle(el).getPropertyValue('background');
+    expect(bg(on), 'pressed tab background').not.toBe('');
+    expect(bg(on)).toBe(bg(panel));
+    expect(getComputedStyle(on).getPropertyValue('border-bottom-width')).toMatch(/^0(px)?$/);
+    expect(getComputedStyle(document.querySelector('.mtabs')!).marginBottom).toBe('-1px');
+    differ(on, off, 'background');
+  });
+
+  it('spaces the blocks inside a section, and keeps a hidden panel hidden', () => {
+    mount(`<main><div class="spane">
+      <div class="panel"><div class="folders"></div><div class="masks"></div></div>
+      <div class="panel" hidden></div>
+      <div role="group" aria-labelledby="g"><select></select><input type="number" /></div>
+    </div></main>`);
+    for (const sel of ['.panel:not([hidden])', '.folders', '.masks', '[role="group"]']) {
+      const el = document.querySelector(sel)!;
+      expect(getComputedStyle(el).display, `${sel} display`).toBe('flex');
+      expect(getComputedStyle(el).getPropertyValue('gap'), `${sel} gap`).toMatch(/^[1-9]\d*px$/);
+    }
+    expect(getComputedStyle(document.querySelector('.panel[hidden]')!).display).toBe('none');
+    // a select straight inside a column must not stretch to the pane's width
+    expect(getComputedStyle(document.querySelector('[role="group"] > select')!).alignSelf).toBe('flex-start');
+    // a number field must keep its own width and not stretch
+    const numberInput = document.querySelector('[role="group"] > input[type="number"]')!;
+    expect(getComputedStyle(numberInput).alignSelf).toBe('flex-start');
+    expect(getComputedStyle(numberInput).width).toBe('16ch');
+  });
 });
 
 describe('each window imports its stylesheets', () => {

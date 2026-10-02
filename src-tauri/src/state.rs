@@ -158,6 +158,17 @@ pub struct AppState {
     /// mean holding the state's own lock for the length of a command, which is
     /// what every other getter here exists to avoid.
     hotkey_change: Mutex<()>,
+    /// The provider's last `Ok` answer to `/credits`, and when it came (an
+    /// `Unreachable` is never kept). Cleared by
+    /// `set_key`, `forget_key` and `set_embedding_model`. Never held across the
+    /// request itself.
+    provider_status: Mutex<ProviderCache>,
+}
+
+#[derive(Default)]
+struct ProviderCache {
+    generation: u64,
+    entry: Option<(Instant, crate::provider_status::ProviderStatus)>,
 }
 
 impl AppState {
@@ -201,6 +212,7 @@ impl AppState {
             autolaunch: Mutex::new(Box::new(crate::os_services::NoOsServices)),
             job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
+            provider_status: Mutex::new(ProviderCache::default()),
         }
     }
 
@@ -338,6 +350,52 @@ impl AppState {
 
     pub fn worker_path(&self) -> &Path {
         &self.worker
+    }
+
+    fn provider_cache(&self) -> std::sync::MutexGuard<'_, ProviderCache> {
+        self.provider_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The cached provider answer, if it is still fresh.
+    pub fn cached_provider_status(&self) -> Option<crate::provider_status::ProviderStatus> {
+        match &self.provider_cache().entry {
+            Some((at, status)) if crate::provider_status::fresh(*at, Instant::now()) => {
+                Some(status.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Which generation of the cache a check is about to answer for. Read
+    /// BEFORE the facts the check depends on, so that a change landing after
+    /// the read is seen at the write.
+    pub fn provider_status_gen(&self) -> u64 {
+        self.provider_cache().generation
+    }
+
+    /// Stores an `Ok` `status` only if nothing has invalidated the cache since `epoch`
+    /// was read: a check that was in flight across a `set_key` would otherwise
+    /// put the old key's verdict back.
+    pub fn store_provider_status(
+        &self,
+        epoch: u64,
+        status: crate::provider_status::ProviderStatus,
+    ) {
+        let mut cache = self.provider_cache();
+        // Only a verdict that cannot flip back by itself is kept: a network
+        // that was down a second ago must be asked again at the next focus.
+        if cache.generation == epoch && status == crate::provider_status::ProviderStatus::Ok {
+            cache.entry = Some((Instant::now(), status));
+        }
+    }
+
+    /// Drops the cached provider answer: what it was an answer about has changed.
+    pub fn forget_provider_status(&self) {
+        let mut cache = self.provider_cache();
+        cache.generation += 1;
+        cache.entry = None;
     }
 
     pub fn provider_base(&self) -> &str {

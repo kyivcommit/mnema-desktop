@@ -16,6 +16,7 @@ import type { AppPrefs, LocaleApplyReply, ModelSettings, ScanState } from '../li
 const appPrefs = vi.fn();
 const setHotkey = vi.fn();
 const setAutostart = vi.fn();
+const setColdAfter = vi.fn();
 const setTheme = vi.fn();
 const getLocale = vi.fn();
 const setLocaleChoice = vi.fn();
@@ -24,10 +25,13 @@ const providerModels = vi.fn();
 const listTree = vi.fn();
 const listMasks = vi.fn();
 const jobStatus = vi.fn();
+// `Settings.svelte` listens for `settings-section`; nothing here sends it.
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
   appPrefs: (...a: unknown[]) => appPrefs(...a),
   setHotkey: (...a: unknown[]) => setHotkey(...a),
   setAutostart: (...a: unknown[]) => setAutostart(...a),
+  setColdAfter: (...a: unknown[]) => setColdAfter(...a),
   setTheme: (...a: unknown[]) => setTheme(...a),
   getLocale: (...a: unknown[]) => getLocale(...a),
   setLocaleChoice: (...a: unknown[]) => setLocaleChoice(...a),
@@ -85,6 +89,7 @@ function prefs(over: Partial<AppPrefs> = {}): AppPrefs {
   return {
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
     autostart: { kind: 'disabled' },
+    coldAfterMinutes: 5,
     version: '0.0.0',
     platform: 'linux',
     ...over,
@@ -101,6 +106,7 @@ beforeEach(() => {
   appPrefs.mockReset();
   setHotkey.mockReset();
   setAutostart.mockReset();
+  setColdAfter.mockReset();
   setTheme.mockReset();
   getLocale.mockReset();
   setLocaleChoice.mockReset();
@@ -879,6 +885,8 @@ test('a person who opens Application in the settings window reads the shortcut, 
     + ' Системна'
     + ' Мова:'
     + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
+    + ' Лаунчер'
+    + ' Лаунчер забуває останню відповідь через (хвилин):'
     + ' Запуск'
     + ' Запуск під час входу в систему:'
     + ' Mnema не запускається під час входу в систему.'
@@ -1943,6 +1951,34 @@ test('the same theme refusal, pressed twice, is heard twice', async () => {
   watcher.stop();
 });
 
+test('a refused threshold is announced assertively', async () => {
+  const SENTENCE = 'the launcher needs at least one minute';
+  setColdAfter.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+});
+
+test('the same threshold refusal, entered twice, is heard twice', async () => {
+  const SENTENCE = 'the launcher needs at least one minute';
+  setColdAfter.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-launcher-cold-label');
+  await typeCold('0');
+  await waitFor(() => expect(announced(assertiveRegion())).toContain(SENTENCE));
+  const watcher = watchAnnouncements(assertiveRegion());
+
+  await typeCold('0');
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledTimes(2));
+  await tick();
+
+  expect(watcher.count()).toBeGreaterThan(0);
+  watcher.stop();
+});
+
 test('the same autostart refusal, pressed twice, is heard twice', async () => {
   const SENTENCE = 'the login item could not be written';
   setAutostart.mockRejectedValue(new Error(SENTENCE));
@@ -2339,6 +2375,8 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-autostart-reason', POLITE],
   ['application-autostart-failed', ASSERTIVE],
   ['application-autostart-error', ASSERTIVE],
+  ['application-launcher-cold-failed', ASSERTIVE],
+  ['application-launcher-cold-error', ASSERTIVE],
 ];
 const ANNOUNCED_BY_PARTIAL: ReadonlyArray<readonly [string, string]> = [
   ['application-language-partial', ASSERTIVE],
@@ -2368,6 +2406,7 @@ const everythingRefused = async () => {
   setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
   setAutostart.mockRejectedValue(new Error('the login item could not be written'));
   setTheme.mockRejectedValue(new Error('prefs.json is read-only'));
+  setColdAfter.mockRejectedValue(new Error('the threshold could not be saved'));
   // The mount's read succeeds, so the select is usable; every read after it
   // fails, which is what puts the read refusal on screen.
   getLocale.mockResolvedValueOnce({ choice: 'auto', effective: 'uk' });
@@ -2380,6 +2419,8 @@ const everythingRefused = async () => {
   await shown('application-theme-error');
   await fireEvent.click(screen.getByTestId('application-autostart-enable'));
   await shown('application-autostart-error');
+  await typeCold('0');
+  await shown('application-launcher-cold-error');
   await fireEvent.change(languageSelect(), { target: { value: 'en' } });
   await shown('application-language-change-error');
   await shown('application-language-error');
@@ -2930,4 +2971,134 @@ test('while the corrective read is out, a quote that repeats the reason stays un
   read.resolve(STANDING);
   await waitFor(() => expect(at('application-shortcut-failed')).toBe(SAME_SHORTCUT));
   expect(screen.queryByTestId('application-shortcut-error')).toBeNull();
+});
+
+// The launcher's idle threshold: a number field in its own group between
+// Appearance and Startup.
+const coldField = () => screen.getByTestId('application-launcher-cold') as HTMLInputElement;
+const typeCold = async (text: string) => {
+  await fireEvent.input(coldField(), { target: { value: text } });
+  await fireEvent.change(coldField());
+};
+
+test('the launcher threshold sits in its own group, between appearance and startup', async () => {
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 12 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  const group = screen.getByRole('group', { name: 'Лаунчер' });
+  expect(within(group).getByTestId('application-launcher-cold')).toBeTruthy();
+  expect(coldField().value).toBe('12');
+  expect(coldField().min).toBe('1');
+  expect(coldField().step).toBe('1');
+  const order = screen.getAllByRole('group').map((g) => g.getAttribute('aria-labelledby'));
+  const at3 = (id: string) => order.indexOf(id);
+  expect(at3('application-group-appearance')).toBeLessThan(at3('application-group-launcher'));
+  expect(at3('application-group-launcher')).toBeLessThan(at3('application-group-startup'));
+});
+
+test('changing the threshold calls set_cold_after with the number', async () => {
+  setColdAfter.mockResolvedValue(7);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('7');
+
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledWith(7));
+  expect(setColdAfter).toHaveBeenCalledTimes(1);
+  expect(coldField().value).toBe('7');
+});
+
+test.each(['', '-3', '2.5', '4294967296', '1e20'])('%j is never sent, and the field goes back to the stored value', async (bad) => {
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold(bad);
+
+  expect(setColdAfter).not.toHaveBeenCalled();
+  await waitFor(() => expect(coldField().value).toBe('5'));
+});
+
+test('a refused threshold shows the command\'s sentence, links it, and shows the stored value', async () => {
+  setColdAfter.mockRejectedValue(new Error('the launcher needs at least one minute before it forgets the last answer'));
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 9 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+
+  expect(setColdAfter).toHaveBeenCalledWith(0);
+  expect(await shown('application-launcher-cold-error'))
+    .toBe('the launcher needs at least one minute before it forgets the last answer');
+  await waitFor(() => expect(coldField().value).toBe('9'));
+  const ids = describedByIds(coldField());
+  expect(ids).toContain('application-launcher-cold-error');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('a threshold write in flight does not disable the field, so it keeps focus', async () => {
+  const inFlight = deferred<number>();
+  setColdAfter.mockReturnValue(inFlight.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  coldField().focus();
+  await typeCold('7');
+
+  expect(setColdAfter).toHaveBeenCalledWith(7);
+  expect(coldField().disabled).toBe(false);
+  expect(document.activeElement).toBe(coldField());
+  inFlight.resolve(7);
+  await waitFor(() => expect(coldField().value).toBe('7'));
+});
+
+test('a second threshold change during a write waits for it, and the last one wins', async () => {
+  const first = deferred<number>();
+  const second = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('2');
+  await typeCold('3');
+  await tick();
+  expect(setColdAfter.mock.calls).toEqual([[2]]);
+
+  first.resolve(2);
+  await waitFor(() => expect(setColdAfter.mock.calls).toEqual([[2], [3]]));
+  second.resolve(3);
+  await waitFor(() => expect(coldField().value).toBe('3'));
+  expect(setColdAfter).toHaveBeenCalledTimes(2);
+});
+
+test('the field keeps the newest typed value while a queued write follows the first', async () => {
+  const first = deferred<number>();
+  const second = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('2');
+  await typeCold('3');
+  first.resolve(2);
+  await waitFor(() => expect(setColdAfter).toHaveBeenCalledTimes(2));
+  await tick();
+  expect(coldField().value).toBe('3');
+  second.resolve(3);
+  await waitFor(() => expect(coldField().value).toBe('3'));
+});
+
+test('a refusal goes away when the person steps back to the stored value during the write', async () => {
+  const first = deferred<number>();
+  setColdAfter.mockReturnValueOnce(first.promise);
+  appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 9 }));
+  renderSection();
+  await shown('application-launcher-cold-label');
+
+  await typeCold('0');
+  await typeCold('9');
+  first.reject(new Error('at least one minute'));
+  await waitFor(() => expect(coldField().value).toBe('9'));
+  expect(setColdAfter).toHaveBeenCalledTimes(1);
+  expect(screen.queryByTestId('application-launcher-cold-error')).toBeNull();
 });

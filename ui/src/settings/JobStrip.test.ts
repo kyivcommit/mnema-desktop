@@ -228,7 +228,9 @@ beforeEach(() => {
     if (r instanceof Error) return Promise.reject(r);
     return Promise.resolve(r);
   });
-  listen.mockImplementation((_name: string, cb: (e: { payload: ScanState }) => void) => {
+  listen.mockImplementation((name: string, cb: (e: { payload: ScanState }) => void) => {
+    // The window also listens for `settings-section`; this file is about the scan.
+    if (name !== 'scan-progress') return Promise.resolve(() => {});
     deliver = (state: ScanState) => cb({ payload: state });
     return Promise.resolve(unlisten);
   });

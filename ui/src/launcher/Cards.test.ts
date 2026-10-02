@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Cards from './Cards.svelte';
-import { stateFromAnswer } from './state';
+import { firstCard, stateFromAnswer } from './state';
 import {
   generated,
   generatedOther,
@@ -32,6 +32,10 @@ import type { LauncherState } from './state';
 // after a click, `Source` (which calls `source_around`). Every test in this file
 // — including the six that predate this task — goes through the mock below, so an
 // unmocked command can never reach jsdom.
+// The hot launcher with both side panels on: what every test below that is not
+// about visibility assumes. `rerender` merges, so these hold across it.
+const HOT = { heat: 'hot', left: true, right: true } as const;
+
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
@@ -58,8 +62,22 @@ function mockTreePending() {
   tree = d.promise;
   return d;
 }
+// The first card of an answer is preselected, so mounting an answer fetches its
+// first citation whether or not the test cares: every first citation of the
+// fixtures has an answer here, and a test overrides the ones it asserts on.
+function defaultSources(): Record<number, Promise<SourceAround>> {
+  return {
+    42: Promise.resolve(excerptSpanA),
+    7: Promise.resolve(excerptSpanA),
+    8: Promise.resolve(excerptSpanB),
+    43: Promise.resolve(excerptSpanB),
+    9: Promise.resolve(excerptDocTwo),
+    50: Promise.resolve(excerptSpanA),
+    61: Promise.resolve(excerptDocTwo),
+  };
+}
 function mockSourceFor(byChunkId: Record<number, SourceAround | Promise<SourceAround>>) {
-  sources = {};
+  sources = defaultSources();
   for (const [id, answer] of Object.entries(byChunkId)) sources[Number(id)] = Promise.resolve(answer);
 }
 function listTreeCalls() {
@@ -101,7 +119,7 @@ async function askAgain(rerender: Rerender, query: string, answer: AskAnswer) {
 beforeEach(() => {
   invoke.mockReset(); // drops the implementation too — reinstall it below
   tree = Promise.resolve(emptyListing);
-  sources = {};
+  sources = defaultSources();
   invoke.mockImplementation((cmd: string, args: { chunkId: number }) => {
     if (cmd === 'list_tree') return tree;
     if (cmd === 'source_around') {
@@ -125,21 +143,21 @@ afterEach(() => setLocale('en'));
 // table described as «лише рядок пошуку» — only the search line. Every other
 // state keeps the tree, so this test is the single negative the rule stands on.
 test('idle shows no cards at all (state A is the bare line)', () => {
-  render(Cards, { state: { kind: 'idle' }, query: '' });
+  render(Cards, { ...HOT, state: { kind: 'idle' }, query: '' });
   expect(screen.queryByTestId('card-tree')).toBeNull();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-test('generated shows tree and centre; source waits for a click', () => {
-  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+test('generated shows tree, centre and the source of the first card', () => {
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.getByTestId('card-centre')).toBeTruthy();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.getByTestId('card-source')).toBeTruthy();
 });
 
 test('refused keeps the tree and draws neither answer nor source (state F)', () => {
-  render(Cards, { state: stateFromAnswer('nothing indexed', refusedNoCandidates), query: 'nothing indexed' });
+  render(Cards, { ...HOT, state: stateFromAnswer('nothing indexed', refusedNoCandidates), query: 'nothing indexed' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
@@ -148,7 +166,8 @@ test('refused keeps the tree and draws neither answer nor source (state F)', () 
 // The six tests above and below cover all six `LauncherState` variants against
 // TWO independent gates, and each one must be readable on its own:
 //
-//   card-tree               — every state except `idle` (ruling I-B)
+//   card-tree               — mounted in every state except `idle` (ruling I-B);
+//                             drawn only when hot and the left switch is on
 //   card-centre             — `generated` AND `citationsOnly` (Task 9)
 //   card-source             — those two, and only after a click
 //
@@ -172,24 +191,24 @@ test('refused keeps the tree and draws neither answer nor source (state F)', () 
 // from drawing the ANSWER in D/E/F — is served in full by the two negatives
 // below, which is all this test ever meant.
 test('inFlight keeps the tree and draws neither answer nor source (state D)', () => {
-  render(Cards, { state: { kind: 'inFlight', query: 'q' }, query: 'q' });
+  render(Cards, { ...HOT, state: { kind: 'inFlight', query: 'q' }, query: 'q' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
 });
 
-test('citationsOnly keeps the tree and draws the centre card; source waits for a click (state E)', () => {
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+test('citationsOnly keeps the tree and draws the centre card and the first passage\'s source (state E)', () => {
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.getByTestId('card-centre')).toBeTruthy();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.getByTestId('card-source')).toBeTruthy();
 });
 
 // `error` keeps the tree deliberately (ruling I-B): `askFailed` is an answer
 // state, and it is exactly the moment a person retries — losing their folders on
 // the failure they are retrying is C1's defect one gate over.
 test('error keeps the tree and draws neither answer nor source', () => {
-  render(Cards, { state: { kind: 'error', reason: 'blank' }, query: '' });
+  render(Cards, { ...HOT, state: { kind: 'error', reason: 'blank' }, query: '' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
@@ -201,7 +220,7 @@ test('error keeps the tree and draws neither answer nor source', () => {
 // reviewer's probe F.
 test('card labels come from the catalogue, on the right section, and follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
-  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
   expect(screen.getByTestId('card-tree').getAttribute('aria-label')).toBe('Tree');
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Answer');
 
@@ -223,7 +242,7 @@ test("the source card's label comes from the catalogue and follows a live langua
   setLocale('en'); // seed, do not inherit
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await settled();
@@ -254,14 +273,15 @@ test('clicking [N] selects the cited file on the left and highlights it on the r
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA }); // both citations live in doc-1
 
-  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
-  // Before the click: no source card at all (§7 — it appears on the click).
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  // Before the click the source card is already up, on the first citation.
+  expect(await screen.findByTestId('card-source')).toBeTruthy();
+  await settled();
+  const beforeClick = sourceAroundCalls().length;
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
-
-  expect(await screen.findByTestId('card-source')).toBeTruthy();
+  await waitFor(() => expect(sourceAroundCalls().length).toBeGreaterThan(beforeClick));
   await settled();
 
   // Ruling AE: the row is found by documentId, not by the citation's path string.
@@ -277,13 +297,13 @@ test('clicking [N] selects the cited file on the left and highlights it on the r
   expect(marks.map((m) => m.textContent)).toEqual([SPAN_A_TEXT, SPAN_B_TEXT]);
   expect(marks.filter((m) => m.dataset.primary === 'true').map((m) => m.textContent))
     .toEqual([SPAN_B_TEXT]); // the citation that was clicked, anchor 7 / chunk 43
-  expect(sourceAroundCalls().map((c) => c[1].chunkId).sort((a, b) => a - b)).toEqual([42, 43]);
+  expect(sourceAroundCalls().slice(beforeClick).map((c) => c[1].chunkId).sort((a, b) => a - b)).toEqual([42, 43]);
 });
 
 test('a new answer clears the previous selection instead of leaving a stale excerpt', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await screen.findByTestId('card-source');
@@ -294,13 +314,18 @@ test('a new answer clears the previous selection instead of leaving a stale exce
   // proves nothing: no state renders the source card there, so the assertion
   // is satisfied without any reset at all and can never go red.
   await askAgain(rerender, 'q2', generatedOther);
+  await settled();
 
-  expect(screen.queryByTestId('card-source')).toBeNull();
-  expect(screen.queryAllByTestId('hl')).toHaveLength(0);
+  // The new answer opens on ITS first card, not on the clicked one of the old.
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
   expect(screen.getByTestId('answer-body').textContent).toContain('second answer');
-  // The left card lets go too: with no selection nothing is open by default, so
-  // the folder the first answer's citation had opened is shut again.
-  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+  // The left card follows: the new answer's file is marked, the old one is not.
+  await waitFor(() =>
+    expect(screen.getByTestId('tree-file-doc-2').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
 });
 
 // The test above is the PRODUCT's claim and goes through state D, where the
@@ -312,7 +337,7 @@ test('a new answer clears the previous selection instead of leaving a stale exce
 test('Cards clears the selection on a new answer even without passing through inFlight', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await screen.findByTestId('card-source');
@@ -320,9 +345,11 @@ test('Cards clears the selection on a new answer even without passing through in
 
   await rerender({ state: stateFromAnswer('q2', generatedOther), query: 'q2' });
   await tick();
+  await settled();
 
-  expect(screen.queryByTestId('card-source')).toBeNull();
-  expect(screen.queryAllByTestId('hl')).toHaveLength(0);
+  expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
 });
 
 // Fixture question, state 1 of 2: the tree answers on its own schedule, and a
@@ -332,7 +359,7 @@ test('a click made before the tree has answered marks the row when the listing a
   const listing = mockTreePending();
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
 
-  render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await settled();
@@ -357,20 +384,21 @@ test('a second answer arriving mid-fetch leaves no excerpt from the first', asyn
   mockTree(oneRootTwoFolders);
   const clicked = deferred<SourceAround>();
   mockSourceFor({ 43: clicked.promise, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   expect(screen.getByTestId('source-loading')).toBeTruthy();
   expect(screen.getByTestId('source-body').dataset.pending).toBe('1'); // still on the wire
 
   await askAgain(rerender, 'q2', generatedOther);
-  expect(screen.queryByTestId('card-source')).toBeNull();
 
   clicked.resolve(excerptSpanB); // the answer for a card that is no longer on screen
   await flush();
+  await settled();
+  expect(sourceAroundCalls().at(-1)![1].chunkId).toBe(61); // the new answer's card is what is up
 
-  expect(screen.queryByTestId('card-source')).toBeNull();
-  expect(screen.queryAllByTestId('hl')).toHaveLength(0);
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/b\.md/);
+  expect(screen.queryAllByTestId('hl').map((m) => m.textContent)).toEqual(['paragraph']); // the new excerpt, and only it
   expect(screen.getByTestId('answer-body').textContent).toContain('second answer');
 });
 
@@ -383,9 +411,12 @@ test('a second answer arriving mid-fetch leaves no excerpt from the first', asyn
 test('the tree lets go of the mark when the next answer is a refusal', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
-  await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand, before any selection
+  // The first card's folder is already open because it is selected. Shut it and
+  // open it again, so it stays open by hand once the selection goes away.
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-notes'));
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await settled();
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
@@ -410,7 +441,7 @@ test('the tree lets go of the mark when the next answer is a refusal', async () 
 test('a new answer does not refetch the tree', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await screen.findByTestId('tree-folder-archive'); // the first listing really arrived
   expect(listTreeCalls()).toHaveLength(1);
@@ -425,7 +456,7 @@ test('a new answer does not refetch the tree', async () => {
 test('a new answer does not shut a hand-opened folder', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
   await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
@@ -444,9 +475,12 @@ test('a new answer does not shut a hand-opened folder', async () => {
 test('the tree keeps its rows but lets go of the mark while the next answer is in flight', async () => {
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 43: excerptSpanB, 42: excerptSpanA });
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', generated), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
 
-  await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand, before any selection
+  // The first card's folder is already open because it is selected. Shut it and
+  // open it again, so it stays open by hand once the selection goes away.
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-notes'));
   await fireEvent.click(await screen.findByRole('button', { name: '[7]' }));
   await settled();
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
@@ -488,7 +522,7 @@ const CAUSE = /key|provider|model|credential|setting|ключ|провайдер
 
 test('the state E banner says generation is unavailable and names no cause (Ruling AF)', () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
   // 🔴 Re-review RI1, and it is FIRST because it is what a screen reader acts
   // on: `role="status"` is what makes this a live region, so "generation is
@@ -526,7 +560,7 @@ test('the state E banner says generation is unavailable and names no cause (Ruli
 // and satisfy a bare length assertion, but it would produce `rank-7`/`rank-9`.
 test('state E ranks the passages as neutral ordinals, with no answer prose and no anchors', () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
   const rows = screen.getAllByTestId(/^rank-/);
   expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual(['rank-1', 'rank-2']);
@@ -559,7 +593,7 @@ const rowText = (el: HTMLElement) => (el.textContent ?? '').replace(/\s+/g, ' ')
 
 test('state E shows the passages themselves, not a list of paths', () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
   expect(screen.getByTestId('citations-banner').textContent)
     .toBe('Generation is unavailable. The search found 2 passages.');
@@ -579,7 +613,7 @@ test('state E shows the passages themselves, not a list of paths', () => {
 // on screen, and the finding was precisely that.
 test('each state E row carries its own rank, passage text and label', () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
 
   const part = (row: HTMLElement, id: string) =>
     row.querySelector(`[data-testid="${id}"]`)!.textContent;
@@ -609,7 +643,7 @@ const centreText = (): string =>
 
 test('zero passages is an answer, and the card does not also promise passages', () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
 
   expect(centreText()).toBe('Generation is unavailable. No passages matched this query.');
   expect(screen.queryAllByTestId(/^rank-/)).toHaveLength(0);
@@ -622,7 +656,7 @@ test('zero passages is an answer, and the card does not also promise passages', 
 // already for the tree.
 test('the zero-passages sentence is its own, in both locales (Ruling AK)', async () => {
   setLocale('uk');
-  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
   await tick();
 
   expect(centreText())
@@ -647,13 +681,16 @@ test('clicking a passage from the second document fetches THAT document, and no 
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 9: excerptDocTwo });
 
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  await settled(); // rank 1 is preselected and fetched on mount
+  const beforeClick = sourceAroundCalls().length;
   await fireEvent.click(screen.getByTestId('rank-2'));
 
   expect(await screen.findByTestId('card-source')).toBeTruthy();
+  await waitFor(() => expect(sourceAroundCalls().length).toBeGreaterThan(beforeClick));
   await settled();
-  expect(sourceAroundCalls()).toHaveLength(1);
-  expect(sourceAroundCalls()[0][1].chunkId).toBe(9);
+  expect(sourceAroundCalls().slice(beforeClick)).toHaveLength(1);
+  expect(sourceAroundCalls()[beforeClick][1].chunkId).toBe(9);
   // Positive, not "not null": the card really is showing the clicked passage's
   // own file, so a mismatch badge over an empty body cannot satisfy this.
   expect(screen.getByTestId('source-header').textContent).toBe('notes/b.md · p. 2');
@@ -672,8 +709,8 @@ test('two passages in one document: a click asks for the sibling too and paints 
   mockTree(oneRootTwoFolders);
   mockSourceFor({ 7: excerptSpanA, 8: excerptSpanB }); // both doc-1
 
-  render(Cards, { state: stateFromAnswer('q', citationsOnlySameDocument), query: 'q' });
-  await fireEvent.click(screen.getByTestId('rank-1'));
+  // No click: rank 1 is the preselected card, so mounting is the "click".
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnlySameDocument), query: 'q' });
 
   expect(await screen.findByTestId('card-source')).toBeTruthy();
   await settled();
@@ -724,7 +761,7 @@ test('two passages in one document: a click asks for the sibling too and paints 
 
 test('state E passage labels follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
   // The locator is the one that carries a translated part: `formatLocator`
   // renders `p. 2` in English and `с. 2` in Ukrainian, so this row moves and
   // `rank-1`'s bare path would not.
@@ -748,7 +785,7 @@ test('state E passage labels follow a live language switch', async () => {
 
 test('the state E banner follows a live language switch', async () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
   expect(screen.getByTestId('citations-banner').textContent)
     .toBe('Generation is unavailable. The search found 2 passages.');
 
@@ -769,7 +806,7 @@ test('the state E banner follows a live language switch', async () => {
 // neither test could name which guard it had caught.
 test('the zero-passages sentence follows a live language switch', async () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
   expect(screen.getByTestId('citations-empty').textContent)
     .toBe('No passages matched this query.');
 
@@ -792,7 +829,7 @@ test('the zero-passages sentence follows a live language switch', async () => {
 // so this is also the negative that stops the two labels being merged back.
 test("the passages card's label comes from the catalogue and follows a live language switch", async () => {
   setLocale('en'); // seed, do not inherit
-  render(Cards, { state: stateFromAnswer('q', citationsOnly), query: 'q' });
+  render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnly), query: 'q' });
   expect(screen.getByTestId('card-centre').getAttribute('aria-label')).toBe('Passages');
 
   setLocale('uk');
@@ -820,7 +857,7 @@ test("the passages card's label comes from the catalogue and follows a live lang
 // cannot show: that the card passes its OWN passage count and not a constant.
 test('the banner agrees in number with the passages it introduces', async () => {
   setLocale('en'); // seed, do not inherit
-  const { rerender } = render(Cards, { state: stateFromAnswer('q', citationsOnlyOne), query: 'q' });
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', citationsOnlyOne), query: 'q' });
   expect(screen.getByTestId('citations-banner').textContent)
     .toBe('Generation is unavailable. The search found 1 passage.');
 
@@ -840,4 +877,100 @@ test('the banner agrees in number with the passages it introduces', async () => 
   await tick();
   expect(screen.getByTestId('citations-banner').textContent)
     .toBe('Generation is unavailable. The search found 2 passages.');
+});
+
+// --- cold and hot, the panels switches -------------------------------------
+
+// `firstCard` is what the right panel opens on, and it is only right if it is
+// the card the centre draws first. Held against the DOM, not against the array
+// it is read from.
+test('firstCard is the first card the centre draws, in both answer kinds', async () => {
+  // Citations listed 7 then 3: citation order and anchor order differ, so a
+  // preview list sorted by anchor would not pass for `citations[0]`.
+  const base = stateFromAnswer('q', generated);
+  if (base.kind !== 'generated') throw new Error('fixture');
+  const g: LauncherState = {
+    ...base,
+    answer: { ...base.answer, citations: [...base.answer.citations].reverse() },
+  };
+  if (g.kind !== 'generated') throw new Error('fixture');
+  expect(g.answer.citations.map((c) => c.anchor)).toEqual([7, 3]);
+  const { unmount } = render(Cards, { ...HOT, state: g, query: 'q' });
+  const previews = screen.getAllByTestId(/^preview-/);
+  expect(previews[0].dataset.testid ?? previews[0].getAttribute('data-testid'))
+    .toBe(`preview-${(firstCard(g.answer) as { anchor: number }).anchor}`);
+  await settled();
+  expect(sourceAroundCalls()[0][1].chunkId).toBe(firstCard(g.answer)!.chunkId);
+  // Through what is rendered, not only what was asked for.
+  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/a\.md/);
+  unmount();
+
+  const e = stateFromAnswer('q', citationsOnly);
+  if (e.kind !== 'citationsOnly') throw new Error('fixture');
+  render(Cards, { ...HOT, state: e, query: 'q' });
+  expect(screen.getAllByTestId('passage-text')[0].textContent).toBe(firstCard(e.answer)!.text);
+});
+
+test('a cold launcher draws no side panel and no empty panel, whatever the state', () => {
+  for (const state of [
+    { kind: 'idle' },
+    { kind: 'inFlight', query: 'q' },
+    { kind: 'error', reason: 'blank' },
+    stateFromAnswer('q', refusedNoCandidates),
+  ] as LauncherState[]) {
+    const { unmount } = render(Cards, { heat: 'cold', left: false, right: false, state, query: '' });
+    for (const id of ['card-centre', 'card-source', 'card-source-empty', 'card-results-empty']) {
+      expect(screen.queryByTestId(id), `${state.kind} / ${id}`).toBeNull();
+    }
+    // The tree is mounted whenever the state is not idle, but never drawn cold.
+    const tree = screen.queryByTestId('card-tree');
+    expect(tree === null || tree.hasAttribute('hidden'), `${state.kind} / card-tree`).toBe(true);
+    unmount();
+  }
+});
+
+test('a hot launcher with nothing to show draws opaque empty panels, and none beside an answer', () => {
+  for (const state of [
+    { kind: 'inFlight', query: 'q' },
+    stateFromAnswer('q', refusedNoCandidates),
+    { kind: 'error', reason: 'askFailed' },
+  ] as LauncherState[]) {
+    const { unmount } = render(Cards, { ...HOT, state, query: '' });
+    expect(screen.getByTestId('card-results-empty'), state.kind).toBeTruthy();
+    expect(screen.getByTestId('card-source-empty'), state.kind).toBeTruthy();
+    unmount();
+  }
+  render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
+  expect(screen.queryByTestId('card-results-empty')).toBeNull();
+  expect(screen.queryByTestId('card-source-empty')).toBeNull();
+});
+
+test('an answer with no passages leaves the source panel empty, not missing', () => {
+  render(Cards, { ...HOT, state: stateFromAnswer('q', emptyCitationsOnly), query: 'q' });
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+});
+
+test('the right switch off draws neither the source card nor its empty panel', () => {
+  render(Cards, { heat: 'hot', left: true, right: false, state: stateFromAnswer('q', generated), query: 'q' });
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.queryByTestId('card-source-empty')).toBeNull();
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+});
+
+// C1's mechanism: the left switch hides the tree, it does not unmount it.
+test('the left switch hides the tree and keeps its state', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Cards, { ...HOT, state: stateFromAnswer('q', generated), query: 'q' });
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive'));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+
+  await rerender({ left: false });
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  await rerender({ left: true });
+
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
+  expect(listTreeCalls()).toHaveLength(1);
 });

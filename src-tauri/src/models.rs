@@ -61,6 +61,7 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     }
     let check = mnema_provider::check_key(state.provider_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
+    state.forget_provider_status();
     choose_the_default_models_for_roles_with_none(&state, &key);
     Ok(KeyStatus {
         balance: check.balance,
@@ -228,9 +229,9 @@ pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
 /// [`set_embedding_model`] argues against on the same store.
 #[tauri::command(async)]
 pub fn forget_key(state: State<'_, AppState>) -> Result<KeyRemoval, Error> {
-    Ok(KeyRemoval::of(mnema_secrets::forget(
-        state.credential_ref(),
-    )?))
+    let removal = KeyRemoval::of(mnema_secrets::forget(state.credential_ref())?);
+    state.forget_provider_status();
+    Ok(removal)
 }
 
 /// What [`forget_key`] did, on the wire.
@@ -511,6 +512,7 @@ pub fn set_embedding_model(
         }
     };
     slot.forget_restore();
+    state.forget_provider_status();
     Ok(AdoptedModel {
         model,
         dim,
