@@ -16,9 +16,12 @@ body { background: transparent; }
  * Starting at the left edge makes that frame right: the search column is at 290
  * when `data-cols` has the tree, else at 0. A centred grid jumped by half the
  * width difference instead (measured: 185 pt, 145 pt).
- * ponytail: when the tree opens, that one frame clips the source panel to the
- * old width; a webview kept at the widest size, so the bitmap is never narrower
- * than the window, would remove it. */
+ * ponytail: a tree toggle still flickers for one frame now and then (measured:
+ * the source clipped to the old width on opening, the old layout 290 pt off on
+ * closing), because the window moves and WebKit repaints in another process with
+ * no order between them; the right panel does not move the window and is clean.
+ * Upgrade path on macOS: keep the webview at the widest layout and move the
+ * window frame and the webview's offset in one AppKit call. */
 html, body { overflow: hidden; }
 main.panels {
   height: 100dvh;
