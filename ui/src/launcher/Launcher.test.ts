@@ -718,7 +718,7 @@ test('the handle offset matches the stylesheet', () => {
   expect(LEFT_SPAN).toBe(col1 + fromCss.gap);
   expect(RIGHT_SPAN).toBe(col3 + fromCss.gap);
   // (2) EVERY layout: its tracks and gaps add up to the width Rust gives the
-  // window for it, so no track is squeezed and `search_offset` stays exact.
+  // window for it, and the grid starts at the left edge, so `search_offset` stays exact.
   const layouts: Array<[string, boolean, boolean]> = [
     ['s', false, false], ['ls', true, false], ['sr', false, true], ['lsr', true, true],
   ];
@@ -738,42 +738,17 @@ test('the handle offset matches the stylesheet', () => {
   for (const bp of breakpoints) expect(bp, `breakpoint ${bp}px`).toBeLessThan(SEARCH_WIDTH);
 });
 
-test('the grid is placed by the window it is in, not centred', () => {
-  // `data-cols` changes a frame before the window frame does, so for one frame
-  // new tracks sit in the old viewport (or the reverse). `justify-content:
-  // center` moved everything by half the width difference; the stylesheet
-  // instead reads the viewport width to learn whether the window holds the
-  // tree, and offsets the grid so the search column never moves.
+test('the grid starts at the window edge and follows data-cols alone', () => {
+  // The new window frame shows the new `data-cols` laid out at the old width
+  // for one frame. A grid that starts at the left edge is right in that frame;
+  // a centred one jumped, and viewport-based margins landed 290 off. So: no
+  // centring, no margin, no media query to place the grid.
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  const layout = readFileSync(join(HERE, '../../../src-tauri/src/launcher_layout.rs'), 'utf8');
-  const sum = (name: string) => {
-    const m = layout.match(new RegExp(`pub const ${name}: f64 = ([\\d.]+)(?: \\+ ([\\d.]+))?;`));
-    if (!m) throw new Error(`${name} is not written in the guarded shape`);
-    return Number(m[1]) + Number(m[2] ?? 0);
-  };
-  const S = sum('SEARCH_WIDTH');
-  const L = sum('LEFT_SPAN');
-  const R = sum('RIGHT_SPAN');
   const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
   expect(panels).not.toMatch(/justify-content:\s*center/);
-  // (a) The media query matches exactly the windows that hold the tree.
-  const mq = css.match(/@media\s+([^{]*)\{\s*main\.panels\s*\{\s*margin-left:\s*(\d+)px/);
-  if (!mq) throw new Error('no @media rule sets the margin of main.panels');
-  // (b) The offset is the tree's span.
-  expect(Number(mq[2])).toBe(L);
-  const ranges = mq[1].split(',').map((r) => {
-    const lo = r.match(/min-width:\s*(\d+)px/);
-    const hi = r.match(/max-width:\s*(\d+)px/);
-    return [lo ? Number(lo[1]) : 0, hi ? Number(hi[1]) : Infinity];
-  });
-  const matches = (w: number) => ranges.some(([lo, hi]) => w >= lo && w <= hi);
-  expect(matches(S + L), 'ls window').toBe(true);
-  expect(matches(S + L + R), 'lsr window').toBe(true);
-  expect(matches(S), 's window').toBe(false);
-  expect(matches(S + R), 'sr window').toBe(false);
-  // The margin that cancels the tree's span when the tracks start with it.
-  expect(css).toMatch(new RegExp(`\\[data-cols="lsr"\\]\\) \\{ margin-left: -${L}px; \\}`));
-  // The centre track must not be allowed to shrink.
+  expect(panels).toMatch(/justify-content:\s*start/);
+  expect(css).not.toMatch(/main\.panels[^{]*\{[^}]*margin-left/);
+  expect(css).not.toMatch(/@media/);
   expect(css).not.toMatch(/minmax\(0, 470px\)/);
 });
 

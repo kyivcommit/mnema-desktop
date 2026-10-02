@@ -10,26 +10,15 @@ body { background: transparent; }
  * `launcher_layout::width` for it; the guard in `Launcher.test.ts` checks all
  * four. The window is not resizable.
  *
- * The grid is placed by the viewport, not centred. `data-cols` changes a frame
- * before the window frame does (the resize is an async IPC call), so for one
- * painted frame the new tracks sit in the old viewport, or the reverse; centred,
- * they jumped by half the width difference (measured: 185 pt, 145 pt). The four
- * window widths are 470 (s), 760 (ls), 841 (sr) and 1131 (lsr), so the width
- * alone says whether the window holds the tree: 760 and 1131 do. The bounds sit
- * midway between neighbouring widths (615, 800, 986), so a width mid-resize
- * still lands on the nearer window. The grid's left margin puts the search
- * column where it is in the window as it is now (290 with the tree, else 0),
- * whatever `data-cols` says: layouts with the tree start 290 further left, so
- * their search column is the second track.
- * A panel not in the window yet is clipped by `overflow: hidden` below; one
- * that just left the window leaves clear space.
- *
- *   window \ cols     s / sr               ls / lsr
- *   no tree (470, 841)  margin 0: search at 0     margin -290: tree off-screen, search at 0
- *   tree (760, 1131)    margin 290: search at 290 margin 0: tree at 0, search at 290
- *
- * The right panel is always after the search column, so it only ever overflows
- * on the right (clipped) or leaves clear space there. */
+ * The grid starts at the window's left edge and follows `data-cols` alone.
+ * The window frame changes before WebKit lays out at the new width, so for one
+ * painted frame the new window shows the new tracks laid out at the old width.
+ * Starting at the left edge makes that frame right: the search column is at 290
+ * when `data-cols` has the tree, else at 0. A centred grid jumped by half the
+ * width difference instead (measured: 185 pt, 145 pt).
+ * ponytail: when the tree opens, that one frame clips the source panel to the
+ * old width; a webview kept at the widest size, so the bitmap is never narrower
+ * than the window, would remove it. */
 html, body { overflow: hidden; }
 main.panels {
   height: 100dvh;
@@ -38,12 +27,6 @@ main.panels {
   grid-template-rows: minmax(0, 1fr);
   gap: 5px;
   justify-content: start;
-  margin-left: 0;
-}
-main.panels:is([data-cols="ls"], [data-cols="lsr"]) { margin-left: -290px; }
-@media (min-width: 615px) and (max-width: 800px), (min-width: 986px) {
-  main.panels { margin-left: 290px; }
-  main.panels:is([data-cols="ls"], [data-cols="lsr"]) { margin-left: 0; }
 }
 main.panels[data-cols="s"] { grid-template-columns: 470px; }
 main.panels[data-cols="ls"] { grid-template-columns: 285px 470px; }
