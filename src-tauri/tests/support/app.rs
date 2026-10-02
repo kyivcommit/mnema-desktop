@@ -70,6 +70,7 @@ pub fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
         .manage(mnema_desktop::ReturnToLauncher::default())
         // `set_launcher_layout` reads it; the production `.setup` manages it.
         .manage(mnema_desktop::launcher_layout::Current::default())
+        .manage(mnema_desktop::launcher_position::Memory::default())
         // `go_cold_if_idle` reads it; the production `.setup` manages it.
         .manage(mnema_desktop::launcher_layout::HiddenAt::default())
         .invoke_handler(mnema_desktop::invoke_handler())

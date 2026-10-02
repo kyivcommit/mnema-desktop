@@ -25,14 +25,14 @@ case_ "launcher position: the corner is checked instead of the handle" \
 
 case_ "launcher position: a hide without a drag is written anyway" \
   src-tauri/src/launcher_position.rs \
-  's~if reference == now \{\n            return None;~if false {\n            return None;~' \
+  's~if reference == anchored \{\n            return None;~if false {\n            return None;~' \
   'if false {
             return None;' \
   mnema-desktop 'launcher_position::tests::a_hide_without_a_drag_writes_nothing' --lib
 
 case_ "launcher position: a failed write forgets the drag" \
   src-tauri/src/launcher_position.rs \
-  's~slots\.left = Some\(now\);\n        Some\(now\)~slots.left = slots.left;\n        Some(now)~' \
+  's~slots\.left = Some\(now\);\n        slots\.nudge = 0;~slots.left = slots.left;\n        slots.nudge = 0;~' \
   'slots.left = slots.left;' \
   mnema-desktop 'launcher_position::tests::a_failed_write_still_updates_memory' --lib
 
@@ -197,14 +197,14 @@ case_ "launcher: a release does not disarm the drag window" \
 
 case_ "launcher position: restore_to hands set_position the search corner" \
   src-tauri/src/launcher_position.rs \
-  's~Some\(\(p, to_window\(p, l, factor\)\)\)~Some((p, p))~' \
-  'Some((p, p))' \
+  's~Some\(\(p, corner, nudge\)\)~Some((p, p, 0))~' \
+  'Some((p, p, 0))' \
   mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
 
 case_ "launcher position: restore_to takes the factor from the wrong monitor" \
   src-tauri/src/launcher_position.rs \
-  's~let factor = handle_factor\(p, monitors\)\.unwrap_or\(1\.0\);~let factor = 1.0;~' \
-  'let factor = 1.0;' \
+  's~fit\(p, l, area, \*factor\)~fit(p, l, area, 1.0)~' \
+  'fit(p, l, area, 1.0)' \
   mnema-desktop 'launcher_position::tests::a_restore_moves_the_window_by_the_handles_monitor_scale' --lib
 
 case_ "launcher position: here reports the window corner, not the search column's" \

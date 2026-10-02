@@ -75,7 +75,7 @@ pub fn resize<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, l: Layout) {
     let _ = window.set_size(tauri::LogicalSize::new(width(l), HEIGHT));
 }
 
-/// The window frame a layout change asks for: the corner `relayout` returns
+/// The window frame a layout change asks for: the corner `refit` returns
 /// and the size `width`/`HEIGHT` give, top-left origin as everywhere else in
 /// this module. The macOS branch hands all of it to AppKit in one call.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,14 +85,9 @@ pub struct Frame {
     pub height: f64,
 }
 
-pub fn target_frame(
-    corner: crate::launcher_position::Point,
-    before: Layout,
-    next: Layout,
-    factor: f64,
-) -> Frame {
+pub fn target_frame(origin: crate::launcher_position::Point, next: Layout) -> Frame {
     Frame {
-        origin: crate::launcher_position::relayout(corner, before, next, factor),
+        origin,
         width: width(next),
         height: HEIGHT,
     }
@@ -148,16 +143,20 @@ fn set_frame_once<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, frame: Fr
 }
 
 /// Resizes the launcher to its visible panels; the search column keeps its
-/// place on screen (owner, 2026-09-25). Synchronous: AppKit wants the window
-/// size from the main thread, as `open_settings`.
+/// place on screen (owner, 2026-09-25) unless the grown window would leave the
+/// monitor's work area: then the window moves horizontally just enough to fit,
+/// and the search column returns to where the person put it when the window
+/// shrinks again (`launcher_position::refit`, `Memory::nudge`). Synchronous:
+/// AppKit wants the window size from the main thread, as `open_settings`.
 #[tauri::command]
 pub fn set_launcher_layout<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     current: tauri::State<'_, Current>,
+    memory: tauri::State<'_, crate::launcher_position::Memory>,
     left: bool,
     right: bool,
 ) {
-    use crate::launcher_position::{Space, relayout, window_corner};
+    use crate::launcher_position::{Space, monitors, refit, window_corner};
     use tauri::Manager;
     let next = Layout { left, right };
     let before = current.get();
@@ -171,21 +170,24 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
         } else {
             window_corner(&window.as_ref().window())
         };
+        let placed = corner
+            .map(|(c, factor)| refit(c, before, next, factor, memory.nudge(), &monitors(&window)));
         // macOS: origin and size in one AppKit call (see `set_frame_once`).
         // ponytail: Windows and Linux keep two steps, `set_size` then
         // `set_position`; no flicker was reported there. If one shows up, give
         // them a single native call too (SetWindowPos / gtk_window_move_resize).
         #[cfg(target_os = "macos")]
-        if let Some((c, factor)) = corner
-            && set_frame_once(&window, target_frame(c, before, next, factor))
+        if let Some((origin, nudge)) = placed
+            && set_frame_once(&window, target_frame(origin, next))
         {
+            memory.set_nudge(nudge);
             current.set(next);
             return;
         }
         resize(&window, next);
-        if let Some((c, factor)) = corner {
-            let _ = window
-                .set_position(Space::of_this_build().position(relayout(c, before, next, factor)));
+        if let Some((origin, nudge)) = placed {
+            let _ = window.set_position(Space::of_this_build().position(origin));
+            memory.set_nudge(nudge);
         }
     }
     current.set(next);
@@ -216,16 +218,12 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_is_the_relayout_corner_and_the_new_width() {
-        use crate::launcher_position::{Point, relayout};
+    fn the_frame_is_the_given_origin_and_the_new_width() {
+        use crate::launcher_position::Point;
         let l = |left, right| Layout { left, right };
-        let corner = Point { x: 100, y: 50 };
-        let f = target_frame(corner, l(true, false), l(false, true), 1.0);
-        assert_eq!(
-            f.origin,
-            relayout(corner, l(true, false), l(false, true), 1.0)
-        );
-        assert_eq!(f.origin, Point { x: 390, y: 50 });
+        let origin = Point { x: 390, y: 50 };
+        let f = target_frame(origin, l(false, true));
+        assert_eq!(f.origin, origin);
         assert_eq!((f.width, f.height), (841.0, 592.0));
     }
 
