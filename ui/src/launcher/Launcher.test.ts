@@ -407,15 +407,30 @@ test('a blank Enter from state B does not shut a hand-opened folder', async () =
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a blank Enter from state B drops the answer and source cards', async () => {
+test('a blank Enter from state B keeps the answer and source cards', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
+  const before = screen.getByTestId('card-centre').textContent;
 
   await submit('   ');
   await screen.findByRole('alert');
 
-  expect(screen.queryByTestId('card-centre')).toBeNull();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('query-echo').textContent).toBe('first question');
+});
+
+test('a too-long Enter from state B keeps the answer and source cards', async () => {
+  mockBackend(generated);
+  await askAndOpenAFolder();
+  const before = screen.getByTestId('card-centre').textContent;
+
+  await submit('x'.repeat(2049));
+  await screen.findByRole('alert');
+
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('query-echo').textContent).toBe('first question');
 });
 
 test('the launcher renders a search input', () => {

@@ -13,14 +13,15 @@
   let echo = $state('');
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
-  // The answer a hot launcher was showing when the current ask started. A
-  // failed ask puts it back: the failure is told in the search line, and the
-  // person keeps what they were reading. Null when there was none, and for
-  // every ask that did not start from a hot launcher's answer.
+  // The answer a hot launcher was showing when the current submit started. Any
+  // error puts it back (a blank or too-long line, a failed ask): the error is
+  // told in the search line, and the person keeps what they were reading. Null
+  // when there was none, and for every submit that did not start from a hot
+  // launcher's answer.
   let previous = $state<LauncherState | null>(null);
   // What the cards draw. The search line always gets `launcherState` itself.
   const cardsState = $derived(
-    launcherState.kind === 'error' && launcherState.reason === 'askFailed' && previous
+    launcherState.kind === 'error' && previous
       ? previous
       : launcherState,
   );
@@ -98,15 +99,16 @@
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
-    // What is on screen, not what the machine holds: after a failed ask the
+    // What is on screen, not what the machine holds: after an error the
     // machine says `error` while the restored answer is still showing, and a
-    // second failure must restore that same answer again.
+    // second error must restore that same answer again.
     const shown = cardsState;
     previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
     const shownEcho = echo;
-    echo = '';
     const check = checkQuery(raw);
+    // A rejected line keeps the echo: the answer it belongs to stays drawn.
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
+    echo = '';
     launcherState = { kind: 'inFlight', query: check.query };
     const gen = coldGen;
     try {
