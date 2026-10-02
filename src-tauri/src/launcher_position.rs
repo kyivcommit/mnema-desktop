@@ -287,6 +287,19 @@ pub fn fit(anchor: Point, next: Layout, area: &Area, factor: f64) -> (Point, i32
     )
 }
 
+/// The nudge to use for a layout change: the one in force while the window is
+/// still where the application last put it (`placed`), else 0 — the person
+/// moved it (a macOS drag loses no focus, so no blur has recorded it yet) and
+/// where they dropped it is the anchor. One unit of slack either way absorbs
+/// the rounding between logical and physical readings. No `placed` (a default
+/// placement the OS moves after show) means no nudge.
+pub fn effective_nudge(now: Point, placed: Option<Point>, nudge: i32) -> i32 {
+    match placed {
+        Some(p) if (now.x - p.x).abs() <= 1 && (now.y - p.y).abs() <= 1 => nudge,
+        _ => 0,
+    }
+}
+
 /// The window corner and the new nudge for a change of layout from `before`
 /// to `next`, given the window's `corner` now and the nudge in force. The
 /// anchor is the search column corner less the nudge; the column returns to it
@@ -342,6 +355,9 @@ struct Slots {
     /// fits where they put it. The application's move, not the person's: the
     /// anchor is the position less this.
     nudge: i32,
+    /// The window corner the application last set (`place`, a layout change),
+    /// which `nudge` is valid for; `None` after a default placement.
+    placed_at: Option<Point>,
 }
 
 /// Managed state (`app.manage(Memory::default())`): one launcher per process.
@@ -367,6 +383,12 @@ impl Memory {
     }
     pub fn set_nudge(&self, nudge: i32) {
         self.lock().nudge = nudge;
+    }
+    pub fn placed_at(&self) -> Option<Point> {
+        self.lock().placed_at
+    }
+    pub fn set_placed_at(&self, corner: Option<Point>) {
+        self.lock().placed_at = corner;
     }
     pub fn set_applied(&self, p: Option<Point>) {
         self.lock().applied = p;
@@ -491,6 +513,7 @@ pub fn place<R: tauri::Runtime>(
     let restored_search = restored.map(|(search, _, _)| search);
     // The default placement is the cold search column alone and fits.
     memory.set_nudge(restored.map_or(0, |(_, _, nudge)| nudge));
+    memory.set_placed_at(restored.map(|(_, corner, _)| corner));
     match restored {
         Some((_, corner, _)) => {
             let _ = window.set_position(space.position(corner));
@@ -954,6 +977,36 @@ mod tests {
             &[],
         );
         assert_eq!((corner, nudge), (Point { x: 8710, y: 50 }, 0));
+    }
+
+    #[test]
+    fn a_nudge_is_kept_only_while_the_window_is_where_it_was_put() {
+        let put = Some(Point { x: 599, y: 50 });
+        let n = |x, y| effective_nudge(Point { x, y }, put, -301);
+        assert_eq!(n(599, 50), -301);
+        assert_eq!(n(600, 49), -301); // rounding between logical and physical
+        assert_eq!(n(601, 50), 0);
+        assert_eq!(n(599, 52), 0);
+        assert_eq!(effective_nudge(Point { x: 599, y: 50 }, None, -301), 0);
+    }
+
+    #[test]
+    fn a_drag_between_a_nudge_and_a_shrink_leaves_the_column_where_it_was_dropped() {
+        let m = [monitor(0, 0, 1440, 900, 1.0)];
+        let (grown, nudge) = refit(
+            Point { x: 900, y: 50 },
+            lay(false, false),
+            lay(false, true),
+            1.0,
+            0,
+            &m,
+        );
+        assert_eq!((grown, nudge), (Point { x: 599, y: 50 }, -301));
+        // The person drags the grown window to x = 400; no blur recorded it.
+        let dropped = Point { x: 400, y: 50 };
+        let kept = effective_nudge(dropped, Some(grown), nudge);
+        let (back, nudge) = refit(dropped, lay(false, true), lay(false, false), 1.0, kept, &m);
+        assert_eq!((back, nudge), (dropped, 0));
     }
 
     // --- Memory: a nudge is the application's move, not the person's ---

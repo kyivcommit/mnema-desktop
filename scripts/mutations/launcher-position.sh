@@ -269,3 +269,9 @@ case_ "launcher cold: the threshold ignores the preference" \
   's~prefs::cold_after_minutes\(s\.data_dir\(\)\)~{ let _ = s; 5 }~' \
   '{ let _ = s; 5 }' \
   mnema-desktop 'go_cold_if_idle_follows_the_prefs_threshold' --test commands
+
+case_ "launcher position: a nudge outlives a drag" \
+  src-tauri/src/launcher_position.rs \
+  's~Some\(p\) if \(now\.x - p\.x\)\.abs\(\) <= 1~Some(p) if (now.x - p.x).abs() <= 1000~' \
+  '<= 1000' \
+  mnema-desktop 'launcher_position::tests::a_nudge_is_kept_only_while_the_window_is_where_it_was_put' --lib

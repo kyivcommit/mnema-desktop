@@ -156,7 +156,7 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
     left: bool,
     right: bool,
 ) {
-    use crate::launcher_position::{Space, monitors, refit, window_corner};
+    use crate::launcher_position::{Space, effective_nudge, monitors, refit, window_corner};
     use tauri::Manager;
     let next = Layout { left, right };
     let before = current.get();
@@ -170,8 +170,10 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
         } else {
             window_corner(&window.as_ref().window())
         };
-        let placed = corner
-            .map(|(c, factor)| refit(c, before, next, factor, memory.nudge(), &monitors(&window)));
+        let placed = corner.map(|(c, factor)| {
+            let nudge = effective_nudge(c, memory.placed_at(), memory.nudge());
+            refit(c, before, next, factor, nudge, &monitors(&window))
+        });
         // macOS: origin and size in one AppKit call (see `set_frame_once`).
         // ponytail: Windows and Linux keep two steps, `set_size` then
         // `set_position`; no flicker was reported there. If one shows up, give
@@ -181,6 +183,7 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
             && set_frame_once(&window, target_frame(origin, next))
         {
             memory.set_nudge(nudge);
+            memory.set_placed_at(Some(origin));
             current.set(next);
             return;
         }
@@ -188,6 +191,7 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
         if let Some((origin, nudge)) = placed {
             let _ = window.set_position(Space::of_this_build().position(origin));
             memory.set_nudge(nudge);
+            memory.set_placed_at(Some(origin));
         }
     }
     current.set(next);
