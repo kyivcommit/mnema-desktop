@@ -742,13 +742,13 @@ test('the grid starts at the window edge and follows data-cols alone', () => {
   // The new window frame shows the new `data-cols` laid out at the old width
   // for one frame. A grid that starts at the left edge is right in that frame;
   // a centred one jumped, and viewport-based margins landed 290 off. So: no
-  // centring, no margin, no media query to place the grid.
+  // centring, no margin, no width media query to place the grid.
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
   const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
   expect(panels).not.toMatch(/justify-content:\s*center/);
   expect(panels).toMatch(/justify-content:\s*start/);
   expect(css).not.toMatch(/main\.panels[^{]*\{[^}]*margin-left/);
-  expect(css).not.toMatch(/@media/);
+  expect(css).not.toMatch(/@media[^{]*width/);
   expect(css).not.toMatch(/minmax\(0, 470px\)/);
 });
 
@@ -867,8 +867,6 @@ test('the launcher listens for the event Rust emits', async () => {
   await waitFor(() => expect(cold.names).toContain('launcher-cold'));
 });
 
-// An ask still on the wire when the launcher goes cold must not bring the
-// forgotten answer back, and must not hold the one-ask-at-a-time guard.
 const answeredCalls = () => invoke.mock.calls.filter((c) => c[0] === 'launcher_answered');
 
 test('an applied answer restarts the idle clock exactly once', async () => {
@@ -898,6 +896,8 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
   expect(answeredCalls()).toHaveLength(0);
 });
 
+// An ask still on the wire when the launcher goes cold must not bring the
+// forgotten answer back, and must not hold the one-ask-at-a-time guard.
 test('an ask in flight when launcher-cold arrives is dropped when it resolves', async () => {
   let resolveAsk!: (v: unknown) => void;
   invoke.mockImplementation((cmd: string) => {

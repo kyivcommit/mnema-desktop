@@ -3,7 +3,7 @@
   import { locale, t } from '../i18n';
   import Answer from './Answer.svelte';
   import Passages from './Passages.svelte';
-    import type { AskCitation, Hit } from '../lib/ipc';
+  import type { AskCitation, Hit } from '../lib/ipc';
   import { firstCard, type CardAnswer } from './state';
 
   // 🔴 Ruling AC — why this component exists at all. The selection lives HERE,
