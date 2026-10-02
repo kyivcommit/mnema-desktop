@@ -2,7 +2,7 @@
 //! declarations in `ui/src/styles/launcher.css` (`main.panels`); the guard
 //! `the handle offset matches the stylesheet` (`Launcher.test.ts`) reads both.
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct Layout {
@@ -44,24 +44,28 @@ impl Current {
 /// When the launcher last hid or lost focus (a pinned one loses focus and
 /// stays up; every hide that follows marks again); `None` until the first.
 /// Managed; written by `hide_launcher` and the `Focused(false)` arm, read by
-/// the show.
+/// the show. A wall-clock time: `Instant` does not advance while the machine
+/// sleeps, and sleep is time hidden.
 #[derive(Default)]
-pub struct HiddenAt(Mutex<Option<Instant>>);
+pub struct HiddenAt(Mutex<Option<SystemTime>>);
 
 impl HiddenAt {
     pub fn mark(&self) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(SystemTime::now());
     }
-    pub fn get(&self) -> Option<Instant> {
+    pub fn get(&self) -> Option<SystemTime> {
         *self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
 /// Whether a show at `now` finds the launcher cold: hidden for at least
 /// `minutes`. Never hidden (`None`) is not cold: the start-up layout already is.
-pub fn goes_cold(hidden_at: Option<Instant>, now: Instant, minutes: u32) -> bool {
+/// A clock set back since the hide (`duration_since` fails) counts as elapsed,
+/// so the person gets a fresh launcher and never a stale answer.
+pub fn goes_cold(hidden_at: Option<SystemTime>, now: SystemTime, minutes: u32) -> bool {
     hidden_at.is_some_and(|t| {
-        now.saturating_duration_since(t) >= Duration::from_secs(u64::from(minutes) * 60)
+        now.duration_since(t)
+            .map_or(true, |d| d >= Duration::from_secs(u64::from(minutes) * 60))
     })
 }
 
@@ -254,10 +258,16 @@ mod tests {
 
     #[test]
     fn cold_exactly_at_the_threshold_not_a_second_before() {
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         assert!(goes_cold(Some(t0), t0 + Duration::from_secs(300), 5));
         assert!(!goes_cold(Some(t0), t0 + Duration::from_secs(299), 5));
         assert!(!goes_cold(None, t0 + Duration::from_secs(9999), 5));
+    }
+
+    #[test]
+    fn a_clock_set_back_counts_as_elapsed() {
+        let t0 = SystemTime::now();
+        assert!(goes_cold(Some(t0), t0 - Duration::from_secs(3600), 5));
     }
 
     #[test]

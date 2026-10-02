@@ -273,7 +273,7 @@ pub fn boot_files(state: &state::AppState) -> i64 {
 pub fn go_cold_if_idle<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     window: &tauri::WebviewWindow<R>,
-    now: std::time::Instant,
+    now: std::time::SystemTime,
 ) -> bool {
     let minutes = app
         .try_state::<state::AppState>()
@@ -311,7 +311,7 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
             // Cold before `place` and `show`: the window never appears wide,
             // and the UI clears its answer on `launcher-cold`. `place` then
             // uses the cold layout.
-            go_cold_if_idle(app, &window, std::time::Instant::now());
+            go_cold_if_idle(app, &window, std::time::SystemTime::now());
             let data_dir = app
                 .try_state::<state::AppState>()
                 .map(|s| s.data_dir().to_path_buf());
