@@ -1,7 +1,12 @@
 //! Supervision of the MLX sidecar (`sidecar/mnema-mlx`): start it, read its
 //! port, hold its token, restart it once, leave no orphan.
 
+mod manifest;
+mod models;
 mod process;
+
+pub use manifest::{FileSpec, Manifest, ModelSpec};
+pub use models::{ModelState, Store};
 
 pub use process::{Endpoint, Sidecar};
 
@@ -23,6 +28,14 @@ pub enum Error {
     Io(String),
     #[error("local model process request failed: {0}")]
     Http(String),
+    /// Not enough room for what is still to download (plus a reserve).
+    #[error("not enough free space: {needed} bytes needed, {free} free")]
+    NoSpace { needed: u64, free: u64 },
+    /// The bytes of `file` did not match the pinned sha256; the partial copy is gone.
+    #[error("checksum mismatch for {file}")]
+    Checksum { file: String },
+    #[error("download cancelled")]
+    Cancelled,
 }
 
 /// Whether this machine can run the sidecar: Apple Silicon, macOS 14 or newer.
