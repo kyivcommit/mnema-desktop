@@ -2094,7 +2094,11 @@ fn a_chat_call_the_provider_refuses_keeps_the_passages_and_says_why() {
     let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
         .expect("a failed chat call must not reject the ask");
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
-    assert_eq!(answer["citations"].as_array().map(Vec::len), Some(1), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
     assert_eq!(answer["why"]["kind"], json!("failed"), "{answer}");
     let reason = answer["why"]["reason"].as_str().unwrap_or_default();
     assert!(
@@ -2116,7 +2120,11 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
     let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
         .expect("a chat call with no network must not reject the ask");
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
-    assert_eq!(answer["citations"].as_array().map(Vec::len), Some(1), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
     assert_eq!(answer["why"], json!({ "kind": "offline" }), "{answer}");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),

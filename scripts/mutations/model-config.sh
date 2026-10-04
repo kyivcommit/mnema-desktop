@@ -408,7 +408,8 @@ case_ "redaction runs before stripping, so the key reassembles afterwards" \
 # ─────────────────────────────────────────────────────────────────────────────
 # The one provider failure that is not about the provider's answer.
 #
-# `http.rs:104` builds `Error::Transport` from ureq's own text, `error.rs:401`
+# `http.rs`'s `unanswered` builds `Error::Transport` from ureq's own text (and,
+# since D171, `Error::NoReply` for a connection that went silent), `error.rs:401`
 # carries that payload verbatim into `ProviderUnreachable`, and `Serialize` for
 # that type is `serialize_str(&self.to_string())` — so it crosses to the window.
 # Until review round 1 there was no test anywhere on that path: `http.rs`'s own
@@ -417,8 +418,8 @@ case_ "redaction runs before stripping, so the key reassembles afterwards" \
 
 case_ "the transport error's own text is replaced by a summary" \
   crates/mnema-provider/src/http.rs \
-  's~    let mut response = result\.map_err\(\|e\| Error::Transport\(e\.to_string\(\)\)\)\?;~    let mut response = result.map_err(|_| Error::Transport("the provider could not be reached".to_string()))?;~' \
-  'Error::Transport("the provider could not be reached".to_string())' \
+  's~        other => Error::Transport\(other\.to_string\(\)\),~        _ => Error::Transport("the provider could not be reached".to_string()),~' \
+  '_ => Error::Transport("the provider could not be reached".to_string()),' \
   mnema-desktop 'a_provider_that_never_answered_reaches_the_window_with_why_and_without_the_key' --test model_commands
 
 # "Never the request" is the clause of that rule which can actually leak, and

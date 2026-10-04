@@ -273,7 +273,14 @@ mod tests {
             let e = unanswered(ureq::Error::Timeout(before));
             assert!(matches!(e, Error::Transport(_)), "{before:?} gave {e:?}");
         }
-        for after in [T::Global, T::PerCall, T::SendRequest, T::SendBody, T::RecvResponse, T::RecvBody] {
+        for after in [
+            T::Global,
+            T::PerCall,
+            T::SendRequest,
+            T::SendBody,
+            T::RecvResponse,
+            T::RecvBody,
+        ] {
             let e = unanswered(ureq::Error::Timeout(after));
             assert!(matches!(e, Error::NoReply(_)), "{after:?} gave {e:?}");
         }
