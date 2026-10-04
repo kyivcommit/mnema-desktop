@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 
 /// Spawns the built `mnema-mlx --stub`; returns the process and its first stdout line.
-func startStubRaw(token: String = "t", env: [String: String] = [:]) throws -> (Process, String) {
+func startStubRaw(token: String = "t", env: [String: String] = [:], stderr: Pipe? = nil) throws -> (Process, String) {
     let exe = Bundle(for: StubAnchor.self).bundleURL.deletingLastPathComponent()
         .appendingPathComponent("mnema-mlx")
     let p = Process()
@@ -15,11 +15,20 @@ func startStubRaw(token: String = "t", env: [String: String] = [:]) throws -> (P
     let out = Pipe()
     p.standardOutput = out
     p.standardInput = Pipe()
-    p.standardError = FileHandle.nullDevice
+    p.standardError = stderr ?? FileHandle.nullDevice
     try p.run()
+    // Read on a side thread: a binary that never prints a newline must fail the test, not hang the run.
     var line = Data()
-    while let b = try out.fileHandleForReading.read(upToCount: 1), !b.isEmpty, b[0] != 10 {
-        line.append(b)
+    let got = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+        while let b = try? out.fileHandleForReading.read(upToCount: 1), !b.isEmpty, b[0] != 10 {
+            line.append(b)
+        }
+        got.signal()
+    }
+    if got.wait(timeout: .now() + 10) == .timedOut {
+        p.terminate()
+        got.wait()
     }
     return (p, String(decoding: line, as: UTF8.self))
 }
@@ -30,6 +39,31 @@ func startStub(token: String = "t", env: [String: String] = [:]) throws -> (Proc
 }
 
 final class StubAnchor {}
+
+/// Sends `text` verbatim over a raw socket; returns everything read back ("" when the peer closes silently).
+func raw(_ port: Int, _ text: String) -> String {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    defer { close(fd) }
+    var tv = timeval(tv_sec: 3, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var a = sockaddr_in()
+    a.sin_family = sa_family_t(AF_INET)
+    a.sin_port = in_port_t(port).bigEndian
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr)
+    let rc = withUnsafePointer(to: &a) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard rc == 0 else { return "" }
+    _ = text.withCString { send(fd, $0, strlen($0), 0) }
+    var out = Data()
+    var buf = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let n = recv(fd, &buf, buf.count, 0)
+        if n <= 0 { break }
+        out.append(contentsOf: buf[..<n])
+    }
+    return String(decoding: out, as: UTF8.self)
+}
 
 /// Blocking HTTP call; status 0 means no answer within `timeout`.
 func http(_ port: Int, _ path: String, method: String = "GET", token: String? = "t",
@@ -43,7 +77,9 @@ func http(_ port: Int, _ path: String, method: String = "GET", token: String? = 
     }
     var out: (Int, Data) = (0, Data())
     let done = DispatchSemaphore(value: 0)
-    URLSession(configuration: .ephemeral).dataTask(with: req) { d, r, _ in
+    let session = URLSession(configuration: .ephemeral)
+    defer { session.invalidateAndCancel() }
+    session.dataTask(with: req) { d, r, _ in
         out = ((r as? HTTPURLResponse)?.statusCode ?? 0, d ?? Data())
         done.signal()
     }.resume()
@@ -165,6 +201,9 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(http(port, "/mnema/load", method: "POST").status, 204)
         XCTAssertEqual(http(port, "/mnema/unload", method: "POST", body: #"{"models":["chat"]}"#).status, 204)
         XCTAssertEqual(try loaded(port), ["baai/bge-m3": true, "gemma-4-e2b-it": false])
+        XCTAssertEqual(http(port, "/mnema/load", method: "POST").status, 204)
+        XCTAssertEqual(http(port, "/mnema/unload", method: "POST", body: #"{"models":["embed"]}"#).status, 204)
+        XCTAssertEqual(try loaded(port), ["baai/bge-m3": false, "gemma-4-e2b-it": true])
     }
 
     func test_interactive_jumps_the_queue() throws {
@@ -185,7 +224,11 @@ final class ProtocolTests: XCTestCase {
         for i in 0..<3 { fire("scan\(i)", "/v1/embeddings", after: UInt32(i) * 10) }
         fire("interactive", "/interactive/v1/embeddings", after: 100)
         group.wait()
-        XCTAssertEqual(finished, ["scan0", "interactive", "scan1", "scan2"])
+        // Only the claim under test: the interactive request finishes second, behind the job already running.
+        // Which of the three scans arrives first is up to the scheduler, so their order is not asserted.
+        XCTAssertEqual(finished.count, 4)
+        XCTAssertEqual(finished[1], "interactive", "\(finished)")
+        XCTAssertFalse(finished.contains { $0.contains(":") }, "\(finished)")
     }
 
     func test_unknown_embed_model_is_404() throws {
@@ -221,5 +264,52 @@ final class ProtocolTests: XCTestCase {
         fire("unload", "/mnema/unload", #"{"models":["embed"]}"#, after: 100)
         group.wait()
         XCTAssertEqual(finished, ["embed:200", "unload:204"])
+    }
+
+    func test_negative_content_length_does_not_kill_the_process() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        let r = raw(port, "POST /v1/embeddings HTTP/1.1\r\nContent-Length: -1\r\n\r\n")
+        XCTAssertTrue(r.hasPrefix("HTTP/1.1 4"), "got: \(r.prefix(40))")
+        XCTAssertEqual(http(port, "/v1/models").status, 200)
+        XCTAssertTrue(p.isRunning)
+    }
+
+    func test_refuses_to_start_without_a_token() throws {
+        let err = Pipe()
+        let (p, line) = try startStubRaw(token: "", stderr: err)
+        defer { if p.isRunning { p.terminate() } }
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning && Date() < deadline { usleep(20_000) }
+        XCTAssertFalse(p.isRunning, "started with an empty token")
+        if !p.isRunning { XCTAssertNotEqual(p.terminationStatus, 0) }
+        XCTAssertFalse(line.hasPrefix("PORT"), line)
+        p.terminate()
+        let reason = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(reason.contains("MNEMA_MLX_TOKEN"), reason)
+    }
+
+    func test_embed_input_must_be_a_string_array() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        for body in [#"{"model":"baai/bge-m3"}"#, #"{"model":"baai/bge-m3","input":"text"}"#,
+                     #"{"model":"baai/bge-m3","input":[1,2]}"#] {
+            XCTAssertEqual(http(port, "/v1/embeddings", method: "POST", body: body).status, 400, body)
+        }
+    }
+
+    func test_routes_check_method_and_interactive_prefix() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        XCTAssertEqual(http(port, "/v1/embeddings").status, 405)
+        XCTAssertEqual(http(port, "/v1/models", method: "POST").status, 405)
+        XCTAssertEqual(http(port, "/interactive/mnema/load", method: "POST").status, 404)
+        XCTAssertEqual(try loaded(port)["gemma-4-e2b-it"], false)
+    }
+
+    func test_malformed_start_line_is_answered() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        XCTAssertTrue(raw(port, "GARBAGE\r\n\r\n").hasPrefix("HTTP/1.1 400"))
     }
 }

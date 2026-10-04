@@ -45,6 +45,19 @@ final class WorkQueue {
     }
 }
 
+/// Largest request body accepted; an embed batch of 16 passages is far below it.
+private let maxBodyBytes = 16 << 20
+
+enum Parsed {
+    case incomplete
+    case malformed
+    case request(Request)
+}
+
+public struct ListenError: Error, CustomStringConvertible {
+    public let description: String
+}
+
 public final class Server {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "mnema-mlx.server")
@@ -79,13 +92,22 @@ public final class Server {
     /// Starts listening and returns the port the OS picked.
     public func start() throws -> UInt16 {
         let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        var failure: String?
+        listener.stateUpdateHandler = {
+            switch $0 {
+            case .ready: ready.signal()
+            case .failed(let e): failure = "listener failed: \(e)"; ready.signal()
+            case .cancelled: failure = "listener cancelled"; ready.signal()
+            default: break
+            }
+        }
         listener.newConnectionHandler = { [self] conn in
             conn.start(queue: queue)
             receive(conn, Data())
         }
         listener.start(queue: queue)
         ready.wait()
+        if let failure { throw ListenError(description: failure) }
         return listener.port!.rawValue
     }
 
@@ -93,51 +115,60 @@ public final class Server {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, done, err in
             var buf = buf
             buf.append(data ?? Data())
-            if let req = parse(buf) {
-                handle(req) { resp in
-                    var head = "HTTP/1.1 \(resp.status) X\r\nContent-Length: \(resp.body.count)\r\n"
-                    head += "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-                    conn.send(content: Data(head.utf8) + resp.body, completion: .contentProcessed { _ in conn.cancel() })
-                }
-            } else if done || err != nil {
-                conn.cancel()
-            } else {
-                receive(conn, buf)
+            func send(_ resp: Response) {
+                var head = "HTTP/1.1 \(resp.status) X\r\nContent-Length: \(resp.body.count)\r\n"
+                head += "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+                conn.send(content: Data(head.utf8) + resp.body, completion: .contentProcessed { _ in conn.cancel() })
+            }
+            switch parse(buf) {
+            case .request(let req): handle(req, reply: send)
+            case .malformed: send(Response(400, ["error": "bad request"]))
+            case .incomplete:
+                if done || err != nil { conn.cancel() } else { receive(conn, buf) }
             }
         }
     }
 
-    /// Returns nil until the whole request (headers and Content-Length body) has arrived.
-    private func parse(_ buf: Data) -> Request? {
-        guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+    /// `.incomplete` until the whole request (headers and Content-Length body) has arrived.
+    private func parse(_ buf: Data) -> Parsed {
+        guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else {
+            return buf.count > 64 << 10 ? .malformed : .incomplete  // no header block this long is ours
+        }
         let lines = String(decoding: buf[..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
         let start = lines[0].split(separator: " ")
-        guard start.count >= 2 else { return nil }
+        guard start.count >= 2 else { return .malformed }
         var headers: [String: String] = [:]
         for l in lines.dropFirst() {
             if let c = l.firstIndex(of: ":") {
                 headers[l[..<c].lowercased()] = l[l.index(after: c)...].trimmingCharacters(in: .whitespaces)
             }
         }
-        let n = Int(headers["content-length"] ?? "0") ?? 0
+        guard let n = Int(headers["content-length"] ?? "0"), n >= 0, n <= maxBodyBytes else { return .malformed }
         let body = buf[end.upperBound...]
-        guard body.count >= n else { return nil }
-        return Request(method: String(start[0]), path: String(start[1]), headers: headers, body: Data(body.prefix(n)))
+        guard body.count >= n else { return .incomplete }
+        return .request(Request(method: String(start[0]), path: String(start[1]), headers: headers, body: Data(body.prefix(n))))
     }
 
     private func handle(_ req: Request, reply: @escaping (Response) -> Void) {
         guard req.headers["authorization"] == "Bearer \(token)" else {
             return reply(Response(401, ["error": "unauthorized"]))
         }
-        let interactive = req.path.hasPrefix("/interactive/")
+        let interactive = req.path.hasPrefix("/interactive/v1/")
         let path = interactive ? String(req.path.dropFirst("/interactive".count)) : req.path
+        let allowed = path == "/v1/models" ? "GET" : "POST"
+        if ["/v1/models", "/v1/embeddings", "/v1/chat/completions", "/mnema/load", "/mnema/unload"].contains(path),
+           req.method != allowed {
+            return reply(Response(405, ["error": "method not allowed"]))
+        }
         let json = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
         switch path {
         case "/v1/embeddings":
             guard json["model"] as? String == "baai/bge-m3" else {
                 return reply(Response(404, ["error": "unknown model"]))
             }
-            let input = json["input"] as? [String] ?? []
+            guard let input = json["input"] as? [String] else {
+                return reply(Response(400, ["error": "input must be an array of strings"]))
+            }
             work.submit(urgent: interactive) { reply(self.embed(input)) }
         case "/v1/chat/completions":
             let messages = json["messages"] as? [[String: String]] ?? []
