@@ -53,13 +53,27 @@ public final class Server {
     private let embedDelayMs: Int
     private let lock = NSLock()
     private var loaded = ["chat": false, "embed": false]
+    /// nil: `--stub`.
+    private let models: (engine: Engine, embedDir: URL, chatDir: URL)?
 
     public init(token: String, embedDelayMs: Int = 0) throws {
         self.token = token
         self.embedDelayMs = embedDelayMs
+        models = nil
+        listener = try Self.listen()
+    }
+
+    public init(token: String, embedDir: URL, chatDir: URL) throws {
+        self.token = token
+        embedDelayMs = 0
+        models = (Engine(), embedDir, chatDir)
+        listener = try Self.listen()
+    }
+
+    private static func listen() throws -> NWListener {
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 0)
-        listener = try NWListener(using: params)
+        return try NWListener(using: params)
     }
 
     /// Starts listening and returns the port the OS picked.
@@ -123,15 +137,21 @@ public final class Server {
             guard json["model"] as? String == "baai/bge-m3" else {
                 return reply(Response(404, ["error": "unknown model"]))
             }
-            work.submit(urgent: interactive) { reply(self.embed(json["input"] as? [String] ?? [])) }
+            let input = json["input"] as? [String] ?? []
+            work.submit(urgent: interactive) { reply(self.embed(input)) }
         case "/v1/chat/completions":
-            work.submit(urgent: true) { reply(Response(200, ["choices": [["message": ["content": "stub <c>1</c>"]]]])) }
+            let messages = json["messages"] as? [[String: String]] ?? []
+            work.submit(urgent: true) { reply(self.chat(messages)) }
+        // Load and unload wait for the running job in the same queue: never free a model in use.
         case "/mnema/load":
-            setLoaded(["chat", "embed"], true)
-            reply(Response(204))
+            work.submit(urgent: false) { reply(self.load(["chat", "embed"])) }
         case "/mnema/unload":
-            setLoaded(json["models"] as? [String] ?? ["chat", "embed"], false)
-            reply(Response(204))
+            let names = json["models"] as? [String] ?? ["chat", "embed"]
+            work.submit(urgent: false) {
+                self.models?.engine.unload(names)
+                self.setLoaded(names, false)
+                reply(Response(204))
+            }
         case "/v1/models":
             lock.lock(); defer { lock.unlock() }
             reply(Response(200, ["data": [
@@ -148,7 +168,37 @@ public final class Server {
         for m in models where loaded[m] != nil { loaded[m] = value }
     }
 
+    /// Runs on the work queue. Loads the models that are not loaded yet.
+    private func load(_ names: [String]) -> Response {
+        if let m = models {
+            if case .failure(let e) = blocking({ try await m.engine.load(embedDir: m.embedDir, chatDir: m.chatDir, models: names) }) {
+                return Response(500, ["error": "load: \(e)"])
+            }
+        }
+        setLoaded(names, true)
+        return Response(204)
+    }
+
+    private func chat(_ messages: [[String: String]]) -> Response {
+        guard let m = models else { return Response(200, ["choices": [["message": ["content": "stub <c>1</c>"]]]]) }
+        let r = load(["chat"])
+        guard r.status == 204 else { return r }
+        switch blocking({ try await m.engine.chat(messages) }) {
+        case .success(let content): return Response(200, ["choices": [["message": ["content": content]]]])
+        case .failure(let e): return Response(500, ["error": "chat: \(e)"])
+        }
+    }
+
     private func embed(_ inputs: [String]) -> Response {
+        if let m = models {
+            let r = load(["embed"])
+            guard r.status == 204 else { return r }
+            switch blocking({ try await m.engine.embed(inputs) }) {
+            case .success(let vecs):
+                return Response(200, ["data": vecs.enumerated().map { ["index": $0.offset, "embedding": $0.element] }])
+            case .failure(let e): return Response(500, ["error": "embed: \(e)"])
+            }
+        }
         if embedDelayMs > 0 { usleep(UInt32(embedDelayMs) * 1000) }
         let data = inputs.indices.map { i -> [String: Any] in
             var v = [Double](repeating: 0, count: 1024)
@@ -157,4 +207,16 @@ public final class Server {
         }
         return Response(200, ["data": data])
     }
+}
+
+/// The work queue is a plain thread; the engine is async. Block the thread until the job is done.
+private func blocking<T>(_ f: @escaping () async throws -> T) -> Result<T, Error> {
+    var out: Result<T, Error>!
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        do { out = .success(try await f()) } catch { out = .failure(error) }
+        done.signal()
+    }
+    done.wait()
+    return out
 }

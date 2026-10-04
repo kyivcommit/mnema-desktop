@@ -200,4 +200,26 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(http(port, "/v1/chat/completions", method: "POST",
                             body: #"{"model":"whatever","messages":[]}"#).status, 200)
     }
+
+    /// Unloading while a job runs would free a model in use: unload queues behind the running embed.
+    func test_unload_waits_for_the_running_job() throws {
+        let (p, port) = try startStub(env: ["MNEMA_STUB_EMBED_MS": "500"])
+        defer { p.terminate() }
+        let lock = NSLock()
+        var finished: [String] = []
+        let group = DispatchGroup()
+        func fire(_ name: String, _ path: String, _ body: String, after ms: UInt32) {
+            group.enter()
+            Thread.detachNewThread {
+                usleep(ms * 1000)
+                let r = http(port, path, method: "POST", body: body, timeout: 10)
+                lock.lock(); finished.append("\(name):\(r.status)"); lock.unlock()
+                group.leave()
+            }
+        }
+        fire("embed", "/v1/embeddings", #"{"model":"baai/bge-m3","input":["x"]}"#, after: 0)
+        fire("unload", "/mnema/unload", #"{"models":["embed"]}"#, after: 100)
+        group.wait()
+        XCTAssertEqual(finished, ["embed:200", "unload:204"])
+    }
 }
