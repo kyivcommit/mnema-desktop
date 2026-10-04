@@ -2115,6 +2115,9 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), NO_PROVIDER);
     let webview = ask_ready_with_one_passage(&app);
+    let state = app.state::<AppState>();
+    let epoch = state.provider_status_gen();
+    state.store_provider_status(epoch, mnema_desktop::provider_status::ProviderStatus::Ok);
 
     let started = std::time::Instant::now();
     let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
@@ -2131,6 +2134,51 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
         "a refused connection is known at once, took {:?}",
         started.elapsed()
     );
+    assert!(
+        state.cached_provider_status().is_none(),
+        "a chat call that could not connect must drop the cached \"ok\" (D171 review, finding 2)"
+    );
+}
+
+/// D171 review, finding 4: with no network the query's embedding fails as
+/// `Transport`, chat is not tried, and the answer says `offline` — AHEAD of the
+/// no-candidates refusal. The text arm is off, so retrieval finds nothing: an
+/// `ask` that checked for hits first would say "nothing matched", which is not
+/// established while the content arm could not run. Also pins that a network
+/// failure drops the cached "ok" behind the launcher's cloud (finding 2).
+#[test]
+fn a_query_embedding_with_no_network_says_offline_ahead_of_no_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let webview = ask_ready_with_one_passage(&app);
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model("baai/bge-m3", 1024, "credential-ref", "chunker-v1")
+        })
+        .expect("the model is adopted");
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .unwrap();
+    let epoch = state.provider_status_gen();
+    state.store_provider_status(epoch, mnema_desktop::provider_status::ProviderStatus::Ok);
+    assert!(
+        state.cached_provider_status().is_some(),
+        "the probe's premise"
+    );
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("an embedding with no network must not reject the ask");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"], json!({ "kind": "offline" }), "{answer}");
+    assert_eq!(answer["citations"], json!([]), "{answer}");
+    assert!(
+        state.cached_provider_status().is_none(),
+        "a failure on the network must drop the cached \"ok\""
+    );
 }
 
 /// D171: the query's embedding goes to the same provider the chat call would,
@@ -2140,7 +2188,7 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
 /// is what turns this red. Pays one real `INTERACTIVE_TIMEOUT` (15 s), the
 /// only way to reach `NoReply` through the real agent.
 #[test]
-fn a_query_embedding_with_no_reply_skips_the_chat_call_and_says_no_reply() {
+fn a_query_embedding_with_no_reply_skips_the_chat_call_and_says_so() {
     const MODEL: &str = "baai/bge-m3";
     const DIM: i64 = 1024;
     let completion =
@@ -2165,7 +2213,11 @@ fn a_query_embedding_with_no_reply_skips_the_chat_call_and_says_no_reply() {
     let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
         .expect("an embedding with no reply must not reject the ask");
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
-    assert_eq!(answer["why"], json!({ "kind": "noReply" }), "{answer}");
+    assert_eq!(
+        answer["why"],
+        json!({ "kind": "embeddingNoReply" }),
+        "{answer}"
+    );
     assert_eq!(
         answer["citations"].as_array().map(Vec::len),
         Some(1),

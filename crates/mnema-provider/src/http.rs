@@ -19,7 +19,8 @@ use crate::Error;
 pub(crate) const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a name lookup may take, and separately how long opening the
-/// connection may take. A machine with no network must hear so in seconds, not
+/// connection may take — in `ureq` 3.3.0 the second also covers the TLS
+/// handshake and sending the request headers (`timings.rs:63-68`). A machine with no network must hear so in seconds, not
 /// after a whole `GLOBAL_TIMEOUT` (D171): before this the two waits were only
 /// bounded by the global one, and a request with nowhere to go sat out all 30 s.
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -142,21 +143,31 @@ fn finish(
     // of a response that stopped mid-transfer. A 200 cut short and a host
     // that was never reachable are different problems, and only `Transport`
     // used to name the second one — this used to collapse both into it.
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| Error::BodyUnreadable {
+    //
+    // One exception, and only for a 2xx (D171, review finding 1): a body that
+    // stopped arriving until the timeout fired is the provider going silent
+    // after it accepted the request — the commonest shape of a model that
+    // stopped answering — and is `NoReply`. A non-2xx keeps `BodyUnreadable`,
+    // whose status the key checks still read (`chat.rs`, `probe.rs`).
+    let body = response.body_mut().read_to_string().map_err(|e| match e {
+        ureq::Error::Timeout(_) if (200..300).contains(&status) => Error::NoReply(e.to_string()),
+        e => Error::BodyUnreadable {
             status,
             detail: e.to_string(),
-        })?;
+        },
+    })?;
     Ok((status, body))
 }
 
 /// Splits a call that got no response at all into the two things a person can
-/// act on differently (D171): the connection never opened — no network, a
-/// name that does not resolve, a host that refuses — is `Transport`; it opened
-/// and then the answer did not come in time is `NoReply`. A resolve or connect
-/// timeout is the first kind: nothing was ever sent.
+/// act on differently (D171): no working connection — no network, a name that
+/// does not resolve, a host that refuses, a TLS handshake that never finished —
+/// is `Transport`; a connection that worked and then no answer in time is
+/// `NoReply`. A `Connect` timeout is the first kind even though bytes may have
+/// left: in `ureq` 3.3.0 its deadline also covers the TLS handshake and the
+/// header send (`timings.rs:63-68`), measured by the D171 review against a
+/// socket that accepts and never answers (`https`: `Timeout(Connect)` at the
+/// connect timeout).
 fn unanswered(e: ureq::Error) -> Error {
     match e {
         ureq::Error::Timeout(t)
@@ -286,6 +297,26 @@ mod tests {
         }
         let refused = unanswered(ureq::Error::ConnectionFailed);
         assert!(matches!(refused, Error::Transport(_)), "{refused:?}");
+    }
+
+    /// D171 review, finding 1: a 200 whose headers came and whose body then
+    /// stalled is `NoReply`, not `BodyUnreadable` — the model went silent
+    /// after accepting the request. The other direction: a 401 with a stalled
+    /// body keeps its status, which the key checks read.
+    #[test]
+    fn a_body_that_stalls_after_a_200_is_no_reply_but_after_a_401_keeps_its_status() {
+        let server = MockServer::new(vec![Reply::stalled(2, "{")]);
+        let silent = post_json_within(server.base(), "/x", "k", "{}", Duration::from_millis(300));
+        assert!(matches!(silent, Err(Error::NoReply(_))), "{silent:?}");
+
+        let mut refused = Reply::stalled(2, "{");
+        refused.status = 401;
+        let server = MockServer::new(vec![refused]);
+        let refused = post_json_within(server.base(), "/x", "k", "{}", Duration::from_millis(300));
+        assert!(
+            matches!(refused, Err(Error::BodyUnreadable { status: 401, .. })),
+            "{refused:?}"
+        );
     }
 
     /// Pairs with the test above (Task 2 review round 2, G5): reading the

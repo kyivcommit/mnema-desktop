@@ -1037,7 +1037,7 @@ fn resolve_content_query(
             Some(ContentArmReport::Failed {
                 reason: e.to_string(),
             }),
-            NoAnswer::unreachable(&e),
+            NoAnswer::from_query_embedding(&e),
         )),
     }
 }
@@ -1299,9 +1299,15 @@ pub enum NoAnswer {
     NotAsked,
     /// The provider could not be reached: no network, most often.
     Offline,
-    /// The provider was reached and did not answer within
+    /// The provider was reached and the chat model did not answer within
     /// [`mnema_provider::INTERACTIVE_TIMEOUT`].
     NoReply,
+    /// The provider was reached and did not embed the search query in time,
+    /// so the chat model was never asked. Its own variant (D171 review,
+    /// finding 3): "the model did not answer, choose another" would send the
+    /// person to change a chat model nobody asked, while the embedding model
+    /// cannot be changed without re-indexing.
+    EmbeddingNoReply,
     /// The provider answered with an error — a refused key, a rate limit, a
     /// model it no longer has. `reason` is that error's own sentence, which
     /// `mnema_provider::Error` guarantees never carries the key.
@@ -1311,20 +1317,32 @@ pub enum NoAnswer {
 impl NoAnswer {
     /// A failed chat call, as the launcher names it.
     fn from_chat(e: &mnema_provider::Error) -> Self {
-        Self::unreachable(e).unwrap_or_else(|| Self::Failed {
-            reason: e.to_string(),
-        })
+        match e {
+            mnema_provider::Error::Transport(_) => Self::Offline,
+            mnema_provider::Error::NoReply(_) => Self::NoReply,
+            other => Self::Failed {
+                reason: other.to_string(),
+            },
+        }
     }
 
-    /// The two failures that are about the way to the provider rather than
-    /// about the request — and so are just as true of the chat call that would
-    /// follow the query's embedding to the same base (D171).
-    fn unreachable(e: &mnema_provider::Error) -> Option<Self> {
+    /// A failed embedding of the search query, when it is about the way to the
+    /// provider rather than about the request — and so just as true of the
+    /// chat call that would follow it to the same base (D171). Any other
+    /// failure is the content arm's alone, and chat is still asked.
+    fn from_query_embedding(e: &mnema_provider::Error) -> Option<Self> {
         match e {
             mnema_provider::Error::Transport(_) => Some(Self::Offline),
-            mnema_provider::Error::NoReply(_) => Some(Self::NoReply),
+            mnema_provider::Error::NoReply(_) => Some(Self::EmbeddingNoReply),
             _ => None,
         }
+    }
+
+    /// Whether this answer is evidence that the provider cannot be reached
+    /// right now — the cached "ok" behind the launcher's cloud is then stale
+    /// (D171 review, finding 2).
+    fn about_the_network(&self) -> bool {
+        matches!(self, Self::Offline | Self::NoReply | Self::EmbeddingNoReply)
     }
 }
 
@@ -1347,13 +1365,16 @@ const MAX_ASK_QUERY: usize = 2048;
 /// halves of `ask.py:17`'s `min_length=1, max_length=2048`; the blank guard
 /// keeps a meaningless question from reaching the billable query embed —
 /// the D115 mechanism through this caller — and the length guard resolves
-/// spec §12). Then the four branches, in order: any non-`Ready` readiness
+/// spec §12). Then the branches, in order: any non-`Ready` readiness
 /// answers with the citations retrieval already found
-/// ([`AskAnswer::CitationsOnly`]) and never reaches the chat model — the
-/// gate. `Ready` with no hits refuses before calling chat (`NoCandidates`,
-/// `service.py:66-68`); a `Ready` call the model answers blankly refuses
-/// after (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the
-/// model wrote become citations.
+/// ([`AskAnswer::CitationsOnly`], `why: NotAsked`) and never reaches the chat
+/// model — the gate. A query embedding that already failed on the network
+/// answers the same way with its cause, and chat is not tried (D171).
+/// `Ready` with no hits refuses before calling chat (`NoCandidates`,
+/// `service.py:66-68`); a chat call that fails keeps the citations and says
+/// why (D171); a `Ready` call the model answers blankly refuses after
+/// (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the model
+/// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
     if query.trim().is_empty() {
@@ -1385,6 +1406,7 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     // because with the content arm down "nothing matched" is not established —
     // the person must read why, not that the archive has nothing.
     if let Some(why) = unreachable {
+        state.forget_provider_status();
         return Ok(AskAnswer::CitationsOnly {
             citations: hits,
             why,
@@ -1409,9 +1431,13 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     let generated = match mnema_rag::answer(&base, &key, &model, &query, &passages, None) {
         Ok(generated) => generated,
         Err(e) => {
+            let why = NoAnswer::from_chat(&e);
+            if why.about_the_network() {
+                state.forget_provider_status();
+            }
             return Ok(AskAnswer::CitationsOnly {
                 citations: hits,
-                why: NoAnswer::from_chat(&e),
+                why,
                 text,
                 content,
             });
@@ -1778,6 +1804,10 @@ mod tests {
         let v = |w: NoAnswer| serde_json::to_value(w).unwrap();
         assert_eq!(v(NoAnswer::Offline), json!({ "kind": "offline" }));
         assert_eq!(v(NoAnswer::NoReply), json!({ "kind": "noReply" }));
+        assert_eq!(
+            v(NoAnswer::EmbeddingNoReply),
+            json!({ "kind": "embeddingNoReply" })
+        );
         assert_eq!(
             v(NoAnswer::Failed { reason: "r".into() }),
             json!({ "kind": "failed", "reason": "r" })

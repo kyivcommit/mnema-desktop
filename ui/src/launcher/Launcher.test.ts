@@ -160,12 +160,16 @@ test('on ready the line clears', async () => {
 // in the line so Enter asks again. Both directions: `notAsked` (no chat model)
 // is not a failure to retry, and clears the line like every other answer.
 test('a provider failure keeps the query in the line; a model never asked clears it', async () => {
-  mockBackend({ ...citationsOnly, why: { kind: 'offline' } });
-  render(Launcher);
-  await submit('retry me');
-  await screen.findByTestId('citations-banner');
-  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('retry me');
-  cleanup();
+  for (const why of [{ kind: 'offline' }, { kind: 'noReply' }, { kind: 'embeddingNoReply' }, { kind: 'failed', reason: 'r' }]) {
+    mockBackend({ ...citationsOnly, why });
+    render(Launcher);
+    await submit('retry me');
+    await screen.findByTestId('citations-banner');
+    expect((screen.getByRole('textbox') as HTMLInputElement).value, why.kind).toBe('retry me');
+    // The cloud is asked again after the failure, not left on its cached state.
+    await waitFor(() => expect(invoke.mock.calls.filter((c) => c[0] === 'provider_status').length, why.kind).toBeGreaterThan(1));
+    cleanup();
+  }
 
   mockBackend(citationsOnly); // why: notAsked
   render(Launcher);

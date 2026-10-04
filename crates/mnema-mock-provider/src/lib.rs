@@ -31,6 +31,9 @@ pub struct Reply {
     /// whatever order the kernel accepts them, so a test that must know which
     /// request got which reply pins each reply to a text the request carries.
     only_for: Option<String>,
+    /// How long to hold the connection open after writing a short body, before
+    /// closing it: headers arrive, the body never finishes (D171).
+    stall: Duration,
 }
 
 impl Reply {
@@ -49,6 +52,7 @@ impl Reply {
             declared_extra: 0,
             gate: None,
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
     pub fn status(status: u16, body: &str) -> Self {
@@ -59,6 +63,7 @@ impl Reply {
             declared_extra: 0,
             gate: None,
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
     pub fn slow(seconds: u64) -> Self {
@@ -69,6 +74,7 @@ impl Reply {
             declared_extra: 0,
             gate: None,
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
 
@@ -93,6 +99,7 @@ impl Reply {
             declared_extra: 0,
             gate: None,
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
 
@@ -109,6 +116,7 @@ impl Reply {
             declared_extra: 0,
             gate: Some(barrier),
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
 
@@ -120,6 +128,18 @@ impl Reply {
     /// received at all, and a client reading a length-delimited body errors
     /// out on the read rather than returning the partial bytes (see
     /// `mnema_provider::Error::BodyUnreadable`).
+    /// A 200 whose headers arrive at once and whose body then stops for
+    /// `seconds`: the shape of a model that accepted the request and went
+    /// silent (D171). Declares more bytes than it sends, so a client that
+    /// waits must time out reading the body.
+    pub fn stalled(seconds: u64, body: &str) -> Self {
+        Self {
+            declared_extra: 64,
+            stall: Duration::from_secs(seconds),
+            ..Self::ok(body)
+        }
+    }
+
     pub fn truncated(body: &str) -> Self {
         Self::truncated_status(200, body)
     }
@@ -139,6 +159,7 @@ impl Reply {
             declared_extra: 64,
             gate: None,
             only_for: None,
+            stall: Duration::ZERO,
         }
     }
 }
@@ -201,6 +222,7 @@ impl MockServer {
                         }
                         thread::sleep(reply.delay);
                         write_reply(&mut stream, reply.status, &reply.body, reply.declared_extra);
+                        thread::sleep(reply.stall);
                     }
                     None => {
                         write_reply(

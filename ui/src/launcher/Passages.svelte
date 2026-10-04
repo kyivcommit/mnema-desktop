@@ -51,6 +51,7 @@
     }
     const cause = why.kind === 'offline' ? t('no_answer_offline')
       : why.kind === 'noReply' ? t('no_answer_no_reply')
+      : why.kind === 'embeddingNoReply' ? t('no_answer_embedding_no_reply')
       : t('no_answer_failed', { reason: why.reason });
     return count === 0 ? cause : `${cause} ${t('citations_only_found', { count })}`;
   });

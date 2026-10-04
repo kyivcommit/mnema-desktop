@@ -125,9 +125,14 @@
       // §7: line clears on ready — but only if it still holds the submitted
       // query. A draft typed while the ask was in flight is kept, not wiped
       // (Codex #3). D171: an answer the provider failed to give keeps the
-      // query too, so Enter asks again — the one thing worth doing next.
-      const retry = answer.kind === 'citationsOnly' && answer.why.kind !== 'notAsked';
-      if (query === raw && !retry) query = '';
+      // query too, so asking again is one Enter away — the remedy for a lost
+      // network or a silent model, and harmless for a refused key.
+      const failed = answer.kind === 'citationsOnly' && answer.why.kind !== 'notAsked';
+      if (query === raw && !failed) query = '';
+      // The provider just failed this ask: the cloud asks again rather than
+      // keep showing a cached "ok" beside the failure (D171 review, finding 2;
+      // the backend dropped that cache for a network failure).
+      if (failed) refreshProvider();
       // §7: the query echoes as a chat bubble. The bubble itself is drawn by
       // `Answer` inside the centre card (Task 8b) — the launcher used to draw a
       // second one of its own here, and in state B both were on screen at once.

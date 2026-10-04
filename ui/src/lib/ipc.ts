@@ -63,6 +63,7 @@ export type NoAnswer =
   | { kind: 'notAsked' }
   | { kind: 'offline' }
   | { kind: 'noReply' }
+  | { kind: 'embeddingNoReply' }
   | { kind: 'failed'; reason: string };
 
 export type AskAnswer =

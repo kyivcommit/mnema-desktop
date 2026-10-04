@@ -310,7 +310,7 @@ pub enum Error {
     ///
     /// Deliberately not "the request never reached a provider", which is more
     /// than the mapping behind it can support: this is built from every
-    /// `ureq` error (`crates/mnema-provider/src/http.rs:104`), and three of
+    /// `ureq` error (`unanswered` in `crates/mnema-provider/src/http.rs`), and three of
     /// those contradict that sentence — a timeout, where the request may well
     /// have arrived and the answer merely did not come back in time; too many
     /// redirects, where the provider answered repeatedly; and a base address
