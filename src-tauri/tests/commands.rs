@@ -2140,6 +2140,35 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
     );
 }
 
+/// D171's own live case (2026-10-02): the chat model accepts the request,
+/// sends its headers, and goes silent. The passages stay, the cause is the
+/// model's silence — not "the provider returned an error" — and it is said
+/// after `INTERACTIVE_TIMEOUT`, not the 30 s global one. Pays one real 15 s
+/// wait (PR #62 review, finding 1: the scenario D171 exists for had no test).
+#[test]
+fn a_chat_model_that_goes_silent_keeps_the_passages_and_says_no_reply() {
+    let server = MockServer::new(vec![Reply::stalled(20, "{")]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let started = std::time::Instant::now();
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a silent chat model must not reject the ask");
+    let waited = started.elapsed();
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"], json!({ "kind": "noReply" }), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_secs(14) && waited < std::time::Duration::from_secs(19),
+        "the wait is INTERACTIVE_TIMEOUT (15 s), took {waited:?}"
+    );
+}
+
 /// D171 review, finding 4: with no network the query's embedding fails as
 /// `Transport`, chat is not tried, and the answer says `offline` — AHEAD of the
 /// no-candidates refusal. The text arm is off, so retrieval finds nothing: an
