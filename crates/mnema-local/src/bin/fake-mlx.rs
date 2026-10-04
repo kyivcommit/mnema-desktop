@@ -37,7 +37,11 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     println!("PORT {}", listener.local_addr().unwrap().port());
     std::io::stdout().flush().unwrap();
-    log(&format!("spawn {}", std::process::id()));
+    log(&format!(
+        "spawn {} {}",
+        std::process::id(),
+        std::env::args().skip(1).collect::<Vec<_>>().join(" ")
+    ));
 
     if std::env::var("FAKE_MLX_IGNORE_STDIN").is_err() {
         std::thread::spawn(|| {
@@ -101,6 +105,8 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
     let body = String::from_utf8_lossy(&body).to_string();
 
     log(&format!("start {method} {path}"));
+    // Routing ignores the `/interactive` prefix; the log keeps the path as sent.
+    let sent = path.clone();
     let path = path
         .strip_prefix("/interactive")
         .unwrap_or(&path)
@@ -119,7 +125,7 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
                 (200, r#"{"data":[]}"#.to_string())
             }
             "/v1/chat/completions" => {
-                log(&format!("body {path} {body}"));
+                log(&format!("body {sent} {body}"));
                 std::thread::sleep(Duration::from_millis(env_num("FAKE_MLX_CHAT_MS")));
                 (
                     200,
@@ -131,7 +137,7 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
                 (200, "{}".to_string())
             }
             "/mnema/unload" => {
-                log(&format!("body {path} {body}"));
+                log(&format!("body {sent} {body}"));
                 (200, "{}".to_string())
             }
             _ => (404, r#"{"error":"not found"}"#.to_string()),
@@ -145,6 +151,6 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(answer.as_bytes());
     let _ = s.flush();
-    log(&format!("end {method} {path}"));
+    log(&format!("end {method} {sent}"));
     status
 }

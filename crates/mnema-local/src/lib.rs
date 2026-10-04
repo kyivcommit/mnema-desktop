@@ -44,14 +44,28 @@ pub fn available() -> bool {
         && macos_major().is_some_and(|v| v >= 14)
 }
 
+/// `kern.osproductversion` ("14.5"), read in-process: spawning `sw_vers` would be
+/// one more spawn outside the shared guard.
 #[cfg(target_os = "macos")]
 fn macos_major() -> Option<u32> {
-    let out = std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
+    let name = c"kern.osproductversion";
+    let mut buf = [0u8; 32];
+    let mut len = buf.len();
+    // SAFETY: `buf`/`len` describe a writable buffer; `name` is NUL-terminated.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    String::from_utf8_lossy(&buf[..len])
+        .trim_end_matches('\0')
         .split('.')
         .next()?
         .parse()

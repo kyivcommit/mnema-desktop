@@ -14,14 +14,16 @@ name = "mnema-local-fake-mlx"
 path = "src/bin/fake-mlx.rs"
 
 [dependencies]
+# For the process-wide spawn guard (D160): the sidecar is a long-lived spawner
+# and must not overlap a pool worker's spawn.
+mnema-pool = { path = "../mnema-pool" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
 
-# `libc` only where it is used: the process-wide spawn lock needs nothing from
-# it, but `Drop` and the tests do. The crate still compiles on Windows, where
-# `available()` is simply false.
+# `libc` is used by `available()` (`sysctlbyname`, macOS only) and by the tests.
+# The crate still compiles on Windows, where `available()` is simply false.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 

@@ -44,9 +44,25 @@ fn start_reads_port_and_token() {
     assert_eq!(status(&format!("{}/models", e.base), &e.token), 200);
 }
 
-/// The fake exits right after answering; give it time to be gone.
-fn let_it_die() {
-    std::thread::sleep(Duration::from_millis(500));
+/// The fake exits right after answering; wait until it has (without reaping it,
+/// which is the supervisor's job): `waitid(WNOWAIT)` sees a zombie.
+fn let_it_die(pid: u32) {
+    for _ in 0..100 {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if r == 0 && unsafe { info.si_pid() } != 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("pid {pid} never exited");
 }
 
 #[test]
@@ -55,7 +71,7 @@ fn a_dead_process_is_restarted_once_with_a_new_token_and_port() {
     let old = s.endpoint().unwrap();
     let old_pid = s.pid();
     assert_eq!(status(&format!("{}/models", old.base), &old.token), 200);
-    let_it_die();
+    let_it_die(old_pid);
 
     let new = s.endpoint().unwrap();
     assert_ne!(new.token, old.token);
@@ -84,12 +100,17 @@ fn a_second_death_is_an_error_with_the_reason() {
     for _ in 0..2 {
         let e = s.endpoint().unwrap();
         assert_eq!(status(&format!("{}/models", e.base), &e.token), 200);
-        let_it_die();
+        let_it_die(s.pid());
     }
     for _ in 0..2 {
         match s.endpoint() {
             Err(Error::Crashed { stderr_tail }) => {
-                assert!(stderr_tail.contains("fake-mlx: dying"), "{stderr_tail}")
+                // Both deaths' reasons, not only the last one.
+                assert_eq!(
+                    stderr_tail.matches("fake-mlx: dying").count(),
+                    2,
+                    "{stderr_tail}"
+                )
             }
             other => panic!("expected Crashed, got {other:?}"),
         }
@@ -178,4 +199,61 @@ fn load_and_unload_reach_the_root_routes_with_the_right_bodies() {
         text.contains(r#"body /mnema/unload {"models":["embed"]}"#),
         "{text}"
     );
+}
+
+/// The sidecar's spawn takes the process-wide guard it shares with `mnema-pool`:
+/// while another spawner holds it, `start` waits; once released, it proceeds.
+#[test]
+fn start_waits_for_the_shared_spawn_guard() {
+    let guard = mnema_pool::spawn_guard();
+    let t = std::thread::spawn(|| start(&[]));
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !t.is_finished(),
+        "start spawned while the shared guard was held"
+    );
+    drop(guard);
+    let s = t.join().unwrap();
+    assert!(s.endpoint().is_ok());
+}
+
+#[test]
+fn the_process_gets_embed_then_chat_and_logs_paths_as_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake.log");
+    let s = Sidecar::start_with_env(
+        Path::new(FAKE),
+        Path::new("/the/embed"),
+        Path::new("/the/chat"),
+        &[("FAKE_MLX_LOG", log.to_str().unwrap())],
+    )
+    .unwrap();
+    let e = s.endpoint().unwrap();
+    assert_eq!(status(&format!("{}/models", e.query_base), &e.token), 200);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.ends_with(" --embed /the/embed --chat /the/chat")),
+        "{text}"
+    );
+    assert!(text.contains("start GET /interactive/v1/models"), "{text}");
+    assert!(text.contains("end GET /interactive/v1/models"), "{text}");
+}
+
+#[test]
+fn debug_never_prints_the_token() {
+    let s = start(&[]);
+    let e = s.endpoint().unwrap();
+    assert!(!format!("{e:?}").contains(&e.token));
+    assert!(!format!("{:?}", s.endpoint()).contains(&e.token));
+}
+
+#[test]
+fn available_is_true_here_only_on_apple_silicon() {
+    // The dev machine and CI's macOS leg run Apple Silicon on macOS 14+.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        assert!(mnema_local::available());
+    } else {
+        assert!(!mnema_local::available());
+    }
 }

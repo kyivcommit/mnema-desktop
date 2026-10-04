@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::{Error, ModelId};
 
 /// Where to send requests, and the secret that goes with them.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Endpoint {
     /// `http://127.0.0.1:<n>/v1`
     pub base: String,
@@ -18,17 +18,21 @@ pub struct Endpoint {
     pub token: String,
 }
 
+impl std::fmt::Debug for Endpoint {
+    /// The token is a bearer secret: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("base", &self.base)
+            .field("query_base", &self.query_base)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// How long the process may take to print its `PORT` line.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of the end of stderr a crash report keeps.
 const TAIL_BYTES: usize = 8 * 1024;
-
-/// Every spawn this crate makes, one at a time (D160): a child inherits every
-/// descriptor that is not `FD_CLOEXEC` at the moment it is created, and std
-/// makes a pipe in two calls, so a concurrent spawn can hand one end of our
-/// pipes to a stranger's child — which then keeps the sidecar's stdin open and
-/// defeats "exits when stdin closes". See `mnema-pool`'s `SPAWN`.
-static SPAWN: Mutex<()> = Mutex::new(());
 
 /// One live (or just dead) process and everything read from it.
 struct Running {
@@ -46,6 +50,9 @@ struct State {
     restarted: bool,
     /// Set once the process died with no restart left; nothing spawns after.
     failed: Option<String>,
+    /// What stderr said when the process died the first time, kept for the
+    /// report if it dies again.
+    first_tail: String,
 }
 
 pub struct Sidecar {
@@ -81,6 +88,7 @@ impl Sidecar {
                 running: None,
                 restarted: false,
                 failed: None,
+                first_tail: String::new(),
             }),
         };
         let running = sidecar.spawn()?;
@@ -91,7 +99,9 @@ impl Sidecar {
     fn spawn(&self) -> Result<Running, Error> {
         let token = new_token()?;
         let mut child = {
-            let _lock = SPAWN.lock().unwrap_or_else(|p| p.into_inner());
+            // The guard shared with `mnema-pool` (D160): this child lives as long as
+            // the application, so a pool worker's half-made pipe must not leak into it.
+            let _lock = mnema_pool::spawn_guard();
             Command::new(&self.binary)
                 .arg("--embed")
                 .arg(&self.embed_dir)
@@ -171,11 +181,20 @@ impl Sidecar {
         if !alive {
             let tail = st.running.as_mut().unwrap().finish();
             if st.restarted {
-                st.failed = Some(tail.clone());
-                return Err(Error::Crashed { stderr_tail: tail });
+                return Err(self.give_up(&mut st, &tail));
             }
             st.restarted = true;
-            st.running = Some(self.spawn()?);
+            st.first_tail = tail;
+            match self.spawn() {
+                Ok(r) => st.running = Some(r),
+                Err(e) => {
+                    let why = match e {
+                        Error::Crashed { stderr_tail } => stderr_tail,
+                        other => other.to_string(),
+                    };
+                    return Err(self.give_up(&mut st, &why));
+                }
+            }
         }
         let r = st.running.as_ref().unwrap();
         Ok(Endpoint {
@@ -183,6 +202,16 @@ impl Sidecar {
             query_base: format!("http://127.0.0.1:{}/interactive/v1", r.port),
             token: r.token.clone(),
         })
+    }
+
+    /// Records the terminal failure: both deaths' reasons, the first one first.
+    fn give_up(&self, st: &mut State, second: &str) -> Error {
+        let tail = format!(
+            "{}\n--- restarted once, died again ---\n{second}",
+            st.first_tail
+        );
+        st.failed = Some(tail.clone());
+        Error::Crashed { stderr_tail: tail }
     }
 
     pub fn load(&self) -> Result<(), Error> {
@@ -273,8 +302,15 @@ impl Running {
     fn finish(&mut self) -> String {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Bounded: if the pipe leaked into another process the reader never sees
+        // EOF, and this runs under the state mutex.
         if let Some(h) = self.stderr_reader.take() {
-            let _ = h.join();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = h.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_secs(1));
         }
         String::from_utf8_lossy(&self.stderr_tail.lock().unwrap()).into_owned()
     }
