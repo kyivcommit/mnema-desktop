@@ -2052,6 +2052,214 @@ fn ask_with_an_empty_completion_refuses_as_empty_completion() {
     );
 }
 
+/// The state every D171 test below starts from: a key, a chat model, the
+/// text arm only, and one indexed document so retrieval finds a passage and the
+/// chat step is reached. The key is stored straight into the credential store
+/// rather than through `set_key`, whose `/credits` check would need a provider
+/// that answers — and the offline test's provider is a port nothing listens on.
+fn ask_ready_with_one_passage(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime> {
+    const BODY: &str = "quantum entanglement resonance";
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-d171").expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+    state
+        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &"d".repeat(64), BODY)))
+        .unwrap();
+    webview
+}
+
+/// D171, the live case of 2026-10-02 turned into a fixture: the provider
+/// answers the chat call with an error. The passages retrieval found are kept
+/// and the provider's own sentence says why there is no answer — before D171
+/// the whole `ask` was rejected and the window said only "the query could not
+/// be run".
+#[test]
+fn a_chat_call_the_provider_refuses_keeps_the_passages_and_says_why() {
+    let server = MockServer::new(vec![Reply::status(
+        503,
+        r#"{"error":{"message":"upstream model is overloaded"}}"#,
+    )]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a failed chat call must not reject the ask");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
+    assert_eq!(answer["why"]["kind"], json!("failed"), "{answer}");
+    let reason = answer["why"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("503") && reason.contains("overloaded"),
+        "the provider's own sentence must reach the window: {answer}"
+    );
+}
+
+/// D171: no network. The chat call cannot connect, the passages stay, and the
+/// cause is named as the network, not as the provider's answer — and it is
+/// said at once, not after a timeout.
+#[test]
+fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let webview = ask_ready_with_one_passage(&app);
+    let state = app.state::<AppState>();
+    let epoch = state.provider_status_gen();
+    state.store_provider_status(epoch, mnema_desktop::provider_status::ProviderStatus::Ok);
+
+    let started = std::time::Instant::now();
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a chat call with no network must not reject the ask");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
+    assert_eq!(answer["why"], json!({ "kind": "offline" }), "{answer}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a refused connection is known at once, took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        state.cached_provider_status().is_none(),
+        "a chat call that could not connect must drop the cached \"ok\" (D171 review, finding 2)"
+    );
+}
+
+/// D171's own live case (2026-10-02): the chat model accepts the request,
+/// sends its headers, and goes silent. The passages stay, the cause is the
+/// model's silence — not "the provider returned an error" — and it is said
+/// after `INTERACTIVE_TIMEOUT`, not the 30 s global one. Pays one real 15 s
+/// wait (PR #62 review, finding 1: the scenario D171 exists for had no test).
+#[test]
+fn a_chat_model_that_goes_silent_keeps_the_passages_and_says_no_reply() {
+    let server = MockServer::new(vec![Reply::stalled(20, "{")]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let started = std::time::Instant::now();
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a silent chat model must not reject the ask");
+    let waited = started.elapsed();
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"], json!({ "kind": "noReply" }), "{answer}");
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_secs(14) && waited < std::time::Duration::from_secs(19),
+        "the wait is INTERACTIVE_TIMEOUT (15 s), took {waited:?}"
+    );
+}
+
+/// D171 review, finding 4: with no network the query's embedding fails as
+/// `Transport`, chat is not tried, and the answer says `offline` — AHEAD of the
+/// no-candidates refusal. The text arm is off, so retrieval finds nothing: an
+/// `ask` that checked for hits first would say "nothing matched", which is not
+/// established while the content arm could not run. Also pins that a network
+/// failure drops the cached "ok" behind the launcher's cloud (finding 2).
+#[test]
+fn a_query_embedding_with_no_network_says_offline_ahead_of_no_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let webview = ask_ready_with_one_passage(&app);
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model("baai/bge-m3", 1024, "credential-ref", "chunker-v1")
+        })
+        .expect("the model is adopted");
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .unwrap();
+    let epoch = state.provider_status_gen();
+    state.store_provider_status(epoch, mnema_desktop::provider_status::ProviderStatus::Ok);
+    assert!(
+        state.cached_provider_status().is_some(),
+        "the probe's premise"
+    );
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("an embedding with no network must not reject the ask");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"], json!({ "kind": "offline" }), "{answer}");
+    assert_eq!(answer["citations"], json!([]), "{answer}");
+    assert!(
+        state.cached_provider_status().is_none(),
+        "a failure on the network must drop the cached \"ok\""
+    );
+}
+
+/// D171: the query's embedding goes to the same provider the chat call would,
+/// so when it gets no reply the chat call is not tried — the person would wait
+/// out a second 15 s for the same silence. The chat reply is queued and
+/// answerable: an `ask` that asked it anyway would come back `generated`, which
+/// is what turns this red. Pays one real `INTERACTIVE_TIMEOUT` (15 s), the
+/// only way to reach `NoReply` through the real agent.
+#[test]
+fn a_query_embedding_with_no_reply_skips_the_chat_call_and_says_so() {
+    const MODEL: &str = "baai/bge-m3";
+    const DIM: i64 = 1024;
+    let completion =
+        serde_json::json!({ "choices": [{ "message": { "content": "an answer <c>1</c>" } }] })
+            .to_string();
+    let server = MockServer::new(vec![Reply::slow(20), Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.adopt_embedding_model(MODEL, DIM, "credential-ref", "chunker-v1"))
+        .expect("the model is adopted");
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("an embedding with no reply must not reject the ask");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(
+        answer["why"],
+        json!({ "kind": "embeddingNoReply" }),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["citations"].as_array().map(Vec::len),
+        Some(1),
+        "the text arm's passage must survive the content arm's silence: {answer}"
+    );
+    assert_eq!(answer["content"]["kind"], json!("failed"), "{answer}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(19),
+        "the wait is INTERACTIVE_TIMEOUT, not the 30 s global one: {:?}",
+        started.elapsed()
+    );
+}
+
 /// Port of `ask.py:17` (`Field(max_length=2048)`): the query is capped at
 /// 2048 characters, not bytes — Python `str` length counts code points, so
 /// the probe repeats a two-byte character, catching a `len()` (bytes)

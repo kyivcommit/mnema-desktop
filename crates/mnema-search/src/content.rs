@@ -126,13 +126,27 @@ pub struct ContentQuery {
 ///
 /// Rejects an empty vector answer as a failure, not an empty result — the
 /// same refusal `content_arm` always made.
-pub fn embed_query(provider: &Provider, model: &str, query: &str) -> Result<Vec<f32>, String> {
-    let vectors = mnema_provider::embed(&provider.base, &provider.key, model, &[query.to_string()])
-        .map_err(|e| e.to_string())?;
+///
+/// A person is waiting, so the wait is `INTERACTIVE_TIMEOUT`, and the error
+/// stays typed: the launcher tells "no network" from "no reply" by it (D171).
+pub fn embed_query(
+    provider: &Provider,
+    model: &str,
+    query: &str,
+) -> Result<Vec<f32>, mnema_provider::Error> {
+    let vectors = mnema_provider::embed_within(
+        &provider.base,
+        &provider.key,
+        model,
+        &[query.to_string()],
+        mnema_provider::INTERACTIVE_TIMEOUT,
+    )?;
     vectors
         .into_iter()
         .next()
-        .ok_or_else(|| "the provider answered with no vector".to_string())
+        .ok_or(mnema_provider::Error::Malformed(
+            "the provider answered with no vector",
+        ))
 }
 
 /// `knn_live_chunks` plus how much of the index it could even see — the
@@ -225,7 +239,11 @@ pub fn content_arm(db: &Db, provider: Option<Provider>, query: &str, k: i64) -> 
     };
     let vector = match embed_query(&provider, &model, query) {
         Ok(v) => v,
-        Err(reason) => return ContentArm::Failed { reason },
+        Err(e) => {
+            return ContentArm::Failed {
+                reason: e.to_string(),
+            };
+        }
     };
     content_arm_answered(db, space, &vector, k)
 }

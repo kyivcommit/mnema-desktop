@@ -2231,13 +2231,14 @@ fn a_body_that_never_finishes_on_a_chat_401_still_says_the_key_was_refused() {
     assert!(matches!(err, Error::Unauthorised { .. }), "got {err:?}");
 }
 
-/// The caller names the wait: a reply slower than it fails as `Transport`
-/// well inside the 30 s global timeout `check_key` keeps.
+/// The caller names the wait: a reply slower than it fails as `NoReply` (the
+/// connection opened; the answer did not come, D171) well inside the 30 s
+/// global timeout `check_key` keeps.
 #[test]
 fn check_key_within_gives_up_at_the_callers_timeout() {
     let server = MockServer::new(vec![Reply::slow(1)]);
     let started = Instant::now();
     let result = check_key_within(server.base(), KEY, Duration::from_millis(300));
-    assert!(matches!(result, Err(Error::Transport(_))), "{result:?}");
+    assert!(matches!(result, Err(Error::NoReply(_))), "{result:?}");
     assert!(started.elapsed() < Duration::from_secs(2));
 }

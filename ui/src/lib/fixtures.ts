@@ -146,6 +146,7 @@ export const hitOtherDocument: Hit = {
 
 export const citationsOnly: AskAnswer = {
   kind: 'citationsOnly',
+  why: { kind: 'notAsked' },
   citations: [hit, hitOtherDocument],
   text: { kind: 'answered', matched: 2 },
   content: { kind: 'noKey' },
@@ -178,6 +179,7 @@ const hitSameDocument: Hit = {
 // count needs no fixture at all.
 export const citationsOnlyOne: AskAnswer = {
   kind: 'citationsOnly',
+  why: { kind: 'notAsked' },
   citations: [hitOtherDocument],
   text: { kind: 'answered', matched: 1 },
   content: { kind: 'noKey' },
@@ -185,6 +187,7 @@ export const citationsOnlyOne: AskAnswer = {
 
 export const citationsOnlySameDocument: AskAnswer = {
   kind: 'citationsOnly',
+  why: { kind: 'notAsked' },
   citations: [hit, hitSameDocument],
   text: { kind: 'answered', matched: 2 },
   content: { kind: 'noKey' },
@@ -194,6 +197,7 @@ export const citationsOnlySameDocument: AskAnswer = {
 // rule this plan re-homes to state E).
 export const emptyCitationsOnly: AskAnswer = {
   kind: 'citationsOnly',
+  why: { kind: 'notAsked' },
   citations: [],
   text: { kind: 'answered', matched: 0 },
   content: { kind: 'noKey' },

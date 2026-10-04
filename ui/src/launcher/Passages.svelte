@@ -35,12 +35,25 @@
   // what it had just asserted. That is this card's own failure mode turned on
   // itself, and `toContain` could not see it. The empty form drops the clause it
   // cannot keep; it does not qualify or soften it.
+  //
+  // D171 — Ruling AF's missing fact now arrives for one case: when the model WAS
+  // asked and failed, `why` says how, and the banner leads with that cause
+  // instead of "generation is unavailable". `notAsked` keeps the cause-free
+  // sentence, for the reason above.
   const banner = $derived.by(() => {
     void $locale;
     const count = answer.citations.length;
+    const why = answer.why;
     // The count is the card's OWN, passed through to ICU (re-review RM1): the
     // catalogue owns the arms, this owns which number selects one.
-    return count === 0 ? t('citations_only_banner_empty') : t('citations_only_banner', { count });
+    if (why.kind === 'notAsked') {
+      return count === 0 ? t('citations_only_banner_empty') : t('citations_only_banner', { count });
+    }
+    const cause = why.kind === 'offline' ? t('no_answer_offline')
+      : why.kind === 'noReply' ? t('no_answer_no_reply')
+      : why.kind === 'embeddingNoReply' ? t('no_answer_embedding_no_reply')
+      : t('no_answer_failed', { reason: why.reason });
+    return count === 0 ? cause : `${cause} ${t('citations_only_found', { count })}`;
   });
 
   // Ruling AK: zero passages is an ANSWER — the search ran and found nothing —

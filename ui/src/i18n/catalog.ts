@@ -45,6 +45,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'source_loading' | 'source_failed' | 'source_wrong_document'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
+  | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -397,6 +398,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Ruling AK: its own sentence, distinct from `tree_empty` (nothing indexed
     // at all) and from `source_failed` (a passage that could not be read).
     citations_only_empty: 'Жоден уривок не відповідає цьому запиту.',
+    // D171: the model was asked and gave no answer, so this card CAN name a
+    // cause — the wire's `why` carries it — and the banner leads with it. The
+    // count clause follows only when there are passages to promise (Review I1).
+    citations_only_found: 'Пошук знайшов {count, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}.',
+    no_answer_offline: "Немає зв'язку з провайдером. Перевірте мережу.",
+    no_answer_no_reply: 'Модель не відповіла вчасно. Спробуйте ще раз або оберіть іншу модель у налаштуваннях.',
+    // Not the chat model's sentence: chat was never asked, and the embedding
+    // model cannot be swapped without re-indexing (D171 review, finding 3).
+    no_answer_embedding_no_reply: 'Провайдер не встиг обробити пошуковий запит. Спробуйте ще раз.',
+    no_answer_failed: 'Провайдер повернув помилку ({reason}).',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1203,6 +1214,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',
+    citations_only_found: 'The search found {count, plural, one {# passage} other {# passages}}.',
+    no_answer_offline: 'Could not reach the provider. Check the network.',
+    no_answer_no_reply: 'The model did not answer in time. Try again, or choose another model in Settings.',
+    no_answer_embedding_no_reply: 'The provider did not process the search query in time. Try again.',
+    no_answer_failed: 'The provider returned an error ({reason}).',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',

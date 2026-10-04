@@ -58,9 +58,17 @@ export type AskCitation = {
   rootId: number | null;
 };
 
+// Why a `citationsOnly` answer has no generated text (D171, `bridge.rs` `NoAnswer`).
+export type NoAnswer =
+  | { kind: 'notAsked' }
+  | { kind: 'offline' }
+  | { kind: 'noReply' }
+  | { kind: 'embeddingNoReply' }
+  | { kind: 'failed'; reason: string };
+
 export type AskAnswer =
   | { kind: 'generated'; answer: string; citations: AskCitation[]; text: TextArmReport; content: ContentArmReport }
-  | { kind: 'citationsOnly'; citations: Hit[]; text: TextArmReport; content: ContentArmReport }
+  | { kind: 'citationsOnly'; citations: Hit[]; why: NoAnswer; text: TextArmReport; content: ContentArmReport }
   | { kind: 'refused'; reason: Refusal; text: TextArmReport; content: ContentArmReport };
 
 export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentArmReport };

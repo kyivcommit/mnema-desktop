@@ -310,7 +310,7 @@ pub enum Error {
     ///
     /// Deliberately not "the request never reached a provider", which is more
     /// than the mapping behind it can support: this is built from every
-    /// `ureq` error (`crates/mnema-provider/src/http.rs:104`), and three of
+    /// `ureq` error (`unanswered` in `crates/mnema-provider/src/http.rs`), and three of
     /// those contradict that sentence — a timeout, where the request may well
     /// have arrived and the answer merely did not come back in time; too many
     /// redirects, where the provider answered repeatedly; and a base address
@@ -462,7 +462,12 @@ fn retirements(retired: &[crate::models::RetiredSpace]) -> String {
 impl From<mnema_provider::Error> for Error {
     fn from(e: mnema_provider::Error) -> Self {
         match e {
-            mnema_provider::Error::Transport(detail) => Error::ProviderUnreachable { detail },
+            // A reply that never came is no more about the key than a
+            // connection that never opened (D171): both ask for the same key
+            // again later, never a different one.
+            mnema_provider::Error::Transport(detail) | mnema_provider::Error::NoReply(detail) => {
+                Error::ProviderUnreachable { detail }
+            }
             answered => Error::Provider(answered),
         }
     }
