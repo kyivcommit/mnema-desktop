@@ -994,15 +994,15 @@ fn resolve_content_query(
     query: &str,
     content_on: bool,
     content_failure: Option<String>,
-) -> Result<(Option<mnema_search::ContentQuery>, Option<ContentArmReport>), Error> {
+) -> Result<ContentResolution, Error> {
     if let Some(reason) = content_failure {
-        return Ok((None, Some(ContentArmReport::Failed { reason })));
+        return Ok((None, Some(ContentArmReport::Failed { reason }), None));
     }
     if !content_on {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
     let Some(provider) = provider else {
-        return Ok((None, Some(ContentArmReport::NoKey)));
+        return Ok((None, Some(ContentArmReport::NoKey), None));
     };
     let resolved: Result<Option<(i64, String)>, mnema_index::Error> = state.with_index(|db| {
         Ok(match db.active_space() {
@@ -1015,21 +1015,42 @@ fn resolve_content_query(
     })?;
     let (space_id, model) = match resolved {
         Ok(Some(pair)) => pair,
-        Ok(None) => return Ok((None, Some(ContentArmReport::NoModel))),
+        Ok(None) => return Ok((None, Some(ContentArmReport::NoModel), None)),
         Err(e) => {
             return Ok((
                 None,
                 Some(ContentArmReport::Failed {
                     reason: e.to_string(),
                 }),
+                None,
             ));
         }
     };
     match mnema_search::embed_query(provider, &model, query) {
-        Ok(vector) => Ok((Some(mnema_search::ContentQuery { space_id, vector }), None)),
-        Err(reason) => Ok((None, Some(ContentArmReport::Failed { reason }))),
+        Ok(vector) => Ok((
+            Some(mnema_search::ContentQuery { space_id, vector }),
+            None,
+            None,
+        )),
+        Err(e) => Ok((
+            None,
+            Some(ContentArmReport::Failed {
+                reason: e.to_string(),
+            }),
+            NoAnswer::unreachable(&e),
+        )),
     }
 }
+
+/// What [`resolve_content_query`] settles before the snapshot: the vector to
+/// search with, a report that stands in for the arm, and — when the query's
+/// embedding failed on the network — why the chat call to the same provider
+/// need not be tried (D171).
+type ContentResolution = (
+    Option<mnema_search::ContentQuery>,
+    Option<ContentArmReport>,
+    Option<NoAnswer>,
+);
 
 /// A retrieved [`Hit`] as a prompt [`Passage`]: the source text verbatim, and a
 /// meta line that is `relative_path` and the rendered locator joined by ` · `,
@@ -1120,7 +1141,7 @@ fn retrieve(
     query: &str,
     arms: Arms,
     limit: i64,
-) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport), Error> {
+) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport, Option<NoAnswer>), Error> {
     let (provider, content_failure) = if arms.content {
         match crate::models::key(state) {
             Ok(key) => (
@@ -1137,7 +1158,7 @@ fn retrieve(
         (None, None)
     };
 
-    let (content_query, content_override) =
+    let (content_query, content_override, unreachable) =
         resolve_content_query(state, &provider, query, arms.content, content_failure)?;
 
     state.with_index(|db| {
@@ -1175,7 +1196,7 @@ fn retrieve(
             }
 
             let content = content_override.unwrap_or_else(|| found.content.into());
-            Ok((hits, found.text.into(), content))
+            Ok((hits, found.text.into(), content, unreachable))
         })
     })
 }
@@ -1194,7 +1215,7 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         return Err(Error::QueryBlank);
     }
     let arms = read_arms(&state)?;
-    let (hits, text, content) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
+    let (hits, text, content, _) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
     Ok(SearchAnswer {
         hits,
         text,
@@ -1246,6 +1267,8 @@ pub enum AskAnswer {
     },
     CitationsOnly {
         citations: Vec<Hit>,
+        /// Why there is no generated text (D171).
+        why: NoAnswer,
         text: TextArmReport,
         content: ContentArmReport,
     },
@@ -1260,6 +1283,49 @@ pub enum AskAnswer {
         text: TextArmReport,
         content: ContentArmReport,
     },
+}
+
+/// Why an [`AskAnswer::CitationsOnly`] carries no generated text (D171).
+///
+/// A field that is always there, never a `null`: until D171 the card could not
+/// say why (ruling AF), and a person whose model stopped answering read the
+/// same banner as one who never chose a model — or, worse, lost the passages
+/// to a bare "the query could not be run".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum NoAnswer {
+    /// Chat readiness was not `Ready` — no chat model, no key, or a key store
+    /// that would not answer — so the model was never asked.
+    NotAsked,
+    /// The provider could not be reached: no network, most often.
+    Offline,
+    /// The provider was reached and did not answer within
+    /// [`mnema_provider::INTERACTIVE_TIMEOUT`].
+    NoReply,
+    /// The provider answered with an error — a refused key, a rate limit, a
+    /// model it no longer has. `reason` is that error's own sentence, which
+    /// `mnema_provider::Error` guarantees never carries the key.
+    Failed { reason: String },
+}
+
+impl NoAnswer {
+    /// A failed chat call, as the launcher names it.
+    fn from_chat(e: &mnema_provider::Error) -> Self {
+        Self::unreachable(e).unwrap_or_else(|| Self::Failed {
+            reason: e.to_string(),
+        })
+    }
+
+    /// The two failures that are about the way to the provider rather than
+    /// about the request — and so are just as true of the chat call that would
+    /// follow the query's embedding to the same base (D171).
+    fn unreachable(e: &mnema_provider::Error) -> Option<Self> {
+        match e {
+            mnema_provider::Error::Transport(_) => Some(Self::Offline),
+            mnema_provider::Error::NoReply(_) => Some(Self::NoReply),
+            _ => None,
+        }
+    }
 }
 
 /// How many passages `ask` puts in the prompt (port `app/api/ask.py:18`,
@@ -1302,15 +1368,30 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     }
 
     let arms = read_arms(&state)?;
-    let (hits, text, content) = retrieve(&state, &query, arms, ASK_TOP_K)?;
+    let (hits, text, content, unreachable) = retrieve(&state, &query, arms, ASK_TOP_K)?;
 
     let ChatReadiness::Ready { model, key } = chat_readiness(&state)? else {
         return Ok(AskAnswer::CitationsOnly {
             citations: hits,
+            why: NoAnswer::NotAsked,
             text,
             content,
         });
     };
+
+    // The query's embedding already failed on the way to the provider, and
+    // the chat call goes to the same base: asking it would only wait out the
+    // same failure a second time (D171). Ahead of the no-candidates refusal,
+    // because with the content arm down "nothing matched" is not established —
+    // the person must read why, not that the archive has nothing.
+    if let Some(why) = unreachable {
+        return Ok(AskAnswer::CitationsOnly {
+            citations: hits,
+            why,
+            text,
+            content,
+        });
+    }
 
     if hits.is_empty() {
         return Ok(AskAnswer::Refused {
@@ -1322,7 +1403,21 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
 
     let passages: Vec<mnema_rag::Passage> = hits.iter().map(passage_from_hit).collect();
     let base = state.provider_base().to_string();
-    match mnema_rag::answer(&base, &key, &model, &query, &passages, None)? {
+    // A chat call that fails keeps what retrieval found: the passages are on
+    // this machine, and only the prose was the provider's to give (D171,
+    // owner's ruling 2026-10-02).
+    let generated = match mnema_rag::answer(&base, &key, &model, &query, &passages, None) {
+        Ok(generated) => generated,
+        Err(e) => {
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why: NoAnswer::from_chat(&e),
+                text,
+                content,
+            });
+        }
+    };
+    match generated {
         None => Ok(AskAnswer::Refused {
             kind: RefusalKind::EmptyCompletion,
             text,
@@ -1672,12 +1767,21 @@ mod tests {
 
         let citations_only = AskAnswer::CitationsOnly {
             citations: vec![],
+            why: NoAnswer::NotAsked,
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };
         let cv = serde_json::to_value(&citations_only).unwrap();
         assert_eq!(cv["kind"], json!("citationsOnly"));
         assert_eq!(cv["citations"], json!([])); // field name pinned
+        assert_eq!(cv["why"], json!({ "kind": "notAsked" })); // D171: never null
+        let v = |w: NoAnswer| serde_json::to_value(w).unwrap();
+        assert_eq!(v(NoAnswer::Offline), json!({ "kind": "offline" }));
+        assert_eq!(v(NoAnswer::NoReply), json!({ "kind": "noReply" }));
+        assert_eq!(
+            v(NoAnswer::Failed { reason: "r".into() }),
+            json!({ "kind": "failed", "reason": "r" })
+        );
 
         let refused = AskAnswer::Refused {
             kind: RefusalKind::NoCandidates,

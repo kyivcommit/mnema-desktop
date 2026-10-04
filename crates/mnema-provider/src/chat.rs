@@ -61,7 +61,13 @@ struct CompletionMessage {
 /// (spec §4); this call's one job is the round trip.
 pub fn complete(base: &str, key: &str, model: &str, messages: &[Message]) -> Result<String, Error> {
     let request = serde_json::json!({ "model": model, "messages": messages }).to_string();
-    let (status, answer) = match http::post_json(base, "/chat/completions", key, &request) {
+    let (status, answer) = match http::post_json_within(
+        base,
+        "/chat/completions",
+        key,
+        &request,
+        http::INTERACTIVE_TIMEOUT,
+    ) {
         Ok(pair) => pair,
         // A body cut off on a refusal still carries the refusal's verdict, not
         // the answer — the same trade `check_key`/`check_embedding_model` make.

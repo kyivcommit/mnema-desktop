@@ -3,9 +3,10 @@
 //! Two rules live here rather than at each call site. **Non-2xx is data, not an
 //! error:** `http_status_as_error(false)` is what lets the caller tell 401 from
 //! 404 and read what the provider said, instead of a transport error that has
-//! lost the status. **One global timeout:** a request that never ends is the
-//! failure a desktop application must not have, and 30 s is well past any
-//! answer this product waits for.
+//! lost the status. **Every request ends:** a request that never ends is the
+//! failure a desktop application must not have. A global timeout bounds every
+//! call, a shorter one bounds opening the connection, and a call a person is
+//! waiting on gets a shorter global one (D171).
 
 use std::time::Duration;
 
@@ -16,6 +17,18 @@ use crate::Error;
 /// fast unit test can pin the value without waiting it out (Task 2 review
 /// round 2, G5) — see `agent_with` and the tests at the bottom of this file.
 pub(crate) const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a name lookup may take, and separately how long opening the
+/// connection may take. A machine with no network must hear so in seconds, not
+/// after a whole `GLOBAL_TIMEOUT` (D171): before this the two waits were only
+/// bounded by the global one, and a request with nowhere to go sat out all 30 s.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a person at the launcher waits for one answer: the query's
+/// embedding, and then the chat completion. The owner's ruling of 2026-10-02
+/// (D171): 15 s, to be revisited if the free models need more. Indexing keeps
+/// `GLOBAL_TIMEOUT` — nobody is watching a batch of 128 texts arrive.
+pub const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// This builder and the `GET` path — `get()`, below — were verified against
 /// the live endpoint 2026-08-08. That is a measurement recorded in the plan,
@@ -30,18 +43,16 @@ pub(crate) const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// was designed against — a 404 for a missing embedding model, one averaged
 /// vector for a two-text batch — is the skeleton's live measurement of
 /// 2026-07-25 (§6.2), cited in the design document, not run here.
-fn agent() -> ureq::Agent {
-    agent_with(GLOBAL_TIMEOUT)
-}
-
-/// `agent()` with the timeout as a parameter, so a test can prove the
-/// mechanism fires on a timeout of its own choosing instead of paying out
-/// this crate's real 30 s (Task 2 review round 2, G5). `agent()` is the only
-/// caller in product code; the product's own timeout lives in one place,
-/// `GLOBAL_TIMEOUT`.
+///
+/// The timeout is a parameter, so a test can prove the mechanism fires on a
+/// timeout of its own choosing instead of paying out this crate's real 30 s
+/// (Task 2 review round 2, G5). Product code passes one of two named waits,
+/// `GLOBAL_TIMEOUT` or `INTERACTIVE_TIMEOUT` (D171), never a literal.
 fn agent_with(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .timeout_resolve(Some(CONNECT_TIMEOUT))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .http_status_as_error(false)
         // Selected, not inherited. `TlsConfig::default()` is
         // `RootCerts::WebPki` (`ureq-3.3.0/src/tls/mod.rs:333`), which validates
@@ -92,7 +103,19 @@ pub(crate) fn post_json(
     key: &str,
     body: &str,
 ) -> Result<(u16, String), Error> {
-    let request = agent()
+    post_json_within(base, path, key, body, GLOBAL_TIMEOUT)
+}
+
+/// `post_json` with the wait chosen by the caller: the launcher's two calls
+/// wait `INTERACTIVE_TIMEOUT`, not the global one.
+pub(crate) fn post_json_within(
+    base: &str,
+    path: &str,
+    key: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<(u16, String), Error> {
+    let request = agent_with(timeout)
         .post(format!("{base}{path}"))
         .header("content-type", "application/json")
         .header("accept", "application/json")
@@ -110,7 +133,7 @@ pub(crate) fn post_json(
 fn finish(
     result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
 ) -> Result<(u16, String), Error> {
-    let mut response = result.map_err(|e| Error::Transport(e.to_string()))?;
+    let mut response = result.map_err(unanswered)?;
     let status = response.status().as_u16();
     // The status is already known here, and it must not be thrown away just
     // because reading the rest of the connection failed (Task 2 review round
@@ -129,6 +152,22 @@ fn finish(
     Ok((status, body))
 }
 
+/// Splits a call that got no response at all into the two things a person can
+/// act on differently (D171): the connection never opened — no network, a
+/// name that does not resolve, a host that refuses — is `Transport`; it opened
+/// and then the answer did not come in time is `NoReply`. A resolve or connect
+/// timeout is the first kind: nothing was ever sent.
+fn unanswered(e: ureq::Error) -> Error {
+    match e {
+        ureq::Error::Timeout(t)
+            if !matches!(t, ureq::Timeout::Resolve | ureq::Timeout::Connect) =>
+        {
+            Error::NoReply(e.to_string())
+        }
+        other => Error::Transport(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -144,11 +183,16 @@ mod tests {
     /// `None`) or the value is swapped.
     #[test]
     fn the_agent_is_configured_with_the_global_timeout_and_reads_non_2xx_as_data() {
-        let config = agent().config().clone();
+        let config = agent_with(GLOBAL_TIMEOUT).config().clone();
         assert_eq!(
             config.timeouts().global,
             Some(GLOBAL_TIMEOUT),
             "the global timeout must be set to the constant this crate promises"
+        );
+        assert_eq!(
+            (config.timeouts().resolve, config.timeouts().connect),
+            (Some(CONNECT_TIMEOUT), Some(CONNECT_TIMEOUT)),
+            "no network must be noticed within the connect timeout, not the global one (D171)"
         );
         assert!(
             !config.http_status_as_error(),
@@ -178,7 +222,7 @@ mod tests {
     /// and derives no `PartialEq`.
     #[test]
     fn certificates_are_validated_against_the_platform_trust_store() {
-        let config = agent().config().clone();
+        let config = agent_with(GLOBAL_TIMEOUT).config().clone();
         assert!(
             matches!(
                 config.tls_config().root_certs(),
@@ -207,6 +251,34 @@ mod tests {
             "GLOBAL_TIMEOUT must be a plausible wait for a person at a window, got \
              {GLOBAL_TIMEOUT:?}"
         );
+    }
+
+    /// The two shorter waits (D171) pinned to their stated values: the
+    /// interactive one is the owner's ruling, and the connect one must stay
+    /// well under it, or "no network" would arrive as late as "no reply".
+    #[test]
+    fn the_short_waits_are_the_ones_the_owner_ruled() {
+        assert_eq!(INTERACTIVE_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
+    }
+
+    /// Which failures are "never connected" and which are "connected, then
+    /// silence" (D171). Both directions: a connect or resolve timeout must not
+    /// read as a silent model, and a timeout after the connection must not
+    /// read as a missing network.
+    #[test]
+    fn a_timeout_before_the_connection_is_transport_and_after_it_is_no_reply() {
+        use ureq::Timeout as T;
+        for before in [T::Resolve, T::Connect] {
+            let e = unanswered(ureq::Error::Timeout(before));
+            assert!(matches!(e, Error::Transport(_)), "{before:?} gave {e:?}");
+        }
+        for after in [T::Global, T::PerCall, T::SendRequest, T::SendBody, T::RecvResponse, T::RecvBody] {
+            let e = unanswered(ureq::Error::Timeout(after));
+            assert!(matches!(e, Error::NoReply(_)), "{after:?} gave {e:?}");
+        }
+        let refused = unanswered(ureq::Error::ConnectionFailed);
+        assert!(matches!(refused, Error::Transport(_)), "{refused:?}");
     }
 
     /// Pairs with the test above (Task 2 review round 2, G5): reading the

@@ -462,7 +462,12 @@ fn retirements(retired: &[crate::models::RetiredSpace]) -> String {
 impl From<mnema_provider::Error> for Error {
     fn from(e: mnema_provider::Error) -> Self {
         match e {
-            mnema_provider::Error::Transport(detail) => Error::ProviderUnreachable { detail },
+            // A reply that never came is no more about the key than a
+            // connection that never opened (D171): both ask for the same key
+            // again later, never a different one.
+            mnema_provider::Error::Transport(detail) | mnema_provider::Error::NoReply(detail) => {
+                Error::ProviderUnreachable { detail }
+            }
             answered => Error::Provider(answered),
         }
     }

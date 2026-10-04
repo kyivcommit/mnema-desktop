@@ -15,9 +15,10 @@ pub use catalogue::{
     UnreadableRecord, models_from_json,
 };
 pub use chat::{Message, MessageRole, complete};
+pub use http::INTERACTIVE_TIMEOUT;
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
-    check_key, check_key_within, embed,
+    check_key, check_key_within, embed, embed_within,
 };
 
 /// Where v1 goes. Not a configuration: v1 has one provider (spec §2.2).
@@ -165,6 +166,12 @@ fn no_such_model_sentence(model: &ProviderMessage) -> String {
 pub enum Error {
     #[error("the provider could not be reached: {0}")]
     Transport(String),
+    /// The connection opened and the answer did not arrive in time — a model
+    /// that stopped answering, not a missing network (D171). Kept apart from
+    /// `Transport` because the launcher says different things for the two.
+    /// `detail` is `ureq`'s own text, never the request.
+    #[error("the provider did not answer in time: {0}")]
+    NoReply(String),
     /// 401 with a key sent: the request was authenticated, and refused.
     /// `reason` is the provider's own explanation, when the failed body said
     /// one and this build could read it (Task 3 review, item 4) — e.g. "the

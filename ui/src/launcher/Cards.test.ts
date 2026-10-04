@@ -553,6 +553,37 @@ test('the state E banner says generation is unavailable and names no cause (Ruli
   }
 });
 
+// D171: when the model WAS asked and failed, the banner names the cause — the
+// one case Ruling AF's missing fact now reaches the card — and the count clause
+// still follows only when there are passages. Every cause, both locales, both
+// forms, pinned exactly.
+test('a provider failure leads the banner with its cause (D171)', async () => {
+  const cases: Array<[AskAnswer, string, string]> = [
+    [{ ...citationsOnly, why: { kind: 'offline' } } as AskAnswer,
+      'Could not reach the provider. Check the network. The search found 2 passages.',
+      "Немає зв'язку з провайдером. Перевірте мережу. Пошук знайшов 2 уривки."],
+    [{ ...citationsOnlyOne, why: { kind: 'noReply' } } as AskAnswer,
+      'The model did not answer in time. Try again, or choose another model in Settings. The search found 1 passage.',
+      'Модель не відповіла вчасно. Спробуйте ще раз або оберіть іншу модель у налаштуваннях. Пошук знайшов 1 уривок.'],
+    [{ ...citationsOnly, why: { kind: 'failed', reason: 'the provider answered 503' } } as AskAnswer,
+      'The provider returned an error (the provider answered 503). The search found 2 passages.',
+      'Провайдер повернув помилку (the provider answered 503). Пошук знайшов 2 уривки.'],
+    [{ ...emptyCitationsOnly, why: { kind: 'offline' } } as AskAnswer,
+      'Could not reach the provider. Check the network.',
+      "Немає зв'язку з провайдером. Перевірте мережу."],
+  ];
+  for (const [answer, en, uk] of cases) {
+    for (const [locale, text] of [['en', en], ['uk', uk]] as const) {
+      setLocale(locale);
+      const { unmount } = render(Cards, { ...HOT, state: stateFromAnswer('q', answer), query: 'q' });
+      await tick();
+      expect(screen.getByTestId('citations-banner').textContent).toBe(text);
+      expect(screen.getByTestId('citations-banner').getAttribute('role')).toBe('status');
+      unmount();
+    }
+  }
+});
+
 // 🔴 Ruling AH. A `Hit` has no `anchor` (`ipc.ts:33-42`), so the rank is the
 // row's own ordinal and its testid is deliberately NOT derivable from any field
 // of the passage. The `toEqual` on the ids is what makes that falsifiable: a

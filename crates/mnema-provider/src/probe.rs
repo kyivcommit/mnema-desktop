@@ -1298,8 +1298,21 @@ pub fn check_embedding_model(base: &str, key: &str, model: &str) -> Result<Embed
 /// pair's own comments warn against, for a call that already has somewhere
 /// downstream to catch it.
 pub fn embed(base: &str, key: &str, model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
+    embed_within(base, key, model, texts, http::GLOBAL_TIMEOUT)
+}
+
+/// `embed` with the wait chosen by the caller: a search query's one text is
+/// embedded while a person waits (`INTERACTIVE_TIMEOUT`, D171).
+pub fn embed_within(
+    base: &str,
+    key: &str,
+    model: &str,
+    texts: &[String],
+    timeout: Duration,
+) -> Result<Vec<Vec<f32>>, Error> {
     let request = serde_json::json!({ "model": model, "input": texts }).to_string();
-    let (status, answer) = match http::post_json(base, "/embeddings", key, &request) {
+    let (status, answer) = match http::post_json_within(base, "/embeddings", key, &request, timeout)
+    {
         Ok(pair) => pair,
         // The same trade `check_embedding_model` makes for a body-read
         // failure, for the same four statuses — see that function's own

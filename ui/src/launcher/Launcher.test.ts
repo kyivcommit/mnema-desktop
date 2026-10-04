@@ -156,6 +156,24 @@ test('on ready the line clears', async () => {
   expect(screen.queryByTestId('query-echo')).toBeNull(); // and state F shows no bubble at all
 });
 
+// D171: the provider failed to answer — the passages show, and the query stays
+// in the line so Enter asks again. Both directions: `notAsked` (no chat model)
+// is not a failure to retry, and clears the line like every other answer.
+test('a provider failure keeps the query in the line; a model never asked clears it', async () => {
+  mockBackend({ ...citationsOnly, why: { kind: 'offline' } });
+  render(Launcher);
+  await submit('retry me');
+  await screen.findByTestId('citations-banner');
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('retry me');
+  cleanup();
+
+  mockBackend(citationsOnly); // why: notAsked
+  render(Launcher);
+  await submit('clear me');
+  await screen.findByTestId('citations-banner');
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('');
+});
+
 // The echo half of the split. The bubble is drawn by `Answer` inside the centre
 // card now (Task 8b), so it exists only where an answer does — state B.
 test('the submitted query echoes as a bubble on a generated answer', async () => {
