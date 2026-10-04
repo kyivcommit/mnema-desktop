@@ -9,6 +9,7 @@ members = [
     "crates/mnema-eval",
     "crates/mnema-extract",
     "crates/mnema-index",
+    "crates/mnema-local",
     "crates/mnema-ingest",
     "crates/mnema-mock-provider",
     "crates/mnema-pool",

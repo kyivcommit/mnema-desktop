@@ -1,0 +1,32 @@
+[package]
+name = "mnema-local"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+# Test scaffolding, not a product binary: a stand-in for the MLX sidecar that
+# speaks just enough of its wire (PORT line, bearer token, a few routes) and can
+# be told to die, hang or ignore a closed stdin. It is a `[[bin]]` because
+# `env!("CARGO_BIN_EXE_…")` exists for bins only; the name is prefixed to stay
+# unique in the shared `target/`.
+[[bin]]
+name = "mnema-local-fake-mlx"
+path = "src/bin/fake-mlx.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+
+# `libc` only where it is used: the process-wide spawn lock needs nothing from
+# it, but `Drop` and the tests do. The crate still compiles on Windows, where
+# `available()` is simply false.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[dev-dependencies]
+mnema-provider = { path = "../mnema-provider" }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.189"

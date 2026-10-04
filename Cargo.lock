@@ -2885,6 +2885,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnema-local"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mnema-provider",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "ureq",
+]
+
+[[package]]
 name = "mnema-mock-provider"
 version = "0.0.0"
 
