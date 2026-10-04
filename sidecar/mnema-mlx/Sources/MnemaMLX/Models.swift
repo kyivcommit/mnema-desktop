@@ -14,6 +14,11 @@ public final class Engine {
 
     public init() {}
 
+    /// What is resident now, by the names `load` and `unload` take.
+    public var loadedModels: [String] {
+        (embedder == nil ? [] : ["embed"]) + (llm == nil ? [] : ["chat"])
+    }
+
     /// Loads the named models ("embed", "chat") that are not loaded yet; the rest stay as they are.
     public func load(embedDir: URL, chatDir: URL, models: [String] = ["embed", "chat"]) async throws {
         // Every embed batch has a new shape and MLX keeps freed buffers for reuse; unbounded, that cache

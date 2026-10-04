@@ -1,13 +1,14 @@
 import Foundation
 import XCTest
 
-/// Spawns the built `mnema-mlx --stub`; returns the process and its first stdout line.
-func startStubRaw(token: String = "t", env: [String: String] = [:], stderr: Pipe? = nil) throws -> (Process, String) {
+/// Spawns the built `mnema-mlx` (`--stub` unless `args` says otherwise); returns the process and its first stdout line.
+func startStubRaw(token: String = "t", env: [String: String] = [:], stderr: Pipe? = nil,
+                  args: [String] = ["--stub"]) throws -> (Process, String) {
     let exe = Bundle(for: StubAnchor.self).bundleURL.deletingLastPathComponent()
         .appendingPathComponent("mnema-mlx")
     let p = Process()
     p.executableURL = exe
-    p.arguments = ["--stub"]
+    p.arguments = args
     var e = ProcessInfo.processInfo.environment
     e["MNEMA_MLX_TOKEN"] = token
     for (k, v) in env { e[k] = v }
@@ -241,7 +242,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(http(port, "/v1/embeddings", method: "POST",
                             body: #"{"model":"baai/bge-m3","input":["a"]}"#).status, 200)
         XCTAssertEqual(http(port, "/v1/chat/completions", method: "POST",
-                            body: #"{"model":"whatever","messages":[]}"#).status, 200)
+                            body: #"{"model":"whatever","messages":[{"role":"user","content":"hi"}]}"#).status, 200)
     }
 
     /// Unloading while a job runs would free a model in use: unload queues behind the running embed.
@@ -312,4 +313,25 @@ final class ProtocolTests: XCTestCase {
         defer { p.terminate() }
         XCTAssertTrue(raw(port, "GARBAGE\r\n\r\n").hasPrefix("HTTP/1.1 400"))
     }
+
+    /// A message that does not decode must not silently drop the conversation and run the model on nothing.
+    func test_malformed_messages_are_400() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        for messages in [
+            #"[{"role":"user","content":null}]"#,
+            #"[{"role":"user"}]"#,
+            #"[{"content":"hi"}]"#,
+            #"[{"role":"user","content":[{"type":"text","text":"hi"}]}]"#,
+            #"[]"#,
+            #""hi""#,
+        ] {
+            let r = http(port, "/v1/chat/completions", method: "POST", body: #"{"model":"x","messages":"# + messages + "}")
+            XCTAssertEqual(r.status, 400, messages)
+        }
+        XCTAssertEqual(http(port, "/v1/chat/completions", method: "POST", body: #"{"model":"x"}"#).status, 400, "no messages")
+        XCTAssertEqual(http(port, "/v1/chat/completions", method: "POST",
+                            body: #"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#).status, 200)
+    }
 }
+

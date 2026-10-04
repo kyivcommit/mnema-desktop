@@ -10,8 +10,8 @@
 # --patch-only   only the guard and `git apply` on the mlx-swift checkout ($MNEMA_MLX_CHECKOUT, default
 #                the one xcodebuild resolves into sidecar/mnema-mlx/.build-xc)
 #
-# Exit codes: 3 the patch does not apply, 4 the patch is already upstream, 5 the patch is not in the
-# checkout after the build.
+# Exit codes: 2 unknown arguments, 3 the patch does not apply, 4 the patch is already upstream, 5 the
+# patch is not in the checkout after the build, 6 the toolchain's Span dylib is not found exactly once.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PKG=$ROOT/sidecar/mnema-mlx
@@ -19,13 +19,19 @@ XC=$PKG/.build-xc
 PATCH=$PKG/patches/mlx-metal31.patch
 CHECKOUT=${MNEMA_MLX_CHECKOUT:-$XC/checkouts/mlx-swift}
 
-case "${1:-}" in
-    -h | --help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+case "$*" in
+    -h | --help) usage; exit 0 ;;
+    "" | --patch-only) ;;
+    *) echo "unknown arguments: $*" >&2; usage >&2; exit 2 ;;
 esac
 
 apply_patch() {
-    # SwiftPM checks packages out read-only; git apply cannot write without this.
-    sed -n 's|^+++ b/||p' "$PATCH" | while read -r f; do chmod u+w "$CHECKOUT/$f"; done
+    # SwiftPM checks packages out read-only; git apply cannot write without this. A file upstream
+    # removed is left to `git apply --check` below, so it ends as "does not apply" (3).
+    sed -n 's|^+++ b/||p' "$PATCH" | while read -r f; do
+        if [[ -e "$CHECKOUT/$f" ]]; then chmod u+w "$CHECKOUT/$f"; fi
+    done
     if git -C "$CHECKOUT" apply --reverse --check "$PATCH" 2>/dev/null; then
         echo "mlx-metal31.patch: латку прийнято в апстрім — видаліть її" >&2
         exit 4
@@ -64,6 +70,12 @@ cp "$OUT/mnema-mlx" "$BIN/mnema-mlx-aarch64-apple-darwin"
 rm -rf "$BIN/mlx-swift_Cmlx.bundle"
 cp -R "$OUT/mlx-swift_Cmlx.bundle" "$BIN/"
 # The binary links @rpath/libswiftCompatibilitySpan.dylib (rpath @executable_path/../lib); the
-# toolchain has it, the build products do not.
-cp "$(dirname "$(xcrun -f swift)")/../lib/swift-6.2/macosx/libswiftCompatibilitySpan.dylib" "$BIN/"
+# active toolchain has it, the build products do not.
+shopt -s nullglob
+spans=("$(dirname "$(xcrun --find swift)")"/../lib/swift-*/macosx/libswiftCompatibilitySpan.dylib)
+if [[ ${#spans[@]} -ne 1 ]]; then
+    echo "libswiftCompatibilitySpan.dylib: expected exactly one in the active toolchain, found ${#spans[@]}: ${spans[*]}" >&2
+    exit 6
+fi
+cp "${spans[0]}" "$BIN/"
 echo "staged mnema-mlx in $BIN"

@@ -171,7 +171,17 @@ public final class Server {
             }
             work.submit(urgent: interactive) { reply(self.embed(input)) }
         case "/v1/chat/completions":
-            let messages = json["messages"] as? [[String: String]] ?? []
+            // Every message needs a string role and content: one that does not decode must not vanish.
+            guard let raw = json["messages"] as? [[String: Any]], !raw.isEmpty else {
+                return reply(Response(400, ["error": "messages must be a non-empty array"]))
+            }
+            let messages = raw.compactMap { m -> [String: String]? in
+                guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
+                return ["role": role, "content": content]
+            }
+            guard messages.count == raw.count else {
+                return reply(Response(400, ["error": "each message needs a string role and content"]))
+            }
             work.submit(urgent: true) { reply(self.chat(messages)) }
         // Load and unload wait for the running job in the same queue: never free a model in use.
         case "/mnema/load":
@@ -201,12 +211,16 @@ public final class Server {
 
     /// Runs on the work queue. Loads the models that are not loaded yet.
     private func load(_ names: [String]) -> Response {
-        if let m = models {
-            if case .failure(let e) = blocking({ try await m.engine.load(embedDir: m.embedDir, chatDir: m.chatDir, models: names) }) {
-                return Response(500, ["error": "load: \(e)"])
-            }
+        guard let m = models else {
+            setLoaded(names, true)
+            return Response(204)
         }
-        setLoaded(names, true)
+        let r = blocking { try await m.engine.load(embedDir: m.embedDir, chatDir: m.chatDir, models: names) }
+        // From the engine, success or not: one model may have loaded before the other failed.
+        let resident = m.engine.loadedModels
+        setLoaded(["embed", "chat"].filter { resident.contains($0) }, true)
+        setLoaded(["embed", "chat"].filter { !resident.contains($0) }, false)
+        if case .failure(let e) = r { return Response(500, ["error": "load: \(e)"]) }
         return Response(204)
     }
 

@@ -121,4 +121,16 @@ final class ModelTests: XCTestCase {
             for v in vecs { XCTAssertLessThan(abs(norm(v) - 1), 1e-3, "norm \(norm(v))") }
         }
     }
+
+    /// Embed loads, chat then fails: /v1/models must report the embedder that is resident, not "nothing".
+    func test_models_report_what_a_failed_load_left_loaded() throws {
+        let dir = try models()
+        let (p, line) = try startStubRaw(args: ["--embed", dir.appendingPathComponent("bge-m3-mlx-8bit").path,
+                                                "--chat", dir.appendingPathComponent("no-such-model").path])
+        defer { p.terminate() }
+        let port = Int(line.dropFirst(5)) ?? 0
+        XCTAssertEqual(http(port, "/mnema/load", method: "POST", timeout: 60).status, 500)
+        XCTAssertEqual(try MnemaMLXTests.loaded(port), ["baai/bge-m3": true, "gemma-4-e2b-it": false])
+    }
 }
+

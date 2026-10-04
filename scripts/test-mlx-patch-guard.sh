@@ -6,6 +6,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PATCH=$ROOT/sidecar/mnema-mlx/patches/mlx-metal31.patch
 BUILD=$ROOT/scripts/build-mlx-sidecar.sh
 fail=0
+dirs=()
+trap 'rm -rf "${dirs[@]}"' EXIT
 
 checkout() {
     local d
@@ -30,21 +32,26 @@ check() {  # name, expected exit, actual exit
 files=$(sed -n 's|^+++ b/||p' "$PATCH")
 
 # Clean upstream: patch applies, every file gains the version switch.
-d=$(checkout); out=$(run "$d"); code=$?
+d=$(checkout); dirs+=("$d"); out=$(run "$d"); code=$?
 check clean 0 "$code"
 for f in $files; do
     grep -q '__METAL_VERSION__ >= 320' "$d/$f" || { echo "FAIL clean: $f has no '__METAL_VERSION__ >= 320'"; fail=1; }
 done
 
 # Upstream already carries the patch: the build must say so and stop.
-d=$(checkout); git -C "$d" apply "$PATCH"; out=$(run "$d"); code=$?
+d=$(checkout); dirs+=("$d"); git -C "$d" apply "$PATCH"; out=$(run "$d"); code=$?
 check already-patched 4 "$code"
 grep -q 'латку прийнято в апстрім — видаліть її' <<<"$out" || { echo "FAIL already-patched: message missing: $out"; fail=1; }
 
 # Upstream changed a context line: the patch no longer applies.
-d=$(checkout); f=$(head -1 <<<"$files")
+d=$(checkout); dirs+=("$d"); f=$(head -1 <<<"$files")
 sed -i '' 's|^// Binary Operators on Integral constants$|// Binary operators, upstream reworded|' "$d/$f"
 out=$(run "$d"); code=$?
 check context-changed 3 "$code"
+
+# Upstream removed one of the files: still "does not apply", not a chmod failure.
+d=$(checkout); dirs+=("$d"); rm "$d/$(tail -1 <<<"$files")"
+out=$(run "$d"); code=$?
+check file-missing 3 "$code"
 
 exit $fail
