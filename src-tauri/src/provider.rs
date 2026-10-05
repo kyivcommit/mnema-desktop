@@ -427,6 +427,21 @@ pub fn remove_model(
     state: tauri::State<'_, crate::state::AppState>,
     id: LocalModel,
 ) -> Result<(), Error> {
+    remove(&state, id)
+}
+
+/// [`remove_model`]'s body, reachable without a `State`.
+pub fn remove(state: &crate::state::AppState, id: LocalModel) -> Result<(), Error> {
+    // The job slot, as `change` takes it: a scan embedding through the process
+    // would otherwise end Failed with "connection refused" for a removal the
+    // person made. Drawn as a model change (`ModelAdoption`) — it is one; the
+    // kept resumable ending is restored on release, the space does not move.
+    let _slot = state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    )?;
     let local = state.local();
     local.stop();
     local.store.remove(id.into())?;

@@ -12811,3 +12811,51 @@ fn the_status_poll_under_mnema_starts_no_process() {
         .count();
     assert_eq!(spawns, 0, "a status poll started the local process");
 }
+
+/// Review round 1, Important 3: removing a model while a scan embeds through
+/// it is refused and the scan finishes; with nothing running it is allowed.
+#[test]
+fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
+    use mnema_desktop::provider::{LocalModel, remove};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 3, &[]);
+    let answer: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let seen = std::sync::Arc::clone(&answer);
+    let (_, settled) = run_scan_watching(
+        fx.app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |state, now| {
+            let embedding = matches!(
+                &now.snapshot,
+                ScanSnapshot::Running {
+                    phase: Phase::Embedding { .. },
+                    ..
+                }
+            );
+            let mut slot = seen.lock().unwrap();
+            if embedding && slot.is_none() {
+                *slot = Some(format!("{:?}", remove(state, LocalModel::Embed)));
+            }
+        },
+    );
+    let answer = answer.lock().unwrap().clone();
+    assert!(
+        answer.as_deref().is_some_and(|a| a.starts_with("Err(")),
+        "a removal while the scan holds the slot must be refused, got {answer:?}"
+    );
+    assert_eq!(
+        report_of(&settled).reason,
+        EndReason::Completed,
+        "{settled:?}"
+    );
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert!(
+        chunks > 0 && vectors == chunks,
+        "{vectors} of {chunks} embedded"
+    );
+
+    let state = fx.app.state::<AppState>();
+    remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
+    assert!(!state.local().models_ready(), "the model is gone");
+}
