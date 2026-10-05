@@ -2798,6 +2798,7 @@ dependencies = [
  "mnema-embed",
  "mnema-index",
  "mnema-ingest",
+ "mnema-local",
  "mnema-mock-provider",
  "mnema-pool",
  "mnema-provider",
