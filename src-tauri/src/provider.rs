@@ -300,12 +300,22 @@ pub fn provider_choice(state: tauri::State<'_, crate::state::AppState>) -> Provi
     state.provider_choice()
 }
 
+/// What [`set_provider_choice`] did: the choice now in force, and the spaces a
+/// confirmed `Discard` destroyed on the way (empty otherwise) — the same fact
+/// `set_embedding_model` puts on the wire as `AdoptedModel::retired`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSwitch {
+    pub choice: ProviderChoice,
+    pub retired: Vec<crate::models::RetiredSpace>,
+}
+
 #[tauri::command(async)]
 pub fn set_provider_choice(
     state: tauri::State<'_, crate::state::AppState>,
     choice: ProviderChoice,
     existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderChoice, Error> {
+) -> Result<ProviderSwitch, Error> {
     change(&state, choice, existing_vectors)
 }
 
@@ -314,7 +324,8 @@ pub fn change(
     state: &crate::state::AppState,
     choice: ProviderChoice,
     existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderChoice, Error> {
+) -> Result<ProviderSwitch, Error> {
+    let mut retired = Vec::new();
     // The job slot, for the reason `models::set_embedding_model` takes it: a
     // scan resolves its endpoint once, on its own thread, after its claim
     // (`scan_job::ScanDeps::production`). Refused while one runs, the choice
@@ -352,10 +363,11 @@ pub fn change(
         // one that moved it: from OpenRouter's bge-m3 the space stays, and so
         // does «Продовжити» with its partial-reading warning.
         match adopted {
-            Ok((space, _)) => {
+            Ok((space, gone)) => {
                 if before != Some(space.space_id) {
                     slot.forget_restore();
                 }
+                retired = gone;
             }
             Err(e) => {
                 if matches!(e, Error::RetiredThenFailed { .. }) {
@@ -371,7 +383,10 @@ pub fn change(
         serde_json::to_value(choice).expect("a unit variant serialises"),
     )?;
     state.forget_provider_status();
-    Ok(state.provider_choice())
+    Ok(ProviderSwitch {
+        choice: state.provider_choice(),
+        retired,
+    })
 }
 
 #[tauri::command]

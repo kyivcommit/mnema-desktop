@@ -12689,7 +12689,7 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let state = app.state::<AppState>();
     let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
     assert!(
-        matches!(switched, Ok(ProviderChoice::Mnema)),
+        matches!(&switched, Ok(s) if s.choice == ProviderChoice::Mnema && s.retired.is_empty()),
         "{switched:?}"
     );
     assert_eq!(active_and_vectors(&app, bge), (Some(bge), 1));
@@ -12700,9 +12700,16 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
     let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    // The existing model-change class, which the window's count-based
+    // confirmation keys on — not any refusal at all.
     assert!(
-        refused.is_err(),
-        "a switch that strands vectors must be refused: {refused:?}"
+        matches!(
+            refused,
+            Err(mnema_desktop::error::Error::Index(
+                mnema_index::Error::SpaceNotEmpty { space_id, embedded_chunks: 1 }
+            )) if space_id == small
+        ),
+        "a switch that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
     );
     assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
     assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
@@ -12710,8 +12717,11 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     // ... and confirmed with Discard: the index is on bge-m3.
     let confirmed = change(&state, ProviderChoice::Mnema, ExistingVectors::Discard);
     assert!(
-        matches!(confirmed, Ok(ProviderChoice::Mnema)),
-        "{confirmed:?}"
+        matches!(&confirmed, Ok(s) if s.choice == ProviderChoice::Mnema
+            && s.retired.len() == 1
+            && s.retired[0].space_id == small
+            && s.retired[0].embedded_chunks == 1),
+        "the confirmed switch must say which space and how many vectors went: {confirmed:?}"
     );
     let model = state
         .with_index(|db| {
