@@ -12538,9 +12538,7 @@ fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {
 
 #[test]
 fn scan_batches_are_small_under_mnema() {
-    // 20, not more: two batches under Mnema (16 + 4) is the whole claim, and
-    // a larger folder measurably delayed FSEvents for `tests/watch.rs` run
-    // straight after this binary.
+    // Two batches under Mnema (16 + 4) is the whole claim.
     const FILES: usize = 20;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("fake-mlx.log");

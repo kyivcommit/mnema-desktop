@@ -136,12 +136,19 @@ pub fn invoke_handler<R: tauri::Runtime>()
 pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let dir = app.path().app_local_data_dir()?;
     let worker = paths::worker_path()?;
-    app.manage(state::AppState::new(
+    let mlx = paths::mlx_path()?;
+    let models = dir.join("models");
+    let state = state::AppState::new(
         dir,
         worker,
         mnema_provider::OPENROUTER_BASE.to_string(),
         models::CREDENTIAL_REF.to_string(),
+    );
+    state.install_local(provider::Local::new(
+        mnema_local::Store::new(models, provider::HUB.to_string()),
+        mlx,
     ));
+    app.manage(state);
     Ok(())
 }
 

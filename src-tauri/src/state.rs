@@ -221,9 +221,14 @@ impl AppState {
             job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
             provider_status: Mutex::new(ProviderCache::default()),
+            // The models where production keeps them, and NO process: the
+            // binary's path is resolved by `lib.rs::manage_state`, with `?`,
+            // and installed there ([`AppState::install_local`]) — the same
+            // start-up surfacing `paths::worker_path` gets. A test installs
+            // its own.
             local: Mutex::new(Arc::new(crate::provider::Local::new(
                 mnema_local::Store::new(data_dir_models, crate::provider::HUB.to_string()),
-                crate::paths::mlx_path().unwrap_or_default(),
+                PathBuf::new(),
             ))),
             last_lang: Mutex::new(None),
         }
