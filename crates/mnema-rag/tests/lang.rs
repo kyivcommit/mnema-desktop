@@ -111,3 +111,54 @@ fn an_unknown_system_locale_is_english() {
     assert_eq!(detect("?", None, Some("ja-JP")), EN);
     assert_eq!(detect("?", None, None), EN);
 }
+
+#[test]
+fn a_sure_latin_question_in_another_allowed_language_keeps_it() {
+    let cases = [
+        (
+            "Wie richte ich die Sicherung der Datenbank ein?",
+            "de",
+            "German",
+        ),
+        (
+            "Quelle est la différence entre ces deux formules d'abonnement proposées ?",
+            "fr",
+            "French",
+        ),
+        (
+            "¿Cómo configuro la copia de seguridad de la base de datos?",
+            "es",
+            "Spanish",
+        ),
+        (
+            "Qual è la differenza tra questi due piani di abbonamento che avete proposto?",
+            "it",
+            "Italian",
+        ),
+        (
+            "Jak skonfigurować kopię zapasową bazy danych?",
+            "pl",
+            "Polish",
+        ),
+    ];
+    for (q, code, name) in cases {
+        assert_eq!(detect(q, Some(UK), None), Lang { code, name }, "{q}");
+    }
+}
+
+#[test]
+fn an_unreliable_latin_question_is_english() {
+    // whatlang labels this German but reports it as unreliable.
+    assert_eq!(detect("xqzv wprt kjhg bnmz", Some(UK), Some("de-DE")), EN);
+}
+
+#[test]
+fn the_previous_language_wins_over_the_system_one() {
+    assert_eq!(detect("ls -la?", Some(UK), Some("de-DE")), UK);
+}
+
+#[test]
+fn an_unreliable_russian_looking_phrase_is_ukrainian() {
+    // whatlang says Russian here but not reliably, and there is no Ukrainian-only letter.
+    assert_eq!(detect("Как настроить", None, None), UK);
+}

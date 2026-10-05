@@ -87,7 +87,8 @@ fn latin(q: &str) -> Lang {
         .map_or(EN, |(_, l)| *l)
 }
 
-/// Letters in ASCII-only words of 2+ letters.
+/// Letters in ASCII-only words of 2+ letters. Words like `café` do not count and Greek or CJK
+/// text counts nothing, so it falls through to `previous`; the probe this follows does the same.
 fn ascii_letters(q: &str) -> usize {
     words(q).filter(|w| w.is_ascii()).map(str::len).sum()
 }
