@@ -3,7 +3,7 @@
 //! `AppState::endpoint` or a job's captured [`Provider`]), so the two can never
 //! be chosen differently at two sites.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -203,15 +203,6 @@ pub fn endpoint(
             local.endpoint()
         }
     }
-}
-
-/// The production local half: models under `<data_dir>/models`, the process
-/// beside the executable.
-pub fn production_local(data_dir: &Path) -> std::io::Result<Local> {
-    Ok(Local::new(
-        Store::new(data_dir.join("models"), HUB.to_string()),
-        crate::paths::mlx_path()?,
-    ))
 }
 
 /// A local model as the window names it.
@@ -424,7 +415,7 @@ mod tests {
     use crate::provider_status::{Missing, ProviderStatus};
     use crate::state::AppState;
 
-    fn state_choosing(dir: &Path, choice: ProviderChoice) -> AppState {
+    fn state_choosing(dir: &std::path::Path, choice: ProviderChoice) -> AppState {
         crate::prefs::write_key(dir, PREFS_KEY, serde_json::to_value(choice).unwrap()).unwrap();
         AppState::new(
             dir.to_path_buf(),
