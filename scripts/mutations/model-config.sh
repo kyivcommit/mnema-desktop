@@ -307,9 +307,9 @@ case_ "decisive: no call is ever exempt" \
 
 case_ "the key is stored before it is checked" \
   src-tauri/src/models.rs \
-  's~    let check = mnema_provider::check_key\(state\.provider_base\(\), &key\)\?;\n    mnema_secrets::store\(state\.credential_ref\(\), &key\)\?;~    mnema_secrets::store(state.credential_ref(), \&key)?;\n    let check = mnema_provider::check_key(state.provider_base(), \&key)?;~' \
+  's~    let check = mnema_provider::check_key\(state\.openrouter_base\(\), &key\)\?;\n    mnema_secrets::store\(state\.credential_ref\(\), &key\)\?;~    mnema_secrets::store(state.credential_ref(), \&key)?;\n    let check = mnema_provider::check_key(state.openrouter_base(), \&key)?;~' \
   '    mnema_secrets::store(state.credential_ref(), &key)?;
-    let check = mnema_provider::check_key(state.provider_base(), &key)?;' \
+    let check = mnema_provider::check_key(state.openrouter_base(), &key)?;' \
   mnema-desktop 'a_key_is_checked_before_it_is_stored' --test model_commands
 
 # The property "check, then store" has that the case above cannot see: it starts
@@ -319,9 +319,9 @@ case_ "the key is stored before it is checked" \
 # on every mistyped attempt at a new one.
 case_ "a refused key first forgets the one that was working" \
   src-tauri/src/models.rs \
-  's~    let check = mnema_provider::check_key\(state\.provider_base\(\), &key\)\?;~    mnema_secrets::forget(state.credential_ref())?;\n    let check = mnema_provider::check_key(state.provider_base(), \&key)?;~' \
+  's~    let check = mnema_provider::check_key\(state\.openrouter_base\(\), &key\)\?;~    mnema_secrets::forget(state.credential_ref())?;\n    let check = mnema_provider::check_key(state.openrouter_base(), \&key)?;~' \
   '    mnema_secrets::forget(state.credential_ref())?;
-    let check = mnema_provider::check_key(state.provider_base(), &key)?;' \
+    let check = mnema_provider::check_key(state.openrouter_base(), &key)?;' \
   mnema-desktop 'a_refusal_leaves_the_key_that_was_already_working' --test model_commands
 
 # The key into the database, by the shortest realistic road: one argument over.
@@ -636,8 +636,8 @@ case_ "an empty key goes to the provider and its answer becomes a verdict on a k
 # guard is ever moved below the call it exists to prevent.
 case_ "the message is right and the request still leaves the machine" \
   src-tauri/src/models.rs \
-  's~    if key\.is_empty\(\) \{\n        return Err\(Error::EmptyKey\);~    if key.is_empty() {\n        let _ = mnema_provider::check_key(state.provider_base(), \&key);\n        return Err(Error::EmptyKey);~' \
-  '        let _ = mnema_provider::check_key(state.provider_base(), &key);' \
+  's~    if key\.is_empty\(\) \{\n        return Err\(Error::EmptyKey\);~    if key.is_empty() {\n        let _ = mnema_provider::check_key(state.openrouter_base(), \&key);\n        return Err(Error::EmptyKey);~' \
+  '        let _ = mnema_provider::check_key(state.openrouter_base(), &key);' \
   mnema-desktop 'an_empty_key_is_refused_here_rather_than_being_sent_and_reported_as_a_verdict_on_a_key' --test model_commands
 
 # And the fold this cycle is about, in its cheapest form: "you submitted

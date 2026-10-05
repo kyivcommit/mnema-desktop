@@ -310,18 +310,46 @@ pub fn change(
     choice: ProviderChoice,
     existing_vectors: crate::models::ExistingVectors,
 ) -> Result<ProviderChoice, Error> {
-    let _ = existing_vectors;
     // The job slot, for the reason `models::set_embedding_model` takes it: a
     // scan resolves its endpoint once, on its own thread, after its claim
     // (`scan_job::ScanDeps::production`). Refused while one runs, the choice
     // cannot move under a run that is already embedding through the other
     // provider; claimed, no run can start until the choice is written.
-    let _slot = state.claim_job(
+    let mut slot = state.claim_job(
         crate::scan_state::Phase::Other {
             job: crate::scan_state::OtherJob::ModelAdoption,
         },
         false,
     )?;
+    if choice == ProviderChoice::Mnema {
+        // The local process embeds with bge-m3 alone. From OpenRouter's
+        // bge-m3 this finds the same space and moves nothing; from any other
+        // model with vectors it is refused under `Keep` — the ordinary model
+        // change's own refusal, which the window answers with its count-based
+        // confirmation — and retires the old space under `Discard` (owner's
+        // ruling on F1, option B). Refused, the choice is not written.
+        let adopted = state.with_index(|db| {
+            Ok(crate::models::adopt_retiring_whatever_blocks(
+                db,
+                LOCAL_EMBED_MODEL,
+                LOCAL_EMBED_DIM,
+                state.credential_ref(),
+                &mnema_chunk::chunker_hash(),
+                existing_vectors,
+            ))
+        })?;
+        // `set_embedding_model`'s rule: a kept resumable report counts against
+        // the active space, so any exit that may have moved it gives that up.
+        match adopted {
+            Ok(_) => slot.forget_restore(),
+            Err(e) => {
+                if matches!(e, Error::RetiredThenFailed { .. }) {
+                    slot.forget_restore();
+                }
+                return Err(e);
+            }
+        }
+    }
     crate::prefs::write_key(
         state.data_dir(),
         PREFS_KEY,
@@ -448,5 +476,23 @@ mod tests {
                 && e.token == "sk-test-synthetic"),
             "{endpoint:?}"
         );
+    }
+
+    #[test]
+    fn the_voice_remembers_the_previous_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_choosing(dir.path(), ProviderChoice::Mnema);
+        let mnema = ProviderChoice::Mnema;
+        for system in [Some("en-US"), Some("de-DE"), None] {
+            assert_eq!(
+                state.voice_with(mnema, "Як налаштувати резервну копію?", system),
+                mnema_rag::Voice::Mnema(mnema_rag::UK)
+            );
+            assert_eq!(
+                state.voice_with(mnema, "1.2.3?", system),
+                mnema_rag::Voice::Mnema(mnema_rag::UK),
+                "a question with no language of its own takes the previous one, system {system:?}"
+            );
+        }
     }
 }

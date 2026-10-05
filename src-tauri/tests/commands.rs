@@ -12627,3 +12627,92 @@ fn the_query_embedding_goes_to_the_interactive_path() {
     assert_eq!(embeds(asked, "/interactive/v1/embeddings"), 1, "{asked}");
     assert_eq!(embeds(asked, "/v1/embeddings"), 0, "{asked}");
 }
+
+/// The process dies after its second answer, in the middle of a scan's
+/// embedding: the run ends — within the bound, not hanging — and says why.
+#[test]
+fn a_sidecar_restart_mid_scan_ends_the_job_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 40, &[("FAKE_MLX_DIE_AFTER", "2")]);
+    let (_, settled) =
+        run_scan_capturing_snapshots(fx.app.handle(), Entry::Full, Duration::from_secs(60));
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Failed, "{report:?}");
+    assert!(
+        report
+            .message
+            .as_deref()
+            .is_some_and(|m| !m.trim().is_empty()),
+        "{report:?}"
+    );
+}
+
+/// An open index under OpenRouter whose active space is `model` (`dim`) and
+/// holds one vector. Answers the space id.
+fn index_with_one_vector(app: &tauri::App<MockRuntime>, model: &str, dim: usize) -> i64 {
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            let space =
+                db.adopt_embedding_model(model, dim as i64, "r", &mnema_chunk::chunker_hash())?;
+            let chunk = write_one_document(db, &"v".repeat(64), "a synthetic vector's text");
+            db.upsert_vector(space.space_id, chunk, &vec![1.0f32; dim])?;
+            Ok(space.space_id)
+        })
+        .unwrap()
+}
+
+fn active_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (Option<i64>, i64) {
+    app.state::<AppState>()
+        .with_index(|db| Ok((db.active_space()?, db.embedded_chunk_count(space_id)?)))
+        .unwrap()
+}
+
+/// F1 as the owner ruled it (option B): bge-m3 is shared, so switching onto
+/// Mnema from it moves nothing; from another model with vectors the switch is
+/// refused like any model change, and only a confirmed Discard makes it.
+#[test]
+fn switching_to_mnema_from_another_space_keeps_it() {
+    use mnema_desktop::models::ExistingVectors;
+    use mnema_desktop::provider::{ProviderChoice, change};
+
+    // (a) From OpenRouter's bge-m3: same space, same vectors, no confirmation.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let bge = index_with_one_vector(&app, "baai/bge-m3", 1024);
+    let state = app.state::<AppState>();
+    let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    assert!(
+        matches!(switched, Ok(ProviderChoice::Mnema)),
+        "{switched:?}"
+    );
+    assert_eq!(active_and_vectors(&app, bge), (Some(bge), 1));
+
+    // (b) From a 1536 space with vectors: refused, nothing moved.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    assert!(
+        refused.is_err(),
+        "a switch that strands vectors must be refused: {refused:?}"
+    );
+    assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
+    assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
+
+    // ... and confirmed with Discard: the index is on bge-m3.
+    let confirmed = change(&state, ProviderChoice::Mnema, ExistingVectors::Discard);
+    assert!(
+        matches!(confirmed, Ok(ProviderChoice::Mnema)),
+        "{confirmed:?}"
+    );
+    let model = state
+        .with_index(|db| {
+            let space = db.active_space()?.expect("an active space");
+            db.space_model(space)
+        })
+        .unwrap();
+    assert_eq!(model, ("baai/bge-m3".to_string(), 1024));
+}

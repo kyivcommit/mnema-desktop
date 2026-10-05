@@ -272,7 +272,7 @@ case_ "a reading pass that ended must record that it did" \
 # read the archive again.
 case_ "a resumption must not record a reading pass it never ran" \
   src-tauri/src/scan_job.rs \
-  's~        std::thread::spawn\(move \|\| embed_after\(slot, job_db, deps, base\)\);\n        return Ok\(\(\)\);~        slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass\n        std::thread::spawn(move || embed_after(slot, job_db, deps, base));\n        return Ok(());~' \
+  's~        std::thread::spawn\(move \|\| embed_after\(slot, job_db, deps\)\);\n        return Ok\(\(\)\);~        slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass\n        std::thread::spawn(move || embed_after(slot, job_db, deps));\n        return Ok(());~' \
   'slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass' \
   mnema-desktop 'scan_job::tests::an_embed_only_run_keeps_the_last_readings_warning' --lib
 
@@ -284,8 +284,8 @@ case_ "a resumption must not record a reading pass it never ran" \
 # drives all three answers.
 case_ "a Stop during the key read must win whatever the store answered" \
   src-tauri/src/scan_job.rs \
-  's~    let answer = \(deps\.key\)\(\);\n\n    if slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\) \{\n        finish_embedding\(\n            slot,\n            &job_db,\n            EmbedOutcome::NotReached,\n            EndReason::Cancelled,\n            None,\n        \);\n        return;\n    \}\n\n    let key = match answer \{~    let answer = (deps.key)();\n\n    let key = match answer \{ // mutant: the store answers first and the Stop is asked afterwards~' \
-  'let key = match answer { // mutant: the store answers first and the Stop is asked afterwards' \
+  's~    let answer = \(deps\.key\)\(\);\n\n    if slot\.cancel_flag\(\)\.load\(Ordering::SeqCst\) \{\n        finish_embedding\(\n            slot,\n            &job_db,\n            EmbedOutcome::NotReached,\n            EndReason::Cancelled,\n            None,\n        \);\n        return;\n    \}\n\n    let endpoint = match answer \{~    let answer = (deps.key)();\n\n    let endpoint = match answer \{ // mutant: the store answers first and the Stop is asked afterwards~' \
+  'let endpoint = match answer { // mutant: the store answers first and the Stop is asked afterwards' \
   mnema-desktop 'scan_job::tests::a_stop_during_the_key_read_wins_whatever_the_store_answers' --lib
 
 # 🔴 D-g step 3 removed outright rather than moved. The Stop is never asked

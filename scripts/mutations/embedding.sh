@@ -203,7 +203,7 @@ case_ "models: the number of spaces must be measured, not asserted (D96g, review
 # and only one of the two can be undone.
 case_ "models: the answer about existing vectors must be required (D96g, review 1)" \
   src-tauri/src/models.rs \
-  's{    existing_vectors: ExistingVectors,\n\) -> Result<AdoptedModel, Error> \{\n    let key = key\(&state\)\?;\n}{    existing_vectors: Option<ExistingVectors>,\n) -> Result<AdoptedModel, Error> \{\n    let existing_vectors = existing_vectors.unwrap_or(ExistingVectors::Keep);\n    let key = key(&state)?;\n}' \
+  's{    existing_vectors: ExistingVectors,\n\) -> Result<AdoptedModel, Error> \{\n    let endpoint = state\.endpoint\(\)\?;\n}{    existing_vectors: Option<ExistingVectors>,\n) -> Result<AdoptedModel, Error> \{\n    let existing_vectors = existing_vectors.unwrap_or(ExistingVectors::Keep);\n    let endpoint = state.endpoint()?;\n}' \
   'let existing_vectors = existing_vectors.unwrap_or(ExistingVectors::Keep);' \
   mnema-desktop 'a_model_change_that_says_nothing_about_the_existing_vectors_is_refused' --test commands
 

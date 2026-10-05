@@ -584,7 +584,7 @@ pub enum ExistingVectors {
 /// bare `Err(other) => return Err(other)` and a `?` on `drop_space`, and each
 /// threw the accumulated list away. What that looked like from the window is
 /// written on [`Error::RetiredThenFailed`].
-fn adopt_retiring_whatever_blocks(
+pub(crate) fn adopt_retiring_whatever_blocks(
     db: &mnema_index::Db,
     model: &str,
     dim: i64,

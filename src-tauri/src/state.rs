@@ -475,12 +475,26 @@ impl AppState {
         choice: crate::provider::ProviderChoice,
         question: &str,
     ) -> mnema_rag::Voice {
+        self.voice_with(choice, question, sys_locale::get_locale().as_deref())
+    }
+
+    /// [`AppState::voice_as`] with the system locale given, so a test can fix it.
+    pub(crate) fn voice_with(
+        &self,
+        choice: crate::provider::ProviderChoice,
+        question: &str,
+        system: Option<&str>,
+    ) -> mnema_rag::Voice {
         match choice {
             crate::provider::ProviderChoice::OpenRouter => mnema_rag::Voice::OpenRouter,
             crate::provider::ProviderChoice::Mnema => {
-                let _ = &self.last_lang;
-                let system = sys_locale::get_locale();
-                mnema_rag::Voice::Mnema(mnema_rag::detect(question, None, system.as_deref()))
+                let mut last = self
+                    .last_lang
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let lang = mnema_rag::detect(question, *last, system);
+                *last = Some(lang);
+                mnema_rag::Voice::Mnema(lang)
             }
         }
     }

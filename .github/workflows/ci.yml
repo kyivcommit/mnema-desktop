@@ -138,6 +138,11 @@ jobs:
       # package.
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
+      # src-tauri's tests find the local-model stand-in in target/<profile>/
+      # (`tests/support/mod.rs::fake_mlx`); a filtered `cargo test` does not
+      # build another package's bin.
+      - name: Build the fake local model process src-tauri's tests drive
+        run: cargo build -p mnema-local --bin mnema-local-fake-mlx
       - run: cargo fmt --all -- --check
       # The second file `src-tauri` will not compile without, and it became one
       # the day the bundle started shipping Pdfium: `bundle.resources` names the
@@ -683,6 +688,11 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
+      # src-tauri's tests find the local-model stand-in in target/<profile>/
+      # (`tests/support/mod.rs::fake_mlx`); a filtered `cargo test` does not
+      # build another package's bin.
+      - name: Build the fake local model process src-tauri's tests drive
+        run: cargo build -p mnema-local --bin mnema-local-fake-mlx
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       # For the legs whose matrix entry says `node: true` and no other —
