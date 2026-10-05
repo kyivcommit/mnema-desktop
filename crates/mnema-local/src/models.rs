@@ -17,7 +17,9 @@ use crate::manifest::{FileSpec, Manifest};
 use crate::{Error, ModelId};
 
 const RESERVE: u64 = 512 * 1024 * 1024;
-const CHUNK: usize = 16 * 1024;
+const CHUNK: usize = 1 << 20;
+/// No byte for this long: the connection is dead, give up (the part is kept).
+const IDLE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelState {
@@ -32,6 +34,8 @@ pub struct Store {
     hub: String,
     manifest: Manifest,
     probe: fn(&Path) -> u64,
+    chunk: usize,
+    idle: Duration,
     /// Downloading/Failed live here only; the disk is the rest of the truth.
     live: Mutex<HashMap<u8, ModelState>>,
 }
@@ -47,6 +51,8 @@ impl Store {
             hub,
             manifest: Manifest::pinned(),
             probe: free_space,
+            chunk: CHUNK,
+            idle: IDLE,
             live: Mutex::new(HashMap::new()),
         }
     }
@@ -58,6 +64,13 @@ impl Store {
 
     pub fn with_free_space_probe(mut self, f: fn(&Path) -> u64) -> Self {
         self.probe = f;
+        self
+    }
+
+    /// Test knobs: read/write granularity and how long a silent body is waited on.
+    pub fn with_transfer(mut self, chunk: usize, idle: Duration) -> Self {
+        self.chunk = chunk;
+        self.idle = idle;
         self
     }
 
@@ -130,7 +143,8 @@ impl Store {
         let owed: u64 = spec.files.iter().map(|f| f.size - have(f)).sum();
         let needed = owed + RESERVE;
         let free = (self.probe)(&self.root);
-        if free < needed {
+        // Nothing owed (a finished model) needs no room.
+        if owed > 0 && free < needed {
             return Err(Error::NoSpace { needed, free });
         }
 
@@ -198,19 +212,71 @@ impl Store {
                 200 => offset = 0,
                 s => return Err(Error::Http(format!("{url}: status {s}"))),
             }
+            // The body is read on its own thread so that a silent connection can
+            // be cancelled and timed out here; ureq has no idle-read timeout. An
+            // abandoned reader ends when its socket errors or the server closes.
             let mut body = resp.into_body().into_reader();
-            let mut buf = vec![0u8; CHUNK];
+            let chunk = self.chunk;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(2);
+            std::thread::spawn(move || {
+                loop {
+                    let mut buf = vec![0u8; chunk];
+                    let mut n = 0;
+                    let mut failed = None;
+                    while n < chunk {
+                        match body.read(&mut buf[n..]) {
+                            Ok(0) => break,
+                            Ok(k) => n += k,
+                            Err(e) => {
+                                failed = Some(e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    buf.truncate(n);
+                    // Bytes that arrived before a failure are still worth keeping.
+                    if n > 0 && tx.send(Ok(buf)).is_err() {
+                        return;
+                    }
+                    if let Some(e) = failed {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                    if n < chunk {
+                        return;
+                    }
+                }
+            });
             let mut written = offset;
-            // Opened per chunk, not held: a failing disk or a changed permission
-            // surfaces as an error on the next write, with the bytes so far kept.
+            // Opened per chunk, not held: a changed permission surfaces as an
+            // error on the next write, with the bytes so far kept.
             let mut first = offset == 0;
+            let mut last_byte = std::time::Instant::now();
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(Error::Cancelled);
                 }
-                let n = body.read(&mut buf).map_err(io)?;
-                if n == 0 {
-                    break;
+                let data = match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => return Err(Error::Http(format!("{}: {e}", f.name))),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if last_byte.elapsed() >= self.idle {
+                            return Err(Error::Http(format!(
+                                "{}: no data for {:?}",
+                                f.name, self.idle
+                            )));
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                last_byte = std::time::Instant::now();
+                // Longer than pinned: wrong whatever it is. Stop before filling the disk.
+                if written + data.len() as u64 > f.size {
+                    let _ = fs::remove_file(&part);
+                    return Err(Error::Checksum {
+                        file: f.name.clone(),
+                    });
                 }
                 let mut opts = fs::OpenOptions::new();
                 opts.create(true);
@@ -221,22 +287,16 @@ impl Store {
                     opts.append(true);
                 }
                 opts.open(&part)
-                    .and_then(|mut file| file.write_all(&buf[..n]))
+                    .and_then(|mut file| file.write_all(&data))
                     .map_err(io)?;
-                written += n as u64;
-                report(base + written.min(f.size));
+                written += data.len() as u64;
+                report(base + written);
             }
             if cancel.load(Ordering::Relaxed) {
                 return Err(Error::Cancelled);
             }
             if written != f.size {
-                // Short or long: keep a short one to resume; a long one can only be wrong.
-                if written > f.size {
-                    let _ = fs::remove_file(&part);
-                    return Err(Error::Checksum {
-                        file: f.name.clone(),
-                    });
-                }
+                // Short: keep it to resume.
                 return Err(Error::Http(format!(
                     "{}: body ended at {written} of {}",
                     f.name, f.size
@@ -259,6 +319,9 @@ fn finish(part: &Path, final_path: &Path, f: &FileSpec) -> Result<(), Error> {
         }
         hasher.update(&buf[..n]);
     }
+    // Data on disk before the name: a crash must not leave a final-named file
+    // of the pinned size whose bytes never reached the platter.
+    file.sync_all().map_err(io)?;
     drop(file);
     let got: String = hasher
         .finalize()
@@ -271,7 +334,18 @@ fn finish(part: &Path, final_path: &Path, f: &FileSpec) -> Result<(), Error> {
             file: f.name.clone(),
         });
     }
-    fs::rename(part, final_path).map_err(io)
+    fs::rename(part, final_path).map_err(io)?;
+    sync_dir(final_path.parent())
+}
+
+/// Makes the rename itself durable. Unix only (a directory cannot be opened on Windows).
+fn sync_dir(dir: Option<&Path>) -> Result<(), Error> {
+    #[cfg(unix)]
+    if let Some(d) = dir {
+        fs::File::open(d).and_then(|f| f.sync_all()).map_err(io)?;
+    }
+    let _ = dir;
+    Ok(())
 }
 
 fn part_path(dir: &Path, name: &str) -> PathBuf {
@@ -282,6 +356,8 @@ fn io(e: std::io::Error) -> Error {
     Error::Io(e.to_string())
 }
 
+/// Unknown (statvfs failing) is reported as unlimited, so the writes themselves
+/// report a real disk error instead of a misleading NoSpace.
 /// Free bytes where `path` will live: asked of its nearest existing ancestor.
 #[cfg(unix)]
 fn free_space(path: &Path) -> u64 {
@@ -294,11 +370,11 @@ fn free_space(path: &Path) -> u64 {
         }
     }
     let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
-        return 0;
+        return u64::MAX;
     };
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
-        return 0;
+        return u64::MAX;
     }
     (st.f_bavail as u64).saturating_mul(st.f_frsize as u64)
 }
