@@ -30,9 +30,10 @@ pub fn answer(
     question: &str,
     passages: &[Passage],
     voice: Voice,
+    timeout: std::time::Duration,
 ) -> Result<Option<Answer>, Error> {
     let messages = build_messages(question, passages, voice);
-    let raw = mnema_provider::complete(base, key, model, &messages)?;
+    let raw = mnema_provider::complete_within(base, key, model, &messages, timeout)?;
     if raw.trim().is_empty() {
         return Ok(None);
     }
@@ -76,6 +77,7 @@ mod tests {
             "why?",
             &one_passage(),
             crate::Voice::OpenRouter,
+            mnema_provider::INTERACTIVE_TIMEOUT,
         )
         .expect("the call succeeds")
         .expect("a non-empty completion is Some");
@@ -109,6 +111,7 @@ mod tests {
             "why?",
             &one_passage(),
             crate::Voice::OpenRouter,
+            mnema_provider::INTERACTIVE_TIMEOUT,
         )
         .unwrap()
         .unwrap();
@@ -134,6 +137,7 @@ mod tests {
             "why?",
             &one_passage(),
             crate::Voice::OpenRouter,
+            mnema_provider::INTERACTIVE_TIMEOUT,
         )
         .unwrap();
         assert!(

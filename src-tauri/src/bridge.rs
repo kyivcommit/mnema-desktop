@@ -1435,6 +1435,7 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
         &query,
         &passages,
         mnema_rag::Voice::OpenRouter,
+        mnema_provider::INTERACTIVE_TIMEOUT,
     ) {
         Ok(generated) => generated,
         Err(e) => {

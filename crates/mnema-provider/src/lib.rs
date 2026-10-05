@@ -14,7 +14,7 @@ pub use catalogue::{
     Catalogue, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
     UnreadableRecord, models_from_json,
 };
-pub use chat::{Message, MessageRole, complete};
+pub use chat::{Message, MessageRole, complete, complete_within};
 pub use http::INTERACTIVE_TIMEOUT;
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
