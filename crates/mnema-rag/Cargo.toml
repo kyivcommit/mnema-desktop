@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 regex = { workspace = true }
+whatlang = "0.16"
 mnema-provider = { path = "../mnema-provider" }
 
 [dev-dependencies]

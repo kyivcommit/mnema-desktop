@@ -6,8 +6,10 @@
 
 mod anchors;
 mod answer;
+mod lang;
 mod prompt;
 
 pub use anchors::{extract_anchor_ids, resolve_anchors};
 pub use answer::{Answer, answer};
+pub use lang::{EN, Lang, UK, detect};
 pub use prompt::{Passage, build_messages};
