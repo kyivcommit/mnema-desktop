@@ -152,6 +152,17 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// The chosen provider (`provider` key): OpenRouter unless the file says
+/// `"mnema"`. Read on every use, so a job thread and a command read the same
+/// fact without a second copy in memory.
+pub fn provider_choice(data_dir: &Path) -> crate::provider::ProviderChoice {
+    read_all(data_dir)
+        .get(crate::provider::PREFS_KEY)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
 /// Minutes the launcher may stay hidden before its next show is cold
 /// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
 pub fn cold_after_minutes(data_dir: &Path) -> u32 {

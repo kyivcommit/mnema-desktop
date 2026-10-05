@@ -358,6 +358,14 @@ pub enum Error {
     /// against `Err` — for the command that asks the question directly.
     #[error("no provider key has been entered")]
     NoKey,
+    /// Mnema is chosen and one of its two models is not downloaded. The local
+    /// counterpart of [`Error::NoKey`]: a normal state with a download behind
+    /// it, not a failure.
+    #[error("the local models are not downloaded yet")]
+    ProviderNotReady,
+    /// The local model process or its files failed.
+    #[error("{0}")]
+    Local(#[from] mnema_local::Error),
     /// [`crate::models::set_key`] was handed an empty string.
     ///
     /// Kept apart from [`Error::NoKey`], which is about the **store** and not

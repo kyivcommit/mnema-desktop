@@ -16,6 +16,7 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod provider;
 pub mod provider_status;
 pub mod scan_job;
 pub mod scan_state;
@@ -88,6 +89,13 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_chat_model,
         models::model_settings,
         provider_status::provider_status,
+        provider::provider_choice,
+        provider::set_provider_choice,
+        provider::mnema_available,
+        provider::local_models,
+        provider::download_model,
+        provider::cancel_download,
+        provider::remove_model,
         scan_job::start_scan_job,
         locale::get_locale,
         locale::set_locale,

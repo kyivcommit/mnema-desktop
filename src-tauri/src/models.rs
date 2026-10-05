@@ -59,10 +59,10 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     if key.is_empty() {
         return Err(Error::EmptyKey);
     }
-    let check = mnema_provider::check_key(state.provider_base(), &key)?;
+    let check = mnema_provider::check_key(state.openrouter_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
     state.forget_provider_status();
-    choose_the_default_models_for_roles_with_none(&state, &key);
+    choose_the_default_models_for_roles_with_none(&state);
     Ok(KeyStatus {
         balance: check.balance,
     })
@@ -82,7 +82,7 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
 /// providers_catalogue` is for — `#[ignore]`d, needing the network and no key,
 /// because the catalogue endpoint is public (see [`provider_models`]).
 pub const DEFAULT_MODELS: DefaultModels = DefaultModels {
-    embedding: "openai/text-embedding-3-small",
+    embedding: "baai/bge-m3",
     chat: "openai/gpt-5.6-luna",
 };
 
@@ -145,7 +145,7 @@ pub struct DefaultModels {
 /// reads the key from the job's own thread after (D-g), the opposite trade,
 /// made because that read can block on a modal authorisation dialog. This
 /// paragraph's citation is history, not a live precedent to match.
-fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
+fn choose_the_default_models_for_roles_with_none(state: &AppState) {
     // Two `let _`, not one: the roles fail separately and neither failing is a
     // reason to leave the other unset.
     let _ = state.with_index(|db| {
@@ -170,9 +170,14 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
     ) else {
         return;
     };
-    let Ok(check) =
-        mnema_provider::check_embedding_model(state.provider_base(), key, DEFAULT_MODELS.embedding)
-    else {
+    let Ok(endpoint) = state.endpoint() else {
+        return;
+    };
+    let Ok(check) = mnema_provider::check_embedding_model(
+        &endpoint.base,
+        &endpoint.token,
+        DEFAULT_MODELS.embedding,
+    ) else {
         return;
     };
     let _ = state.with_index(|db| {
@@ -206,10 +211,10 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState, key: &str) {
 /// not a command being served, and it returns nothing for the reason
 /// [`choose_the_default_models_for_roles_with_none`] returns nothing.
 pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
-    let Ok(Some(key)) = mnema_secrets::load(state.credential_ref()) else {
+    let Ok(Some(_)) = mnema_secrets::load(state.credential_ref()) else {
         return;
     };
-    choose_the_default_models_for_roles_with_none(state, &key);
+    choose_the_default_models_for_roles_with_none(state);
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding
@@ -293,20 +298,6 @@ pub struct KeyStatus {
     pub balance: mnema_provider::Balance,
 }
 
-/// The key, or the fact that nobody has entered one.
-///
-/// `pub(crate)`, and deliberately not a command: a `#[tauri::command]` returning
-/// a `String` here is precisely how the key would cross to the window, which is
-/// the one thing this module exists to prevent.
-///
-/// The absence of a key is [`Error::NoKey`] and not [`Error::Secrets`] — see
-/// that variant for the two opposite things those tell the person at the window
-/// to do next. This function is where the split is made, and
-/// [`set_embedding_model`] is the caller that makes it reachable.
-pub(crate) fn key(state: &AppState) -> Result<String, Error> {
-    mnema_secrets::load(state.credential_ref())?.ok_or(Error::NoKey)
-}
-
 /// The role the window named, or a refusal.
 ///
 /// Written as a total match with no fallthrough: the alternative that suggests
@@ -337,7 +328,7 @@ fn role_from(name: &str) -> Result<Role, Error> {
 #[tauri::command(async)]
 pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catalogue, Error> {
     Ok(mnema_provider::list_models(
-        state.provider_base(),
+        state.openrouter_base(),
         None,
         role_from(&role)?,
     )?)
@@ -364,7 +355,8 @@ pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catal
 /// wording could have told them apart, because the fact was not in the message.
 /// It is not inferred here either — see [`AdoptedModel::created`].
 ///
-/// The store is asked **once**, by `key`. Asking it again for a `key_present`
+/// The store is asked **once**, by [`AppState::endpoint`] (`provider::endpoint`
+/// is where `Error::NoKey` is told apart from `Error::Secrets`). Asking it again for a `key_present`
 /// would be a second measurement that can disagree with the one this command
 /// actually used: a concurrent `forget_key` would report the key as absent on a
 /// call that has just succeeded with it. The window does not need the answer in
@@ -425,7 +417,7 @@ pub fn set_embedding_model(
     model: String,
     existing_vectors: ExistingVectors,
 ) -> Result<AdoptedModel, Error> {
-    let key = key(&state)?;
+    let endpoint = state.endpoint()?;
     // ⚠️ **This command takes the job slot, although it is not a job**, and the
     // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
     // once, at the start, and holds that space id for the whole run — so a model
@@ -465,7 +457,7 @@ pub fn set_embedding_model(
         },
         false,
     )?;
-    let check = mnema_provider::check_embedding_model(state.provider_base(), &key, &model)?;
+    let check = mnema_provider::check_embedding_model(&endpoint.base, &endpoint.token, &model)?;
     let hash = mnema_chunk::chunker_hash();
     let dim = check.dim as i64;
     // Two failures that are not the same one. The outer `?` is `with_index`

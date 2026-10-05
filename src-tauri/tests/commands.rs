@@ -12311,3 +12311,37 @@ fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
 
 #[cfg(unix)]
 use app::app_with_a_worker_that_reads_nothing;
+
+// ---------------------------------------------------------------------------
+// Provider choice (Task 7): one endpoint for OpenRouter or the local process.
+// ---------------------------------------------------------------------------
+
+/// The state as it stands after the person chose `choice`.
+fn choose(state: &AppState, choice: mnema_desktop::provider::ProviderChoice) {
+    mnema_desktop::prefs::write_key(
+        state.data_dir(),
+        mnema_desktop::provider::PREFS_KEY,
+        serde_json::to_value(choice).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn mnema_endpoint_is_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(
+        dir.path().to_path_buf(),
+        support::worker().to_path_buf(),
+        NO_PROVIDER.into(),
+        NO_CREDENTIAL.into(),
+    );
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(dir.path(), &[]));
+    let endpoint = state.endpoint();
+    assert!(
+        matches!(&endpoint, Ok(e) if e.base.starts_with("http://127.0.0.1:")
+            && e.query_base.starts_with("http://127.0.0.1:")
+            && !e.token.is_empty()),
+        "{endpoint:?}"
+    );
+}

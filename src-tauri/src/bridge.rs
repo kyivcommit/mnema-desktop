@@ -1089,21 +1089,38 @@ enum ChatReadiness {
     NoKey,
     /// A model is set but the credential store could not be read.
     KeyUnreadable,
-    /// A model and a key: the only state that opens the generation branch.
-    Ready { model: String, key: String },
+    /// A model and an endpoint: the only state that opens the generation
+    /// branch. Under Mnema the model is always [`crate::provider::LOCAL_CHAT_MODEL`]
+    /// — the stored name is OpenRouter's and means nothing to the local process.
+    Ready {
+        model: String,
+        endpoint: crate::provider::Endpoint,
+    },
 }
 
 /// The gate. `?` still stops the whole command on a poisoned or unopened index
 /// (as every command does); `NoKey`/`KeyUnreadable` become states, not errors,
 /// so a missing key answers with citations rather than failing.
-fn chat_readiness(state: &State<'_, AppState>) -> Result<ChatReadiness, Error> {
-    let model = state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?;
+fn chat_readiness(
+    state: &State<'_, AppState>,
+    choice: crate::provider::ProviderChoice,
+) -> Result<ChatReadiness, Error> {
+    let model = match choice {
+        crate::provider::ProviderChoice::Mnema => {
+            Some(crate::provider::LOCAL_CHAT_MODEL.to_string())
+        }
+        crate::provider::ProviderChoice::OpenRouter => {
+            state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?
+        }
+    };
     let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
         return Ok(ChatReadiness::NoModel);
     };
-    match crate::models::key(state) {
-        Ok(key) => Ok(ChatReadiness::Ready { model, key }),
-        Err(Error::NoKey) => Ok(ChatReadiness::NoKey),
+    match state.endpoint_as(choice) {
+        Ok(endpoint) => Ok(ChatReadiness::Ready { model, endpoint }),
+        // The local models not downloaded is the local "no key": citations
+        // only, nothing failed.
+        Err(Error::NoKey | Error::ProviderNotReady) => Ok(ChatReadiness::NoKey),
         Err(Error::Secrets(_)) => Ok(ChatReadiness::KeyUnreadable),
         Err(e) => Err(e),
     }
@@ -1141,17 +1158,21 @@ fn retrieve(
     query: &str,
     arms: Arms,
     limit: i64,
+    choice: crate::provider::ProviderChoice,
 ) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport, Option<NoAnswer>), Error> {
     let (provider, content_failure) = if arms.content {
-        match crate::models::key(state) {
-            Ok(key) => (
+        match state.endpoint_as(choice) {
+            // `query_base`: under Mnema the question's embedding takes the
+            // process's priority route, ahead of a scan's batches; under
+            // OpenRouter it is the same base as everything else.
+            Ok(endpoint) => (
                 Some(Provider {
-                    base: state.provider_base().to_string(),
-                    key,
+                    base: endpoint.query_base,
+                    key: endpoint.token,
                 }),
                 None,
             ),
-            Err(Error::NoKey) => (None, None),
+            Err(Error::NoKey | Error::ProviderNotReady) => (None, None),
             Err(e) => (None, Some(e.to_string())),
         }
     } else {
@@ -1215,7 +1236,8 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         return Err(Error::QueryBlank);
     }
     let arms = read_arms(&state)?;
-    let (hits, text, content, _) = retrieve(&state, &query, arms, SEARCH_LIMIT)?;
+    let choice = state.provider_choice();
+    let (hits, text, content, _) = retrieve(&state, &query, arms, SEARCH_LIMIT, choice)?;
     Ok(SearchAnswer {
         hits,
         text,
@@ -1389,9 +1411,12 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     }
 
     let arms = read_arms(&state)?;
-    let (hits, text, content, unreachable) = retrieve(&state, &query, arms, ASK_TOP_K)?;
+    // Read once: retrieval, readiness, voice and timeout all answer for the
+    // same provider.
+    let choice = state.provider_choice();
+    let (hits, text, content, unreachable) = retrieve(&state, &query, arms, ASK_TOP_K, choice)?;
 
-    let ChatReadiness::Ready { model, key } = chat_readiness(&state)? else {
+    let ChatReadiness::Ready { model, endpoint } = chat_readiness(&state, choice)? else {
         return Ok(AskAnswer::CitationsOnly {
             citations: hits,
             why: NoAnswer::NotAsked,
@@ -1424,18 +1449,17 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     }
 
     let passages: Vec<mnema_rag::Passage> = hits.iter().map(passage_from_hit).collect();
-    let base = state.provider_base().to_string();
     // A chat call that fails keeps what retrieval found: the passages are on
     // this machine, and only the prose was the provider's to give (D171,
     // owner's ruling 2026-10-02).
     let generated = match mnema_rag::answer(
-        &base,
-        &key,
+        &endpoint.base,
+        &endpoint.token,
         &model,
         &query,
         &passages,
-        mnema_rag::Voice::OpenRouter,
-        mnema_provider::INTERACTIVE_TIMEOUT,
+        state.voice_as(choice, &query),
+        choice.chat_timeout(),
     ) {
         Ok(generated) => generated,
         Err(e) => {

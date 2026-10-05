@@ -117,12 +117,29 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
         match path.as_str() {
             "/v1/models" => (200, r#"{"object":"list","data":[]}"#.to_string()),
             "/v1/embeddings" => {
-                let n = serde_json::from_str::<serde_json::Value>(&body)
+                let inputs = serde_json::from_str::<serde_json::Value>(&body)
                     .ok()
-                    .and_then(|v| v["input"].as_array().map(Vec::len))
-                    .unwrap_or(0);
-                log(&format!("input {n}"));
-                (200, r#"{"data":[]}"#.to_string())
+                    .and_then(|v| v["input"].as_array().cloned())
+                    .unwrap_or_default();
+                log(&format!("input {}", inputs.len()));
+                // One unit vector of width 1024 per input, hot where the text's
+                // hash says: deterministic, and distinct for distinct texts.
+                let data: Vec<_> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let hash = text
+                            .to_string()
+                            .bytes()
+                            .fold(0xcbf29ce484222325u64, |h, b| {
+                                (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+                            });
+                        let mut v = vec![0.0f32; 1024];
+                        v[(hash % 1024) as usize] = 1.0;
+                        serde_json::json!({ "embedding": v, "index": i })
+                    })
+                    .collect();
+                (200, serde_json::json!({ "data": data }).to_string())
             }
             "/v1/chat/completions" => {
                 log(&format!("body {sent} {body}"));
