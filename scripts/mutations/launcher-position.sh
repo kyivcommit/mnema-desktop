@@ -239,7 +239,7 @@ case_ "launcher cold: the threshold second itself is not yet cold" \
 
 case_ "launcher cold: hide_launcher records no hide" \
   src-tauri/src/lib.rs \
-  's~        app\.state::<launcher_layout::HiddenAt>\(\)\.mark\(\);\n    \}\n\}~    }\n}~' \
+  's~        launcher_hidden\(app\);\n    \}\n\}~    }\n}~' \
   'let _ = window.hide();
     }
 }' \

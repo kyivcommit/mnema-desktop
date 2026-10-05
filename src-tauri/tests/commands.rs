@@ -12537,6 +12537,27 @@ fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {
 }
 
 #[test]
+fn a_real_scan_ending_while_cold_unloads_bge_m3() {
+    // The production scan thread calls `Provider::scan_end` when it ends.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 2, &[("FAKE_MLX_LOG", &log_env)]);
+    let gone = r#"body /mnema/unload {"models":["embed"]}"#;
+    // Cold, then a scan: it ends with bge-m3 unloaded.
+    mnema_desktop::provider::on_cold(&fx.app.state::<AppState>());
+    scan_to_completion(fx.app.handle());
+    // The slot is released before the thread's last act, so wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut text = String::new();
+    while std::time::Instant::now() < deadline && !text.lines().any(|l| l == gone) {
+        text = std::fs::read_to_string(&log).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(text.lines().any(|l| l == gone), "{text}");
+}
+
+#[test]
 fn scan_batches_are_small_under_mnema() {
     // Two batches under Mnema (16 + 4) is the whole claim.
     const FILES: usize = 20;

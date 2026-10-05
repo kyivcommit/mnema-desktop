@@ -272,7 +272,7 @@ case_ "a reading pass that ended must record that it did" \
 # read the archive again.
 case_ "a resumption must not record a reading pass it never ran" \
   src-tauri/src/scan_job.rs \
-  's~        std::thread::spawn\(move \|\| embed_after\(slot, job_db, deps\)\);\n        return Ok\(\(\)\);~        slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass\n        std::thread::spawn(move || embed_after(slot, job_db, deps));\n        return Ok(());~' \
+  's~        let provider = state\.provider\(\);\n        std::thread::spawn\(move \|\| \{\n            embed_after\(slot, job_db, deps\);~        slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass\n        let provider = state.provider();\n        std::thread::spawn(move || {\n            embed_after(slot, job_db, deps);~' \
   'slot.mark_reading_done(crate::scan_state::ReadingOutcome::default()); // mutant: a resumption claims a reading pass' \
   mnema-desktop 'scan_job::tests::an_embed_only_run_keeps_the_last_readings_warning' --lib
 

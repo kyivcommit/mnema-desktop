@@ -310,7 +310,11 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
             },
             true,
         )?;
-        std::thread::spawn(move || embed_after(slot, job_db, deps));
+        let provider = state.provider();
+        std::thread::spawn(move || {
+            embed_after(slot, job_db, deps);
+            provider.scan_end();
+        });
         return Ok(());
     }
 
@@ -394,7 +398,11 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
     // into the thread, and the worker's path is the only thing from it the
     // reading pass still needs.
     let worker = state.worker_path().to_path_buf();
-    std::thread::spawn(move || read_every_root(slot, job_db, worker, roots, deps));
+    let provider = state.provider();
+    std::thread::spawn(move || {
+        read_every_root(slot, job_db, worker, roots, deps);
+        provider.scan_end();
+    });
     Ok(())
 }
 

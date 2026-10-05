@@ -317,6 +317,12 @@ pub fn go_cold_if_idle<R: tauri::Runtime>(
 pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
+            // Every show path comes through here: the local models load while
+            // the person types, not when they press Enter. `try_state`: the
+            // shell tests build no `AppState`.
+            if let Some(state) = app.try_state::<state::AppState>() {
+                drop(provider::on_show(&state));
+            }
             // Already up (single-instance while the person is dragging it):
             // focus, and do not move what no focus loss has recorded yet.
             if window.is_visible().unwrap_or(false) {
@@ -353,7 +359,19 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         let _ = window.hide();
-        app.state::<launcher_layout::HiddenAt>().mark();
+        launcher_hidden(app);
+    }
+}
+
+/// The launcher left the screen: records when, and starts the clock that will
+/// give the local models' memory back if it stays away
+/// (`provider::start_cold_timer`). The one place both hides go through, the
+/// shortcut/close and the `Focused(false)` arm.
+fn launcher_hidden<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    app.state::<launcher_layout::HiddenAt>().mark();
+    if let Some(state) = app.try_state::<state::AppState>() {
+        let minutes = prefs::cold_after_minutes(state.data_dir());
+        provider::start_cold_timer(app, std::time::Duration::from_secs(u64::from(minutes) * 60));
     }
 }
 
@@ -774,7 +792,7 @@ pub fn run() -> anyhow::Result<()> {
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 // Esc and blur hide from the UI, not through `hide_launcher`.
-                app.state::<launcher_layout::HiddenAt>().mark();
+                launcher_hidden(app);
                 let memory = app.state::<launcher_position::Memory>();
                 let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
                 launcher_position::remember(
