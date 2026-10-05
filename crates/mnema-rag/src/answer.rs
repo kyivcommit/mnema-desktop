@@ -1,7 +1,7 @@
 use mnema_provider::Error;
 
 use crate::anchors::resolve_anchors;
-use crate::prompt::{Passage, build_messages};
+use crate::prompt::{Passage, Voice, build_messages};
 
 /// The synthesised answer: the anchor-resolved text and the 1-based ordinals
 /// that resolved, in first-occurrence order. Invalid anchors are already gone
@@ -29,9 +29,9 @@ pub fn answer(
     model: &str,
     question: &str,
     passages: &[Passage],
-    answer_lang: Option<&str>,
+    voice: Voice,
 ) -> Result<Option<Answer>, Error> {
-    let messages = build_messages(question, passages, answer_lang);
+    let messages = build_messages(question, passages, voice);
     let raw = mnema_provider::complete(base, key, model, &messages)?;
     if raw.trim().is_empty() {
         return Ok(None);
@@ -69,9 +69,16 @@ mod tests {
     #[test]
     fn it_builds_the_prompt_sends_it_and_resolves_the_anchors() {
         let server = MockServer::new(vec![Reply::ok(&completion("The sky is blue <c>1</c>."))]);
-        let out = answer(server.base(), "k", "m", "why?", &one_passage(), None)
-            .expect("the call succeeds")
-            .expect("a non-empty completion is Some");
+        let out = answer(
+            server.base(),
+            "k",
+            "m",
+            "why?",
+            &one_passage(),
+            crate::Voice::OpenRouter,
+        )
+        .expect("the call succeeds")
+        .expect("a non-empty completion is Some");
         assert_eq!(out.text, "The sky is blue <c>1</c>.");
         assert_eq!(out.cited, vec![1]);
 
@@ -95,9 +102,16 @@ mod tests {
         let server = MockServer::new(vec![Reply::ok(&completion(
             "Guessing <c>9</c> here <c>2</c>.",
         ))]);
-        let out = answer(server.base(), "k", "m", "why?", &one_passage(), None)
-            .unwrap()
-            .unwrap();
+        let out = answer(
+            server.base(),
+            "k",
+            "m",
+            "why?",
+            &one_passage(),
+            crate::Voice::OpenRouter,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(out.cited, vec![2], "only the in-range anchor is cited");
         assert!(
             !out.text.contains('9'),
@@ -113,7 +127,15 @@ mod tests {
         // *raw* completion, before anchor resolution (spec §6). Three plain
         // spaces, no newline, so the JSON body stays valid with no escaping.
         let server = MockServer::new(vec![Reply::ok(&completion("   "))]);
-        let out = answer(server.base(), "k", "m", "why?", &one_passage(), None).unwrap();
+        let out = answer(
+            server.base(),
+            "k",
+            "m",
+            "why?",
+            &one_passage(),
+            crate::Voice::OpenRouter,
+        )
+        .unwrap();
         assert!(
             out.is_none(),
             "a blank completion must be None, got {out:?}"

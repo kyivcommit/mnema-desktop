@@ -5,6 +5,8 @@
 
 use mnema_provider::{Message, MessageRole};
 
+use crate::lang::Lang;
+
 /// One retrieved source as it enters the prompt. `text` is the original chunk
 /// text (verbatim, never truncated — `prompt.py:103-108`); `meta` is the
 /// pre-rendered locator line (`relative_path · <coordinate>`, built by the
@@ -64,31 +66,34 @@ const ISO_DIRECTIVE_TAIL: &str = concat!(
 const AUTO_USER_REMINDER: &str =
     "Write your entire answer in the same language as the Question above.";
 
-/// Auto = no explicit target language: `None`, empty, whitespace-only, or
-/// case-insensitive `"auto"` after trimming (`prompt.py:79-85`, `_is_auto`).
-fn is_auto(answer_lang: Option<&str>) -> bool {
-    let stripped = answer_lang.unwrap_or("").trim();
-    stripped.is_empty() || stripped.eq_ignore_ascii_case("auto")
+/// The brevity line a small local model needs; it otherwise writes essays.
+const MNEMA_BREVITY: &str = "Answer briefly: two to four sentences, or a short list when the question asks for options or steps. Include only what answers the question; leave out sources that do not.";
+
+/// Who will read the prompt. `OpenRouter` is the server's auto prompt, byte for
+/// byte; `Mnema` names the answer language (the small local model does not infer
+/// it) and asks for a short answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice {
+    OpenRouter,
+    Mnema(Lang),
 }
 
-/// Rule-5 directive: the question-language directive for auto, the ISO directive
-/// otherwise (`prompt.py:88-92`, `_build_language_directive`).
-fn language_directive(answer_lang: Option<&str>) -> String {
-    if is_auto(answer_lang) {
-        return AUTO_DIRECTIVE.to_string();
+/// Rule-5 directive: the question-language directive for OpenRouter, the ISO
+/// directive otherwise (`prompt.py:88-92`, `_build_language_directive`).
+fn language_directive(voice: Voice) -> String {
+    match voice {
+        Voice::OpenRouter => AUTO_DIRECTIVE.to_string(),
+        Voice::Mnema(l) => format!(
+            "{ISO_DIRECTIVE_HEAD}{} ({}){ISO_DIRECTIVE_TAIL}",
+            l.code, l.name
+        ),
     }
-    let lang = answer_lang.unwrap_or("").trim();
-    format!("{ISO_DIRECTIVE_HEAD}{lang}{ISO_DIRECTIVE_TAIL}")
 }
 
 /// Build the two chat messages for synthesis (`prompt.py:95-124`). Each source
 /// shows its FULL text — the chunker already size-bounds chunks, and a per-source
 /// cap would silently hide a fact past the cap (`prompt.py:103-108`).
-pub fn build_messages(
-    question: &str,
-    passages: &[Passage],
-    answer_lang: Option<&str>,
-) -> Vec<Message> {
+pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec<Message> {
     let blocks: Vec<String> = passages
         .iter()
         .enumerate()
@@ -104,11 +109,15 @@ pub fn build_messages(
         .collect();
     let sources = blocks.join("\n\n");
     let mut user = format!("Sources:\n\n{sources}\n\nQuestion: {question}");
-    if is_auto(answer_lang) {
-        user.push_str("\n\n");
-        user.push_str(AUTO_USER_REMINDER);
+    user.push_str("\n\n");
+    match voice {
+        Voice::OpenRouter => user.push_str(AUTO_USER_REMINDER),
+        Voice::Mnema(l) => user.push_str(&format!(
+            "Write your entire answer in {}, even though the Question and the sources may be in another language. {MNEMA_BREVITY}",
+            l.name
+        )),
     }
-    let system = format!("{SYSTEM_PROMPT_HEAD}{}", language_directive(answer_lang));
+    let system = format!("{SYSTEM_PROMPT_HEAD}{}", language_directive(voice));
     vec![
         Message {
             role: MessageRole::System,
@@ -124,6 +133,7 @@ pub fn build_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lang::UK;
     use mnema_provider::MessageRole;
 
     // Byte-for-byte from the server's own `build_messages` (auto mode), captured
@@ -133,7 +143,7 @@ mod tests {
 
     #[test]
     fn the_system_prompt_is_the_ported_rules_plus_the_auto_directive() {
-        let messages = build_messages("q?", &[], None);
+        let messages = build_messages("q?", &[], Voice::OpenRouter);
         assert_eq!(messages.len(), 2, "system + user");
         assert_eq!(messages[0].role, MessageRole::System);
         assert_eq!(messages[1].role, MessageRole::User);
@@ -155,7 +165,11 @@ mod tests {
 
     #[test]
     fn the_user_turn_numbers_sources_with_meta_then_the_question_and_reminder() {
-        let messages = build_messages("What colour is the sky?", &two_passages(), None);
+        let messages = build_messages(
+            "What colour is the sky?",
+            &two_passages(),
+            Voice::OpenRouter,
+        );
         let expected = concat!(
             "Sources:\n\n",
             "[1] (docs/sky.txt)\nThe sky is blue.\n\n",
@@ -172,7 +186,7 @@ mod tests {
             text: "Bare.".into(),
             meta: String::new(),
         }];
-        let messages = build_messages("q?", &passages, None);
+        let messages = build_messages("q?", &passages, Voice::OpenRouter);
         assert!(
             messages[1].content.contains("[1]\nBare."),
             "empty meta must yield `[1]` with no parens: {}",
@@ -186,10 +200,10 @@ mod tests {
 
     #[test]
     fn an_explicit_language_switches_the_directive_and_drops_the_reminder() {
-        let messages = build_messages("q?", &[], Some("uk"));
+        let messages = build_messages("q?", &[], Voice::Mnema(UK));
         assert!(
             messages[0].content.ends_with(
-                "language (BCP-47 / ISO code): uk. The SOURCE passages may be in a different \
+                "language (BCP-47 / ISO code): uk (Ukrainian). The SOURCE passages may be in a different \
                  language; translate any facts or quotes you cite into that language. Do NOT \
                  state which language you are using — just give the answer."
             ),
@@ -204,18 +218,34 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_and_the_word_auto_are_treated_as_auto() {
-        for lang in [Some("   "), Some("AUTO"), Some("Auto"), None] {
-            let messages = build_messages("q?", &[], lang);
-            assert!(
-                messages[0].content.ends_with(AUTO_DIRECTIVE),
-                "{lang:?} must select the auto directive"
-            );
-            assert!(
-                messages[1].content.ends_with(AUTO_USER_REMINDER),
-                "{lang:?} must append the auto reminder"
-            );
-        }
+    fn mnema_system_names_code_and_language() {
+        let messages = build_messages("q?", &[], Voice::Mnema(UK));
+        assert!(
+            messages[0].content.contains("uk (Ukrainian)"),
+            "system: {}",
+            messages[0].content
+        );
+    }
+
+    #[test]
+    fn mnema_user_turn_ends_with_reminder_and_brevity() {
+        let de = Lang {
+            code: "de",
+            name: "German",
+        };
+        let messages = build_messages("q?", &two_passages(), Voice::Mnema(de));
+        let tail = "Write your entire answer in German, even though the Question and the sources may be in another language. Answer briefly: two to four sentences, or a short list when the question asks for options or steps. Include only what answers the question; leave out sources that do not.";
+        assert!(
+            messages[1].content.ends_with(tail),
+            "user: {}",
+            messages[1].content
+        );
+    }
+
+    #[test]
+    fn openrouter_user_turn_has_no_brevity_line() {
+        let messages = build_messages("q?", &two_passages(), Voice::OpenRouter);
+        assert!(!messages[1].content.contains("Answer briefly"));
     }
 
     #[test]
@@ -230,7 +260,7 @@ mod tests {
                 meta: "ok.txt".into(),
             },
         ];
-        let messages = build_messages("q?", &passages, None);
+        let messages = build_messages("q?", &passages, Voice::OpenRouter);
         assert_eq!(messages.len(), 2);
         let user = &messages[1].content;
         // Exactly the two real headers, at the real positions.

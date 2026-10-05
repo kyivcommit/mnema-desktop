@@ -1428,7 +1428,14 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     // A chat call that fails keeps what retrieval found: the passages are on
     // this machine, and only the prose was the provider's to give (D171,
     // owner's ruling 2026-10-02).
-    let generated = match mnema_rag::answer(&base, &key, &model, &query, &passages, None) {
+    let generated = match mnema_rag::answer(
+        &base,
+        &key,
+        &model,
+        &query,
+        &passages,
+        mnema_rag::Voice::OpenRouter,
+    ) {
         Ok(generated) => generated,
         Err(e) => {
             let why = NoAnswer::from_chat(&e);
