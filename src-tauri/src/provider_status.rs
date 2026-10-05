@@ -71,16 +71,19 @@ fn local_facts(
     }
 }
 
-/// Under Mnema: both models downloaded, the process answering, a space to
-/// embed into. Nothing leaves the machine, so nothing is cached and `/credits`
-/// is never asked.
+/// Under Mnema: both models downloaded and, if the process is already
+/// running, still answering. Asked of the files and the running process only —
+/// a poll never starts the process (that is a question's or a scan's to do).
+/// Nothing leaves the machine, so nothing is cached and `/credits` is never
+/// asked.
 fn local_status(state: &AppState) -> ProviderStatus {
-    if !state.local().models_ready() {
+    let local = state.local();
+    if !local.models_ready() {
         return not_configured(Missing::LocalModels);
     }
-    match state.endpoint_as(crate::provider::ProviderChoice::Mnema) {
-        Ok(_) => ProviderStatus::Ok,
-        Err(e) => ProviderStatus::Unreachable {
+    match local.running() {
+        None | Some(Ok(())) => ProviderStatus::Ok,
+        Some(Err(e)) => ProviderStatus::Unreachable {
             reason: e.to_string(),
         },
     }

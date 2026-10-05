@@ -127,6 +127,20 @@ impl Local {
         Ok(sidecar.as_ref().expect("started above").endpoint()?)
     }
 
+    /// Whether a process this provider already started still answers —
+    /// `None` when none was started. Never starts one: a status poll must not
+    /// be what brings the process up. An existing process that died gets the
+    /// supervisor's one restart, as any request to it would.
+    pub(crate) fn running(&self) -> Option<Result<(), Error>> {
+        let sidecar = self
+            .sidecar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sidecar
+            .as_ref()
+            .map(|s| s.endpoint().map(|_| ()).map_err(Error::from))
+    }
+
     pub(crate) fn cancel_flag(&self, id: ModelId) -> &AtomicBool {
         &self.cancel[id as usize]
     }

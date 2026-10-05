@@ -12785,3 +12785,29 @@ fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
         "a switch that moved the space must not keep counts about the old one"
     );
 }
+
+/// Review round 1, Important 2: under Mnema the launcher's status poll answers
+/// from the model files and never starts the local process.
+#[test]
+fn the_status_poll_under_mnema_starts_no_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(
+        dir.path(),
+        &[("FAKE_MLX_LOG", &log_env)],
+    ));
+    state.open_index().unwrap();
+    let webview = main_webview(&app);
+    let status = call(&webview, "provider_status", json!({})).expect("status");
+    assert_eq!(status, json!({ "kind": "ok" }));
+    let spawns = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("spawn "))
+        .count();
+    assert_eq!(spawns, 0, "a status poll started the local process");
+}
