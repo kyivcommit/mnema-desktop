@@ -12538,7 +12538,10 @@ fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {
 
 #[test]
 fn scan_batches_are_small_under_mnema() {
-    const FILES: usize = 40;
+    // 20, not more: two batches under Mnema (16 + 4) is the whole claim, and
+    // a larger folder measurably delayed FSEvents for `tests/watch.rs` run
+    // straight after this binary.
+    const FILES: usize = 20;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("fake-mlx.log");
     let log_env = log.display().to_string();
@@ -12551,7 +12554,7 @@ fn scan_batches_are_small_under_mnema() {
     assert!(sizes.iter().all(|&n| n <= 16), "{sizes:?}");
     assert_eq!(most, 1, "scan requests in flight at once");
 
-    // OpenRouter: the same scan in one request of all 40.
+    // OpenRouter: the same scan in one request of all of them.
     let rows: Vec<Value> = (0..FILES)
         .map(|i| {
             let mut v = vec![0.0f32; 1024];
@@ -12633,7 +12636,9 @@ fn the_query_embedding_goes_to_the_interactive_path() {
 #[test]
 fn a_sidecar_restart_mid_scan_ends_the_job_with_the_reason() {
     let dir = tempfile::tempdir().unwrap();
-    let fx = mnema_app(dir.path(), 40, &[("FAKE_MLX_DIE_AFTER", "2")]);
+    // 33 files: three batches of 16, 16, 1 — the process dies after the
+    // second answer, so the third has nobody to go to.
+    let fx = mnema_app(dir.path(), 33, &[("FAKE_MLX_DIE_AFTER", "2")]);
     let (_, settled) =
         run_scan_capturing_snapshots(fx.app.handle(), Entry::Full, Duration::from_secs(60));
     let report = report_of(&settled);
