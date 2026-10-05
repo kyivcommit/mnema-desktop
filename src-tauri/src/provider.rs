@@ -301,7 +301,27 @@ pub fn set_provider_choice(
     choice: ProviderChoice,
     existing_vectors: crate::models::ExistingVectors,
 ) -> Result<ProviderChoice, Error> {
+    change(&state, choice, existing_vectors)
+}
+
+/// [`set_provider_choice`]'s body, reachable without a `State`.
+pub fn change(
+    state: &crate::state::AppState,
+    choice: ProviderChoice,
+    existing_vectors: crate::models::ExistingVectors,
+) -> Result<ProviderChoice, Error> {
     let _ = existing_vectors;
+    // The job slot, for the reason `models::set_embedding_model` takes it: a
+    // scan resolves its endpoint once, on its own thread, after its claim
+    // (`scan_job::ScanDeps::production`). Refused while one runs, the choice
+    // cannot move under a run that is already embedding through the other
+    // provider; claimed, no run can start until the choice is written.
+    let _slot = state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    )?;
     crate::prefs::write_key(
         state.data_dir(),
         PREFS_KEY,

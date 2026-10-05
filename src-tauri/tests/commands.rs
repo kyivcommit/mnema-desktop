@@ -12345,3 +12345,285 @@ fn mnema_endpoint_is_the_sidecar() {
         "{endpoint:?}"
     );
 }
+
+/// An application under Mnema: both local models `Ready`, the process the
+/// fake (steered by `env`), the index open on a `baai/bge-m3` space, and one
+/// watched folder of `files` distinct one-chunk text files.
+struct MnemaApp {
+    app: tauri::App<MockRuntime>,
+    webview: WebviewWindow<MockRuntime>,
+    space_id: i64,
+    _folder: tempfile::TempDir,
+}
+
+fn mnema_app(dir: &std::path::Path, files: usize, env: &[(&str, &str)]) -> MnemaApp {
+    let app = app_with_provider(dir, NO_PROVIDER);
+    let state = app.state::<AppState>();
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(dir, env));
+    state.open_index().unwrap();
+    let space_id = state
+        .with_index(|db| {
+            db.adopt_embedding_model(
+                "baai/bge-m3",
+                1024,
+                "credential-ref",
+                &mnema_chunk::chunker_hash(),
+            )
+        })
+        .unwrap()
+        .space_id;
+    let folder = tempfile::tempdir().unwrap();
+    for i in 0..files {
+        std::fs::write(
+            folder.path().join(format!("note-{i}.txt")),
+            format!("note number {i} about the synthetic topic {i}"),
+        )
+        .unwrap();
+    }
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap();
+    MnemaApp {
+        app,
+        webview,
+        space_id,
+        _folder: folder,
+    }
+}
+
+/// `(chunks, vectors in the space)` as the index holds them now.
+fn chunks_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (i64, i64) {
+    app.state::<AppState>()
+        .with_index(|db| Ok((db.chunk_count()?, db.embedded_chunk_count(space_id)?)))
+        .unwrap()
+}
+
+#[test]
+fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
+    use mnema_desktop::provider::{ProviderChoice, change};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 3, &[]);
+    let refusal: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let seen = std::sync::Arc::clone(&refusal);
+    let (_, settled) = run_scan_watching(
+        fx.app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |state, now| {
+            let embedding = matches!(
+                &now.snapshot,
+                ScanSnapshot::Running {
+                    phase: Phase::Embedding { .. },
+                    ..
+                }
+            );
+            let mut slot = seen.lock().unwrap();
+            if embedding && slot.is_none() {
+                let answer = change(
+                    state,
+                    ProviderChoice::OpenRouter,
+                    mnema_desktop::models::ExistingVectors::Keep,
+                );
+                *slot = Some(format!("{answer:?}"));
+            }
+        },
+    );
+    let refusal = refusal.lock().unwrap().clone();
+    assert!(
+        refusal.as_deref().is_some_and(|r| r.starts_with("Err(")),
+        "a switch while the scan holds the slot must be refused, got {refusal:?}"
+    );
+    assert_eq!(
+        fx.app.state::<AppState>().provider_choice(),
+        ProviderChoice::Mnema
+    );
+    assert_eq!(
+        report_of(&settled).reason,
+        EndReason::Completed,
+        "{settled:?}"
+    );
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert!(
+        chunks > 0 && vectors == chunks,
+        "{vectors} of {chunks} embedded"
+    );
+}
+
+/// What the fake logged for its chat request: the JSON body.
+fn logged_chat_body(log: &std::path::Path) -> Value {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix("body /v1/chat/completions "))
+        .unwrap_or_else(|| panic!("no chat request in the fake's log:\n{text}"));
+    serde_json::from_str(line).expect("the chat body is JSON")
+}
+
+#[test]
+fn the_ask_path_sends_the_mnema_voice_only_for_mnema() {
+    // Mnema: the fake writes the chat body to its log.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    let body = logged_chat_body(&log);
+    assert_eq!(body["model"], json!("gemma-4-e2b-it"), "{body}");
+    let user = body["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        user.contains("Answer briefly:")
+            && user.trim_end().ends_with("leave out sources that do not."),
+        "the Mnema user message must end with the brevity line: {user:?}"
+    );
+
+    // OpenRouter: the same ask carries no brevity line.
+    let completion =
+        json!({ "choices": [{ "message": { "content": "an answer <c>1</c>" } }] }).to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+    call(&webview, "ask", json!({ "query": "quantum entanglement" })).expect("ask");
+    let request = server.request();
+    assert!(request.contains("/chat/completions"), "{request}");
+    assert!(
+        !request.contains("Answer briefly"),
+        "OpenRouter's prompt must stay the server's: {request}"
+    );
+}
+
+/// A local answer slower than OpenRouter's 15 s still arrives: the chat call
+/// under Mnema waits `LOCAL_CHAT_TIMEOUT`. Pays 20 s.
+#[test]
+fn mnema_chat_gets_the_local_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_CHAT_MS", "20000")]);
+    scan_to_completion(fx.app.handle());
+    let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+}
+
+/// The batch sizes, and the most requests in flight at once, the fake saw for
+/// `/v1/embeddings` (from its `start`/`input`/`end` lines).
+fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let (mut sizes, mut open, mut most) = (Vec::new(), 0usize, 0usize);
+    let mut in_embed = false;
+    for line in text.lines() {
+        if line == "start POST /v1/embeddings" {
+            open += 1;
+            most = most.max(open);
+            in_embed = true;
+        } else if line == "end POST /v1/embeddings" {
+            open -= 1;
+        } else if let Some(n) = line.strip_prefix("input ")
+            && in_embed
+        {
+            sizes.push(n.parse().unwrap());
+        }
+    }
+    (sizes, most)
+}
+
+#[test]
+fn scan_batches_are_small_under_mnema() {
+    const FILES: usize = 40;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), FILES, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert_eq!((chunks, vectors), (FILES as i64, FILES as i64));
+    let (sizes, most) = scan_embed_shape(&log);
+    assert_eq!(sizes.iter().sum::<usize>(), FILES, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= 16), "{sizes:?}");
+    assert_eq!(most, 1, "scan requests in flight at once");
+
+    // OpenRouter: the same scan in one request of all 40.
+    let rows: Vec<Value> = (0..FILES)
+        .map(|i| {
+            let mut v = vec![0.0f32; 1024];
+            v[i] = 1.0;
+            json!({ "embedding": v, "index": i })
+        })
+        .collect();
+    let server = MockServer::new(vec![Reply::ok(&json!({ "data": rows }).to_string())]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-batches").unwrap();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model("baai/bge-m3", 1024, "r", &mnema_chunk::chunker_hash())
+        })
+        .unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    for i in 0..FILES {
+        std::fs::write(
+            folder.path().join(format!("note-{i}.txt")),
+            format!("note number {i} about the synthetic topic {i}"),
+        )
+        .unwrap();
+    }
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap();
+    scan_to_completion(app.handle());
+    let request = server.request();
+    let body: Value =
+        serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(
+        body["input"].as_array().map(Vec::len),
+        Some(FILES),
+        "one batch of all"
+    );
+}
+
+#[test]
+fn the_query_embedding_goes_to_the_interactive_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    let scanned = std::fs::read_to_string(&log).unwrap();
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .unwrap();
+    call(&fx.webview, "search", json!({ "query": "synthetic topic" })).expect("search");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let asked = &text[scanned.len()..];
+    let embeds = |t: &str, path: &str| {
+        t.lines()
+            .filter(|l| *l == format!("start POST {path}"))
+            .count()
+    };
+    assert!(embeds(&scanned, "/v1/embeddings") > 0, "{scanned}");
+    assert_eq!(
+        embeds(&scanned, "/interactive/v1/embeddings"),
+        0,
+        "{scanned}"
+    );
+    assert_eq!(embeds(asked, "/interactive/v1/embeddings"), 1, "{asked}");
+    assert_eq!(embeds(asked, "/v1/embeddings"), 0, "{asked}");
+}

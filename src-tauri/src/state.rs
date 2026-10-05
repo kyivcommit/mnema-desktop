@@ -475,8 +475,14 @@ impl AppState {
         choice: crate::provider::ProviderChoice,
         question: &str,
     ) -> mnema_rag::Voice {
-        let _ = (choice, question, &self.last_lang);
-        mnema_rag::Voice::OpenRouter
+        match choice {
+            crate::provider::ProviderChoice::OpenRouter => mnema_rag::Voice::OpenRouter,
+            crate::provider::ProviderChoice::Mnema => {
+                let _ = &self.last_lang;
+                let system = sys_locale::get_locale();
+                mnema_rag::Voice::Mnema(mnema_rag::detect(question, None, system.as_deref()))
+            }
+        }
     }
 
     pub fn credential_ref(&self) -> &str {
