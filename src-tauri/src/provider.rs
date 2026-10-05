@@ -319,20 +319,30 @@ pub fn change(
         // change's own refusal, which the window answers with its count-based
         // confirmation — and retires the old space under `Discard` (owner's
         // ruling on F1, option B). Refused, the choice is not written.
-        let adopted = state.with_index(|db| {
-            Ok(crate::models::adopt_retiring_whatever_blocks(
-                db,
-                LOCAL_EMBED_MODEL,
-                LOCAL_EMBED_DIM,
-                state.credential_ref(),
-                &mnema_chunk::chunker_hash(),
-                existing_vectors,
+        let (before, adopted) = state.with_index(|db| {
+            let before = db.active_space()?;
+            Ok((
+                before,
+                crate::models::adopt_retiring_whatever_blocks(
+                    db,
+                    LOCAL_EMBED_MODEL,
+                    LOCAL_EMBED_DIM,
+                    state.credential_ref(),
+                    &mnema_chunk::chunker_hash(),
+                    existing_vectors,
+                ),
             ))
         })?;
         // `set_embedding_model`'s rule: a kept resumable report counts against
-        // the active space, so any exit that may have moved it gives that up.
+        // the active space, so an exit that moved it gives the report up. Only
+        // one that moved it: from OpenRouter's bge-m3 the space stays, and so
+        // does «Продовжити» with its partial-reading warning.
         match adopted {
-            Ok(_) => slot.forget_restore(),
+            Ok((space, _)) => {
+                if before != Some(space.space_id) {
+                    slot.forget_restore();
+                }
+            }
             Err(e) => {
                 if matches!(e, Error::RetiredThenFailed { .. }) {
                     slot.forget_restore();

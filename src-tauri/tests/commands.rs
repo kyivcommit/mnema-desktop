@@ -27,7 +27,7 @@ use mnema_desktop::job::EndReason;
 use mnema_desktop::models::{IndexSettings, UnreadableCause, model_settings, set_key};
 use mnema_desktop::scan_job;
 use mnema_desktop::scan_state::{
-    EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState, SkipWhy,
+    EmbedOutcome, EndedIn, Entry, Phase, ScanReport, ScanSnapshot, ScanState, SkipWhy, Terminal,
 };
 use mnema_desktop::state::AppState;
 use mnema_mock_provider::{MockServer, Reply, one_vector};
@@ -12720,4 +12720,68 @@ fn switching_to_mnema_from_another_space_keeps_it() {
         })
         .unwrap();
     assert_eq!(model, ("baai/bge-m3".to_string(), 1024));
+}
+
+/// A scan that stopped mid-embedding and offers «Продовжити», put in the slot
+/// directly: what is under test is what a provider switch does with it.
+fn keep_a_resumable_ending(state: &AppState) -> ScanReport {
+    let report = ScanReport {
+        embedding: EmbedOutcome::Ran {
+            done: 1,
+            total: 2,
+            refused: 0,
+        },
+        ended_in: EndedIn::Embedding,
+        reason: EndReason::Cancelled,
+        message: None,
+        resume: Some(Entry::EmbedOnly),
+    };
+    state
+        .claim_job(
+            Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+    report
+}
+
+/// Review round 1, Important 1: a switch that leaves the active space where it
+/// was keeps the resumable ending (its counts are still about that space); a
+/// switch that moves the space forgets it.
+#[test]
+fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
+    use mnema_desktop::models::ExistingVectors;
+    use mnema_desktop::provider::{ProviderChoice, change};
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    index_with_one_vector(&app, "baai/bge-m3", 1024);
+    let state = app.state::<AppState>();
+    let report = keep_a_resumable_ending(&state);
+    change(&state, ProviderChoice::Mnema, ExistingVectors::Keep).expect("same space");
+    assert_eq!(
+        state.scan_state().snapshot,
+        ScanSnapshot::Ended { report },
+        "a switch that moved nothing must keep «Продовжити»"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    keep_a_resumable_ending(&state);
+    change(&state, ProviderChoice::Mnema, ExistingVectors::Discard).expect("confirmed");
+    assert_eq!(
+        state.scan_state().snapshot,
+        ScanSnapshot::Idle,
+        "a switch that moved the space must not keep counts about the old one"
+    );
 }
