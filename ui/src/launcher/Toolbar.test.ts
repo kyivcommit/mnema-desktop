@@ -102,3 +102,11 @@ test('settings opens without a section', async () => {
   await fireEvent.click(screen.getByTestId('settings'));
   expect(openSettings).toHaveBeenCalledWith();
 });
+
+test('the cloud names the missing local models, not the key', () => {
+  setLocale('uk');
+  render(Toolbar, props({ status: { kind: 'notConfigured', missing: 'localModels' } }));
+  const cloud = screen.getByTestId('provider-cloud');
+  expect(cloud.getAttribute('aria-label')).toBe('Завантажте моделі Mnema — відкрити налаштування моделей');
+  expect(cloud.getAttribute('aria-label')).not.toContain('ключа');
+});

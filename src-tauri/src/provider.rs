@@ -666,6 +666,32 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_one_download_leaves_the_other_running() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::tempdir().unwrap();
+        let local = Local::new(
+            Store::new(dir.path().to_path_buf(), HUB.to_string()),
+            PathBuf::from("unused"),
+        );
+        local
+            .cancel_flag(LocalModel::Chat.into())
+            .store(true, SeqCst);
+        assert!(local.cancel_flag(LocalModel::Chat.into()).load(SeqCst));
+        assert!(
+            !local.cancel_flag(LocalModel::Embed.into()).load(SeqCst),
+            "cancelling Chat cancelled Embed"
+        );
+        // And the other way round, since one shared flag would pass either half alone.
+        local
+            .cancel_flag(LocalModel::Chat.into())
+            .store(false, SeqCst);
+        local
+            .cancel_flag(LocalModel::Embed.into())
+            .store(true, SeqCst);
+        assert!(!local.cancel_flag(LocalModel::Chat.into()).load(SeqCst));
+    }
+
+    #[test]
     fn mnema_without_ready_models_asks_for_the_models() {
         let dir = tempfile::tempdir().unwrap();
         let state = state_choosing(dir.path(), ProviderChoice::Mnema);

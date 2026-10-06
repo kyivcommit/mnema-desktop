@@ -22,7 +22,11 @@
       case 'ok': return t('provider_ok');
       case 'unreachable': return t('provider_unreachable', { reason: status.reason });
       case 'notConfigured':
-        return t(status.missing === 'key' ? 'provider_missing_key' : 'provider_missing_model');
+        return t(
+          status.missing === 'key' ? 'provider_missing_key'
+            : status.missing === 'localModels' ? 'provider_missing_local_models'
+              : 'provider_missing_model',
+        );
     }
   });
   const leftLabel = $derived.by(() => { void $locale; return t('toolbar_left'); });

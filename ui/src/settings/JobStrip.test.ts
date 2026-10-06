@@ -196,6 +196,10 @@ function reply(extra: Replies = {}) {
     // and the editor would draw "no mask has been added yet" from a fixture
     // that never said so.
     list_masks: [],
+    // `Provider` asks on mount; Mnema is not offered here, so Models stands alone.
+    mnema_available: false,
+    provider_choice: 'openRouter',
+    local_models: [],
     model_settings: READY_SETTINGS,
     provider_models: EMPTY_CATALOGUE,
     job_status: IDLE_SCAN,

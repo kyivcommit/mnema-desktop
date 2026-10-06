@@ -4,6 +4,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { locale, t } from '../i18n';
   import Models from './Models.svelte';
+  import Provider from './Provider.svelte';
   import Folders from './Folders.svelte';
   import Masks from './Masks.svelte';
   import JobStrip from './JobStrip.svelte';
@@ -420,7 +421,7 @@
            property gained. -->
       <div class="panel" data-testid="settings-panel-models" hidden={section !== 'models'}>
         <h2>{modelsLabel}</h2>
-        <Models {jobs} />
+        <Provider><Models {jobs} /></Provider>
       </div>
       {#if section === 'indexing'}
         <h2>{scanningLabel}</h2>

@@ -35,6 +35,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
+  | 'provider_choice_label' | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
   | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
@@ -353,6 +354,22 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
+    provider_choice_label: 'Провайдер',
+    provider_openrouter: 'OpenRouter',
+    provider_mnema: 'Mnema (локально)',
+    provider_mnema_hint: '~3,1 ГБ диска, ~4 ГБ пам\'яті',
+    provider_model_embed: 'Модель пошуку',
+    provider_model_chat: 'Модель відповідей',
+    provider_download: 'Завантажити',
+    provider_cancel: 'Скасувати',
+    provider_remove: 'Видалити',
+    provider_retry: 'Повторити',
+    provider_no_space: 'Потрібно ~{needed} ГБ, вільно {free} ГБ',
+    provider_row_ready: '✓',
+    provider_downloading: 'Завантаження: {name}',
+    provider_local_ready: 'Моделі Mnema завантажені',
+    provider_missing_local_models: 'Завантажте моделі Mnema — відкрити налаштування моделей',
+    provider_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}}.',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
@@ -1196,6 +1213,22 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
+    provider_choice_label: 'Provider',
+    provider_openrouter: 'OpenRouter',
+    provider_mnema: 'Mnema (local)',
+    provider_mnema_hint: '~3.1 GB of disk, ~4 GB of memory',
+    provider_model_embed: 'Search model',
+    provider_model_chat: 'Answer model',
+    provider_download: 'Download',
+    provider_cancel: 'Cancel',
+    provider_remove: 'Remove',
+    provider_retry: 'Retry',
+    provider_no_space: 'About {needed} GB needed, {free} GB free',
+    provider_row_ready: '✓',
+    provider_downloading: 'Downloading: {name}',
+    provider_local_ready: 'Mnema models are downloaded',
+    provider_missing_local_models: 'Download the Mnema models — open the model settings',
+    provider_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}}.',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
