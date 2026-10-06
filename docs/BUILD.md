@@ -82,6 +82,12 @@ scripts/fetch-pdfium.sh            # bundle.resources names it; see "Pdfium in t
 # The package.
 cargo tauri build
 
+# The MLX sidecar (macOS arm64 only): `cargo tauri build` builds it through before-build.sh
+# (scripts/build-mlx-sidecar.sh, Xcode 26 with the Metal toolchain). Where it was not built,
+# stage-sidecar.sh stages a placeholder so the shell compiles; verify-bundle.sh rejects it.
+# A release verifies with MNEMA_REQUIRE_METAL=1, which also demands `mnema-mlx --metal-selftest`
+# print METAL OK from inside the image (CI runs it best-effort: a hosted runner may have no GPU).
+
 # What it produced, opened and checked.
 scripts/verify-bundle.sh
 ```

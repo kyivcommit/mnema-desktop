@@ -376,12 +376,16 @@ fi
 
 # --- the MLX sidecar ----------------------------------------------------------
 #
-# Three artefacts have to be in the bundle, and then the sidecar has to RUN from inside it:
-# `mnema-mlx --metal-selftest` does one operation on the GPU and prints METAL OK. That one
-# run is what separates a real sidecar from the placeholder scripts/stage-sidecar.sh writes
-# when none was built (it exits 1), and a sidecar whose metallib or Swift runtime library did
-# not travel with it (dyld error, or a Metal library error). Present-but-unrunnable is the
-# state a file check cannot see. Measured on a macos-14 runner: not yet — see docs/BUILD.md.
+# Three artefacts have to be in the bundle, and then the sidecar has to RUN from inside it.
+# Always: `mnema-mlx --stub` answers the PORT handshake (stdin is closed at once, so it prints
+# its port and exits). That alone separates a real sidecar from the placeholder
+# scripts/stage-sidecar.sh writes when none was built (a shell script that exits 1), and from
+# one whose Swift runtime library did not travel with it (dyld error).
+# On request (MNEMA_REQUIRE_METAL=1): `--metal-selftest`, one GPU operation, must print METAL OK —
+# the metallib actually loads and a kernel runs. Without the variable it still runs and its
+# verdict is printed, but a failure is a note, not a red: a hosted CI runner may have no GPU
+# (unmeasured), and that must not hide whether the rest of the bundle is right. A release
+# verifies with the variable set.
 mlx_name="mnema-mlx"
 mlx="${app}/Contents/MacOS/${mlx_name}"
 [ -f "${mlx}" ] || fail "${product}.app carries no ${mlx_name}.
@@ -396,13 +400,23 @@ metallib_bundle="${app}/Contents/Resources/mlx-swift_Cmlx.bundle"
 [ -d "${metallib_bundle}" ] || fail "${product}.app carries no mlx-swift_Cmlx.bundle in Contents/Resources.
   That bundle holds the Metal library of the sidecar; bundle.resources in
   src-tauri/tauri.macos.conf.json puts it there."
+stub=""
+stub_status=0
+stub="$(printf '' | MNEMA_MLX_TOKEN=verify-bundle "${mlx}" --stub 2>&1)" || stub_status=$?
+{ [ "${stub_status}" -eq 0 ] && printf '%s\n' "${stub}" | grep -qE '^PORT [0-9]+$'; } \
+  || fail "the bundled ${mlx_name} gave no PORT handshake (exit ${stub_status}). It said:
+  $(printf '%s' "${stub}" | head -3 | tr '\n' ' ' | cut -c1-200)"
 selftest=""
 selftest_status=0
 selftest="$("${mlx}" --metal-selftest 2>&1)" || selftest_status=$?
-{ [ "${selftest_status}" -eq 0 ] && printf '%s\n' "${selftest}" | grep -qx 'METAL OK'; } \
-  || fail "the bundled ${mlx_name} did not print METAL OK (exit ${selftest_status}). It said:
+if [ "${selftest_status}" -eq 0 ] && printf '%s\n' "${selftest}" | grep -qx 'METAL OK'; then
+  echo "verify-bundle: the bundled ${mlx_name} answers the handshake and runs a Metal operation"
+elif [ "${MNEMA_REQUIRE_METAL:-}" = "1" ]; then
+  fail "the bundled ${mlx_name} did not print METAL OK (exit ${selftest_status}). It said:
   $(printf '%s' "${selftest}" | head -3 | tr '\n' ' ' | cut -c1-200)"
-echo "verify-bundle: the bundled ${mlx_name} runs a Metal operation from inside the image"
+else
+  echo "verify-bundle: NOTE the bundled ${mlx_name} answers the handshake but --metal-selftest did not print METAL OK (exit ${selftest_status}); not required without MNEMA_REQUIRE_METAL=1. It said: $(printf '%s' "${selftest}" | head -3 | tr '\n' ' ' | cut -c1-200)"
+fi
 
 # --- the font licences --------------------------------------------------------
 #

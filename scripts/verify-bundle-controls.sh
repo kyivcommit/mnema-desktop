@@ -46,6 +46,10 @@
 
 set -uo pipefail
 
+# Every control below runs without the variable unless it sets it itself: the point of 22 is that a
+# placeholder is rejected by the handshake alone.
+unset MNEMA_REQUIRE_METAL
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE="${REPO}/target/release/bundle"
 LAB="$(mktemp -d "${TMPDIR:-/tmp}/mnema-controls.XXXXXX")"
@@ -781,16 +785,51 @@ fi
 
 echo "### 22. the placeholder stands where the sidecar should be"
 # What scripts/stage-sidecar.sh writes when no real sidecar was built: present, executable, signed — and
-# it cannot print METAL OK. The file checks above all pass on it; only running it does not.
+# it cannot answer the handshake. The file checks above all pass on it; only running it does not.
 if must copy_app_out "${LAB}/placeholder" \
   && must printf '#!/bin/sh\necho "mnema-mlx placeholder: run scripts/build-mlx-sidecar.sh" >&2\nexit 1\n' \
        > "${LAB}/placeholder/Mnema.app/Contents/MacOS/mnema-mlx" \
   && must chmod +x "${LAB}/placeholder/Mnema.app/Contents/MacOS/mnema-mlx" \
   && must codesign --sign - --force --deep "${LAB}/placeholder/Mnema.app" \
   && must image_from "${LAB}/placeholder" "${LAB}/placeholder-img/dmg/Mnema.dmg"; then
-  expect_red -m "did not print METAL OK" \
-    "a placeholder is not a sidecar" \
+  expect_red -m "gave no PORT handshake" \
+    "a placeholder is not a sidecar, with or without MNEMA_REQUIRE_METAL" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/placeholder-img"
+fi
+
+echo "### 23. a sidecar that answers the handshake but cannot run Metal"
+# A GPU-less host, or a metallib that does not load: the handshake passes and --metal-selftest exits 1.
+# Required only under MNEMA_REQUIRE_METAL=1 (23); without it the same image must pass (23b).
+if must copy_app_out "${LAB}/no-gpu" \
+  && must printf '#!/bin/sh\ncase "$1" in --stub) echo "PORT 1";; *) echo "no GPU" >&2; exit 1;; esac\n' \
+       > "${LAB}/no-gpu/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must chmod +x "${LAB}/no-gpu/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must codesign --sign - --force --deep "${LAB}/no-gpu/Mnema.app" \
+  && must image_from "${LAB}/no-gpu" "${LAB}/no-gpu-img/dmg/Mnema.dmg"; then
+  export MNEMA_REQUIRE_METAL=1
+  expect_red -m "did not print METAL OK" \
+    "Metal required and the self-test fails" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-gpu-img"
+  unset MNEMA_REQUIRE_METAL
+  echo "### 23b. the same image without MNEMA_REQUIRE_METAL passes, with a note"
+  # Captured, not piped into `grep -q`: under pipefail grep's early exit SIGPIPEs the check.
+  note_out="$(bash "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-gpu-img" 2>&1)"; note_status=$?
+  if [ "${note_status}" -eq 0 ] && printf '%s' "${note_out}" | grep -q 'NOTE the bundled mnema-mlx'; then
+    echo "   green with the note, as it must be"
+  else
+    echo "   *** RED or no note — Metal is being required without MNEMA_REQUIRE_METAL ***"
+    rejected=$((rejected + 1))
+  fi
+fi
+
+echo "### 24. the sidecar is there and is not executable"
+if must copy_app_out "${LAB}/dead-mlx" \
+  && must chmod a-x "${LAB}/dead-mlx/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must codesign --sign - --force --deep "${LAB}/dead-mlx/Mnema.app" \
+  && must image_from "${LAB}/dead-mlx" "${LAB}/dead-mlx-img/dmg/Mnema.dmg"; then
+  expect_red -m "mnema-mlx exists and is not executable" \
+    "a sidecar that cannot be executed" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-mlx-img"
 fi
 
 echo

@@ -74,11 +74,22 @@ if [[ "${1:-}" == "--stage-only" ]]; then
 fi
 
 cd "$PKG"
-# A fresh checkout each time, so the guard always sees upstream and never our own earlier apply.
-rm -rf "$XC/checkouts/mlx-swift"
-xcodebuild -resolvePackageDependencies -onlyUsePackageVersionsFromResolvedFile \
-    -clonedSourcePackagesDirPath "$XC" -quiet
-apply_patch
+# A fresh checkout, so the guard sees upstream and never our own earlier apply — except when the
+# checkout in place is one this script patched under the SAME patch and pins (a stamp of both, written
+# after the guard accepted them): then the guard has already answered for exactly these inputs, and
+# re-resolving would only give every source a new mtime and rebuild MLX. A stamp that does not match,
+# or a checkout the patch no longer reverses out of, falls back to the fresh path.
+stamp=$(cat "$PATCH" "$PKG/Package.resolved" | shasum -a 256 | cut -d' ' -f1)
+if [[ -d "$CHECKOUT" && "$(cat "$XC/.patched-stamp" 2>/dev/null)" == "$stamp" ]] \
+    && git -C "$CHECKOUT" apply --reverse --check "$PATCH" 2>/dev/null; then
+    echo "mlx-swift checkout already patched for this patch and pins; reusing it"
+else
+    rm -rf "$XC/checkouts/mlx-swift" "$XC/.patched-stamp"
+    xcodebuild -resolvePackageDependencies -onlyUsePackageVersionsFromResolvedFile \
+        -clonedSourcePackagesDirPath "$XC" -quiet
+    apply_patch
+    echo "$stamp" > "$XC/.patched-stamp"
+fi
 # No resolution during the build: it would reset the patched checkout.
 xcodebuild build -scheme mnema-mlx -configuration Release -destination 'platform=macOS,arch=arm64' \
     -clonedSourcePackagesDirPath "$XC" -derivedDataPath "$XC/dd" \
