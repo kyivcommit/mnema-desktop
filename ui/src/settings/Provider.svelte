@@ -54,6 +54,18 @@
     await readRows();
   }
 
+  // A row can say "downloading" for a download this window never started (one
+  // from an earlier Settings window), so no `download()` call is waiting to
+  // re-read it: the cancel re-reads the real state itself.
+  async function cancel(id: LocalModelId) {
+    try {
+      await cancelDownload(id);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    await readRows();
+  }
+
   async function remove(id: LocalModelId) {
     try {
       await removeModel(id);
@@ -105,8 +117,8 @@
       retired = done.retired.length > 0 ? done.retired : null;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+      radioRev += 1;
     }
-    radioRev += 1;
   }
 
   async function choose(next: ProviderChoice) {
@@ -114,6 +126,9 @@
     error = null;
     retired = null;
     if (next === 'mnema') {
+      // The prediction is the backend's rule, not a second one: with bge-m3
+      // already active `adopt_retiring_whatever_blocks` under `Keep` cannot
+      // refuse (space.rs:1259-1261), so only another model asks.
       // The local process embeds with bge-m3 alone: from OpenRouter's bge-m3
       // nothing moves, from any other model the vectors cannot come along.
       try {
@@ -137,6 +152,14 @@
     radioRev += 1;
   }
 
+  const retiredLabel = $derived.by(() => {
+    void $locale;
+    return t('provider_retired', { count: (retired ?? []).reduce((n, r) => n + r.embeddedChunks, 0) });
+  });
+  const estimateLabel = $derived.by(() => { void $locale; return t('models_embedding_confirm_estimate', { count: pending?.count ?? 0 }); });
+  const lossLabel = $derived.by(() => { void $locale; return t('models_embedding_confirm_loss'); });
+  const discardLabel = $derived.by(() => { void $locale; return t('models_embedding_discard'); });
+  const keepLabel = $derived.by(() => { void $locale; return t('models_embedding_cancel'); });
   const confirmTitle = $derived.by(() => { void $locale; return t('models_embedding_confirm_title'); });
   const label = $derived.by(() => { void $locale; return t('provider_choice_label'); });
   const openRouterLabel = $derived.by(() => { void $locale; return t('provider_openrouter'); });
@@ -172,15 +195,15 @@
   </fieldset>
 {/key}
 {#if error}<p role="alert">{error}</p>{/if}
-{#if retired}<p>{t('provider_retired', { count: retired.reduce((n, r) => n + r.embeddedChunks, 0) })}</p>{/if}
+{#if retired}<p>{retiredLabel}</p>{/if}
 {#if pending}
   <div class="group" role="group" aria-label={confirmTitle}>
     <p>{confirmTitle}</p>
-    <p>{t('models_embedding_confirm_estimate', { count: pending.count })}</p>
-    <p>{t('models_embedding_confirm_loss')}</p>
+    <p>{estimateLabel}</p>
+    <p>{lossLabel}</p>
     <div class="row">
-      <button type="button" onclick={() => commit('mnema', 'discard')}>{t('models_embedding_discard')}</button>
-      <button type="button" onclick={cancelPending}>{t('models_embedding_cancel')}</button>
+      <button type="button" onclick={() => commit('mnema', 'discard')}>{discardLabel}</button>
+      <button type="button" onclick={cancelPending}>{keepLabel}</button>
     </div>
   </div>
 {/if}
@@ -193,7 +216,7 @@
       {#if active[id] || state.kind === 'downloading'}
         <div role="progressbar" aria-label={downloadingLabel(id)} aria-valuemin="0" aria-valuemax="100"
           aria-valuenow={progress[id]}><span class="fill" style:width="{progress[id]}%"></span></div>
-        <button type="button" onclick={() => cancelDownload(id)}>{cancelLabel}</button>
+        <button type="button" onclick={() => cancel(id)}>{cancelLabel}</button>
       {:else if state.kind === 'ready'}
         <span>{readyMark}</span>
         <button type="button" onclick={() => remove(id)}>{removeLabel}</button>

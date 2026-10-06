@@ -230,3 +230,28 @@ test('cancelling one of two downloads names only that model', async () => {
   // The embed row is still downloading: it still offers to be cancelled.
   expect(inRow(embed).button('Скасувати')).toBeTruthy();
 });
+
+test('a download inherited from an earlier window is re-read after Cancel', async () => {
+  const downloading = { kind: 'downloading', done: 10, total: 100 } as const;
+  await mountRows(rows({ kind: 'absent' }, downloading));
+  const row = await waitFor(() => chatRow());
+  expect(within(row).getByRole('progressbar')).toBeTruthy();
+  // The backend has not yet noticed the cancel: the bar stays, truthfully.
+  localModels.mockResolvedValue(rows({ kind: 'absent' }, downloading));
+  await fireEvent.click(inRow(row).button('Скасувати'));
+  expect(cancelDownload).toHaveBeenCalledWith('chat');
+  await waitFor(() => expect(localModels).toHaveBeenCalledTimes(2));
+  expect(within(chatRow()).getByRole('progressbar')).toBeTruthy();
+  // Once it has, the row is a plain Absent row again.
+  localModels.mockResolvedValue(ABSENT);
+  await fireEvent.click(inRow(chatRow()).button('Скасувати'));
+  await waitFor(() => expect(inRow(chatRow()).button('Завантажити')).toBeTruthy());
+  expect(within(chatRow()).queryByRole('progressbar')).toBeNull();
+});
+
+test('a cancel the backend refuses to take is not an unhandled rejection', async () => {
+  await mountRows(rows({ kind: 'absent' }, { kind: 'downloading', done: 1, total: 2 }));
+  cancelDownload.mockRejectedValueOnce(new Error('no such download'));
+  await fireEvent.click(inRow(await waitFor(() => chatRow())).button('Скасувати'));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+});
