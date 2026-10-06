@@ -363,16 +363,38 @@ pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// An answer landed (`launcher_layout::launcher_answered`). Marks the idle
+/// clock, and, when the launcher is hidden, arms a cold clock of its own: the
+/// mark voids every clock armed at the hide, so without this a local answer
+/// arriving after Esc would leave the models in memory until the next show.
+pub(crate) fn answer_landed<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    launcher_visible: bool,
+    after: std::time::Duration,
+) {
+    app.state::<launcher_layout::HiddenAt>().mark();
+    if !launcher_visible {
+        provider::start_cold_timer(app, after);
+    }
+}
+
 /// The launcher left the screen: records when, and starts the clock that will
 /// give the local models' memory back if it stays away
 /// (`provider::start_cold_timer`). The one place both hides go through, the
 /// shortcut/close and the `Focused(false)` arm.
 fn launcher_hidden<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     app.state::<launcher_layout::HiddenAt>().mark();
-    if let Some(state) = app.try_state::<state::AppState>() {
-        let minutes = prefs::cold_after_minutes(state.data_dir());
-        provider::start_cold_timer(app, std::time::Duration::from_secs(u64::from(minutes) * 60));
+    if let Some(after) = cold_after(app) {
+        provider::start_cold_timer(app, after);
     }
+}
+
+/// The cold threshold as a duration; `None` where the shell tests build no
+/// `AppState`.
+fn cold_after<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<std::time::Duration> {
+    let state = app.try_state::<state::AppState>()?;
+    let minutes = prefs::cold_after_minutes(state.data_dir());
+    Some(std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// The global shortcut's action: hide the launcher if it is up, otherwise show

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mnema_local::{ModelId, ModelState, Sidecar, Store};
@@ -75,11 +75,6 @@ pub struct Local {
     binary: PathBuf,
     env: Vec<(String, String)>,
     sidecar: Mutex<Option<Arc<Sidecar>>>,
-    /// A load started by [`on_show`] is under way: [`Local::endpoint`] waits
-    /// for it, so a question asked the instant the launcher opens meets
-    /// loaded models and not a half-loaded process.
-    loading: Mutex<bool>,
-    loaded: Condvar,
     /// The launcher went cold and has not been shown since. A scan that ends
     /// now finishes the unloading [`on_cold`] left half done.
     cold: AtomicBool,
@@ -102,8 +97,6 @@ impl Local {
             binary,
             env: Vec::new(),
             sidecar: Mutex::new(None),
-            loading: Mutex::new(false),
-            loaded: Condvar::new(),
             cold: AtomicBool::new(false),
             shown: AtomicU64::new(0),
             want: AtomicBool::new(false),
@@ -127,35 +120,12 @@ impl Local {
             .all(|id| self.store.state(id) == ModelState::Ready)
     }
 
-    /// The running process's endpoint, starting it on first use. Held under
-    /// the lock for the start so two callers cannot start two processes.
+    /// The running process's endpoint, starting it on first use, and loaded
+    /// when the launcher is up. [`on_show`] sets `want` before its thread
+    /// exists, and `endpoint` holds `loaded_pid` across the load, so a
+    /// question asked the instant the launcher opens either waits for that load
+    /// or performs it itself: never a chat before the models are in.
     fn endpoint(&self) -> Result<Endpoint, Error> {
-        {
-            let mut loading = self
-                .loading
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while *loading {
-                loading = self
-                    .loaded
-                    .wait(loading)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-        }
-        self.endpoint_now()
-    }
-
-    fn set_loading(&self, on: bool) {
-        *self
-            .loading
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = on;
-        self.loaded.notify_all();
-    }
-
-    /// [`Local::endpoint`] without waiting for a load: the load's own thread
-    /// asks through this, or it would wait for itself.
-    fn endpoint_now(&self) -> Result<Endpoint, Error> {
         let sidecar = self.process()?;
         // The supervisor's restart happens inside this call, so what follows
         // sees the process that will answer.
@@ -582,7 +552,7 @@ pub fn on_cold(state: &crate::state::AppState) {
         // Best effort: a process that will not answer holds no memory worth
         // waiting for, and the next show asks again.
         // bge-m3 stays while a scan runs: it is what the scan embeds with.
-        let _ = sidecar.unload(state.job_is_running().then_some(ModelId::Chat));
+        let _ = sidecar.unload(scan_running(state).then_some(ModelId::Chat));
     }
 }
 
@@ -596,14 +566,24 @@ pub fn on_show(state: &crate::state::AppState) -> std::thread::JoinHandle<()> {
     if provider.choice() != ProviderChoice::Mnema || !provider.local.models_ready() {
         return std::thread::spawn(|| {});
     }
-    // Set before the thread exists, so a question asked the instant `on_show`
-    // returns already finds the load pending.
-    provider.local.set_loading(true);
     std::thread::spawn(move || {
         // `want` is set, so this starts the process and loads it.
-        let _ = provider.local.endpoint_now();
-        provider.local.set_loading(false);
+        let _ = provider.local.endpoint();
     })
+}
+
+/// Whether a scan (reading or embedding) holds the job slot. Not any job: only
+/// a scan thread calls `scan_end`, so keeping bge-m3 for a removal or an
+/// adoption would keep it until the next cold cycle.
+fn scan_running(state: &crate::state::AppState) -> bool {
+    use crate::scan_state::{Phase, ScanSnapshot};
+    matches!(
+        state.scan_state().snapshot,
+        ScanSnapshot::Running {
+            phase: Phase::Reading { .. } | Phase::Embedding { .. },
+            ..
+        }
+    )
 }
 
 /// Starts the clock that makes the launcher cold: after `after`, if it has not
@@ -809,6 +789,38 @@ mod lifecycle {
         (state, log)
     }
 
+    /// Polls `what` for up to 5 s. The fake logs `spawn` after it prints
+    /// `PORT`, so a count read the instant `endpoint()` returns can be one short.
+    fn eventually(what: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if what() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        what()
+    }
+
+    /// Waits until the process the state's local provider holds has exited.
+    fn wait_dead(state: &AppState) {
+        let pid = state.local().started().expect("a process").pid();
+        assert!(
+            // A child nobody has reaped yet is a zombie (`Z`), and is dead.
+            eventually(|| {
+                let out = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .expect("ps runs");
+                !out.status.success()
+                    || String::from_utf8_lossy(&out.stdout)
+                        .trim_start()
+                        .starts_with('Z')
+            }),
+            "process {pid} is still alive"
+        );
+    }
+
     fn logged(log: &Path) -> String {
         std::fs::read_to_string(log).unwrap_or_default()
     }
@@ -931,8 +943,8 @@ mod lifecycle {
         // other "a job is running" question.
         let _scan = state
             .claim_job(
-                crate::scan_state::Phase::Other {
-                    job: crate::scan_state::OtherJob::Probe,
+                crate::scan_state::Phase::Embedding {
+                    counts: crate::job::Progress::default(),
                 },
                 false,
             )
@@ -950,8 +962,8 @@ mod lifecycle {
     fn scan_slot(state: &AppState) -> crate::state::JobSlot {
         state
             .claim_job(
-                crate::scan_state::Phase::Other {
-                    job: crate::scan_state::OtherJob::Probe,
+                crate::scan_state::Phase::Embedding {
+                    counts: crate::job::Progress::default(),
                 },
                 false,
             )
@@ -1004,10 +1016,10 @@ mod lifecycle {
         on_show(&state).join().unwrap();
         let ep = state.endpoint().expect("the first process answers");
         post(&ep, "/v1/chat/completions", "{}");
-        std::thread::sleep(Duration::from_millis(300));
+        wait_dead(&state);
         state.endpoint().expect("the supervisor's restart");
         let text = logged(&log);
-        assert_eq!(count_prefix(&log, "spawn"), 2, "{text}");
+        assert!(eventually(|| count_prefix(&log, "spawn") == 2), "{text}");
         assert_eq!(
             count(&log, "start POST /mnema/load"),
             2,
@@ -1046,7 +1058,7 @@ mod lifecycle {
         let die = |state: &AppState| {
             let ep = state.endpoint().expect("an endpoint");
             post(&ep, "/v1/models", "");
-            std::thread::sleep(Duration::from_millis(300));
+            wait_dead(state);
         };
         die(&state); // process 1
         die(&state); // its one restart
@@ -1056,11 +1068,19 @@ mod lifecycle {
         );
         // A status poll finds it dead and never spawns.
         assert!(matches!(state.local().running(), Some(Err(_)) | None));
-        assert_eq!(count_prefix(&log, "spawn"), 2, "{}", logged(&log));
+        assert!(
+            eventually(|| count_prefix(&log, "spawn") == 2),
+            "{}",
+            logged(&log)
+        );
         // The next explicit use starts a fresh one, with a fresh restart budget.
         let fresh = state.endpoint();
         assert!(fresh.is_ok(), "{fresh:?}");
-        assert_eq!(count_prefix(&log, "spawn"), 3, "{}", logged(&log));
+        assert!(
+            eventually(|| count_prefix(&log, "spawn") == 3),
+            "{}",
+            logged(&log)
+        );
     }
 
     fn unloads_after(
@@ -1093,7 +1113,6 @@ mod lifecycle {
         let shown = |state: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
             app.state::<crate::launcher_layout::HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(400));
-            std::thread::sleep(Duration::from_millis(50));
             on_show(state).join().unwrap();
         };
         assert_eq!(unloads_after(shown), 0, "shown before the clock ran out");
@@ -1102,9 +1121,60 @@ mod lifecycle {
         let rehidden = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
             app.state::<crate::launcher_layout::HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(400));
-            std::thread::sleep(Duration::from_millis(50));
+            // SystemTime must have moved for the second mark to differ.
+            std::thread::sleep(Duration::from_millis(20));
             app.state::<crate::launcher_layout::HiddenAt>().mark();
         };
         assert_eq!(unloads_after(rehidden), 0, "a later hide owns the clock");
+    }
+
+    #[test]
+    fn an_answer_after_a_hide_leaves_one_live_clock() {
+        use tauri::Manager as _;
+        let after = Duration::from_millis(300);
+        // Hidden, then the answer lands (it marks again): the clock still runs out.
+        let answered_hidden = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
+            app.state::<crate::launcher_layout::HiddenAt>().mark();
+            start_cold_timer(app, after);
+            std::thread::sleep(Duration::from_millis(20));
+            crate::answer_landed(app, false, after);
+        };
+        assert_eq!(
+            unloads_after(answered_hidden),
+            1,
+            "hidden when the answer came"
+        );
+
+        // Shown when the answer lands: nothing is armed, nothing unloads.
+        let answered_shown =
+            |state: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
+                on_show(state).join().unwrap();
+                crate::answer_landed(app, true, after);
+            };
+        assert_eq!(
+            unloads_after(answered_shown),
+            0,
+            "visible when the answer came"
+        );
+    }
+
+    #[test]
+    fn going_cold_during_a_job_that_is_not_a_scan_unloads_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        state.endpoint().expect("the process starts");
+        // Only a scan thread calls `scan_end`; keeping bge-m3 for this job would
+        // keep it resident for good.
+        let _adoption = state
+            .claim_job(
+                crate::scan_state::Phase::Other {
+                    job: crate::scan_state::OtherJob::ModelAdoption,
+                },
+                false,
+            )
+            .unwrap();
+        on_cold(&state);
+        let text = logged(&log);
+        assert!(text.lines().any(|l| l == "body /mnema/unload "), "{text}");
     }
 }
