@@ -836,6 +836,33 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
+      # The MLX sidecar (Swift) that the bundle ships. Its Metal shaders need the Metal
+      # toolchain component, which the image does not carry by default.
+      - name: Metal toolchain, for the sidecar's shaders
+        run: xcodebuild -downloadComponent MetalToolchain
+      # xcodebuild's own resolved packages and build products. Keyed by the files that pin them:
+      # a new pin or patch is a new key, never a stale hit.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: sidecar/mnema-mlx/.build-xc
+          key: mlx-sidecar-${{ runner.os }}-${{ hashFiles('sidecar/mnema-mlx/Package.resolved', 'sidecar/mnema-mlx/patches/mlx-metal31.patch') }}
+      - name: The Metal 3.1 patch guard rejects a patch that no longer applies or is already upstream
+        run: scripts/test-mlx-patch-guard.sh
+      - name: The Span-library lookup exits 6, not an unbound variable, when it finds none
+        run: scripts/test-mlx-stage.sh
+      # `cargo tauri build` calls this again through before-build.sh and finds the products built;
+      # it is a step of its own so that its time is read apart from the rest.
+      - name: Build the MLX sidecar
+        run: scripts/build-mlx-sidecar.sh
+      # xcodebuild, not `swift build`: SwiftPM from the command line does not compile MLX's shaders.
+      # ModelTests skip here (no model files on a runner, "needs MNEMA_MLX_MODELS"), so the patch
+      # is checked by compiling the shaders and by the protocol tests, not by running a model.
+      - name: Sidecar protocol tests
+        working-directory: sidecar/mnema-mlx
+        run: |
+          xcodebuild test -scheme mnema-mlx -destination 'platform=macOS,arch=arm64' \
+            -clonedSourcePackagesDirPath .build-xc -derivedDataPath .build-xc/dd-test \
+            -disableAutomaticPackageResolution -skipPackageUpdates -skipMacroValidation
       - run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it

@@ -9,6 +9,7 @@
 #
 # --patch-only   only the guard and `git apply` on the mlx-swift checkout ($MNEMA_MLX_CHECKOUT, default
 #                the one xcodebuild resolves into sidecar/mnema-mlx/.build-xc)
+# --stage-only   only the staging half, from products already built
 #
 # Exit codes: 2 unknown arguments, 3 the patch does not apply, 4 the patch is already upstream, 5 the
 # patch is not in the checkout after the build, 6 the toolchain's Span dylib is not found exactly once.
@@ -19,10 +20,10 @@ XC=$PKG/.build-xc
 PATCH=$PKG/patches/mlx-metal31.patch
 CHECKOUT=${MNEMA_MLX_CHECKOUT:-$XC/checkouts/mlx-swift}
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 case "$*" in
     -h | --help) usage; exit 0 ;;
-    "" | --patch-only) ;;
+    "" | --patch-only | --stage-only) ;;
     *) echo "unknown arguments: $*" >&2; usage >&2; exit 2 ;;
 esac
 
@@ -48,6 +49,30 @@ if [[ "${1:-}" == "--patch-only" ]]; then
     exit 0
 fi
 
+stage() {
+    local OUT=$XC/dd/Build/Products/Release BIN=$ROOT/src-tauri/binaries
+    # The binary links @rpath/libswiftCompatibilitySpan.dylib (rpath @executable_path/../lib); the
+    # active toolchain has it, the build products do not. Looked up first: nothing is copied if it is missing.
+    # ${spans[*]+...}: on bash 3.2 an empty array under `set -u` is an unbound variable.
+    shopt -s nullglob
+    local spans=("$(dirname "$(xcrun --find swift)")"/../lib/swift-*/macosx/libswiftCompatibilitySpan.dylib)
+    if [[ ${#spans[@]} -ne 1 ]]; then
+        echo "libswiftCompatibilitySpan.dylib: expected exactly one in the active toolchain, found ${#spans[@]}: ${spans[*]+"${spans[*]}"}" >&2
+        exit 6
+    fi
+    mkdir -p "$BIN"
+    cp "$OUT/mnema-mlx" "$BIN/mnema-mlx-aarch64-apple-darwin"
+    rm -rf "$BIN/mlx-swift_Cmlx.bundle"
+    cp -R "$OUT/mlx-swift_Cmlx.bundle" "$BIN/"
+    cp "${spans[0]}" "$BIN/"
+    echo "staged mnema-mlx in $BIN"
+}
+
+if [[ "${1:-}" == "--stage-only" ]]; then
+    stage
+    exit 0
+fi
+
 cd "$PKG"
 # A fresh checkout each time, so the guard always sees upstream and never our own earlier apply.
 rm -rf "$XC/checkouts/mlx-swift"
@@ -63,19 +88,4 @@ if ! git -C "$CHECKOUT" apply --reverse --check "$PATCH"; then
     exit 5
 fi
 
-OUT=$XC/dd/Build/Products/Release
-BIN=$ROOT/src-tauri/binaries
-mkdir -p "$BIN"
-cp "$OUT/mnema-mlx" "$BIN/mnema-mlx-aarch64-apple-darwin"
-rm -rf "$BIN/mlx-swift_Cmlx.bundle"
-cp -R "$OUT/mlx-swift_Cmlx.bundle" "$BIN/"
-# The binary links @rpath/libswiftCompatibilitySpan.dylib (rpath @executable_path/../lib); the
-# active toolchain has it, the build products do not.
-shopt -s nullglob
-spans=("$(dirname "$(xcrun --find swift)")"/../lib/swift-*/macosx/libswiftCompatibilitySpan.dylib)
-if [[ ${#spans[@]} -ne 1 ]]; then
-    echo "libswiftCompatibilitySpan.dylib: expected exactly one in the active toolchain, found ${#spans[@]}: ${spans[*]}" >&2
-    exit 6
-fi
-cp "${spans[0]}" "$BIN/"
-echo "staged mnema-mlx in $BIN"
+stage

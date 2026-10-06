@@ -344,14 +344,15 @@ fn the_script_pins_a_library_for_every_platform_this_file_checks() {
 }
 
 #[test]
-fn macos_is_configured_by_the_base_file_alone() {
+fn macos_merges_the_mlx_file_and_nothing_else() {
     // The macOS bundle is the one that was verified end to end: a signed image,
     // opened, with the worker asked where it loaded Pdfium from. That evidence
-    // is about the configuration in `tauri.conf.json`, and a `tauri.macos.conf.json`
-    // appearing beside it would silently move macOS onto a merged configuration
-    // nothing has measured. This does not forbid that file — it requires that
-    // adding it comes with a rebuilt image and a fresh run of
-    // scripts/verify-bundle.sh, by failing until someone reads this.
+    // is about the configuration in `tauri.conf.json`, and any further platform file
+    // would silently move macOS onto a merged configuration nothing has measured.
+    // `tauri.macos.conf.json` (the MLX sidecar: externalBin, its Metal bundle, the Swift
+    // runtime library) is the one that was added with a rebuilt image and a fresh run of
+    // scripts/verify-bundle.sh — Pdfium loaded from inside the image on that merge. A
+    // second file must come the same way, by failing until someone reads this.
     let (_, paths) = effective_config(Target::MacOS);
     let names: Vec<String> = paths
         .iter()
@@ -359,8 +360,11 @@ fn macos_is_configured_by_the_base_file_alone() {
         .collect();
     assert_eq!(
         names,
-        vec!["tauri.conf.json".to_string()],
-        "macOS is no longer configured by tauri.conf.json alone; it now merges \
+        vec![
+            "tauri.conf.json".to_string(),
+            "tauri.macos.conf.json".to_string()
+        ],
+        "macOS no longer merges just tauri.conf.json and tauri.macos.conf.json; it now merges \
          {names:?}. The bundle guarantee — Pdfium loaded from inside the image, \
          preferred over a copy beside the executable — was measured against the \
          unmerged file. Rebuild the image, run scripts/verify-bundle.sh, and \

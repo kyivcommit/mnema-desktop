@@ -4,6 +4,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
+# The release ships the real MLX sidecar; stage-sidecar.sh would only write a placeholder.
+[ "$(uname -s)" = "Darwin" ] && "$SCRIPT_DIR/build-mlx-sidecar.sh"
 "$SCRIPT_DIR/stage-sidecar.sh" release
 npm --prefix "$ROOT/ui" ci
 npm --prefix "$ROOT/ui" run build

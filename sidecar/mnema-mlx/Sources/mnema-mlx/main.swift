@@ -1,8 +1,17 @@
 import Foundation
 import MnemaMLX
 
-// mnema-mlx --stub | --embed <bge-m3 dir> --chat <gemma dir>
+// mnema-mlx --metal-selftest | --stub | --embed <bge-m3 dir> --chat <gemma dir>
 let args = CommandLine.arguments
+// mnema-mlx --metal-selftest: one GPU op, no token, no server. verify-bundle.sh runs it from inside the .app.
+if args.contains("--metal-selftest") {
+    guard metalSelfTest() else {
+        FileHandle.standardError.write(Data("METAL FAILED\n".utf8))
+        exit(1)
+    }
+    print("METAL OK")
+    exit(0)
+}
 let env = ProcessInfo.processInfo.environment
 let token = env["MNEMA_MLX_TOKEN"] ?? ""
 guard !token.isEmpty else {

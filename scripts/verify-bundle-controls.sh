@@ -746,6 +746,53 @@ if must copy_app_out "${LAB}/no-ofl" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-ofl-img"
 fi
 
+echo "### 19. the bundle carries no MLX sidecar"
+if must copy_app_out "${LAB}/no-mlx" \
+  && must rm -f "${LAB}/no-mlx/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && gone "${LAB}/no-mlx/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must codesign --sign - --force --deep "${LAB}/no-mlx/Mnema.app" \
+  && must image_from "${LAB}/no-mlx" "${LAB}/no-mlx-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no mnema-mlx" \
+    "a packaged build with no sidecar has no Mnema provider" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-mlx-img"
+fi
+
+echo "### 20. the sidecar's Swift runtime library is not in Contents/lib"
+if must copy_app_out "${LAB}/no-span" \
+  && must rm -f "${LAB}/no-span/Mnema.app/Contents/lib/libswiftCompatibilitySpan.dylib" \
+  && gone "${LAB}/no-span/Mnema.app/Contents/lib/libswiftCompatibilitySpan.dylib" \
+  && must codesign --sign - --force --deep "${LAB}/no-span/Mnema.app" \
+  && must image_from "${LAB}/no-span" "${LAB}/no-span-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no libswiftCompatibilitySpan.dylib" \
+    "macOS 14 does not ship the library the sidecar links" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-span-img"
+fi
+
+echo "### 21. the sidecar's Metal library bundle is not in Contents/Resources"
+if must copy_app_out "${LAB}/no-metallib" \
+  && must rm -rf "${LAB}/no-metallib/Mnema.app/Contents/Resources/mlx-swift_Cmlx.bundle" \
+  && gone "${LAB}/no-metallib/Mnema.app/Contents/Resources/mlx-swift_Cmlx.bundle" \
+  && must codesign --sign - --force --deep "${LAB}/no-metallib/Mnema.app" \
+  && must image_from "${LAB}/no-metallib" "${LAB}/no-metallib-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no mlx-swift_Cmlx.bundle" \
+    "the sidecar cannot load its Metal kernels" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-metallib-img"
+fi
+
+echo "### 22. the placeholder stands where the sidecar should be"
+# What scripts/stage-sidecar.sh writes when no real sidecar was built: present, executable, signed — and
+# it cannot print METAL OK. The file checks above all pass on it; only running it does not.
+if must copy_app_out "${LAB}/placeholder" \
+  && must printf '#!/bin/sh\necho "mnema-mlx placeholder: run scripts/build-mlx-sidecar.sh" >&2\nexit 1\n' \
+       > "${LAB}/placeholder/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must chmod +x "${LAB}/placeholder/Mnema.app/Contents/MacOS/mnema-mlx" \
+  && must codesign --sign - --force --deep "${LAB}/placeholder/Mnema.app" \
+  && must image_from "${LAB}/placeholder" "${LAB}/placeholder-img/dmg/Mnema.dmg"; then
+  expect_red -m "did not print METAL OK" \
+    "a placeholder is not a sidecar" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/placeholder-img"
+fi
+
 echo
 echo "### and the real bundle, which must pass"
 if bash "${REPO}/scripts/verify-bundle.sh" >/dev/null 2>&1; then
