@@ -62,7 +62,7 @@ fn main() {
         let token = token.clone();
         std::thread::spawn(move || {
             // Only authorised requests count, so a 401 probe does not use one up.
-            if handle(stream, &token) != 200 {
+            if !(200..300).contains(&handle(stream, &token)) {
                 return;
             }
             let n = SERVED.fetch_add(1, Ordering::SeqCst) + 1;

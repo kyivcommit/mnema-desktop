@@ -149,7 +149,7 @@ fn the_job_slice_starts_at_the_job_it_names() {
          wearing a job's name.\nThe slice reads:\n{bundle}"
     );
     assert!(
-        declares(&bundle, "- run: cargo tauri build"),
+        declares(&bundle, "run: cargo tauri build"),
         "the `bundle` job slice does not contain `cargo tauri build`, so either \
          it starts in the wrong place or the job no longer builds \
          anything.\nThe slice reads:\n{bundle}"
@@ -161,7 +161,7 @@ fn the_job_slice_starts_at_the_job_it_names() {
     // against ci.yml itself rather than against the document built for it.
     let check = check_job();
     assert!(
-        !declares(&check, "- run: cargo tauri build"),
+        !declares(&check, "run: cargo tauri build"),
         "the `check` job slice runs on into `bundle`. Its end condition is the \
          one thing the two-job document below cannot prove about the real \
          file.\nThe slice reads:\n{check}"
