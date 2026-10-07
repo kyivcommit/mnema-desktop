@@ -783,6 +783,17 @@ if must copy_app_out "${LAB}/no-metallib" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-metallib-img"
 fi
 
+echo "### 21b. the Metal library bundle is there and empty"
+if must copy_app_out "${LAB}/empty-metallib" \
+  && must rm -rf "${LAB}/empty-metallib/Mnema.app/Contents/Resources/mlx-swift_Cmlx.bundle" \
+  && must mkdir "${LAB}/empty-metallib/Mnema.app/Contents/Resources/mlx-swift_Cmlx.bundle" \
+  && must codesign --sign - --force --deep "${LAB}/empty-metallib/Mnema.app" \
+  && must image_from "${LAB}/empty-metallib" "${LAB}/empty-metallib-img/dmg/Mnema.dmg"; then
+  expect_red -m "holds no default.metallib" \
+    "a bundle directory without the Metal library" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/empty-metallib-img"
+fi
+
 echo "### 22. the placeholder stands where the sidecar should be"
 # What scripts/stage-sidecar.sh writes when no real sidecar was built: present, executable, signed — and
 # it cannot answer the handshake. The file checks above all pass on it; only running it does not.

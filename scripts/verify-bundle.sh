@@ -400,6 +400,9 @@ metallib_bundle="${app}/Contents/Resources/mlx-swift_Cmlx.bundle"
 [ -d "${metallib_bundle}" ] || fail "${product}.app carries no mlx-swift_Cmlx.bundle in Contents/Resources.
   That bundle holds the Metal library of the sidecar; bundle.resources in
   src-tauri/tauri.macos.conf.json puts it there."
+[ -f "${metallib_bundle}/Contents/Resources/default.metallib" ] \
+  || fail "mlx-swift_Cmlx.bundle in ${product}.app holds no default.metallib.
+  An empty bundle directory is not the Metal library; the sidecar cannot run a kernel without it."
 stub=""
 stub_status=0
 stub="$(printf '' | MNEMA_MLX_TOKEN=verify-bundle "${mlx}" --stub 2>&1)" || stub_status=$?

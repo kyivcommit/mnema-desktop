@@ -149,8 +149,16 @@ public final class Server {
         return .request(Request(method: String(start[0]), path: String(start[1]), headers: headers, body: Data(body.prefix(n))))
     }
 
+    /// Compares without stopping at the first differing byte.
+    private static func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        var diff = x.count ^ y.count
+        for i in 0..<min(x.count, y.count) { diff |= Int(x[i] ^ y[i]) }
+        return diff == 0
+    }
+
     private func handle(_ req: Request, reply: @escaping (Response) -> Void) {
-        guard req.headers["authorization"] == "Bearer \(token)" else {
+        guard Self.constantTimeEqual(req.headers["authorization"] ?? "", "Bearer \(token)") else {
             return reply(Response(401, ["error": "unauthorized"]))
         }
         let interactive = req.path.hasPrefix("/interactive/v1/")
