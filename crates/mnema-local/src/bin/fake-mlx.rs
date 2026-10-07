@@ -151,11 +151,12 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
             }
             "/mnema/load" => {
                 std::thread::sleep(Duration::from_millis(env_num("FAKE_MLX_LOAD_MS")));
-                (200, "{}".to_string())
+                // The real server answers 204 with an empty body here.
+                (204, String::new())
             }
             "/mnema/unload" => {
                 log(&format!("body {sent} {body}"));
-                (200, "{}".to_string())
+                (204, String::new())
             }
             _ => (404, r#"{"error":"not found"}"#.to_string()),
         }

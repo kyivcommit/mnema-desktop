@@ -184,8 +184,11 @@ fn load_and_unload_reach_the_root_routes_with_the_right_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("fake.log");
     let s = start(&[("FAKE_MLX_LOG", log.to_str().unwrap())]);
-    s.load().unwrap();
-    s.unload(None).unwrap();
+    // The real server answers 204 (empty body) to both; any 2xx is success.
+    let loaded = s.load();
+    assert!(loaded.is_ok(), "load: {loaded:?}");
+    let unloaded = s.unload(None);
+    assert!(unloaded.is_ok(), "unload: {unloaded:?}");
     s.unload(Some(mnema_local::ModelId::Chat)).unwrap();
     s.unload(Some(mnema_local::ModelId::Embed)).unwrap();
     let text = std::fs::read_to_string(&log).unwrap();

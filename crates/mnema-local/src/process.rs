@@ -244,7 +244,7 @@ impl Sidecar {
             .send(body)
             .map_err(|err| Error::Http(err.to_string()))?;
         let status = resp.status().as_u16();
-        if status == 200 {
+        if (200..300).contains(&status) {
             return Ok(());
         }
         let text = resp.body_mut().read_to_string().unwrap_or_default();
