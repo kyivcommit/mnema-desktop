@@ -14,6 +14,11 @@ public final class Engine {
 
     public init() {}
 
+    /// Milliseconds from the start of the last `chat` generation to its first token.
+    public private(set) var lastFirstTokenMs: Int?
+    /// Same for the generation `load` runs to warm the chat model; kept apart so a warm-up never looks like a request.
+    public private(set) var warmupFirstTokenMs: Int?
+
     /// What is resident now, by the names `load` and `unload` take.
     public var loadedModels: [String] {
         (embedder == nil ? [] : ["embed"]) + (llm == nil ? [] : ["chat"])
@@ -27,9 +32,16 @@ public final class Engine {
         if models.contains("embed") && embedder == nil {
             embedder = try await EmbedderModelFactory.shared.loadContainer(
                 from: embedDir, using: #huggingFaceTokenizerLoader())
+            // The first embed in a process pays Metal kernel compilation (1.3 s measured on a never-run binary);
+            // a failed warm-up must not leave a model that reports itself loaded.
+            do { _ = try await embed(["warm-up"]) } catch { embedder = nil; throw error }
         }
         if models.contains("chat") && llm == nil {
             llm = try await LLMModelFactory.shared.loadContainer(from: chatDir, using: #huggingFaceTokenizerLoader())
+            // Same for the first generation (2.7 s measured): pay it here, in the background load.
+            do {
+                _ = try await generate([["role": "user", "content": "Hi"]], maxTokens: 1, report: false)
+            } catch { llm = nil; throw error }
         }
     }
 
@@ -77,6 +89,11 @@ public final class Engine {
     /// Greedy, no streaming. Prints `first_token_ms=<n>` to stderr: from the start of `generate` to the
     /// first token, so the 0.5 s gate measures the model, not the wire.
     public func chat(_ messages: [[String: String]]) async throws -> String {
+        try await generate(messages, maxTokens: 1024, report: true)
+    }
+
+    /// `report: false` is the warm-up: the time goes to `warmupFirstTokenMs`, nothing to stderr.
+    private func generate(_ messages: [[String: String]], maxTokens: Int, report: Bool) async throws -> String {
         guard let llm else { throw EngineError.notLoaded }
         return try await llm.perform { ctx -> String in
             let chat: [Chat.Message] = messages.map {
@@ -94,13 +111,18 @@ public final class Engine {
             var first: Date?
             var out = ""
             for await g in try MLXLMCommon.generate(
-                input: input, parameters: .init(maxTokens: 1024, temperature: 0), context: ctx)
+                input: input, parameters: .init(maxTokens: maxTokens, temperature: 0), context: ctx)
             {
                 if case .chunk(let x) = g {
                     if first == nil {
                         first = Date()
                         let ms = Int(first!.timeIntervalSince(start) * 1000)
-                        FileHandle.standardError.write(Data("first_token_ms=\(ms)\n".utf8))
+                        if report {
+                            self.lastFirstTokenMs = ms
+                            FileHandle.standardError.write(Data("first_token_ms=\(ms)\n".utf8))
+                        } else {
+                            self.warmupFirstTokenMs = ms
+                        }
                     }
                     out += x
                 }

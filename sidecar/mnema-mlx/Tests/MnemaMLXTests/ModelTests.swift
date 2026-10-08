@@ -71,6 +71,26 @@ final class ModelTests: XCTestCase {
             + "його відкривають о \(n % 12 + 1)-й годині, а ключі зберігає черговий.", count: 3).joined(separator: " ") + "\n\n"
     }.joined()
 
+    /// Under xctest the host process's Metal cache is already warm, so the time test below cannot go red here;
+    /// this one fails when `load` runs no warm-up generation (and when the warm-up is reported as a request).
+    func test_load_runs_a_silent_warmup() async throws {
+        let e = try await loaded()
+        defer { e.unload() }
+        XCTAssertNotNil(e.warmupFirstTokenMs, "load ran no warm-up generation")
+        XCTAssertNil(e.lastFirstTokenMs, "the warm-up must not look like a request")
+    }
+
+    func test_first_chat_after_load_is_warm() async throws {
+        let e = try await loaded()
+        defer { e.unload() }
+        _ = try await e.chat(Self.capitalQuestion)
+        let ms = try XCTUnwrap(e.lastFirstTokenMs)
+        _ = try await e.chat(Self.capitalQuestion)
+        let second = try XCTUnwrap(e.lastFirstTokenMs)
+        print("first_chat_after_load_ms \(ms) second \(second)")
+        XCTAssertLessThan(ms, 1000, "first token \(ms) ms after load")
+    }
+
     func test_chat_does_not_think() async throws {
         let e = try await loaded()
         defer { e.unload() }
