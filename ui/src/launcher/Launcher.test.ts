@@ -1081,3 +1081,18 @@ test('turning the right panel off in the hot state tells Rust', async () => {
   expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });
+
+// The Toolbar takes the provider from `provider_choice`, read with the status.
+test('under Mnema the status button names Mnema, under OpenRouter it does not', async () => {
+  for (const [choice, has, hasNot] of [['mnema', 'Mnema', 'OpenRouter'], ['openRouter', 'OpenRouter', 'Mnema']]) {
+    mockBackend(undefined);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+      cmd === 'provider_choice' ? Promise.resolve(choice) : base(cmd, ...a));
+    render(Launcher);
+    const b = await screen.findByTestId('provider-cloud');
+    expect(b.getAttribute('aria-label'), choice).toContain(has);
+    expect(b.getAttribute('aria-label'), choice).not.toContain(hasNot);
+    cleanup();
+  }
+});

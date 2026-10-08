@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerStatus, setLauncherLayout, type ProviderStatus } from '../lib/ipc';
+  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Arms from './Arms.svelte';
   import Toolbar from './Toolbar.svelte';
@@ -27,6 +27,8 @@
   );
   let provider = $state(false);
   let status = $state<ProviderStatus | null>(null);
+  // Which provider the status is about: the two are written together.
+  let statusProvider = $state<ProviderChoice>('openRouter');
   let textOn = $state(true);
   let contentOn = $state(false);
   // Cold: the search column alone. The first answer with something to show
@@ -59,8 +61,8 @@
   let providerGen = 0;
   function refreshProvider() {
     const gen = ++providerGen;
-    providerStatus()
-      .then((s) => { if (gen === providerGen) status = s; })
+    Promise.all([providerStatus(), providerChoice().catch((): ProviderChoice => 'openRouter')])
+      .then(([s, c]) => { if (gen === providerGen) { status = s; statusProvider = c ?? 'openRouter'; } })
       .catch((e) => console.error('provider_status failed', e));
     modelSettings()
       .then((s) => {
@@ -209,7 +211,7 @@
       </div>
       <div class="sb-tools">
         <Arms bind:textOn bind:contentOn {provider} />
-        <Toolbar {heat} bind:left bind:right bind:pinned {status} />
+        <Toolbar {heat} bind:left bind:right bind:pinned {status} provider={statusProvider} />
       </div>
     </div>
     {/snippet}

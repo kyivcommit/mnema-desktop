@@ -20,6 +20,8 @@
 
   // `provider.rs`'s `LOCAL_EMBED_MODEL`: the one name both providers embed under.
   const LOCAL_EMBED_MODEL = 'baai/bge-m3';
+  const OPEN_ROUTER: ProviderChoice = 'openRouter';
+  const MNEMA: ProviderChoice = 'mnema';
   const IDS: LocalModelId[] = ['embed', 'chat'];
   let states = $state<Record<LocalModelId, LocalModelState>>({
     embed: { kind: 'absent' }, chat: { kind: 'absent' },
@@ -194,8 +196,8 @@
   {#key radioRev}
     <select id="model-provider" value={choice} disabled={!available}
       onchange={(e) => choose(e.currentTarget.value as ProviderChoice)}>
-      <option value="openRouter">{openRouterLabel}</option>
-      {#if available}<option value="mnema">{mnemaLabel}</option>{/if}
+      <option value={OPEN_ROUTER}>{openRouterLabel}</option>
+      {#if available}<option value={MNEMA}>{mnemaLabel}</option>{/if}
     </select>
   {/key}
 </div>{#if available}<div class="provider">

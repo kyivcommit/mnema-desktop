@@ -110,3 +110,26 @@ test('the cloud names the missing local models, not the key', () => {
   expect(cloud.getAttribute('aria-label')).toBe('Завантажте моделі Mnema — відкрити налаштування моделей');
   expect(cloud.getAttribute('aria-label')).not.toContain('ключа');
 });
+
+test('the status button names the provider in use', () => {
+  const name = (over: Record<string, unknown>) => {
+    const r = render(Toolbar, props(over));
+    const b = screen.getByTestId('provider-cloud');
+    const v = [b.getAttribute('aria-label')!, b.getAttribute('title')!];
+    r.unmount();
+    return v;
+  };
+  // Under Mnema, ready or unreachable, OpenRouter is not named.
+  for (const status of [OK, { kind: 'unreachable', reason: 'refused' }] as ProviderStatus[]) {
+    const [label, title] = name({ provider: 'mnema', status });
+    expect(label).toContain('Mnema');
+    expect(title).toContain('Mnema');
+    expect(label).not.toContain('OpenRouter');
+    expect(title).not.toContain('OpenRouter');
+  }
+  // And the other direction: OpenRouter's wording is unchanged.
+  expect(name({ provider: 'openRouter' })[0]).toBe('Connected to OpenRouter');
+  expect(name({})[0]).toBe('Connected to OpenRouter');
+  setLocale('uk');
+  expect(name({ provider: 'mnema' })[0]).toContain('Mnema');
+});

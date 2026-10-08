@@ -36,7 +36,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
-  | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
+  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -351,6 +351,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     arm_text: 'текст', arm_content: 'зміст',
     toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
+    provider_ok_mnema: 'Mnema (локально) готова',
+    provider_unreachable_mnema: 'Mnema (локально) не відповідає: {reason}',
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
@@ -1209,6 +1211,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     arm_text: 'text', arm_content: 'content',
     toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
+    provider_ok_mnema: 'Mnema (local) is ready',
+    provider_unreachable_mnema: 'Mnema (local) is not responding: {reason}',
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
