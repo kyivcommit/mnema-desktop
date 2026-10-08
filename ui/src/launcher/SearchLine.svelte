@@ -41,7 +41,8 @@
 
 <div class="search-line">
   <input type="text" bind:this={input} bind:value={query} placeholder={placeholder} aria-busy={state.kind === 'inFlight' ? 'true' : undefined} onkeydown={onKeydown} />
-  {#if state.kind === 'error'}
+  <!-- A too-long message belongs to the line that was too long: stale once emptied. -->
+  {#if state.kind === 'error' && !(state.reason === 'tooLong' && query.trim() === '')}
     <p class="guard" role="alert">{errorText}</p>
   {:else if state.kind === 'refused'}
     <p class="refusal" role="status">{refusalMessage}</p>

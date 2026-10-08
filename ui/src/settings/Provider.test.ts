@@ -265,3 +265,16 @@ test('a cancel the backend refuses to take is not an unhandled rejection', async
   await fireEvent.click(inRow(await waitFor(() => chatRow())).button('Скасувати'));
   expect(await screen.findByRole('alert')).toBeTruthy();
 });
+
+// Review of 36436d7, Minor 3: `available` and `choice` arrive asynchronously and
+// the Mnema option exists only once `available` is true, so the select's value
+// for a saved Mnema choice is a state worth building.
+test('a saved Mnema choice shows in the dropdown', async () => {
+  await mount({ choice: 'mnema' });
+  expect(dropdown().value).toBe('mnema');
+  expect(within(dropdown()).getByRole('option', { name: MNEMA })).toHaveProperty('selected', true);
+  // And the other direction: a saved OpenRouter choice does not.
+  cleanup();
+  await mount({ choice: 'openRouter' });
+  expect(dropdown().value).toBe('openRouter');
+});

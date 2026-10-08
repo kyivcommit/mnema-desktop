@@ -62,18 +62,19 @@
   // and this condition already covers it — a bonus, not a decision made here.
   //
   // 🔴 Ruling I-C — the known cost of taking `error` whole, stated rather than
-  // discovered. `error` carries three reasons (`state.ts:25`) and only
-  // `askFailed` is an answer state: `tooLong` comes from `checkQuery`
-  // BEFORE any ask, so an over-long first Enter is `error` with no answer
-  // behind it (a blank Enter is inert since 2026-10-08). That Enter mounts the tree, and mounting fires `list_tree`; in
-  // the cold launcher the section is `hidden` below, so nothing is drawn, and
-  // `launcher-cold` (which sets `idle`) is the way back to the bare line.
+  // discovered. `error` carries two reasons (`state.ts`) and only `askFailed`
+  // is an answer state: `tooLong` comes from `checkQuery` BEFORE any ask, so an
+  // over-long first Enter is `error` with no answer behind it. That Enter
+  // mounts the tree, and mounting fires `list_tree`; in the cold launcher the
+  // section is `hidden` below, so nothing is drawn, and `launcher-cold` (which
+  // sets `idle`) is the way back to the bare line. A blank Enter is not an
+  // error at all (owner, 2026-10-08): it returns before the machine moves.
   //
-  // Narrowing to `reason === 'askFailed'` was considered and rejected: an over-long
-  // query typed from state B is ALSO `error: 'tooLong'`, so a gate keyed on the
-  // reason would tear the tree down when a person with three cards on screen
-  // mistypes an Enter — C1's exact defect, reintroduced through the gate that
-  // was widened to fix it. One condition, no state, cost declared.
+  // Narrowing to `reason === 'askFailed'` was considered and rejected: an
+  // over-long query typed from state B is ALSO an `error`, so a gate keyed on
+  // the reason would tear the tree down when a person with three cards on
+  // screen mistypes an Enter — C1's exact defect, reintroduced through the gate
+  // that was widened to fix it. One condition, no state, cost declared.
   //
   // MOUNTING and SEEING are two decisions. Mounting is this condition alone;
   // seeing is the heat and the left switch, a `hidden` attribute on the section

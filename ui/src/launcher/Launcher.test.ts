@@ -1110,3 +1110,22 @@ test('Enter on an empty line does nothing: nothing on screen, or an answer on sc
   expect(askCalls()).toHaveLength(1);
   expect(screen.getByTestId('query-echo')).toBeTruthy();
 });
+
+// Review of 36436d7, Minor 2: a "too long" message belongs to the line that was
+// too long. Once the line is emptied it is stale, and a blank Enter after it
+// changes nothing further.
+test('the too-long message goes when the line is emptied', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await submit('x'.repeat(2049));
+  expect((await screen.findByRole('alert')).textContent).toContain('2048');
+  // Still too long: the message stays (the other direction).
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  expect(screen.getByRole('alert')).toBeTruthy();
+  await fireEvent.input(box, { target: { value: '' } });
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls()).toHaveLength(0);
+});

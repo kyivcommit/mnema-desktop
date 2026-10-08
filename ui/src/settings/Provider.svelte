@@ -112,7 +112,7 @@
   let retired = $state<RetiredSpace[] | null>(null);
   // The select is a native control the person has already moved by the time a
   // refusal arrives; re-creating it is how the DOM goes back to `choice`.
-  let radioRev = $state(0);
+  let selectRev = $state(0);
 
   async function commit(next: ProviderChoice, existing: ExistingVectors) {
     pending = null;
@@ -122,7 +122,7 @@
       retired = done.retired.length > 0 ? done.retired : null;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      radioRev += 1;
+      selectRev += 1;
     }
   }
 
@@ -145,7 +145,7 @@
         }
       } catch (e) {
         error = e instanceof Error ? e.message : String(e);
-        radioRev += 1;
+        selectRev += 1;
         return;
       }
     }
@@ -154,7 +154,7 @@
 
   function cancelPending() {
     pending = null;
-    radioRev += 1;
+    selectRev += 1;
   }
 
   const retiredLabel = $derived.by(() => {
@@ -193,7 +193,7 @@
      the same as before this component wrapped it when Mnema is unavailable. -->
 <div class="row">
   <label for="model-provider">{label}</label>
-  {#key radioRev}
+  {#key selectRev}
     <select id="model-provider" value={choice} disabled={!available}
       onchange={(e) => choose(e.currentTarget.value as ProviderChoice)}>
       <option value={OPEN_ROUTER}>{openRouterLabel}</option>

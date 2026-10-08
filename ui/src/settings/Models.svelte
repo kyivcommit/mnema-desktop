@@ -1,7 +1,5 @@
 <script lang="ts">
   import { getContext, onMount, tick } from 'svelte';
-  // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
-  const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
@@ -20,6 +18,9 @@
   // one message" class this project has paid for 22 times in one cycle — one
   // of the two would eventually read a fixed set of fields differently.
   import { providerReady } from '../launcher/state';
+
+  // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
+  const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
 
   // The controller, as a PROP — the same rule `Folders` and `Scanning` already
   // follow, and this section was the one left out. It matters here for two

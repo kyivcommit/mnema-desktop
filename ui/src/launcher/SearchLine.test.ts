@@ -21,7 +21,7 @@ test('state error(tooLong) shows the too-long message with the limit interpolate
   // The only real-logic error branch (an interpolated placeholder) was
   // untested; if the intl param name ever drifts from MAX_ASK_QUERY,
   // IntlMessageFormat throws at render time and this fails.
-  render(SearchLine, { state: { kind: 'error', reason: 'tooLong' } as LauncherState, onSubmit: vi.fn() });
+  render(SearchLine, { state: { kind: 'error', reason: 'tooLong' } as LauncherState, onSubmit: vi.fn(), query: 'x' });
   expect(screen.getByRole('alert').textContent).toContain(String(MAX_ASK_QUERY));
 });
 
