@@ -3,11 +3,6 @@ import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, heatAfter, f
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { ModelSettings, IndexSettings } from '../lib/ipc';
 
-test('a blank query is rejected', () => {
-  expect(checkQuery('')).toEqual({ ok: false, reason: 'blank' });
-  expect(checkQuery('   ')).toEqual({ ok: false, reason: 'blank' });
-});
-
 test('a non-blank query within the limit is accepted', () => {
   expect(checkQuery('hello')).toEqual({ ok: true, query: 'hello' });
 });

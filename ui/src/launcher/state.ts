@@ -20,10 +20,11 @@ export const DRAG_GRAB_WINDOW_MS = 1000;
 
 export type QueryCheck =
   | { ok: true; query: string }
-  | { ok: false; reason: 'blank' | 'tooLong' };
+  | { ok: false; reason: 'tooLong' };
 
+// A blank line is not judged here: Enter on one does nothing, and the caller
+// returns before asking (owner, 2026-10-08).
 export function checkQuery(raw: string): QueryCheck {
-  if (raw.trim() === '') return { ok: false, reason: 'blank' };
   // Code points, like Rust's query.chars().count() — spread iterates code
   // points, raw.length would count UTF-16 units and diverge past the BMP.
   if ([...raw].length > MAX_ASK_QUERY) return { ok: false, reason: 'tooLong' };

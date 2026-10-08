@@ -396,8 +396,8 @@ test('a freshly mounted launcher shows no cards at all (state A)', () => {
 
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
 //
-// The gate keeps the tree for `error`, and `error` carries three reasons. The
-// `Cards`-level test pins `reason: 'blank'`; these pin the transition the ruling
+// The gate keeps the tree for `error`, and `error` carries two reasons. The
+// `Cards`-level test pins `reason: 'tooLong'`; these pin the transition the ruling
 // was actually argued from — a person with three cards on screen mistyping an
 // Enter — which is the half that makes "do not narrow the gate by reason"
 // falsifiable. Anchored on the guard message, which only a completed validation

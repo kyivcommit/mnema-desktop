@@ -26,8 +26,8 @@
   });
 
   function onKeydown(event: KeyboardEvent) {
-    // A held Enter auto-repeats keydown; only the press submits, or the repeat
-    //, or a failed answer (which keeps the query) would be asked again by the repeat.
+    // A held Enter auto-repeats keydown; only the press submits; otherwise a failed
+    // answer (which keeps the query) would be asked again by the repeat.
     if (event.key === 'Enter' && !event.repeat) onSubmit(query);
   }
 
