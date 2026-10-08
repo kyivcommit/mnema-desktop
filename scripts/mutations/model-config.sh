@@ -325,13 +325,15 @@ case_ "a refused key first forgets the one that was working" \
   mnema-desktop 'a_refusal_leaves_the_key_that_was_already_working' --test model_commands
 
 # The key into the database, by the shortest realistic road: one argument over.
+# The key is `endpoint.token` since `set_embedding_model` reads one endpoint for
+# either provider; this test's provider is OpenRouter, so that token is its key.
 # The database travels to colleagues (D33) and the key must not travel with it.
 # The mutation deliberately leaves `credential_ref` alone, so the scan's own
 # positive control still passes and the red is the leak rather than the control.
 case_ "the key is written into the index beside the reference" \
   src-tauri/src/models.rs \
-  's~            &model,\n            dim,\n            state\.credential_ref\(\),~            \&key,\n            dim,\n            state.credential_ref(),~' \
-  '            &key,
+  's~            &model,\n            dim,\n            state\.credential_ref\(\),~            \&endpoint.token,\n            dim,\n            state.credential_ref(),~' \
+  '            &endpoint.token,
             dim,
             state.credential_ref(),' \
   mnema-desktop 'the_key_never_reaches_the_database_file' --test model_commands
