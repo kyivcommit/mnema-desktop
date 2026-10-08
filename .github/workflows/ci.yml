@@ -742,21 +742,24 @@ jobs:
     # One architecture per package rather than a universal binary: a universal
     # build carries both slices, so every user downloads roughly twice the
     # application they can run. Measured, not assumed — the numbers are in
-    # docs/BUILD.md. macos-15 is arm64, which is what the artefact name claims.
+    # docs/BUILD.md. macos-26 is arm64, which is what the artefact name claims.
     #
-    # macos-15, not macos-14, since the MLX sidecar: it builds with Swift 6.2 (Xcode 26),
-    # and the macos-14 image carries Xcode 15.2-16.2 at most while macos-15 carries 26.0-26.3
-    # (actions/runner-images, images/macos/toolsets/toolset-14.json and toolset-15.json,
-    # read 2026-10). That is the BUILD host; the macOS 14 floor of the app is a runtime claim
-    # (Package.swift platforms, the Span dylib in Contents/lib) that a real macOS 14 M1 proves.
+    # macos-26, since the MLX sidecar: the pinned mlx-swift declares Swift tools 6.3.0, so
+    # it needs Xcode 26.4 or newer (26.4 ships Swift 6.3). macos-14 carries Xcode 15.2-16.2
+    # at most and macos-15 26.0-26.3 (Swift 6.2.x; 26.2 failed to resolve the package with
+    # exactly that message); macos-26 carries 26.0.1-26.6 (actions/runner-images,
+    # images/macos/toolsets/toolset-14/15/26.json, read 2026-10-08). That is the BUILD host;
+    # the macOS 14 floor of the app is a runtime claim (Package.swift platforms, the Span
+    # dylib in Contents/lib) that a real macOS 14 M1 proves.
     #
     # No `needs:`, for the reason written above `mutations`.
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       # The Xcode that builds the sidecar, named rather than whatever the image defaults to
-      # (16.4 on macos-15). 26.2 ships Swift 6.2, and the one libswiftCompatibilitySpan.dylib
-      # that build-mlx-sidecar.sh looks for in its toolchain.
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      # (26.6 on macos-26 today; the default moves, the name does not). 26.6 ships Swift
+      # 6.3.3, and the one libswiftCompatibilitySpan.dylib that build-mlx-sidecar.sh looks
+      # for in its toolchain. Changing it changes the sidecar cache key below too.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     # 1.4–2.1 minutes across the same three runs. The limit is here for the same
     # reason as the one on `check`, and it matters slightly more: this job is the
     # one that produces the download, so a wedged run leaves someone waiting on
@@ -815,7 +818,7 @@ jobs:
       # one, and the checksum beside the version here — from the downloaded
       # file with `shasum -a 256`, never from a page.
       #
-      # `aarch64-apple-darwin`, because `runs-on: macos-15` is arm64 (this
+      # `aarch64-apple-darwin`, because `runs-on: macos-26` is arm64 (this
       # job's header comment, above `runs-on`); a runner change means an
       # asset change. `CARGO_HOME` rather than a literal `~/.cargo`, because
       # that is the directory rust-cache and rustup agree on.
@@ -864,7 +867,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: sidecar/mnema-mlx/.build-xc
-          key: mlx-sidecar-${{ runner.os }}-xcode26.2-${{ hashFiles('sidecar/mnema-mlx/Package.resolved', 'sidecar/mnema-mlx/patches/mlx-metal31.patch') }}
+          key: mlx-sidecar-${{ runner.os }}-xcode26.6-${{ hashFiles('sidecar/mnema-mlx/Package.resolved', 'sidecar/mnema-mlx/patches/mlx-metal31.patch') }}
       - name: The Metal 3.1 patch guard rejects a patch that no longer applies or is already upstream
         run: scripts/test-mlx-patch-guard.sh
       - name: The Span-library lookup exits 6, not an unbound variable, when it finds none
