@@ -110,7 +110,8 @@ impl Local {
         }
     }
 
-    /// Overrides the host check (tests: the fake process runs on any host).
+    /// Overrides the host check: a hook for tests and embedders, whose fake or
+    /// substitute process runs on any host.
     pub fn with_available(mut self, available: bool) -> Self {
         self.available = available;
         self

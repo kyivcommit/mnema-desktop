@@ -136,5 +136,8 @@ pub fn ready_local(root: &Path, env: &[(&str, &str)]) -> mnema_desktop::provider
         std::fs::create_dir_all(store.dir(id)).expect("model dir");
         std::fs::write(store.dir(id).join("weights"), b"x").expect("model file");
     }
-    mnema_desktop::provider::Local::new(store, fake_mlx()).with_env(env)
+    mnema_desktop::provider::Local::new(store, fake_mlx())
+        .with_env(env)
+        // The fake runs on any host; without this a Mnema choice reads as OpenRouter on Linux.
+        .with_available(true)
 }

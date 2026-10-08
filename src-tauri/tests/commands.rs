@@ -12706,6 +12706,7 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let app = app_with_provider(dir.path(), NO_PROVIDER);
     let bge = index_with_one_vector(&app, "baai/bge-m3", 1024);
     let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
     let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
     assert!(
         matches!(&switched, Ok(s) if s.choice == ProviderChoice::Mnema && s.retired.is_empty()),
@@ -12718,6 +12719,7 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let app = app_with_provider(dir.path(), NO_PROVIDER);
     let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
     let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
     // The existing model-change class, which the window's count-based
     // confirmation keys on — not any refusal at all.
