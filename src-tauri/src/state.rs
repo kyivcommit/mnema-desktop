@@ -451,7 +451,12 @@ impl AppState {
     }
 
     pub fn provider_choice(&self) -> crate::provider::ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir)
+        crate::prefs::provider_choice(&self.data_dir, self.mnema_available())
+    }
+
+    /// Whether this machine can run the local provider (`Local::available`).
+    pub fn mnema_available(&self) -> bool {
+        self.local().available()
     }
 
     /// The one place a model request learns where to go. See

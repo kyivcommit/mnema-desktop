@@ -88,6 +88,10 @@ pub struct Local {
     want: AtomicBool,
     loaded_pid: Mutex<u32>,
     cancel: [AtomicBool; 2],
+    /// Whether this machine can run the process at all ([`mnema_local::available`]
+    /// unless set otherwise). The one answer both the stored choice and the
+    /// window's radios read, so a test can stand on any host as either kind.
+    available: bool,
 }
 
 impl Local {
@@ -102,7 +106,18 @@ impl Local {
             want: AtomicBool::new(false),
             loaded_pid: Mutex::new(0),
             cancel: [AtomicBool::new(false), AtomicBool::new(false)],
+            available: mnema_local::available(),
         }
+    }
+
+    /// Overrides the host check (tests: the fake process runs on any host).
+    pub fn with_available(mut self, available: bool) -> Self {
+        self.available = available;
+        self
+    }
+
+    pub fn available(&self) -> bool {
+        self.available
     }
 
     /// Extra environment for the process (tests steer the fake with it).
@@ -242,7 +257,7 @@ pub struct Provider {
 impl Provider {
     /// The choice as the preferences file states it right now.
     pub fn choice(&self) -> ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir)
+        crate::prefs::provider_choice(&self.data_dir, self.local.available())
     }
 
     /// Where to send model requests, and the secret for them.
@@ -466,8 +481,8 @@ pub fn change(
 }
 
 #[tauri::command]
-pub fn mnema_available() -> bool {
-    mnema_local::available()
+pub fn mnema_available(state: tauri::State<'_, crate::state::AppState>) -> bool {
+    state.mnema_available()
 }
 
 #[tauri::command(async)]
@@ -635,14 +650,25 @@ mod tests {
     use crate::provider_status::{Missing, ProviderStatus};
     use crate::state::AppState;
 
+    /// An app state choosing `choice` on a host taken as able to run Mnema,
+    /// whatever host the test runs on: a Linux CI run otherwise reads the
+    /// stored choice as OpenRouter.
     fn state_choosing(dir: &std::path::Path, choice: ProviderChoice) -> AppState {
         crate::prefs::write_key(dir, PREFS_KEY, serde_json::to_value(choice).unwrap()).unwrap();
-        AppState::new(
+        let state = AppState::new(
             dir.to_path_buf(),
             "w".into(),
             "http://127.0.0.1:1".into(),
             String::new(),
-        )
+        );
+        state.install_local(
+            Local::new(
+                Store::new(dir.join("models"), HUB.to_string()),
+                PathBuf::new(),
+            )
+            .with_available(true),
+        );
+        state
     }
 
     #[test]
@@ -686,6 +712,22 @@ mod tests {
                 missing: Missing::LocalModels
             }
         );
+    }
+
+    #[test]
+    fn a_host_that_cannot_run_mnema_reads_openrouter_and_offers_no_mnema() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_choosing(dir.path(), ProviderChoice::Mnema);
+        state.install_local(
+            Local::new(
+                Store::new(dir.path().join("models"), HUB.to_string()),
+                PathBuf::from("unused"),
+            )
+            .with_available(false),
+        );
+        assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
+        assert_eq!(state.provider().choice(), ProviderChoice::OpenRouter);
+        assert!(!state.mnema_available());
     }
 
     #[test]
@@ -785,7 +827,11 @@ mod lifecycle {
         let log_env = log.display().to_string();
         let mut all = vec![("FAKE_MLX_LOG", log_env.as_str())];
         all.extend_from_slice(env);
-        state.install_local(Local::new(store, fake_mlx()).with_env(&all));
+        state.install_local(
+            Local::new(store, fake_mlx())
+                .with_env(&all)
+                .with_available(true),
+        );
         (state, log)
     }
 

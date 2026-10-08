@@ -159,16 +159,9 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 /// A stored `"mnema"` on a machine that cannot run the local provider (data
 /// moved to an Intel Mac or an older macOS) reads as OpenRouter, so the person
 /// is not left with no radios and a "download the Mnema models" prompt.
-///
-/// Unit tests take the host as able: their Mnema process is the fake, which
-/// runs on every CI host, and without this a Linux run read the stored choice
-/// as OpenRouter and reached the key store. The host check itself is
-/// `provider_choice_with`'s, tested with both answers.
-pub fn provider_choice(data_dir: &Path) -> crate::provider::ProviderChoice {
-    provider_choice_with(data_dir, cfg!(test) || mnema_local::available())
-}
-
-fn provider_choice_with(data_dir: &Path, mnema_available: bool) -> crate::provider::ProviderChoice {
+/// `mnema_available` is `Local::available`, the same answer the window's
+/// radios read, so the two cannot disagree.
+pub fn provider_choice(data_dir: &Path, mnema_available: bool) -> crate::provider::ProviderChoice {
     use crate::provider::ProviderChoice;
     let stored: ProviderChoice = read_all(data_dir)
         .get(crate::provider::PREFS_KEY)
@@ -1356,8 +1349,8 @@ mod tests {
         use crate::provider::ProviderChoice::{Mnema, OpenRouter};
         let dir = tempfile::tempdir().unwrap();
         write_key(dir.path(), crate::provider::PREFS_KEY, json!("mnema")).unwrap();
-        assert_eq!(provider_choice_with(dir.path(), true), Mnema);
-        assert_eq!(provider_choice_with(dir.path(), false), OpenRouter);
+        assert_eq!(provider_choice(dir.path(), true), Mnema);
+        assert_eq!(provider_choice(dir.path(), false), OpenRouter);
         // The file itself is untouched: moving back restores the choice.
         assert_eq!(
             read_all(dir.path()).get(crate::provider::PREFS_KEY),
