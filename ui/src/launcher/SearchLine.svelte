@@ -27,7 +27,9 @@
   });
 
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter') onSubmit(query);
+    // A held Enter auto-repeats keydown; only the press submits, or the repeat
+    // that lands after a fast answer finds the emptied line ("Enter a query.").
+    if (event.key === 'Enter' && !event.repeat) onSubmit(query);
   }
 
   // Every show of the launcher (⌥Space, the tray, single-instance) ends in

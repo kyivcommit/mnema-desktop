@@ -1096,3 +1096,22 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
     cleanup();
   }
 });
+
+// Owner, live run 2026-10-08: after an answer the line cleared and "Enter a
+// query." appeared, as if Enter had been pressed on an empty line. A held key
+// auto-repeats keydown with `repeat: true`; the repeat after the answer saw the
+// emptied line.
+test('no blank-query message follows an answer, and a real Enter on an empty line still shows it', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  await submit('how much?');
+  await screen.findByTestId('query-echo');
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await waitFor(() => expect(box.value).toBe(''));
+  // The key is still held: the auto-repeat is not a second submission.
+  await fireEvent.keyDown(box, { key: 'Enter', repeat: true });
+  expect(screen.queryByRole('alert')).toBeNull();
+  // A new press on the empty line is.
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  expect((await screen.findByRole('alert')).textContent).toBe('Enter a query.');
+});
