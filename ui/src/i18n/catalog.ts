@@ -31,7 +31,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
-  | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
+  | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
@@ -344,7 +344,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
-    query_blank: 'Введіть запит.',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
@@ -1204,7 +1203,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
-    query_blank: 'Enter a query.',
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',

@@ -126,13 +126,6 @@ async function submit(value: string) {
   await fireEvent.keyDown(box, { key: 'Enter' });
 }
 
-test('a blank query never reaches ask and shows the blank message', async () => {
-  render(Launcher);
-  await submit('   ');
-  expect(askCalls()).toHaveLength(0); // model_settings may run on mount; ask must not
-  expect(screen.getByRole('alert').textContent).toMatch(/query|запит/i);
-});
-
 test('a query that refuses shows the F message', async () => {
   mockBackend(refusedNoCandidates);
   render(Launcher);
@@ -409,33 +402,33 @@ test('a freshly mounted launcher shows no cards at all (state A)', () => {
 // Enter — which is the half that makes "do not narrow the gate by reason"
 // falsifiable. Anchored on the guard message, which only a completed validation
 // writes (`SearchLine.svelte:46`).
-test('a blank Enter from state B keeps the tree', async () => {
+test('a too-long Enter from state B keeps the tree (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
 
-  await submit('   ');
-  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
+  await submit('x'.repeat(2049));
+  await screen.findByRole('alert');
 
   expect(screen.getByTestId('card-tree')).toBeTruthy();
 });
 
-test('a blank Enter from state B does not shut a hand-opened folder', async () => {
+test('a too-long Enter from state B does not shut a hand-opened folder (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
 
-  await submit('   ');
-  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
+  await submit('x'.repeat(2049));
+  await screen.findByRole('alert');
 
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a blank Enter from state B keeps the answer and source cards', async () => {
+test('a too-long Enter from state B keeps the answer and source cards (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
   const before = screen.getByTestId('card-centre').textContent;
 
-  await submit('   ');
-  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
+  await submit('x'.repeat(2049));
+  await screen.findByRole('alert');
 
   expect(screen.getByTestId('card-centre').textContent).toBe(before);
   expect(screen.getByTestId('card-source')).toBeTruthy();
@@ -1097,25 +1090,23 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
   }
 });
 
-// Owner, live run 2026-10-08: Enter pressed twice - the first submitted and
-// cleared the line, the second hit the empty line and put "Enter a query."
-// under a visible answer.
-test('Enter on an empty line says nothing while an answer is shown, and shows the message when nothing is', async () => {
+// Owner, live run 2026-10-08: a second Enter on the emptied line put a hint
+// under a visible answer. Owner ruling: no hint at all; Enter on an empty line
+// does nothing in any state.
+test('Enter on an empty line does nothing: nothing on screen, or an answer on screen', async () => {
   mockBackend(generated);
   render(Launcher);
   const box = screen.getByRole('textbox') as HTMLInputElement;
-  // Nothing on screen: the message (the other direction).
   await fireEvent.keyDown(box, { key: 'Enter' });
-  expect((await screen.findByRole('alert')).textContent).toBe('Enter a query.');
-  const asks = askCalls().length;
+  await submit('   ');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls()).toHaveLength(0);
   await submit('how much?');
   await screen.findByTestId('query-echo');
   await waitFor(() => expect(box.value).toBe(''));
-  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-  // Answer shown: a second Enter (and a held key's repeat) does nothing at all.
   await fireEvent.keyDown(box, { key: 'Enter' });
   await fireEvent.keyDown(box, { key: 'Enter', repeat: true });
   expect(screen.queryByRole('alert')).toBeNull();
-  expect(askCalls().length).toBe(asks + 1);
+  expect(askCalls()).toHaveLength(1);
   expect(screen.getByTestId('query-echo')).toBeTruthy();
 });

@@ -12,12 +12,11 @@
   const placeholder = $derived.by(() => { void $locale; return t('search_placeholder'); });
 
   // Every message is driven by the machine's state, not a local guard — so a
-  // rejected `ask` (askFailed) is as visible as a blank query.
+  // rejected `ask` (askFailed) is as visible as a too-long one.
   // void $locale so the text follows a live language switch.
   const errorText = $derived.by(() => {
     void $locale;
     if (state.kind !== 'error') return '';
-    if (state.reason === 'blank') return t('query_blank');
     if (state.reason === 'tooLong') return t('query_too_long', { limit: MAX_ASK_QUERY });
     return t('query_failed'); // askFailed
   });
@@ -28,7 +27,7 @@
 
   function onKeydown(event: KeyboardEvent) {
     // A held Enter auto-repeats keydown; only the press submits, or the repeat
-    // that lands after a fast answer finds the emptied line ("Enter a query.").
+    //, or a failed answer (which keeps the query) would be asked again by the repeat.
     if (event.key === 'Enter' && !event.repeat) onSubmit(query);
   }
 

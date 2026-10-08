@@ -36,7 +36,7 @@ export type LauncherState =
   | { kind: 'generated'; query: string; answer: Extract<AskAnswer, { kind: 'generated' }> } // B (PR 6)
   | { kind: 'citationsOnly'; query: string; answer: Extract<AskAnswer, { kind: 'citationsOnly' }> } // E (PR 6)
   | { kind: 'refused'; reason: Refusal } // F
-  | { kind: 'error'; reason: 'blank' | 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
+  | { kind: 'error'; reason: 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
 
 // §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when a provider
 // key is present AND the index has a chosen embedding model. A stored key with no chosen model

@@ -14,7 +14,7 @@
   let pinned = $state(false);
   let launcherState = $state<LauncherState>({ kind: 'idle' });
   // The answer a hot launcher was showing when the current submit started. Any
-  // error puts it back (a blank or too-long line, a failed ask): the error is
+  // error puts it back (a too-long line, a failed ask): the error is
   // told in the search line, and the person keeps what they were reading. Null
   // when there was none, and for every submit that did not start from a hot
   // launcher's answer.
@@ -101,10 +101,8 @@
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
-    // Enter on the emptied line while an answer is up (a second press after the
-    // first submitted) is not a mistake worth a message: nothing happens.
-    if (raw.trim() === '' && heat === 'hot'
-      && (cardsState.kind === 'generated' || cardsState.kind === 'citationsOnly')) return;
+    // Enter on an empty line does nothing, in every state (owner, 2026-10-08).
+    if (raw.trim() === '') return;
     // What is on screen, not what the machine holds: after an error the
     // machine says `error` while the restored answer is still showing, and a
     // second error must restore that same answer again.

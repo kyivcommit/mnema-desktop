@@ -17,19 +17,6 @@ test('Enter emits onSubmit with the raw query (the owner validates, not the line
   expect(onSubmit).toHaveBeenCalledWith('hello');
 });
 
-test('state error(blank) shows the blank message, not a refusal', () => {
-  const { container } = render(SearchLine, { state: { kind: 'error', reason: 'blank' } as LauncherState, onSubmit: vi.fn() });
-  // The role is a claim here, not the way in: the element is reached by its
-  // class, so the assertion cannot be satisfied by the locator that found it.
-  // Reached by role alone, `role="alert"` survives only while nobody rewrites
-  // the query — a locator is not an assertion.
-  expect(container.querySelector('.guard')!.getAttribute('role')).toBe('alert');
-  // Tightened from /query|запит/i: that also matches query_failed's text, so
-  // it could not tell blank from askFailed apart.
-  expect(screen.getByRole('alert').textContent).toMatch(/enter|введіть/i);
-  expect(screen.queryByRole('status')).toBeNull();
-});
-
 test('state error(tooLong) shows the too-long message with the limit interpolated', () => {
   // The only real-logic error branch (an interpolated placeholder) was
   // untested; if the intl param name ever drifts from MAX_ASK_QUERY,

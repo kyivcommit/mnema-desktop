@@ -208,7 +208,7 @@ test('citationsOnly keeps the tree and draws the centre card and the first passa
 // state, and it is exactly the moment a person retries — losing their folders on
 // the failure they are retrying is C1's defect one gate over.
 test('error keeps the tree and draws neither answer nor source', () => {
-  render(Cards, { ...HOT, state: { kind: 'error', reason: 'blank' }, query: '' });
+  render(Cards, { ...HOT, state: { kind: 'error', reason: 'tooLong' }, query: '' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
@@ -949,7 +949,7 @@ test('a cold launcher draws no side panel and no empty panel, whatever the state
   for (const state of [
     { kind: 'idle' },
     { kind: 'inFlight', query: 'q' },
-    { kind: 'error', reason: 'blank' },
+    { kind: 'error', reason: 'tooLong' },
     stateFromAnswer('q', refusedNoCandidates),
   ] as LauncherState[]) {
     const { unmount } = render(Cards, { heat: 'cold', left: false, right: false, state, query: '' });
