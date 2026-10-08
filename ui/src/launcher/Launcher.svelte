@@ -101,6 +101,10 @@
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
+    // Enter on the emptied line while an answer is up (a second press after the
+    // first submitted) is not a mistake worth a message: nothing happens.
+    if (raw.trim() === '' && heat === 'hot'
+      && (cardsState.kind === 'generated' || cardsState.kind === 'citationsOnly')) return;
     // What is on screen, not what the machine holds: after an error the
     // machine says `error` while the restored answer is still showing, and a
     // second error must restore that same answer again.

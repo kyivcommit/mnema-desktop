@@ -414,7 +414,7 @@ test('a blank Enter from state B keeps the tree', async () => {
   await askAndOpenAFolder();
 
   await submit('   ');
-  await screen.findByRole('alert');
+  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
 
   expect(screen.getByTestId('card-tree')).toBeTruthy();
 });
@@ -424,7 +424,7 @@ test('a blank Enter from state B does not shut a hand-opened folder', async () =
   await askAndOpenAFolder();
 
   await submit('   ');
-  await screen.findByRole('alert');
+  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
 
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
@@ -435,7 +435,7 @@ test('a blank Enter from state B keeps the answer and source cards', async () =>
   const before = screen.getByTestId('card-centre').textContent;
 
   await submit('   ');
-  await screen.findByRole('alert');
+  expect(screen.queryByRole('alert')).toBeNull(); // nothing happens (12.3), so nothing is torn down
 
   expect(screen.getByTestId('card-centre').textContent).toBe(before);
   expect(screen.getByTestId('card-source')).toBeTruthy();
@@ -1097,21 +1097,25 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
   }
 });
 
-// Owner, live run 2026-10-08: after an answer the line cleared and "Enter a
-// query." appeared, as if Enter had been pressed on an empty line. A held key
-// auto-repeats keydown with `repeat: true`; the repeat after the answer saw the
-// emptied line.
-test('no blank-query message follows an answer, and a real Enter on an empty line still shows it', async () => {
+// Owner, live run 2026-10-08: Enter pressed twice - the first submitted and
+// cleared the line, the second hit the empty line and put "Enter a query."
+// under a visible answer.
+test('Enter on an empty line says nothing while an answer is shown, and shows the message when nothing is', async () => {
   mockBackend(generated);
   render(Launcher);
-  await submit('how much?');
-  await screen.findByTestId('query-echo');
   const box = screen.getByRole('textbox') as HTMLInputElement;
-  await waitFor(() => expect(box.value).toBe(''));
-  // The key is still held: the auto-repeat is not a second submission.
-  await fireEvent.keyDown(box, { key: 'Enter', repeat: true });
-  expect(screen.queryByRole('alert')).toBeNull();
-  // A new press on the empty line is.
+  // Nothing on screen: the message (the other direction).
   await fireEvent.keyDown(box, { key: 'Enter' });
   expect((await screen.findByRole('alert')).textContent).toBe('Enter a query.');
+  const asks = askCalls().length;
+  await submit('how much?');
+  await screen.findByTestId('query-echo');
+  await waitFor(() => expect(box.value).toBe(''));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  // Answer shown: a second Enter (and a held key's repeat) does nothing at all.
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  await fireEvent.keyDown(box, { key: 'Enter', repeat: true });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls().length).toBe(asks + 1);
+  expect(screen.getByTestId('query-echo')).toBeTruthy();
 });
