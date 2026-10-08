@@ -159,8 +159,13 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
 /// A stored `"mnema"` on a machine that cannot run the local provider (data
 /// moved to an Intel Mac or an older macOS) reads as OpenRouter, so the person
 /// is not left with no radios and a "download the Mnema models" prompt.
+///
+/// Unit tests take the host as able: their Mnema process is the fake, which
+/// runs on every CI host, and without this a Linux run read the stored choice
+/// as OpenRouter and reached the key store. The host check itself is
+/// `provider_choice_with`'s, tested with both answers.
 pub fn provider_choice(data_dir: &Path) -> crate::provider::ProviderChoice {
-    provider_choice_with(data_dir, mnema_local::available())
+    provider_choice_with(data_dir, cfg!(test) || mnema_local::available())
 }
 
 fn provider_choice_with(data_dir: &Path, mnema_available: bool) -> crate::provider::ProviderChoice {
