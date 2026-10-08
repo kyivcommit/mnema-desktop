@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, type Snippet } from 'svelte';
+  import { onMount, setContext, type Snippet } from 'svelte';
   import { locale, t } from '../i18n';
   import {
     mnemaAvailable, providerChoice, setProviderChoice, localModels, downloadModel, cancelDownload,
@@ -13,6 +13,9 @@
   let { children }: { children?: Snippet } = $props();
 
   let available = $state(false);
+  // The dropdown below IS the section's Provider row (with or without Mnema on
+  // offer), so `Models` leaves its own, disabled, OpenRouter-only one out.
+  setContext('provider-row-owned', true);
   let choice = $state<ProviderChoice>('openRouter');
 
   // `provider.rs`'s `LOCAL_EMBED_MODEL`: the one name both providers embed under.
@@ -105,8 +108,8 @@
   // about) while Mnema is being proposed over some other embedding model.
   let pending = $state<{ count: number } | null>(null);
   let retired = $state<RetiredSpace[] | null>(null);
-  // The radios are native controls the person has already moved by the time a
-  // refusal arrives; re-creating them is how the DOM goes back to `choice`.
+  // The select is a native control the person has already moved by the time a
+  // refusal arrives; re-creating it is how the DOM goes back to `choice`.
   let radioRev = $state(0);
 
   async function commit(next: ProviderChoice, existing: ExistingVectors) {
@@ -161,7 +164,7 @@
   const discardLabel = $derived.by(() => { void $locale; return t('models_embedding_discard'); });
   const keepLabel = $derived.by(() => { void $locale; return t('models_embedding_cancel'); });
   const confirmTitle = $derived.by(() => { void $locale; return t('models_embedding_confirm_title'); });
-  const label = $derived.by(() => { void $locale; return t('provider_choice_label'); });
+  const label = $derived.by(() => { void $locale; return t('models_provider_label'); });
   const openRouterLabel = $derived.by(() => { void $locale; return t('provider_openrouter'); });
   const mnemaLabel = $derived.by(() => { void $locale; return t('provider_mnema'); });
   // Gigabytes as the person reads them: one decimal, in their own language.
@@ -186,14 +189,16 @@
 
 <!-- Adjacent blocks with no whitespace between them: the section's text must read
      the same as before this component wrapped it when Mnema is unavailable. -->
-{#if available}<div class="provider">
-{#key radioRev}
-  <fieldset>
-    <legend>{label}</legend>
-    <label><input type="radio" name="provider" checked={choice === 'openRouter'} onchange={() => choose('openRouter')} />{openRouterLabel}</label>
-    <label><input type="radio" name="provider" checked={choice === 'mnema'} onchange={() => choose('mnema')} />{mnemaLabel}</label>
-  </fieldset>
-{/key}
+<div class="row">
+  <label for="model-provider">{label}</label>
+  {#key radioRev}
+    <select id="model-provider" value={choice} disabled={!available}
+      onchange={(e) => choose(e.currentTarget.value as ProviderChoice)}>
+      <option value="openRouter">{openRouterLabel}</option>
+      {#if available}<option value="mnema">{mnemaLabel}</option>{/if}
+    </select>
+  {/key}
+</div>{#if available}<div class="provider">
 {#if error}<p role="alert">{error}</p>{/if}
 {#if retired}<p>{retiredLabel}</p>{/if}
 {#if pending}
@@ -235,9 +240,6 @@
 </div>{/if}{#if !(available && choice === 'mnema')}{@render children?.()}{/if}
 
 <style>
-  .provider fieldset { display: flex; gap: 16px; border: 0; padding: 0; margin: 0 0 8px; }
-  .provider legend { padding: 0; margin-bottom: 4px; }
-  .provider label { display: flex; gap: 6px; align-items: center; }
   [role='progressbar'] { width: 140px; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
   .fill { display: block; height: 100%; background: var(--accent); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }

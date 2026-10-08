@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
+  // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
+  const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
@@ -1048,12 +1050,14 @@
 </script>
 
 {#if settings}
+  {#if !providerRowOwned}
   <div class="row">
     <label for="model-provider">{providerLabel}</label>
     <select id="model-provider" disabled>
       <option selected>{providerName}</option>
     </select>
   </div>
+  {/if}
   <!-- Step 5, and the review that followed it: the section is grouped by
        subject, and the one sentence a person can act on comes before the ones
        they cannot. The Key group is second, immediately under the provider it

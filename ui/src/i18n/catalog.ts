@@ -35,7 +35,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
-  | 'provider_choice_label' | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
+  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
   | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
@@ -354,7 +354,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
-    provider_choice_label: 'Провайдер',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (локально)',
     provider_mnema_hint: '~3,1 ГБ диска, ~4 ГБ пам\'яті',
@@ -1213,7 +1212,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
-    provider_choice_label: 'Provider',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (local)',
     provider_mnema_hint: '~3.1 GB of disk, ~4 GB of memory',

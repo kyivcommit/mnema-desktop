@@ -75,7 +75,10 @@ async function mount(over: {
   return view;
 }
 
-const MNEMA = { name: 'Mnema (локально)' };
+const MNEMA = 'Mnema (локально)';
+const dropdown = () => screen.getByRole('combobox', { name: 'Провайдер:' }) as HTMLSelectElement;
+const optionNames = () => within(dropdown()).getAllByRole('option').map((o) => o.textContent);
+const pick = (v: string) => fireEvent.change(dropdown(), { target: { value: v } });
 
 beforeEach(() => {
   for (const f of [mnemaAvailable, providerChoice, setProviderChoice, localModels, downloadModel,
@@ -89,12 +92,19 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); setLocale('en'); });
 
-test('hidden when mnema is unavailable', async () => {
+test('the provider is chosen in the Provider dropdown', async () => {
   await mount({ available: false });
-  expect(screen.queryByRole('radio', MNEMA)).toBeNull();
+  // Unavailable: the dropdown offers OpenRouter only.
+  expect(optionNames()).toEqual(['OpenRouter']);
   cleanup();
   await mount({ available: true });
-  expect(await screen.findByRole('radio', MNEMA)).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: MNEMA })).toBeNull();
+  expect(optionNames()).toEqual(['OpenRouter', MNEMA]);
+  expect(dropdown().value).toBe('openRouter');
+  await pick('mnema');
+  await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep'));
+  expect(await screen.findByRole('group', { name: 'Модель відповідей' })).toBeTruthy();
+  expect(dropdown().value).toBe('mnema');
 });
 
 test('choosing mnema hides the key field', async () => {
@@ -102,12 +112,12 @@ test('choosing mnema hides the key field', async () => {
   // Both directions: under OpenRouter the key field is there and the hint is not.
   expect(screen.getByLabelText('Ключ:')).toBeTruthy();
   expect(screen.queryByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeNull();
-  await fireEvent.click(await screen.findByRole('radio', MNEMA));
+  await pick('mnema');
   await waitFor(() => expect(screen.queryByLabelText('Ключ:')).toBeNull());
   expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep');
   expect(screen.getByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeTruthy();
   // And back: the key field returns with the choice.
-  await fireEvent.click(screen.getByRole('radio', { name: 'OpenRouter' }));
+  await pick('openRouter');
   await waitFor(() => expect(screen.getByLabelText('Ключ:')).toBeTruthy());
   expect(setProviderChoice).toHaveBeenLastCalledWith('openRouter', 'keep');
 });
@@ -190,14 +200,14 @@ test('green dot only when both ready', async () => {
 
 test('switching between bge-m3 providers asks no reindex', async () => {
   await mount({ settings: settings('baai/bge-m3', 120) });
-  await fireEvent.click(await screen.findByRole('radio', MNEMA));
+  await pick('mnema');
   await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep'));
   expect(screen.queryByText('Змінити модель ембедингу?')).toBeNull();
 });
 
 test('switching from another embedding model asks first, and discards only on yes', async () => {
   await mount({ settings: settings('openai/text-embedding-3-small', 42) });
-  await fireEvent.click(await screen.findByRole('radio', MNEMA));
+  await pick('mnema');
   expect(await screen.findByText('Змінити модель ембедингу?')).toBeTruthy();
   // The existing count-based sentence, and the existing sentence about the loss.
   expect(screen.getByText(/42 ембединги в усіх векторних просторах/)).toBeTruthy();
@@ -211,7 +221,7 @@ test('switching from another embedding model asks first, and discards only on ye
   expect(screen.getByLabelText('Ключ:')).toBeTruthy();
   // Yes retires the old space, and says how much went.
   setProviderChoice.mockResolvedValueOnce({ choice: 'mnema', retired: [{ spaceId: 1, embeddedChunks: 42 }] });
-  await fireEvent.click(screen.getByRole('radio', MNEMA));
+  await pick('mnema');
   await fireEvent.click(await screen.findByRole('button', { name: 'Відкинути ембединги' }));
   await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'discard'));
   expect(await screen.findByText('Зміна відкинула 42 ембединги.')).toBeTruthy();
