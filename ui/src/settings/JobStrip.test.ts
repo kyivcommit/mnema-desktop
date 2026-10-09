@@ -847,6 +847,11 @@ test('an embedding skipped for no key, no model, or a store that did not answer 
     'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
   );
 
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'localModels' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: моделі Mnema ще не завантажені — завантажте їх у налаштуваннях моделей. Пошук по словах уже працює.',
+  );
+
   await emit(ended(
     { embedding: { kind: 'skipped', why: { kind: 'storeUnavailable', message: 'locked' } }, endedIn: 'embedding' },
   ));

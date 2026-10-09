@@ -127,7 +127,7 @@ impl ScanDeps {
         Self {
             key: std::sync::Arc::new(move || match provider.endpoint() {
                 Ok(endpoint) => Ok(Some(endpoint)),
-                Err(Error::NoKey | Error::ProviderNotReady) => Ok(None),
+                Err(Error::NoKey) => Ok(None),
                 Err(e) => Err(e),
             }),
             embed: std::sync::Arc::new(move |db, base, key, cancel, on_progress| {
@@ -882,6 +882,13 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps) {
         // nothing it was allowed to do next.
         Ok(None) => {
             skip_embedding(slot, &job_db, SkipWhy::NoKey);
+            return;
+        }
+        // Mnema chosen and its models not downloaded: as ordinary as a fresh
+        // installation without a key, but the person's next step is the
+        // download rows, not a key field.
+        Err(Error::ProviderNotReady) => {
+            skip_embedding(slot, &job_db, SkipWhy::LocalModels);
             return;
         }
         // The store would not answer at all: a locked keychain, an absent
@@ -1682,6 +1689,11 @@ mod tests {
         Ok(None)
     }
 
+    /// The local provider chosen, its models not downloaded.
+    fn local_models_not_ready() -> Result<Option<crate::provider::Endpoint>, Error> {
+        Err(Error::ProviderNotReady)
+    }
+
     /// A credential store that will not answer at all.
     ///
     /// The empty reference is `tests/support/fixture.rs`'s own trick, used here
@@ -2356,6 +2368,33 @@ mod tests {
             "the phase was announced only once it had something to count, so a \
              surface drew a reading bar for the whole of the key read: {phases:?}"
         );
+    }
+
+    /// Mnema chosen, models not downloaded: the scan reads every folder and says so,
+    /// without sending the person to a key field Mnema does not have.
+    #[test]
+    fn local_models_not_downloaded_is_reported_as_such_not_as_no_key() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let (deps, calls) =
+            deps_counting_embeds(local_models_not_ready, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+
+        let report = report_of(&settled);
+        assert_eq!(
+            report.embedding,
+            EmbedOutcome::Skipped {
+                why: SkipWhy::LocalModels
+            },
+            "Mnema without its models must not tell a person to enter a key: {report:?}"
+        );
+        assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// 🔴 A store that will not answer is not a store with no key in it.

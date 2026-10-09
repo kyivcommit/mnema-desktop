@@ -107,7 +107,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_root_volume_missing' | 'indexing_root_message' | 'indexing_root_cancelled'
   | 'indexing_resume' | 'indexing_retry'
   | 'scanning_scan' | 'scanning_incomplete' | 'scanning_continue_embedding'
-  | 'indexing_note_no_key' | 'indexing_note_no_model'
+  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_local_models'
   | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
   | 'indexing_index_never'
@@ -960,6 +960,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // rather than corrected to name all of them.
     indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
     indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
+    indexing_note_local_models: 'Пошук за змістом не вмикали: моделі Mnema ще не завантажені — завантажте їх у налаштуваннях моделей. Пошук по словах уже працює.',
     indexing_cancel: 'Зупинити',
     // §9.3, PR 9 Task 6 — the Scanning SECTION (called Indexing before Task
     // 8), which says what the index holds. Every key here is
@@ -1390,6 +1391,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     scanning_continue_embedding: 'Continue embedding',
     indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search already works.',
     indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
+    indexing_note_local_models: 'Search by meaning was not started: the Mnema models are not downloaded yet — download them in the model settings. Word search already works.',
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',

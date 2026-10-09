@@ -643,10 +643,11 @@ export type Phase =
 // group, translate or act on. `storeUnavailable` carries a message because that
 // one IS a diagnostic — the credential store refused to answer at all — and
 // there is no closed vocabulary for what an operating system says then.
-export const SKIP_WHY_KINDS = ['noKey', 'noModel', 'storeUnavailable'] as const;
+export const SKIP_WHY_KINDS = ['noKey', 'noModel', 'localModels', 'storeUnavailable'] as const;
 export type SkipWhy =
   | { kind: 'noKey' }
   | { kind: 'noModel' }
+  | { kind: 'localModels' }
   | { kind: 'storeUnavailable'; message: string };
 
 // What the embedding phase did, if it got that far.

@@ -288,7 +288,12 @@ pub enum EmbedOutcome {
 pub enum SkipWhy {
     NoKey,
     NoModel,
-    StoreUnavailable { message: String },
+    /// The local provider is chosen and its models are not downloaded: nothing
+    /// to do with a key, so the person is sent to the download rows instead.
+    LocalModels,
+    StoreUnavailable {
+        message: String,
+    },
 }
 
 /// What one watched folder's reading came to.

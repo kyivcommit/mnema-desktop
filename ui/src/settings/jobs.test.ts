@@ -186,7 +186,7 @@ test('ENDED_IN is exactly what scan_state.rs defines, in the spelling serde send
 // the union it is supposed to enumerate.
 test('SKIP_WHY_KINDS is exactly what scan_state.rs defines, and covers the union', () => {
   expect([...SKIP_WHY_KINDS].sort()).toEqual(rustEnumVariants(SCAN_STATE_RS, 'SkipWhy').map(camelOf).sort());
-  const covered: Record<SkipWhy['kind'], true> = { noKey: true, noModel: true, storeUnavailable: true };
+  const covered: Record<SkipWhy['kind'], true> = { noKey: true, noModel: true, localModels: true, storeUnavailable: true };
   expect(Object.keys(covered).sort()).toEqual([...SKIP_WHY_KINDS].sort());
 });
 
