@@ -472,6 +472,15 @@ impl AppState {
         self.provider().endpoint_as(choice)
     }
 
+    /// [`crate::provider::Provider::question_endpoint_as`]: a question's wait
+    /// for the local models is bounded.
+    pub fn question_endpoint_as(
+        &self,
+        choice: crate::provider::ProviderChoice,
+    ) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().question_endpoint_as(choice)
+    }
+
     /// How the answer to `question` should be voiced: the server's prompt for
     /// OpenRouter; for Mnema, the question's language, falling back to the
     /// previous question's and then the system's.

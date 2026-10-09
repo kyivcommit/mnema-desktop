@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use mnema_local::{ModelId, ModelState, Sidecar, Store};
 use serde::{Deserialize, Serialize};
@@ -83,15 +83,18 @@ pub struct Local {
     shown: AtomicU64,
     /// The launcher is up (or was, not yet cold): the models should be in
     /// memory. A process that restarted holds none, so [`Local::endpoint`]
-    /// loads them again whenever this is set and `loaded_pid` is not the
+    /// loads them again whenever this is set and [`Loads::loaded`] is not the
     /// running process.
     want: AtomicBool,
-    loaded_pid: Mutex<u32>,
+    loads: Arc<(Mutex<Loads>, Condvar)>,
     cancel: [AtomicBool; 2],
     /// Whether this machine can run the process at all ([`mnema_local::available`]
     /// unless set otherwise). The one answer both the stored choice and the
     /// window's radios read, so a test can stand on any host as either kind.
     available: bool,
+    /// How long a question waits for a load before it answers with the
+    /// passages alone ([`LOCAL_CHAT_TIMEOUT`] unless set otherwise).
+    question_wait: Duration,
 }
 
 impl Local {
@@ -104,10 +107,18 @@ impl Local {
             cold: AtomicBool::new(false),
             shown: AtomicU64::new(0),
             want: AtomicBool::new(false),
-            loaded_pid: Mutex::new(0),
+            loads: Arc::default(),
             cancel: [AtomicBool::new(false), AtomicBool::new(false)],
             available: mnema_local::available(),
+            question_wait: LOCAL_CHAT_TIMEOUT,
         }
+    }
+
+    /// Overrides [`LOCAL_CHAT_TIMEOUT`] as a question's wait for a load, so a
+    /// test of a hung load does not pay a minute.
+    pub fn with_question_wait(mut self, wait: Duration) -> Self {
+        self.question_wait = wait;
+        self
     }
 
     /// Overrides the host check: a hook for tests and embedders, whose fake or
@@ -136,12 +147,19 @@ impl Local {
             .all(|id| self.store.state(id) == ModelState::Ready)
     }
 
+    /// [`Local::endpoint_within`] with no limit on the wait for a load: what
+    /// everything but a question uses (a scan, the show's own load).
+    fn endpoint(&self) -> Result<Endpoint, Error> {
+        self.endpoint_within(None)
+    }
+
     /// The running process's endpoint, starting it on first use, and loaded
     /// when the launcher is up. [`on_show`] sets `want` before its thread
-    /// exists, and `endpoint` holds `loaded_pid` across the load, so a
-    /// question asked the instant the launcher opens either waits for that load
-    /// or performs it itself: never a chat before the models are in.
-    fn endpoint(&self) -> Result<Endpoint, Error> {
+    /// exists, and a caller that finds a load in flight waits for it (see
+    /// [`Local::ensure_loaded`]), so a question asked the instant the launcher
+    /// opens either waits for that load or starts it itself: never a chat
+    /// before the models are in.
+    fn endpoint_within(&self, wait: Option<Duration>) -> Result<Endpoint, Error> {
         let sidecar = self.process()?;
         // The supervisor's restart happens inside this call, so what follows
         // sees the process that will answer.
@@ -162,18 +180,73 @@ impl Local {
             return Err(e.into());
         }
         if self.want.load(Ordering::SeqCst) {
-            // Held across the load: two callers cannot load the same process
-            // twice, and the second finds it already done.
-            let mut loaded = self
-                .loaded_pid
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *loaded != sidecar.pid() {
-                sidecar.load()?;
-                *loaded = sidecar.pid();
-            }
+            self.ensure_loaded(&sidecar, wait)?;
         }
         Ok(sidecar.endpoint()?)
+    }
+
+    /// Loads the models into `sidecar` unless they are in. One load at a time,
+    /// on a thread of its own: a second caller waits on the load in flight
+    /// rather than starting another, and a caller with a `wait` can stop
+    /// waiting. `wait` runs from the moment the load began, not from the call,
+    /// so once a hung load has cost one question its wait, the next question
+    /// hears [`Error::LocalLoading`] at once instead of waiting it out again.
+    /// The load itself goes on to [`Sidecar::load`]'s own limit (a cold disk is
+    /// slow); when it ends, the next caller finds the models in, or starts a
+    /// fresh load if it failed. `None` waits for the end.
+    fn ensure_loaded(&self, sidecar: &Arc<Sidecar>, wait: Option<Duration>) -> Result<(), Error> {
+        // Read before the lock: during a restart `pid` waits on the process's
+        // own lock, and no caller may wait on that while holding this one.
+        let pid = sidecar.pid();
+        let (lock, done) = &*self.loads;
+        let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if st.loaded == pid {
+                return Ok(());
+            }
+            let began = match st.running {
+                Some(began) => began,
+                None => {
+                    st.attempt += 1;
+                    let began = Instant::now();
+                    st.running = Some(began);
+                    let (attempt, loads, sidecar) =
+                        (st.attempt, Arc::clone(&self.loads), Arc::clone(sidecar));
+                    std::thread::spawn(move || {
+                        let result = sidecar.load();
+                        let (lock, done) = &*loads;
+                        let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                        if result.is_ok() {
+                            st.loaded = pid;
+                        }
+                        st.running = None;
+                        st.last = Some((attempt, result));
+                        done.notify_all();
+                    });
+                    began
+                }
+            };
+            let mine = st.attempt;
+            while st.last.as_ref().is_none_or(|(n, _)| *n < mine) {
+                st = match wait {
+                    None => done.wait(st).unwrap_or_else(PoisonError::into_inner),
+                    Some(wait) => {
+                        let left = (began + wait).saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            return Err(Error::LocalLoading);
+                        }
+                        done.wait_timeout(st, left)
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0
+                    }
+                };
+            }
+            if let Some((n, Err(e))) = &st.last
+                && *n == mine
+            {
+                return Err(e.clone().into());
+            }
+        }
     }
 
     /// The process, started on first use. Held under the lock for the start so
@@ -200,11 +273,16 @@ impl Local {
     }
 
     /// The models are no longer in memory (or no longer all of them).
+    /// Waits out a load in flight first, as the lock held across the load
+    /// once made it: a load ending after this would mark as loaded what the
+    /// caller is about to unload.
     fn forget_loaded(&self) {
-        *self
-            .loaded_pid
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0;
+        let (lock, done) = &*self.loads;
+        let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        while st.running.is_some() {
+            st = done.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+        st.loaded = 0;
     }
 
     /// Whether a process this provider already started still answers —
@@ -245,6 +323,19 @@ impl Local {
     }
 }
 
+/// The models' load into the process, shared by every caller that needs it.
+#[derive(Default)]
+struct Loads {
+    /// The process whose models are in memory; 0 for none.
+    loaded: u32,
+    /// When the load in flight began; `None` while none is.
+    running: Option<Instant>,
+    /// Numbers the loads, so a waiter tells its own load's end from a later one's.
+    attempt: u64,
+    /// How the last load to end ended, and its number.
+    last: Option<(u64, Result<(), mnema_local::Error>)>,
+}
+
 /// Everything [`endpoint`] reads, owned, so a job thread can carry it without
 /// `AppState`.
 #[derive(Clone)]
@@ -279,6 +370,20 @@ impl Provider {
             &self.openrouter_base,
             &self.credential_ref,
             &self.local,
+            None,
+        )
+    }
+
+    /// [`Provider::endpoint_as`] for a question: under Mnema it waits for a
+    /// load no longer than [`LOCAL_CHAT_TIMEOUT`], then hears
+    /// [`Error::LocalLoading`] and answers with the passages.
+    pub fn question_endpoint_as(&self, choice: ProviderChoice) -> Result<Endpoint, Error> {
+        endpoint(
+            choice,
+            &self.openrouter_base,
+            &self.credential_ref,
+            &self.local,
+            Some(self.local.question_wait),
         )
     }
 }
@@ -288,6 +393,7 @@ pub fn endpoint(
     openrouter_base: &str,
     credential_ref: &str,
     local: &Local,
+    load_wait: Option<Duration>,
 ) -> Result<Endpoint, Error> {
     match choice {
         ProviderChoice::OpenRouter => {
@@ -302,7 +408,7 @@ pub fn endpoint(
             if !local.models_ready() {
                 return Err(Error::ProviderNotReady);
             }
-            local.endpoint()
+            local.endpoint_within(load_wait)
         }
     }
 }

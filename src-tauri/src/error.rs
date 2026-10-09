@@ -366,6 +366,10 @@ pub enum Error {
     /// The local model process or its files failed.
     #[error("{0}")]
     Local(#[from] mnema_local::Error),
+    /// A question waited its limit for the local models to load, and the load
+    /// had not finished. The load goes on in the background.
+    #[error("the local models are still loading")]
+    LocalLoading,
     /// [`crate::models::set_key`] was handed an empty string.
     ///
     /// Kept apart from [`Error::NoKey`], which is about the **store** and not

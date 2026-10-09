@@ -17,7 +17,7 @@ pub enum ModelId {
     Chat,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     #[error("the local model process was not started")]
     NotStarted,

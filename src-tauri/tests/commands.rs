@@ -12514,6 +12514,92 @@ fn mnema_chat_gets_the_local_timeout() {
     assert_eq!(answer["kind"], json!("generated"), "{answer}");
 }
 
+/// How many processes the fake logged starting.
+fn spawns(log: &std::path::Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("spawn "))
+        .count()
+}
+
+/// Whether `answer` is the passages alone, with a `failed` reason that does
+/// not carry the process's stderr into the window.
+fn passages_with_a_reason(answer: &Result<Value, Value>) -> bool {
+    matches!(answer, Ok(a) if a["kind"] == json!("citationsOnly")
+        && a["why"]["kind"] == json!("failed")
+        && a["why"]["reason"].as_str().is_some_and(|r| !r.is_empty() && !r.contains("fake-mlx"))
+        && a["citations"].as_array().is_some_and(|c| !c.is_empty()))
+}
+
+/// Task 14.1: a local process that cannot start costs the answer, not the
+/// passages the text arm already found (D171's shape), and one ask starts it
+/// once — with the content arm on (the process is first asked for in
+/// retrieval) and off (first asked for by the chat stage).
+#[test]
+fn a_local_process_that_cannot_start_still_gives_the_passages() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    scan_to_completion(fx.app.handle());
+    let healthy = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    assert_eq!(healthy["kind"], json!("generated"), "{healthy}");
+
+    let log = dir.path().join("broken.log");
+    let log_env = log.display().to_string();
+    fx.app
+        .state::<AppState>()
+        .install_local(support::ready_local(
+            dir.path(),
+            &[("FAKE_MLX_FAIL_START", "1"), ("FAKE_MLX_LOG", &log_env)],
+        ));
+    for content in [true, false] {
+        call(
+            &fx.webview,
+            "set_search_arms",
+            json!({ "text": true, "content": content }),
+        )
+        .expect("set_search_arms");
+        let _ = std::fs::remove_file(&log);
+        let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+        assert!(
+            passages_with_a_reason(&answer),
+            "content arm {content}: {answer:?}"
+        );
+        assert_eq!(spawns(&log), 1, "content arm {content}: one ask, one start");
+    }
+}
+
+/// Task 14.2: a load that does not finish holds a question no longer than the
+/// question's wait, and the next question does not wait it out again.
+#[test]
+fn a_hung_load_gives_the_passages_within_the_question_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    scan_to_completion(fx.app.handle());
+    let state = fx.app.state::<AppState>();
+    state.install_local(
+        support::ready_local(dir.path(), &[("FAKE_MLX_LOAD_MS", "20000")])
+            .with_question_wait(Duration::from_secs(2)),
+    );
+    let _loading = mnema_desktop::provider::on_show(&state);
+
+    let asked = std::time::Instant::now();
+    let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+    let took = asked.elapsed();
+    assert!(
+        passages_with_a_reason(&answer) && took < Duration::from_secs(6),
+        "after {took:?}: {answer:?}"
+    );
+
+    let asked = std::time::Instant::now();
+    let again = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+    let took = asked.elapsed();
+    assert!(
+        passages_with_a_reason(&again) && took < Duration::from_secs(1),
+        "the second question, after {took:?}: {again:?}"
+    );
+}
+
 /// The batch sizes, and the most requests in flight at once, the fake saw for
 /// `/v1/embeddings` (from its `start`/`input`/`end` lines).
 fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {

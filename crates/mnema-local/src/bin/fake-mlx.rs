@@ -3,6 +3,7 @@
 //! prints `PORT <n>` first, answers 401 without the bearer token, and exits when
 //! stdin closes. Knobs (env): `FAKE_MLX_DIE_AFTER=<n>` (authorised requests), `FAKE_MLX_HANG=1`,
 //! `FAKE_MLX_CHAT_MS`, `FAKE_MLX_LOAD_MS`, `FAKE_MLX_IGNORE_STDIN=1`,
+//! `FAKE_MLX_FAIL_START=1` (logs its spawn, then exits before `PORT`),
 //! `FAKE_MLX_LOG=<file>`.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -33,6 +34,11 @@ fn main() {
     if token.is_empty() {
         eprintln!("fake-mlx: MNEMA_MLX_TOKEN is empty");
         std::process::exit(2);
+    }
+    if std::env::var("FAKE_MLX_FAIL_START").is_ok() {
+        log(&format!("spawn {}", std::process::id()));
+        eprintln!("fake-mlx: failing at start");
+        std::process::exit(1);
     }
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     println!("PORT {}", listener.local_addr().unwrap().port());

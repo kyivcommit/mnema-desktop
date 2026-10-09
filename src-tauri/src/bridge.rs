@@ -1089,6 +1089,9 @@ enum ChatReadiness {
     NoKey,
     /// A model is set but the credential store could not be read.
     KeyUnreadable,
+    /// The local process failed to start or to load, or a load outlasted the
+    /// question's wait: the passages are still this machine's to give (D171).
+    Unavailable(NoAnswer),
     /// A model and an endpoint: the only state that opens the generation
     /// branch. Under Mnema the model is always [`crate::provider::LOCAL_CHAT_MODEL`]
     /// — the stored name is OpenRouter's and means nothing to the local process.
@@ -1116,12 +1119,15 @@ fn chat_readiness(
     let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
         return Ok(ChatReadiness::NoModel);
     };
-    match state.endpoint_as(choice) {
+    match state.question_endpoint_as(choice) {
         Ok(endpoint) => Ok(ChatReadiness::Ready { model, endpoint }),
         // The local models not downloaded is the local "no key": citations
         // only, nothing failed.
         Err(Error::NoKey | Error::ProviderNotReady) => Ok(ChatReadiness::NoKey),
         Err(Error::Secrets(_)) => Ok(ChatReadiness::KeyUnreadable),
+        Err(e @ (Error::Local(_) | Error::LocalLoading)) => {
+            Ok(ChatReadiness::Unavailable(NoAnswer::from_local(&e)))
+        }
         Err(e) => Err(e),
     }
 }
@@ -1160,8 +1166,8 @@ fn retrieve(
     limit: i64,
     choice: crate::provider::ProviderChoice,
 ) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport, Option<NoAnswer>), Error> {
-    let (provider, content_failure) = if arms.content {
-        match state.endpoint_as(choice) {
+    let (provider, content_failure, local_failure) = if arms.content {
+        match state.question_endpoint_as(choice) {
             // `query_base`: under Mnema the question's embedding takes the
             // process's priority route, ahead of a scan's batches; under
             // OpenRouter it is the same base as everything else.
@@ -1171,12 +1177,18 @@ fn retrieve(
                     key: endpoint.token,
                 }),
                 None,
+                None,
             ),
-            Err(Error::NoKey | Error::ProviderNotReady) => (None, None),
-            Err(e) => (None, Some(e.to_string())),
+            Err(Error::NoKey | Error::ProviderNotReady) => (None, None, None),
+            // The local process failing is also why chat cannot run: `ask`
+            // reads it from here rather than starting the process again.
+            Err(e @ (Error::Local(_) | Error::LocalLoading)) => {
+                (None, Some(e.to_string()), Some(NoAnswer::from_local(&e)))
+            }
+            Err(e) => (None, Some(e.to_string()), None),
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let (content_query, content_override, unreachable) =
@@ -1217,7 +1229,12 @@ fn retrieve(
             }
 
             let content = content_override.unwrap_or_else(|| found.content.into());
-            Ok((hits, found.text.into(), content, unreachable))
+            Ok((
+                hits,
+                found.text.into(),
+                content,
+                unreachable.or(local_failure),
+            ))
         })
     })
 }
@@ -1360,6 +1377,17 @@ impl NoAnswer {
         }
     }
 
+    /// The local process could not serve the question. A fixed sentence, not
+    /// the error's: a crash carries the process's stderr, which the window
+    /// does not show.
+    fn from_local(e: &Error) -> Self {
+        let reason = match e {
+            Error::LocalLoading => e.to_string(),
+            _ => "the local model process failed".to_string(),
+        };
+        Self::Failed { reason }
+    }
+
     /// Whether this answer is evidence that the provider cannot be reached
     /// right now — the cached "ok" behind the launcher's cloud is then stale
     /// (D171 review, finding 2).
@@ -1416,13 +1444,34 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
     let choice = state.provider_choice();
     let (hits, text, content, unreachable) = retrieve(&state, &query, arms, ASK_TOP_K, choice)?;
 
-    let ChatReadiness::Ready { model, endpoint } = chat_readiness(&state, choice)? else {
-        return Ok(AskAnswer::CitationsOnly {
-            citations: hits,
-            why: NoAnswer::NotAsked,
-            text,
-            content,
-        });
+    // Under Mnema the chat model is fixed, so readiness would only ask for the
+    // process again — and a process retrieval already saw fail would be
+    // started a second time in the same ask.
+    let readiness = match &unreachable {
+        Some(why) if choice == crate::provider::ProviderChoice::Mnema => {
+            ChatReadiness::Unavailable(why.clone())
+        }
+        _ => chat_readiness(&state, choice)?,
+    };
+    let (model, endpoint) = match readiness {
+        ChatReadiness::Ready { model, endpoint } => (model, endpoint),
+        ChatReadiness::Unavailable(why) => {
+            state.forget_provider_status();
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why,
+                text,
+                content,
+            });
+        }
+        ChatReadiness::NoModel | ChatReadiness::NoKey | ChatReadiness::KeyUnreadable => {
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why: NoAnswer::NotAsked,
+                text,
+                content,
+            });
+        }
     };
 
     // The query's embedding already failed on the way to the provider, and
