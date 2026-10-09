@@ -571,6 +571,11 @@ test('a provider failure leads the banner with its cause (D171)', async () => {
     [{ ...citationsOnly, why: { kind: 'failed', reason: 'the provider answered 503' } } as AskAnswer,
       'The provider returned an error (the provider answered 503). The search found 2 passages.',
       'Провайдер повернув помилку (the provider answered 503). Пошук знайшов 2 уривки.'],
+    // Task 14.2: a local load still in flight is not an error, and is said in
+    // each locale's own words, not as an English reason inside the line.
+    [{ ...citationsOnly, why: { kind: 'localLoading' } } as AskAnswer,
+      'The local models are still loading. Try again in a minute. The search found 2 passages.',
+      'Локальні моделі ще завантажуються. Спробуйте за хвилину. Пошук знайшов 2 уривки.'],
     [{ ...emptyCitationsOnly, why: { kind: 'offline' } } as AskAnswer,
       'Could not reach the provider. Check the network.',
       "Немає зв'язку з провайдером. Перевірте мережу."],

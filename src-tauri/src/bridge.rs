@@ -1183,7 +1183,7 @@ fn retrieve(
             // The local process failing is also why chat cannot run: `ask`
             // reads it from here rather than starting the process again.
             Err(e @ (Error::Local(_) | Error::LocalLoading)) => {
-                (None, Some(e.to_string()), Some(NoAnswer::from_local(&e)))
+                (None, Some(local_reason(&e)), Some(NoAnswer::from_local(&e)))
             }
             Err(e) => (None, Some(e.to_string()), None),
         }
@@ -1351,6 +1351,10 @@ pub enum NoAnswer {
     /// model it no longer has. `reason` is that error's own sentence, which
     /// `mnema_provider::Error` guarantees never carries the key.
     Failed { reason: String },
+    /// Under Mnema, the question waited its limit for the local models to load
+    /// and the load had not finished; it goes on in the background. Not
+    /// `Failed`: nothing failed, and the launcher says so in its own words.
+    LocalLoading,
 }
 
 impl NoAnswer {
@@ -1377,15 +1381,17 @@ impl NoAnswer {
         }
     }
 
-    /// The local process could not serve the question. A fixed sentence, not
-    /// the error's: a crash carries the process's stderr, which the window
-    /// does not show.
+    /// The local process could not serve the question.
     fn from_local(e: &Error) -> Self {
-        let reason = match e {
-            Error::LocalLoading => e.to_string(),
-            _ => "the local model process failed".to_string(),
-        };
-        Self::Failed { reason }
+        match e {
+            Error::LocalLoading => Self::LocalLoading,
+            _ => {
+                eprintln!("mnema: the local model process failed: {e}");
+                Self::Failed {
+                    reason: local_reason(e),
+                }
+            }
+        }
     }
 
     /// Whether this answer is evidence that the provider cannot be reached
@@ -1393,6 +1399,16 @@ impl NoAnswer {
     /// (D171 review, finding 2).
     fn about_the_network(&self) -> bool {
         matches!(self, Self::Offline | Self::NoReply | Self::EmbeddingNoReply)
+    }
+}
+
+/// A local-process failure as the window may read it. A fixed sentence, not
+/// the error's own: a crash carries the process's stderr, which goes to the
+/// log ([`NoAnswer::from_local`]) and never into a command's answer.
+fn local_reason(e: &Error) -> String {
+    match e {
+        Error::LocalLoading => e.to_string(),
+        _ => "the local model process failed".to_string(),
     }
 }
 
@@ -1893,6 +1909,7 @@ mod tests {
             v(NoAnswer::Failed { reason: "r".into() }),
             json!({ "kind": "failed", "reason": "r" })
         );
+        assert_eq!(v(NoAnswer::LocalLoading), json!({ "kind": "localLoading" }));
 
         let refused = AskAnswer::Refused {
             kind: RefusalKind::NoCandidates,

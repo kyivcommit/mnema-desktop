@@ -64,7 +64,8 @@ export type NoAnswer =
   | { kind: 'offline' }
   | { kind: 'noReply' }
   | { kind: 'embeddingNoReply' }
-  | { kind: 'failed'; reason: string };
+  | { kind: 'failed'; reason: string }
+  | { kind: 'localLoading' };
 
 export type AskAnswer =
   | { kind: 'generated'; answer: string; citations: AskCitation[]; text: TextArmReport; content: ContentArmReport }

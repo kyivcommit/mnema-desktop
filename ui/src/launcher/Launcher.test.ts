@@ -153,7 +153,7 @@ test('on ready the line clears', async () => {
 // in the line so Enter asks again. Both directions: `notAsked` (no chat model)
 // is not a failure to retry, and clears the line like every other answer.
 test('a provider failure keeps the query in the line; a model never asked clears it', async () => {
-  for (const why of [{ kind: 'offline' }, { kind: 'noReply' }, { kind: 'embeddingNoReply' }, { kind: 'failed', reason: 'r' }]) {
+  for (const why of [{ kind: 'offline' }, { kind: 'noReply' }, { kind: 'embeddingNoReply' }, { kind: 'failed', reason: 'r' }, { kind: 'localLoading' }]) {
     mockBackend({ ...citationsOnly, why });
     render(Launcher);
     await submit('retry me');

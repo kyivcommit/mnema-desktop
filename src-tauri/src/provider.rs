@@ -95,6 +95,9 @@ pub struct Local {
     /// How long a question waits for a load before it answers with the
     /// passages alone ([`LOCAL_CHAT_TIMEOUT`] unless set otherwise).
     question_wait: Duration,
+    /// What loads the models into the process: [`Sidecar::load`], unless a
+    /// test makes the load misbehave in a way the fake cannot.
+    load: fn(&Sidecar) -> Result<(), mnema_local::Error>,
 }
 
 impl Local {
@@ -111,7 +114,14 @@ impl Local {
             cancel: [AtomicBool::new(false), AtomicBool::new(false)],
             available: mnema_local::available(),
             question_wait: LOCAL_CHAT_TIMEOUT,
+            load: Sidecar::load,
         }
+    }
+
+    #[cfg(test)]
+    fn with_load(mut self, load: fn(&Sidecar) -> Result<(), mnema_local::Error>) -> Self {
+        self.load = load;
+        self
     }
 
     /// Overrides [`LOCAL_CHAT_TIMEOUT`] as a question's wait for a load, so a
@@ -207,22 +217,31 @@ impl Local {
             let began = match st.running {
                 Some(began) => began,
                 None => {
-                    st.attempt += 1;
+                    let attempt = st.attempt + 1;
                     let began = Instant::now();
+                    let (loads, sidecar, load) =
+                        (Arc::clone(&self.loads), Arc::clone(sidecar), self.load);
+                    // The end is recorded by a guard, so a load that panics
+                    // still ends: otherwise every caller with no limit would
+                    // wait on it for ever, and no load could start again.
+                    std::thread::Builder::new()
+                        .name("mnema-load".into())
+                        .spawn(move || {
+                            let mut end = LoadEnd {
+                                loads,
+                                attempt,
+                                pid,
+                                result: None,
+                            };
+                            end.result = Some(load(&sidecar));
+                        })
+                        .map_err(|e| {
+                            mnema_local::Error::Io(format!("cannot start the model load: {e}"))
+                        })?;
+                    // Still under the lock, so the thread cannot record its
+                    // end before the load is marked in flight.
+                    st.attempt = attempt;
                     st.running = Some(began);
-                    let (attempt, loads, sidecar) =
-                        (st.attempt, Arc::clone(&self.loads), Arc::clone(sidecar));
-                    std::thread::spawn(move || {
-                        let result = sidecar.load();
-                        let (lock, done) = &*loads;
-                        let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                        if result.is_ok() {
-                            st.loaded = pid;
-                        }
-                        st.running = None;
-                        st.last = Some((attempt, result));
-                        done.notify_all();
-                    });
                     began
                 }
             };
@@ -334,6 +353,33 @@ struct Loads {
     attempt: u64,
     /// How the last load to end ended, and its number.
     last: Option<(u64, Result<(), mnema_local::Error>)>,
+}
+
+/// Records the end of a load when its thread ends, however it ends: a panic
+/// leaves no `result`, and is recorded as a failed load.
+struct LoadEnd {
+    loads: Arc<(Mutex<Loads>, Condvar)>,
+    attempt: u64,
+    pid: u32,
+    result: Option<Result<(), mnema_local::Error>>,
+}
+
+impl Drop for LoadEnd {
+    fn drop(&mut self) {
+        let result = self.result.take().unwrap_or_else(|| {
+            Err(mnema_local::Error::Io(
+                "the model load stopped unexpectedly".into(),
+            ))
+        });
+        let (lock, done) = &*self.loads;
+        let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if result.is_ok() {
+            st.loaded = self.pid;
+        }
+        st.running = None;
+        st.last = Some((self.attempt, result));
+        done.notify_all();
+    }
 }
 
 /// Everything [`endpoint`] reads, owned, so a job thread can carry it without
@@ -908,7 +954,6 @@ mod lifecycle {
     /// An app state choosing `choice`, whose local models are `Ready` and whose
     /// process is the fake, logging to the returned file.
     fn app(dir: &Path, choice: ProviderChoice, env: &[(&str, &str)]) -> (AppState, PathBuf) {
-        use mnema_local::{FileSpec, Manifest, ModelSpec};
         crate::prefs::write_key(dir, PREFS_KEY, serde_json::to_value(choice).unwrap()).unwrap();
         let state = AppState::new(
             dir.to_path_buf(),
@@ -916,6 +961,15 @@ mod lifecycle {
             "http://127.0.0.1:1".into(),
             String::new(),
         );
+        let (local, log) = local_at(dir, env);
+        state.install_local(local);
+        (state, log)
+    }
+
+    /// A [`Local`] over the fake with both models `Ready`, logging to the
+    /// returned file.
+    fn local_at(dir: &Path, env: &[(&str, &str)]) -> (Local, PathBuf) {
+        use mnema_local::{FileSpec, Manifest, ModelSpec};
         let spec = |name: &str| ModelSpec {
             repo: format!("test/{name}"),
             commit: "0".into(),
@@ -934,12 +988,52 @@ mod lifecycle {
         let log_env = log.display().to_string();
         let mut all = vec![("FAKE_MLX_LOG", log_env.as_str())];
         all.extend_from_slice(env);
-        state.install_local(
-            Local::new(store, fake_mlx())
-                .with_env(&all)
-                .with_available(true),
+        let local = Local::new(store, fake_mlx())
+            .with_env(&all)
+            .with_available(true);
+        (local, log)
+    }
+
+    /// Panics on its first call, then loads as the real one does.
+    fn a_load_that_panics_once(sidecar: &Sidecar) -> Result<(), mnema_local::Error> {
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("a load that panics (test)");
+        }
+        sidecar.load()
+    }
+
+    /// A load thread that panics must not leave its load "in flight" for ever:
+    /// the caller waiting on it hears an error, and the next use loads again.
+    #[test]
+    fn a_load_that_panics_wakes_its_waiter_and_the_next_use_loads_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, log) = local_at(dir.path(), &[]);
+        let local = Arc::new(local.with_load(a_load_that_panics_once));
+        local.want.store(true, Ordering::SeqCst);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = Arc::clone(&local);
+        std::thread::spawn(move || {
+            let _ = tx.send(waiter.endpoint().map(|_| ()));
+        });
+        let first = rx.recv_timeout(Duration::from_secs(5));
+        assert!(
+            matches!(first, Ok(Err(_))),
+            "the waiter on a panicked load must hear an error, got {first:?}"
         );
-        (state, log)
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let next = Arc::clone(&local);
+        std::thread::spawn(move || {
+            let _ = tx.send(next.endpoint().map(|_| ()));
+        });
+        let second = rx.recv_timeout(Duration::from_secs(5));
+        assert!(
+            matches!(second, Ok(Ok(()))),
+            "the next use loads again, got {second:?}"
+        );
+        assert_eq!(count(&log, "start POST /mnema/load"), 1, "{}", logged(&log));
     }
 
     /// Polls `what` for up to 5 s. The fake logs `spawn` after it prints

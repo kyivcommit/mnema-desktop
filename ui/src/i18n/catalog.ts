@@ -47,6 +47,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
+  | 'no_answer_local_loading'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -425,6 +426,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // model cannot be swapped without re-indexing (D171 review, finding 3).
     no_answer_embedding_no_reply: 'Провайдер не встиг обробити пошуковий запит. Спробуйте ще раз.',
     no_answer_failed: 'Провайдер повернув помилку ({reason}).',
+    // Task 14.2: a load in flight, not an error; it goes on in the background.
+    no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1252,6 +1255,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_no_reply: 'The model did not answer in time. Try again, or choose another model in Settings.',
     no_answer_embedding_no_reply: 'The provider did not process the search query in time. Try again.',
     no_answer_failed: 'The provider returned an error ({reason}).',
+    no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',

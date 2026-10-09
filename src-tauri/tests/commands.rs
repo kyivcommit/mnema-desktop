@@ -12523,13 +12523,37 @@ fn spawns(log: &std::path::Path) -> usize {
         .count()
 }
 
-/// Whether `answer` is the passages alone, with a `failed` reason that does
-/// not carry the process's stderr into the window.
-fn passages_with_a_reason(answer: &Result<Value, Value>) -> bool {
+/// Whether `answer` is exactly `passages` alone, with `why` of kind `why`, and
+/// with no stderr of the process anywhere in the payload: not in `why`'s
+/// reason, and not in a failed content arm's (the log keeps it).
+fn passages_with_a_reason(answer: &Result<Value, Value>, why: &str, passages: &Value) -> bool {
+    let no_stderr = |v: &Value| {
+        v.as_str()
+            .is_none_or(|r| !r.is_empty() && !r.contains("fake-mlx"))
+    };
     matches!(answer, Ok(a) if a["kind"] == json!("citationsOnly")
-        && a["why"]["kind"] == json!("failed")
-        && a["why"]["reason"].as_str().is_some_and(|r| !r.is_empty() && !r.contains("fake-mlx"))
-        && a["citations"].as_array().is_some_and(|c| !c.is_empty()))
+        && a["why"]["kind"] == json!(why)
+        && no_stderr(&a["why"]["reason"])
+        && no_stderr(&a["content"]["reason"])
+        && a["citations"] == *passages)
+}
+
+/// The text arm's passages for `query`, as a text-only search returns them —
+/// the passages an ask must keep when the local model cannot answer. Leaves
+/// the content arm off.
+fn text_arm_passages(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
+    call(
+        webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms");
+    let found = call(webview, "search", json!({ "query": query })).expect("search");
+    assert!(
+        found["hits"].as_array().is_some_and(|h| !h.is_empty()),
+        "the text arm finds the passage: {found}"
+    );
+    found["hits"].clone()
 }
 
 /// Task 14.1: a local process that cannot start costs the answer, not the
@@ -12543,6 +12567,7 @@ fn a_local_process_that_cannot_start_still_gives_the_passages() {
     scan_to_completion(fx.app.handle());
     let healthy = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
     assert_eq!(healthy["kind"], json!("generated"), "{healthy}");
+    let passages = text_arm_passages(&fx.webview, "synthetic topic");
 
     let log = dir.path().join("broken.log");
     let log_env = log.display().to_string();
@@ -12562,24 +12587,44 @@ fn a_local_process_that_cannot_start_still_gives_the_passages() {
         let _ = std::fs::remove_file(&log);
         let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
         assert!(
-            passages_with_a_reason(&answer),
+            passages_with_a_reason(&answer, "failed", &passages),
             "content arm {content}: {answer:?}"
         );
+        if content {
+            assert_eq!(
+                answer.as_ref().unwrap()["content"]["kind"],
+                json!("failed"),
+                "{answer:?}"
+            );
+        }
         assert_eq!(spawns(&log), 1, "content arm {content}: one ask, one start");
     }
 }
 
 /// Task 14.2: a load that does not finish holds a question no longer than the
-/// question's wait, and the next question does not wait it out again.
+/// question's wait, and the next question does not wait it out again — nor
+/// start a second load of its own.
 #[test]
 fn a_hung_load_gives_the_passages_within_the_question_wait() {
     let dir = tempfile::tempdir().unwrap();
     let fx = mnema_app(dir.path(), 1, &[]);
     scan_to_completion(fx.app.handle());
+    let passages = text_arm_passages(&fx.webview, "synthetic topic");
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms");
+    let log = dir.path().join("hung.log");
+    let log_env = log.display().to_string();
     let state = fx.app.state::<AppState>();
     state.install_local(
-        support::ready_local(dir.path(), &[("FAKE_MLX_LOAD_MS", "20000")])
-            .with_question_wait(Duration::from_secs(2)),
+        support::ready_local(
+            dir.path(),
+            &[("FAKE_MLX_LOAD_MS", "20000"), ("FAKE_MLX_LOG", &log_env)],
+        )
+        .with_question_wait(Duration::from_secs(2)),
     );
     let _loading = mnema_desktop::provider::on_show(&state);
 
@@ -12587,7 +12632,7 @@ fn a_hung_load_gives_the_passages_within_the_question_wait() {
     let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
     let took = asked.elapsed();
     assert!(
-        passages_with_a_reason(&answer) && took < Duration::from_secs(6),
+        passages_with_a_reason(&answer, "localLoading", &passages) && took < Duration::from_secs(6),
         "after {took:?}: {answer:?}"
     );
 
@@ -12595,9 +12640,15 @@ fn a_hung_load_gives_the_passages_within_the_question_wait() {
     let again = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
     let took = asked.elapsed();
     assert!(
-        passages_with_a_reason(&again) && took < Duration::from_secs(1),
+        passages_with_a_reason(&again, "localLoading", &passages) && took < Duration::from_secs(1),
         "the second question, after {took:?}: {again:?}"
     );
+    let loads = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| *l == "start POST /mnema/load")
+        .count();
+    assert_eq!(loads, 1, "two questions, one load in flight");
 }
 
 /// The batch sizes, and the most requests in flight at once, the fake saw for
