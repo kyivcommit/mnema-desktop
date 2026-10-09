@@ -41,6 +41,45 @@ func startStub(token: String = "t", env: [String: String] = [:]) throws -> (Proc
 
 final class StubAnchor {}
 
+/// The stub's stderr trace (`stub: queued … embed`, `stub: started embed`), read on a side thread so a
+/// test can wait until a job is queued or running instead of sleeping a fixed time and hoping.
+final class StubTrace {
+    let pipe = Pipe()
+    private let cond = NSCondition()
+    private var lines: [String] = []
+
+    init() {
+        let handle = pipe.fileHandleForReading
+        Thread.detachNewThread { [self] in
+            var buf = Data()
+            while let b = try? handle.read(upToCount: 1), !b.isEmpty {
+                if b[0] == 10 {
+                    cond.lock(); lines.append(String(decoding: buf, as: UTF8.self)); cond.broadcast(); cond.unlock()
+                    buf.removeAll()
+                } else {
+                    buf.append(b)
+                }
+            }
+        }
+    }
+
+    /// Waits until `line` has appeared `count` times; false after 10 s.
+    func wait(for line: String, count: Int = 1) -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        cond.lock(); defer { cond.unlock() }
+        while lines.filter({ $0 == line }).count < count {
+            if !cond.wait(until: deadline) { return false }
+        }
+        return true
+    }
+}
+
+func startTracedStub(embedMs: Int) throws -> (Process, port: Int, StubTrace) {
+    let trace = StubTrace()
+    let (p, line) = try startStubRaw(env: ["MNEMA_STUB_EMBED_MS": "\(embedMs)"], stderr: trace.pipe)
+    return (p, Int(line.dropFirst(5)) ?? 0, trace)
+}
+
 /// Sends `text` verbatim over a raw socket; returns everything read back ("" when the peer closes silently).
 func raw(_ port: Int, _ text: String) -> String {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -208,22 +247,24 @@ final class ProtocolTests: XCTestCase {
     }
 
     func test_interactive_jumps_the_queue() throws {
-        let (p, port) = try startStub(env: ["MNEMA_STUB_EMBED_MS": "500"])
+        let (p, port, trace) = try startTracedStub(embedMs: 500)
         defer { p.terminate() }
         let lock = NSLock()
         var finished: [String] = []
         let group = DispatchGroup()
-        func fire(_ name: String, _ path: String, after ms: UInt32) {
+        func fire(_ name: String, _ path: String) {
             group.enter()
             Thread.detachNewThread {
-                usleep(ms * 1000)
                 let r = http(port, path, method: "POST", body: #"{"model":"baai/bge-m3","input":["x"]}"#, timeout: 10)
                 lock.lock(); finished.append(r.status == 200 ? name : "\(name):\(r.status)"); lock.unlock()
                 group.leave()
             }
         }
-        for i in 0..<3 { fire("scan\(i)", "/v1/embeddings", after: UInt32(i) * 10) }
-        fire("interactive", "/interactive/v1/embeddings", after: 100)
+        for i in 0..<3 { fire("scan\(i)", "/v1/embeddings") }
+        // The interactive request goes in only once all three scans are queued and one of them runs.
+        XCTAssertTrue(trace.wait(for: "stub: queued scan embed", count: 3), "scans never queued")
+        XCTAssertTrue(trace.wait(for: "stub: started embed"), "no scan started")
+        fire("interactive", "/interactive/v1/embeddings")
         group.wait()
         // Only the claim under test: the interactive request finishes second, behind the job already running.
         // Which of the three scans arrives first is up to the scheduler, so their order is not asserted.
@@ -247,22 +288,23 @@ final class ProtocolTests: XCTestCase {
 
     /// Unloading while a job runs would free a model in use: unload queues behind the running embed.
     func test_unload_waits_for_the_running_job() throws {
-        let (p, port) = try startStub(env: ["MNEMA_STUB_EMBED_MS": "500"])
+        let (p, port, trace) = try startTracedStub(embedMs: 500)
         defer { p.terminate() }
         let lock = NSLock()
         var finished: [String] = []
         let group = DispatchGroup()
-        func fire(_ name: String, _ path: String, _ body: String, after ms: UInt32) {
+        func fire(_ name: String, _ path: String, _ body: String) {
             group.enter()
             Thread.detachNewThread {
-                usleep(ms * 1000)
                 let r = http(port, path, method: "POST", body: body, timeout: 10)
                 lock.lock(); finished.append("\(name):\(r.status)"); lock.unlock()
                 group.leave()
             }
         }
-        fire("embed", "/v1/embeddings", #"{"model":"baai/bge-m3","input":["x"]}"#, after: 0)
-        fire("unload", "/mnema/unload", #"{"models":["embed"]}"#, after: 100)
+        fire("embed", "/v1/embeddings", #"{"model":"baai/bge-m3","input":["x"]}"#)
+        // The unload goes in only once the embed is running, so it arrives during the job.
+        XCTAssertTrue(trace.wait(for: "stub: started embed"), "the embed never started")
+        fire("unload", "/mnema/unload", #"{"models":["embed"]}"#)
         group.wait()
         XCTAssertEqual(finished, ["embed:200", "unload:204"])
     }

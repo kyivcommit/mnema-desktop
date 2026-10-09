@@ -76,6 +76,13 @@ public final class Server {
         listener = try Self.listen()
     }
 
+    /// Queue-ordering tests need to know a job is queued or running before they send the next one;
+    /// a fixed sleep lost that race on a busy CI runner. Only the stub's delay knob turns this on.
+    private func stubTrace(_ event: String) {
+        guard embedDelayMs > 0 else { return }
+        FileHandle.standardError.write(Data("stub: \(event)\n".utf8))
+    }
+
     public init(token: String, embedDir: URL, chatDir: URL) throws {
         self.token = token
         embedDelayMs = 0
@@ -177,6 +184,7 @@ public final class Server {
             guard let input = json["input"] as? [String] else {
                 return reply(Response(400, ["error": "input must be an array of strings"]))
             }
+            stubTrace("queued \(interactive ? "interactive" : "scan") embed")
             work.submit(urgent: interactive) { reply(self.embed(input)) }
         case "/v1/chat/completions":
             // Every message needs a string role and content: one that does not decode must not vanish.
@@ -252,6 +260,7 @@ public final class Server {
             case .failure(let e): return Response(500, ["error": "embed: \(e)"])
             }
         }
+        stubTrace("started embed")
         if embedDelayMs > 0 { usleep(UInt32(embedDelayMs) * 1000) }
         let data = inputs.indices.map { i -> [String: Any] in
             var v = [Double](repeating: 0, count: 1024)
