@@ -662,7 +662,11 @@ mod tests {
             })
         );
 
-        for (why, spelling) in [(SkipWhy::NoKey, "noKey"), (SkipWhy::NoModel, "noModel")] {
+        for (why, spelling) in [
+            (SkipWhy::NoKey, "noKey"),
+            (SkipWhy::NoModel, "noModel"),
+            (SkipWhy::LocalModels, "localModels"),
+        ] {
             assert_eq!(
                 serde_json::to_value(EmbedOutcome::Skipped { why: why.clone() }).unwrap(),
                 serde_json::json!({ "kind": "skipped", "why": { "kind": spelling } }),

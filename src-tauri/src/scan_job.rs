@@ -93,6 +93,19 @@ pub(crate) struct ScanDeps {
 /// a signature taking `&AppState` could only be called before the spawn — which
 /// is the one place D-g says it must not be called from.
 /// [`ScanDeps::production`] captures a [`crate::provider::Provider`] instead.
+/// What the production key read makes of the provider's answer: only "nobody
+/// entered a key" is the ordinary empty answer. Mnema without its models
+/// (`ProviderNotReady`) stays an error so the scan can say *that*, not "no key".
+pub(crate) fn key_answer(
+    answer: Result<crate::provider::Endpoint, Error>,
+) -> Result<Option<crate::provider::Endpoint>, Error> {
+    match answer {
+        Ok(endpoint) => Ok(Some(endpoint)),
+        Err(Error::NoKey) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) type KeyFn = dyn Fn() -> Result<Option<crate::provider::Endpoint>, Error> + Send + Sync;
 
 /// `mnema_embed::run`, with its own signature rather than a narrowed one: the
@@ -125,11 +138,7 @@ impl ScanDeps {
         let provider = state.provider();
         let for_embed = provider.clone();
         Self {
-            key: std::sync::Arc::new(move || match provider.endpoint() {
-                Ok(endpoint) => Ok(Some(endpoint)),
-                Err(Error::NoKey) => Ok(None),
-                Err(e) => Err(e),
-            }),
+            key: std::sync::Arc::new(move || key_answer(provider.endpoint())),
             embed: std::sync::Arc::new(move |db, base, key, cancel, on_progress| {
                 let choice = for_embed.choice();
                 mnema_embed::run_with(
@@ -2368,6 +2377,17 @@ mod tests {
             "the phase was announced only once it had something to count, so a \
              surface drew a reading bar for the whole of the key read: {phases:?}"
         );
+    }
+
+    /// The production key read keeps the two empty answers apart: no key is
+    /// `Ok(None)`, Mnema without models stays `ProviderNotReady`.
+    #[test]
+    fn the_production_key_read_keeps_no_key_and_no_local_models_apart() {
+        assert!(matches!(key_answer(Err(Error::NoKey)), Ok(None)));
+        assert!(matches!(
+            key_answer(Err(Error::ProviderNotReady)),
+            Err(Error::ProviderNotReady)
+        ));
     }
 
     /// Mnema chosen, models not downloaded: the scan reads every folder and says so,
