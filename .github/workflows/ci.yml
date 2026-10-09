@@ -636,7 +636,11 @@ jobs:
     # measurement that exists for both machines says the runner is about twice
     # this one (6m17s there against 3m17s here), so this leg is expected
     # around 4–5 minutes cold — inside the same margin every other leg has.
-    timeout-minutes: 15
+    # 25, not 15: on 2026-10-08/09 the runner's `apt-get` step alone took
+    # 12m43s–14m40s three times, before or during the harness, and cancelled
+    # legs whose harness needed 2–5 minutes. The limit covers the mirror, not
+    # the mutants.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
