@@ -103,7 +103,18 @@ fn a_second_death_is_an_error_with_the_reason() {
         let_it_die(s.pid());
     }
     for _ in 0..2 {
-        match s.endpoint() {
+        let got = s.endpoint();
+        if let Err(e @ Error::Crashed { .. }) = &got {
+            // The message a person can be shown stays short: the process's own
+            // stderr is for the log, never the window (it is up to 8 KB).
+            let shown = e.to_string();
+            assert!(
+                !shown.contains("fake-mlx: dying"),
+                "stderr in the message: {shown}"
+            );
+            assert!(shown.len() < 120, "message too long: {shown}");
+        }
+        match got {
             Err(Error::Crashed { stderr_tail }) => {
                 // Both deaths' reasons, not only the last one.
                 assert_eq!(

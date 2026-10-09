@@ -21,8 +21,10 @@ pub enum ModelId {
 pub enum Error {
     #[error("the local model process was not started")]
     NotStarted,
-    /// The process died (twice, or at start); `stderr_tail` is why.
-    #[error("the local model process died: {stderr_tail}")]
+    /// The process died (twice, or at start); `stderr_tail` is why. The tail
+    /// (up to 8 KB) goes to the app's log where it is raised, not into this
+    /// message: the message can reach a window, the tail is a diagnostic.
+    #[error("the local model process stopped")]
     Crashed { stderr_tail: String },
     #[error("local model process: {0}")]
     Io(String),

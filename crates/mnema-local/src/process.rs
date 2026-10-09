@@ -161,9 +161,11 @@ impl Sidecar {
                 running.port = p;
                 Ok(running)
             }
-            None => Err(Error::Crashed {
-                stderr_tail: running.finish(),
-            }),
+            None => {
+                let stderr_tail = running.finish();
+                eprintln!("mnema: the local model process did not start:\n{stderr_tail}");
+                Err(Error::Crashed { stderr_tail })
+            }
         }
     }
 
@@ -210,6 +212,7 @@ impl Sidecar {
             "{}\n--- restarted once, died again ---\n{second}",
             st.first_tail
         );
+        eprintln!("mnema: the local model process stopped:\n{tail}");
         st.failed = Some(tail.clone());
         Error::Crashed { stderr_tail: tail }
     }
