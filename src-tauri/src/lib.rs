@@ -16,6 +16,7 @@ pub mod models;
 pub mod os_services;
 pub mod paths;
 pub mod prefs;
+pub mod provider;
 pub mod provider_status;
 pub mod scan_job;
 pub mod scan_state;
@@ -88,6 +89,13 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_chat_model,
         models::model_settings,
         provider_status::provider_status,
+        provider::provider_choice,
+        provider::set_provider_choice,
+        provider::mnema_available,
+        provider::local_models,
+        provider::download_model,
+        provider::cancel_download,
+        provider::remove_model,
         scan_job::start_scan_job,
         locale::get_locale,
         locale::set_locale,
@@ -128,12 +136,19 @@ pub fn invoke_handler<R: tauri::Runtime>()
 pub fn manage_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let dir = app.path().app_local_data_dir()?;
     let worker = paths::worker_path()?;
-    app.manage(state::AppState::new(
+    let mlx = paths::mlx_path()?;
+    let models = dir.join("models");
+    let state = state::AppState::new(
         dir,
         worker,
         mnema_provider::OPENROUTER_BASE.to_string(),
         models::CREDENTIAL_REF.to_string(),
+    );
+    state.install_local(provider::Local::new(
+        mnema_local::Store::new(models, provider::HUB.to_string()),
+        mlx,
     ));
+    app.manage(state);
     Ok(())
 }
 
@@ -302,6 +317,12 @@ pub fn go_cold_if_idle<R: tauri::Runtime>(
 pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
+            // Every show path comes through here: the local models load while
+            // the person types, not when they press Enter. `try_state`: the
+            // shell tests build no `AppState`.
+            if let Some(state) = app.try_state::<state::AppState>() {
+                drop(provider::on_show(&state));
+            }
             // Already up (single-instance while the person is dragging it):
             // focus, and do not move what no focus loss has recorded yet.
             if window.is_visible().unwrap_or(false) {
@@ -338,8 +359,42 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         let _ = window.hide();
-        app.state::<launcher_layout::HiddenAt>().mark();
+        launcher_hidden(app);
     }
+}
+
+/// An answer landed (`launcher_layout::launcher_answered`). Marks the idle
+/// clock, and, when the launcher is hidden, arms a cold clock of its own: the
+/// mark voids every clock armed at the hide, so without this a local answer
+/// arriving after Esc would leave the models in memory until the next show.
+pub(crate) fn answer_landed<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    launcher_visible: bool,
+    after: std::time::Duration,
+) {
+    app.state::<launcher_layout::HiddenAt>().mark();
+    if !launcher_visible {
+        provider::start_cold_timer(app, after);
+    }
+}
+
+/// The launcher left the screen: records when, and starts the clock that will
+/// give the local models' memory back if it stays away
+/// (`provider::start_cold_timer`). The one place both hides go through, the
+/// shortcut/close and the `Focused(false)` arm.
+fn launcher_hidden<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    app.state::<launcher_layout::HiddenAt>().mark();
+    if let Some(after) = cold_after(app) {
+        provider::start_cold_timer(app, after);
+    }
+}
+
+/// The cold threshold as a duration; `None` where the shell tests build no
+/// `AppState`.
+fn cold_after<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<std::time::Duration> {
+    let state = app.try_state::<state::AppState>()?;
+    let minutes = prefs::cold_after_minutes(state.data_dir());
+    Some(std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// The global shortcut's action: hide the launcher if it is up, otherwise show
@@ -759,7 +814,7 @@ pub fn run() -> anyhow::Result<()> {
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 let app = window.app_handle();
                 // Esc and blur hide from the UI, not through `hide_launcher`.
-                app.state::<launcher_layout::HiddenAt>().mark();
+                launcher_hidden(app);
                 let memory = app.state::<launcher_position::Memory>();
                 let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
                 launcher_position::remember(

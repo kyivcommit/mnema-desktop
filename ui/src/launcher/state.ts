@@ -20,10 +20,11 @@ export const DRAG_GRAB_WINDOW_MS = 1000;
 
 export type QueryCheck =
   | { ok: true; query: string }
-  | { ok: false; reason: 'blank' | 'tooLong' };
+  | { ok: false; reason: 'tooLong' };
 
+// A blank line is not judged here: Enter on one does nothing, and the caller
+// returns before asking (owner, 2026-10-08).
 export function checkQuery(raw: string): QueryCheck {
-  if (raw.trim() === '') return { ok: false, reason: 'blank' };
   // Code points, like Rust's query.chars().count() — spread iterates code
   // points, raw.length would count UTF-16 units and diverge past the BMP.
   if ([...raw].length > MAX_ASK_QUERY) return { ok: false, reason: 'tooLong' };
@@ -36,7 +37,7 @@ export type LauncherState =
   | { kind: 'generated'; query: string; answer: Extract<AskAnswer, { kind: 'generated' }> } // B (PR 6)
   | { kind: 'citationsOnly'; query: string; answer: Extract<AskAnswer, { kind: 'citationsOnly' }> } // E (PR 6)
   | { kind: 'refused'; reason: Refusal } // F
-  | { kind: 'error'; reason: 'blank' | 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
+  | { kind: 'error'; reason: 'tooLong' | 'askFailed' }; // the query guard AND a rejected ask: every non-idle state goes through the machine, so `error` is live
 
 // §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when a provider
 // key is present AND the index has a chosen embedding model. A stored key with no chosen model

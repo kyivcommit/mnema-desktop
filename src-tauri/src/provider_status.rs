@@ -27,6 +27,8 @@ const TTL: Duration = Duration::from_secs(60);
 pub enum Missing {
     Key,
     EmbeddingModel,
+    /// Mnema is chosen and its two models are not both downloaded.
+    LocalModels,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -50,19 +52,40 @@ pub fn fresh(cached_at: Instant, now: Instant) -> bool {
 /// A credential store that will not answer is NOT "no key entered": the
 /// person may well have one, and sending them to re-enter it is wrong
 /// (`KeyState::Unreadable`). It is `Unreachable`, and never cached.
-fn local_facts(state: &AppState) -> Result<String, ProviderStatus> {
-    let key = match mnema_secrets::load(state.credential_ref()) {
-        Ok(Some(key)) => key,
-        Ok(None) => return Err(not_configured(Missing::Key)),
+fn local_facts(
+    state: &AppState,
+    choice: crate::provider::ProviderChoice,
+) -> Result<crate::provider::Endpoint, ProviderStatus> {
+    let endpoint = match state.endpoint_as(choice) {
+        Ok(endpoint) => endpoint,
+        Err(Error::NoKey) => return Err(not_configured(Missing::Key)),
         Err(e) => {
             return Err(ProviderStatus::Unreachable {
-                reason: Error::from(e).to_string(),
+                reason: e.to_string(),
             });
         }
     };
     match state.with_index(|db| db.active_space()) {
-        Ok(Some(_)) => Ok(key),
+        Ok(Some(_)) => Ok(endpoint),
         _ => Err(not_configured(Missing::EmbeddingModel)),
+    }
+}
+
+/// Under Mnema: both models downloaded and, if the process is already
+/// running, still answering. Asked of the files and the running process only —
+/// a poll never starts the process (that is a question's or a scan's to do).
+/// Nothing leaves the machine, so nothing is cached and `/credits` is never
+/// asked.
+fn local_status(state: &AppState) -> ProviderStatus {
+    let local = state.local();
+    if !local.models_ready() {
+        return not_configured(Missing::LocalModels);
+    }
+    match local.running() {
+        None | Some(Ok(())) => ProviderStatus::Ok,
+        Some(Err(e)) => ProviderStatus::Unreachable {
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -72,10 +95,19 @@ fn not_configured(missing: Missing) -> ProviderStatus {
 
 #[tauri::command(async)]
 pub fn provider_status(state: State<'_, AppState>) -> ProviderStatus {
+    status(&state)
+}
+
+/// The command's body, reachable without a `State`.
+pub(crate) fn status(state: &AppState) -> ProviderStatus {
+    let choice = state.provider_choice();
+    if choice == crate::provider::ProviderChoice::Mnema {
+        return local_status(state);
+    }
     // Before the first read of anything the answer depends on.
     let epoch = state.provider_status_gen();
-    let key = match local_facts(&state) {
-        Ok(key) => key,
+    let endpoint = match local_facts(state, choice) {
+        Ok(endpoint) => endpoint,
         Err(status) => return status,
     };
     if let Some(cached) = state.cached_provider_status() {
@@ -83,13 +115,13 @@ pub fn provider_status(state: State<'_, AppState>) -> ProviderStatus {
     }
     // The cache lock is not held across the request, so a slow `/credits`
     // never blocks `set_key` and friends.
-    let status = match mnema_provider::check_key_within(state.provider_base(), &key, PROBE_TIMEOUT)
-    {
-        Ok(_) => ProviderStatus::Ok,
-        Err(e) => ProviderStatus::Unreachable {
-            reason: Error::from(e).to_string(),
-        },
-    };
+    let status =
+        match mnema_provider::check_key_within(&endpoint.base, &endpoint.token, PROBE_TIMEOUT) {
+            Ok(_) => ProviderStatus::Ok,
+            Err(e) => ProviderStatus::Unreachable {
+                reason: Error::from(e).to_string(),
+            },
+        };
     state.store_provider_status(epoch, status.clone());
     status
 }

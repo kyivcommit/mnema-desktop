@@ -196,6 +196,10 @@ function reply(extra: Replies = {}) {
     // and the editor would draw "no mask has been added yet" from a fixture
     // that never said so.
     list_masks: [],
+    // `Provider` asks on mount; Mnema is not offered here, so Models stands alone.
+    mnema_available: false,
+    provider_choice: 'openRouter',
+    local_models: [],
     model_settings: READY_SETTINGS,
     provider_models: EMPTY_CATALOGUE,
     job_status: IDLE_SCAN,
@@ -841,6 +845,11 @@ test('an embedding skipped for no key, no model, or a store that did not answer 
   await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'noModel' } }, endedIn: 'embedding' }));
   expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
     'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
+  );
+
+  await emit(ended({ embedding: { kind: 'skipped', why: { kind: 'localModels' } }, endedIn: 'embedding' }));
+  expect(visible(screen.getByTestId('indexing-embed-outcome'))).toBe(
+    'Пошук за змістом не вмикали: моделі Mnema ще не завантажені — завантажте їх у налаштуваннях моделей. Пошук по словах уже працює.',
   );
 
   await emit(ended(

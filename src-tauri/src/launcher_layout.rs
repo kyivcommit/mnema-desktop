@@ -203,9 +203,19 @@ pub fn set_launcher_layout<R: tauri::Runtime>(
 /// otherwise be dropped, with its query, by a show that is cold by the hide's
 /// clock. Unconditional: marking while the launcher is visible is harmless,
 /// because every hide (`hide_launcher`, the `Focused(false)` arm) marks again.
+///
+/// Hidden, it also arms a cold clock (`crate::answer_landed`): the mark voids
+/// the ones armed at the hide, so nothing else would give the models back.
 #[tauri::command]
-pub fn launcher_answered(hidden_at: tauri::State<'_, HiddenAt>) {
-    hidden_at.mark();
+pub fn launcher_answered<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    use tauri::Manager as _;
+    let visible = app
+        .get_webview_window("launcher")
+        .is_some_and(|w| w.is_visible().unwrap_or(false));
+    match crate::cold_after(&app) {
+        Some(after) => crate::answer_landed(&app, visible, after),
+        None => app.state::<HiddenAt>().mark(),
+    }
 }
 
 #[cfg(test)]

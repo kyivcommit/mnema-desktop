@@ -94,3 +94,50 @@ pub fn worker() -> &'static Path {
         path
     })
 }
+
+/// The stand-in for the local model process, `mnema-local`'s own test bin.
+/// Found, not built: `CARGO_BIN_EXE_*` exists only inside `mnema-local`, and
+/// `cargo test --workspace` builds it anyway.
+#[allow(dead_code)]
+pub fn fake_mlx() -> PathBuf {
+    let exe = std::env::current_exe().expect("a test binary knows its own path");
+    let profile_dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("a test binary sits in <target>/<profile>/deps");
+    let path = profile_dir.join(format!(
+        "mnema-local-fake-mlx{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        path.exists(),
+        "{} is missing: run cargo build -p mnema-local --bin mnema-local-fake-mlx",
+        path.display()
+    );
+    path
+}
+
+/// A local provider whose two models are `Ready` (one one-byte file each, under
+/// a test manifest) and whose process is [`fake_mlx`], steered by `env`.
+#[allow(dead_code)]
+pub fn ready_local(root: &Path, env: &[(&str, &str)]) -> mnema_desktop::provider::Local {
+    use mnema_local::{FileSpec, Manifest, ModelId, ModelSpec, Store};
+    let spec = |name: &str| ModelSpec {
+        repo: format!("test/{name}"),
+        commit: "0".into(),
+        files: vec![FileSpec::new("weights", 1, "")],
+    };
+    let store =
+        Store::new(root.join("models"), "http://127.0.0.1:1".into()).with_manifest(Manifest {
+            embed: spec("embed"),
+            chat: spec("chat"),
+        });
+    for id in [ModelId::Embed, ModelId::Chat] {
+        std::fs::create_dir_all(store.dir(id)).expect("model dir");
+        std::fs::write(store.dir(id).join("weights"), b"x").expect("model file");
+    }
+    mnema_desktop::provider::Local::new(store, fake_mlx())
+        .with_env(env)
+        // The fake runs on any host; without this a Mnema choice reads as OpenRouter on Linux.
+        .with_available(true)
+}

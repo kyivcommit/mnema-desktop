@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { getContext, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
@@ -18,6 +18,9 @@
   // one message" class this project has paid for 22 times in one cycle — one
   // of the two would eventually read a fixed set of fields differently.
   import { providerReady } from '../launcher/state';
+
+  // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
+  const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
 
   // The controller, as a PROP — the same rule `Folders` and `Scanning` already
   // follow, and this section was the one left out. It matters here for two
@@ -1048,12 +1051,14 @@
 </script>
 
 {#if settings}
+  {#if !providerRowOwned}
   <div class="row">
     <label for="model-provider">{providerLabel}</label>
     <select id="model-provider" disabled>
       <option selected>{providerName}</option>
     </select>
   </div>
+  {/if}
   <!-- Step 5, and the review that followed it: the section is grouped by
        subject, and the one sentence a person can act on comes before the ones
        they cannot. The Key group is second, immediately under the provider it

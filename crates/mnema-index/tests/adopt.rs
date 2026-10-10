@@ -1057,3 +1057,33 @@ fn credential_of(db: &mnema_index::Db, model_config_id: i64) -> Option<String> {
 fn count(db: &mnema_index::Db, sql: &str) -> i64 {
     db.conn().query_row(sql, [], |r| r.get(0)).expect("count")
 }
+
+/// OpenRouter's `baai/bge-m3` and the local one write into ONE space: the
+/// credential reference is the only field that differs between the two
+/// adoptions, and it is not part of what identifies a space.
+#[test]
+fn bge_m3_from_either_provider_adopts_one_space() {
+    let db = temp_db();
+    let cloud = db
+        .adopt_embedding_model("baai/bge-m3", 1024, "openrouter", HASH)
+        .expect("adopted under OpenRouter");
+    let local = db.adopt_embedding_model("baai/bge-m3", 1024, "mnema-local", HASH);
+    assert!(
+        matches!(local, Ok(a) if a.space_id == cloud.space_id && !a.created),
+        "the second adoption must find the first space, got {local:?}"
+    );
+}
+
+/// A different model is a different space, whichever provider asked.
+#[test]
+fn another_model_gets_its_own_space() {
+    let db = temp_db();
+    let bge = db
+        .adopt_embedding_model("baai/bge-m3", 1024, REF, HASH)
+        .expect("bge-m3 adopted");
+    let other = db.adopt_embedding_model("openai/text-embedding-3-small", 1536, REF, HASH);
+    assert!(
+        matches!(other, Ok(a) if a.space_id != bge.space_id && a.created),
+        "another model must mint its own space, got {other:?}"
+    );
+}

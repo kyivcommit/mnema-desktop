@@ -94,3 +94,21 @@ chmod +x "${tmp}"
 mv -f "${tmp}" "${dest_dir}/${name}-${triple}"
 
 echo "stage-sidecar: ${dest_dir}/${name}-${triple}"
+
+# The MLX sidecar (macOS only: externalBin lives in tauri.macos.conf.json). `tauri-build` checks the
+# declared file while src-tauri compiles, so every macOS `cargo test` / `cargo tauri dev` needs one in
+# place. The real one comes from scripts/build-mlx-sidecar.sh (Xcode, minutes; before-build.sh calls it
+# for a release). Where it was not built, an executable placeholder stands in — dev and test only:
+# verify-bundle.sh runs `mnema-mlx --stub` from inside the .app and a placeholder cannot
+# answer the PORT handshake, so it can never pass for a shipped sidecar. Never overwrites a real binary.
+if [ "$(uname -s)" = "Darwin" ]; then
+  mlx="${dest_dir}/mnema-mlx-${triple}"
+  if [ ! -e "${mlx}" ]; then
+    printf '#!/bin/sh\necho "mnema-mlx placeholder: run scripts/build-mlx-sidecar.sh" >&2\nexit 1\n' > "${mlx}.tmp"
+    chmod +x "${mlx}.tmp"
+    mv -f "${mlx}.tmp" "${mlx}"
+    echo "stage-sidecar: placeholder ${mlx} (no real MLX sidecar built)"
+  fi
+  # tauri-build checks the declared resource directory too; an empty one satisfies it and has no metallib.
+  mkdir -p "${dest_dir}/mlx-swift_Cmlx.bundle"
+fi

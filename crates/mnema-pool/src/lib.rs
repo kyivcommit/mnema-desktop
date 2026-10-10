@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,16 @@ const READ_AHEAD: usize = 64;
 // ponytail: serialises ~4 ms per spawn; a private posix_spawn with
 // POSIX_SPAWN_CLOEXEC_DEFAULT would close the other direction too.
 static SPAWN: Mutex<()> = Mutex::new(());
+
+/// The guard of [`SPAWN`], for any other crate in this process that spawns a
+/// long-lived child (the local model process): the window above is process-wide,
+/// and a long-lived stranger that spawns inside it keeps a worker's pipe ends
+/// for its whole life. Hold it only around the spawn call itself.
+pub fn spawn_guard() -> MutexGuard<'static, ()> {
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ---------------------------------------------------------------- what fails
 
@@ -877,9 +887,7 @@ impl Pool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let child = {
-            let _one_at_a_time = SPAWN
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _one_at_a_time = spawn_guard();
             command.spawn()
         }
         .map_err(|source| PoolError::Spawn {
@@ -987,9 +995,7 @@ impl Pool {
         }
 
         let mut child = {
-            let _one_at_a_time = SPAWN
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _one_at_a_time = spawn_guard();
             command.spawn()
         }
         .map_err(|source| PoolError::Spawn {

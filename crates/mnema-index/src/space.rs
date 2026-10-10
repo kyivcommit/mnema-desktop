@@ -1466,6 +1466,11 @@ impl Db {
             // because there is nothing else here to call it. The secret is not
             // a parameter and never will be — `credential_ref` names an entry
             // in the OS credential store.
+            //
+            // Local (Mnema) adoptions get this same constant: the column is
+            // never read to find a space — `model_config_for` looks a model up
+            // by `embed_model` alone — so `baai/bge-m3` from either provider
+            // lands in one space.
             None => self.create_model_config(model, "openrouter", None, model, dim)?,
         };
         self.conn().execute(

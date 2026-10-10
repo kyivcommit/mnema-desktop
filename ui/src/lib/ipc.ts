@@ -64,7 +64,8 @@ export type NoAnswer =
   | { kind: 'offline' }
   | { kind: 'noReply' }
   | { kind: 'embeddingNoReply' }
-  | { kind: 'failed'; reason: string };
+  | { kind: 'failed'; reason: string }
+  | { kind: 'localLoading' };
 
 export type AskAnswer =
   | { kind: 'generated'; answer: string; citations: AskCitation[]; text: TextArmReport; content: ContentArmReport }
@@ -642,10 +643,11 @@ export type Phase =
 // group, translate or act on. `storeUnavailable` carries a message because that
 // one IS a diagnostic — the credential store refused to answer at all — and
 // there is no closed vocabulary for what an operating system says then.
-export const SKIP_WHY_KINDS = ['noKey', 'noModel', 'storeUnavailable'] as const;
+export const SKIP_WHY_KINDS = ['noKey', 'noModel', 'localModels', 'storeUnavailable'] as const;
 export type SkipWhy =
   | { kind: 'noKey' }
   | { kind: 'noModel' }
+  | { kind: 'localModels' }
   | { kind: 'storeUnavailable'; message: string };
 
 // What the embedding phase did, if it got that far.
@@ -960,7 +962,45 @@ export const setLocaleChoice = (choice: LocaleChoice) =>
 // local facts on every call; `unreachable` and `ok` come from the provider and
 // are cached by the core for a minute. `reason` is the core's own sentence.
 export type ProviderStatus =
-  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' }
+  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' | 'localModels' }
   | { kind: 'unreachable'; reason: string }
   | { kind: 'ok' };
 export const providerStatus = () => invoke<ProviderStatus>('provider_status');
+
+// ---------------------------------------------------------------------------
+// The Mnema (local) provider (`src-tauri/src/provider.rs`). Wire spellings are
+// the serde ones: camelCase variants, `kind`-tagged unions.
+// ---------------------------------------------------------------------------
+export type ProviderChoice = 'openRouter' | 'mnema';
+export type LocalModelId = 'embed' | 'chat';
+export type LocalModelState =
+  | { kind: 'absent' }
+  | { kind: 'downloading'; done: number; total: number }
+  | { kind: 'ready' }
+  | { kind: 'failed'; message: string };
+export type LocalModelRow = { id: LocalModelId; state: LocalModelState };
+// `DownloadError`: what a rejected `download_model` carries.
+export type DownloadError =
+  | { kind: 'noSpace'; needed: number; free: number }
+  | { kind: 'cancelled' }
+  | { kind: 'failed'; message: string };
+export type ProviderSwitch = { choice: ProviderChoice; retired: RetiredSpace[] };
+
+export const providerChoice = () => invoke<ProviderChoice>('provider_choice');
+export const setProviderChoice = (choice: ProviderChoice, existingVectors: ExistingVectors) =>
+  invoke<ProviderSwitch>('set_provider_choice', { choice, existingVectors });
+export const mnemaAvailable = () => invoke<boolean>('mnema_available');
+export const localModels = () => invoke<LocalModelRow[]>('local_models');
+export const downloadModel = (id: LocalModelId) => invoke<void>('download_model', { id });
+export const cancelDownload = (id: LocalModelId) => invoke<void>('cancel_download', { id });
+export const removeModel = (id: LocalModelId) => invoke<void>('remove_model', { id });
+
+// Named in `provider.rs` as `PROGRESS_EVENT`; payload `{id, done, total}`.
+export const LOCAL_MODEL_PROGRESS_EVENT = 'local-model-progress';
+export type LocalModelProgress = { id: LocalModelId; done: number; total: number };
+export const listenLocalModelProgress = async (
+  cb: (p: LocalModelProgress) => void,
+): Promise<UnlistenFn> => {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<LocalModelProgress>(LOCAL_MODEL_PROGRESS_EVENT, (e) => cb(e.payload));
+};

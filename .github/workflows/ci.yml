@@ -138,6 +138,11 @@ jobs:
       # package.
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
+      # src-tauri's tests find the local-model stand-in in target/<profile>/
+      # (`tests/support/mod.rs::fake_mlx`); a filtered `cargo test` does not
+      # build another package's bin.
+      - name: Build the fake local model process src-tauri's tests drive
+        run: cargo build -p mnema-local --bin mnema-local-fake-mlx
       - run: cargo fmt --all -- --check
       # The second file `src-tauri` will not compile without, and it became one
       # the day the bundle started shipping Pdfium: `bundle.resources` names the
@@ -631,7 +636,11 @@ jobs:
     # measurement that exists for both machines says the runner is about twice
     # this one (6m17s there against 3m17s here), so this leg is expected
     # around 4–5 minutes cold — inside the same margin every other leg has.
-    timeout-minutes: 15
+    # 25, not 15: on 2026-10-08/09 the runner's `apt-get` step alone took
+    # 12m43s–14m40s three times, before or during the harness, and cancelled
+    # legs whose harness needed 2–5 minutes. The limit covers the mirror, not
+    # the mutants.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
@@ -683,6 +692,11 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
+      # src-tauri's tests find the local-model stand-in in target/<profile>/
+      # (`tests/support/mod.rs::fake_mlx`); a filtered `cargo test` does not
+      # build another package's bin.
+      - name: Build the fake local model process src-tauri's tests drive
+        run: cargo build -p mnema-local --bin mnema-local-fake-mlx
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
       # For the legs whose matrix entry says `node: true` and no other —
@@ -732,10 +746,24 @@ jobs:
     # One architecture per package rather than a universal binary: a universal
     # build carries both slices, so every user downloads roughly twice the
     # application they can run. Measured, not assumed — the numbers are in
-    # docs/BUILD.md. macos-14 is arm64, which is what the artefact name claims.
+    # docs/BUILD.md. macos-26 is arm64, which is what the artefact name claims.
+    #
+    # macos-26, since the MLX sidecar: the pinned mlx-swift declares Swift tools 6.3.0, so
+    # it needs Xcode 26.4 or newer (26.4 ships Swift 6.3). macos-14 carries Xcode 15.2-16.2
+    # at most and macos-15 26.0-26.3 (Swift 6.2.x; 26.2 failed to resolve the package with
+    # exactly that message); macos-26 carries 26.0.1-26.6 (actions/runner-images,
+    # images/macos/toolsets/toolset-14/15/26.json, read 2026-10-08). That is the BUILD host;
+    # the macOS 14 floor of the app is a runtime claim (Package.swift platforms, the Span
+    # dylib in Contents/lib) that a real macOS 14 M1 proves.
     #
     # No `needs:`, for the reason written above `mutations`.
-    runs-on: macos-14
+    runs-on: macos-26
+    env:
+      # The Xcode that builds the sidecar, named rather than whatever the image defaults to
+      # (26.6 on macos-26 today; the default moves, the name does not). 26.6 ships Swift
+      # 6.3.3, and the one libswiftCompatibilitySpan.dylib that build-mlx-sidecar.sh looks
+      # for in its toolchain. Changing it changes the sidecar cache key below too.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     # 1.4–2.1 minutes across the same three runs. The limit is here for the same
     # reason as the one on `check`, and it matters slightly more: this job is the
     # one that produces the download, so a wedged run leaves someone waiting on
@@ -746,7 +774,11 @@ jobs:
     # `cargo tauri build` — never observed on its own here: every cold run
     # so far also compiled tauri-cli, which the pinned download below no
     # longer does — and the limit has to hold that run too.
-    timeout-minutes: 15
+    #
+    # 45 is provisional: the job now also builds MLX and its Metal shaders (Release, then the
+    # Debug build of the protocol tests), which has never run on a runner. After the first CI
+    # run it becomes the measured total x 1.5, as above.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
@@ -790,7 +822,7 @@ jobs:
       # one, and the checksum beside the version here — from the downloaded
       # file with `shasum -a 256`, never from a page.
       #
-      # `aarch64-apple-darwin`, because `runs-on: macos-14` is arm64 (this
+      # `aarch64-apple-darwin`, because `runs-on: macos-26` is arm64 (this
       # job's header comment, above `runs-on`); a runner change means an
       # asset change. `CARGO_HOME` rather than a literal `~/.cargo`, because
       # that is the directory rust-cache and rustup agree on.
@@ -826,7 +858,42 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
-      - run: cargo tauri build
+      # The MLX sidecar (Swift) that the bundle ships. Its Metal shaders need the Metal
+      # toolchain component, which the image does not carry by default.
+      - name: The Xcode the sidecar builds with
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+      - name: Metal toolchain, for the sidecar's shaders
+        run: xcodebuild -downloadComponent MetalToolchain
+      # xcodebuild's own resolved packages and build products. Keyed by the files that pin them:
+      # a new pin or patch is a new key, never a stale hit.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: sidecar/mnema-mlx/.build-xc
+          key: mlx-sidecar-${{ runner.os }}-xcode26.6-${{ hashFiles('sidecar/mnema-mlx/Package.resolved', 'sidecar/mnema-mlx/patches/mlx-metal31.patch') }}
+      - name: The Metal 3.1 patch guard rejects a patch that no longer applies or is already upstream
+        run: scripts/test-mlx-patch-guard.sh
+      - name: The Span-library lookup exits 6, not an unbound variable, when it finds none
+        run: scripts/test-mlx-stage.sh
+      # Built once per job: the step below stages the products, and `cargo tauri build` then
+      # skips its own build (MNEMA_MLX_PREBUILT, which before-build.sh honours only when the
+      # staged file is a real binary). The cached checkout stays patched, see the script.
+      - name: Build the MLX sidecar
+        run: scripts/build-mlx-sidecar.sh
+      # xcodebuild, not `swift build`: SwiftPM from the command line does not compile MLX's shaders.
+      # ModelTests skip here (no model files on a runner, "needs MNEMA_MLX_MODELS"), so the patch
+      # is checked by compiling the shaders and by the protocol tests, not by running a model.
+      - name: Sidecar protocol tests
+        working-directory: sidecar/mnema-mlx
+        run: |
+          xcodebuild test -scheme mnema-mlx -destination 'platform=macOS,arch=arm64' \
+            -clonedSourcePackagesDirPath .build-xc -derivedDataPath .build-xc/dd \
+            -disableAutomaticPackageResolution -skipPackageUpdates -skipMacroValidation
+      - name: Build the application
+        env:
+          MNEMA_MLX_PREBUILT: '1'
+        run: cargo tauri build
       # Never `|| true`, never a grep whose failure is swallowed. The script
       # opens the .dmg and looks at the application inside it; every state it
       # rejects is produced on purpose by scripts/verify-bundle-controls.sh,
@@ -837,6 +904,11 @@ jobs:
       # It looks inside the image because `target/release/bundle/macos/` is empty
       # after the build: with targets ["dmg"] the bundler prints
       # `Cleaning …/Mnema.app` once the image is written.
+      #
+      # The sidecar's Metal self-test is best-effort here: a hosted runner may have no GPU, and
+      # that must not hide whether the rest of the bundle is right. The handshake with the
+      # bundled sidecar and the presence of its metallib and Span library are always required.
+      # A release sets MNEMA_REQUIRE_METAL=1 (docs/BUILD.md), as does anyone verifying by hand.
       - name: The bundle exists, is signed, and its own worker answers for what is in it
         run: scripts/verify-bundle.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -21,8 +21,8 @@ case_ "startup: the index goes to the LOCAL data directory, not the cache" \
 
 case_ "startup: the state is actually managed" \
   src-tauri/src/lib.rs \
-  's{    app\.manage\(state::AppState::new\(\n        dir,\n        worker,\n        mnema_provider::OPENROUTER_BASE\.to_string\(\),\n        models::CREDENTIAL_REF\.to_string\(\),\n    \)\);\n}{    let _ = (dir, worker);\n}' \
-  'let _ = (dir, worker);' \
+  's{    app\.manage\(state\);\n}{    let _ = state;\n}' \
+  'let _ = state;' \
   mnema-desktop 'the_application_puts_the_index_in_the_local_data_directory' --test commands
 
 case_ "job: nothing measured yet means no estimate" \

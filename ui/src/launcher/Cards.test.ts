@@ -208,7 +208,7 @@ test('citationsOnly keeps the tree and draws the centre card and the first passa
 // state, and it is exactly the moment a person retries — losing their folders on
 // the failure they are retrying is C1's defect one gate over.
 test('error keeps the tree and draws neither answer nor source', () => {
-  render(Cards, { ...HOT, state: { kind: 'error', reason: 'blank' }, query: '' });
+  render(Cards, { ...HOT, state: { kind: 'error', reason: 'tooLong' }, query: '' });
   expect(screen.getByTestId('card-tree')).toBeTruthy();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
@@ -571,6 +571,11 @@ test('a provider failure leads the banner with its cause (D171)', async () => {
     [{ ...citationsOnly, why: { kind: 'failed', reason: 'the provider answered 503' } } as AskAnswer,
       'The provider returned an error (the provider answered 503). The search found 2 passages.',
       'Провайдер повернув помилку (the provider answered 503). Пошук знайшов 2 уривки.'],
+    // Task 14.2: a local load still in flight is not an error, and is said in
+    // each locale's own words, not as an English reason inside the line.
+    [{ ...citationsOnly, why: { kind: 'localLoading' } } as AskAnswer,
+      'The local models are still loading. Try again in a minute. The search found 2 passages.',
+      'Локальні моделі ще завантажуються. Спробуйте за хвилину. Пошук знайшов 2 уривки.'],
     [{ ...emptyCitationsOnly, why: { kind: 'offline' } } as AskAnswer,
       'Could not reach the provider. Check the network.',
       "Немає зв'язку з провайдером. Перевірте мережу."],
@@ -949,7 +954,7 @@ test('a cold launcher draws no side panel and no empty panel, whatever the state
   for (const state of [
     { kind: 'idle' },
     { kind: 'inFlight', query: 'q' },
-    { kind: 'error', reason: 'blank' },
+    { kind: 'error', reason: 'tooLong' },
     stateFromAnswer('q', refusedNoCandidates),
   ] as LauncherState[]) {
     const { unmount } = render(Cards, { heat: 'cold', left: false, right: false, state, query: '' });

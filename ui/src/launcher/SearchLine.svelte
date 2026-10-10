@@ -12,12 +12,11 @@
   const placeholder = $derived.by(() => { void $locale; return t('search_placeholder'); });
 
   // Every message is driven by the machine's state, not a local guard — so a
-  // rejected `ask` (askFailed) is as visible as a blank query.
+  // rejected `ask` (askFailed) is as visible as a too-long one.
   // void $locale so the text follows a live language switch.
   const errorText = $derived.by(() => {
     void $locale;
     if (state.kind !== 'error') return '';
-    if (state.reason === 'blank') return t('query_blank');
     if (state.reason === 'tooLong') return t('query_too_long', { limit: MAX_ASK_QUERY });
     return t('query_failed'); // askFailed
   });
@@ -27,7 +26,9 @@
   });
 
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter') onSubmit(query);
+    // A held Enter auto-repeats keydown; only the press submits; otherwise a failed
+    // answer (which keeps the query) would be asked again by the repeat.
+    if (event.key === 'Enter' && !event.repeat) onSubmit(query);
   }
 
   // Every show of the launcher (⌥Space, the tray, single-instance) ends in
@@ -40,7 +41,8 @@
 
 <div class="search-line">
   <input type="text" bind:this={input} bind:value={query} placeholder={placeholder} aria-busy={state.kind === 'inFlight' ? 'true' : undefined} onkeydown={onKeydown} />
-  {#if state.kind === 'error'}
+  <!-- A too-long message belongs to the line that was too long: stale once emptied. -->
+  {#if state.kind === 'error' && !(state.reason === 'tooLong' && query.trim() === '')}
     <p class="guard" role="alert">{errorText}</p>
   {:else if state.kind === 'refused'}
     <p class="refusal" role="status">{refusalMessage}</p>

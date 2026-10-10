@@ -27,7 +27,7 @@ use mnema_desktop::job::EndReason;
 use mnema_desktop::models::{IndexSettings, UnreadableCause, model_settings, set_key};
 use mnema_desktop::scan_job;
 use mnema_desktop::scan_state::{
-    EmbedOutcome, EndedIn, Entry, Phase, ScanSnapshot, ScanState, SkipWhy,
+    EmbedOutcome, EndedIn, Entry, Phase, ScanReport, ScanSnapshot, ScanState, SkipWhy, Terminal,
 };
 use mnema_desktop::state::AppState;
 use mnema_mock_provider::{MockServer, Reply, one_vector};
@@ -12311,3 +12311,719 @@ fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
 
 #[cfg(unix)]
 use app::app_with_a_worker_that_reads_nothing;
+
+// ---------------------------------------------------------------------------
+// Provider choice (Task 7): one endpoint for OpenRouter or the local process.
+// ---------------------------------------------------------------------------
+
+/// The state as it stands after the person chose `choice`.
+fn choose(state: &AppState, choice: mnema_desktop::provider::ProviderChoice) {
+    mnema_desktop::prefs::write_key(
+        state.data_dir(),
+        mnema_desktop::provider::PREFS_KEY,
+        serde_json::to_value(choice).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn mnema_endpoint_is_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(
+        dir.path().to_path_buf(),
+        support::worker().to_path_buf(),
+        NO_PROVIDER.into(),
+        NO_CREDENTIAL.into(),
+    );
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(dir.path(), &[]));
+    let endpoint = state.endpoint();
+    assert!(
+        matches!(&endpoint, Ok(e) if e.base.starts_with("http://127.0.0.1:")
+            && e.query_base.starts_with("http://127.0.0.1:")
+            && !e.token.is_empty()),
+        "{endpoint:?}"
+    );
+}
+
+/// An application under Mnema: both local models `Ready`, the process the
+/// fake (steered by `env`), the index open on a `baai/bge-m3` space, and one
+/// watched folder of `files` distinct one-chunk text files.
+struct MnemaApp {
+    app: tauri::App<MockRuntime>,
+    webview: WebviewWindow<MockRuntime>,
+    space_id: i64,
+    _folder: tempfile::TempDir,
+}
+
+fn mnema_app(dir: &std::path::Path, files: usize, env: &[(&str, &str)]) -> MnemaApp {
+    let app = app_with_provider(dir, NO_PROVIDER);
+    let state = app.state::<AppState>();
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(dir, env));
+    state.open_index().unwrap();
+    let space_id = state
+        .with_index(|db| {
+            db.adopt_embedding_model(
+                "baai/bge-m3",
+                1024,
+                "credential-ref",
+                &mnema_chunk::chunker_hash(),
+            )
+        })
+        .unwrap()
+        .space_id;
+    let folder = tempfile::tempdir().unwrap();
+    for i in 0..files {
+        std::fs::write(
+            folder.path().join(format!("note-{i}.txt")),
+            format!("note number {i} about the synthetic topic {i}"),
+        )
+        .unwrap();
+    }
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap();
+    MnemaApp {
+        app,
+        webview,
+        space_id,
+        _folder: folder,
+    }
+}
+
+/// `(chunks, vectors in the space)` as the index holds them now.
+fn chunks_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (i64, i64) {
+    app.state::<AppState>()
+        .with_index(|db| Ok((db.chunk_count()?, db.embedded_chunk_count(space_id)?)))
+        .unwrap()
+}
+
+#[test]
+fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
+    use mnema_desktop::provider::{ProviderChoice, change};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 3, &[]);
+    let refusal: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let seen = std::sync::Arc::clone(&refusal);
+    let (_, settled) = run_scan_watching(
+        fx.app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |state, now| {
+            let embedding = matches!(
+                &now.snapshot,
+                ScanSnapshot::Running {
+                    phase: Phase::Embedding { .. },
+                    ..
+                }
+            );
+            let mut slot = seen.lock().unwrap();
+            if embedding && slot.is_none() {
+                let answer = change(
+                    state,
+                    ProviderChoice::OpenRouter,
+                    mnema_desktop::models::ExistingVectors::Keep,
+                );
+                *slot = Some(format!("{answer:?}"));
+            }
+        },
+    );
+    let refusal = refusal.lock().unwrap().clone();
+    assert!(
+        refusal.as_deref().is_some_and(|r| r.starts_with("Err(")),
+        "a switch while the scan holds the slot must be refused, got {refusal:?}"
+    );
+    assert_eq!(
+        fx.app.state::<AppState>().provider_choice(),
+        ProviderChoice::Mnema
+    );
+    assert_eq!(
+        report_of(&settled).reason,
+        EndReason::Completed,
+        "{settled:?}"
+    );
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert!(
+        chunks > 0 && vectors == chunks,
+        "{vectors} of {chunks} embedded"
+    );
+}
+
+/// What the fake logged for its chat request: the JSON body.
+fn logged_chat_body(log: &std::path::Path) -> Value {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix("body /v1/chat/completions "))
+        .unwrap_or_else(|| panic!("no chat request in the fake's log:\n{text}"));
+    serde_json::from_str(line).expect("the chat body is JSON")
+}
+
+#[test]
+fn the_ask_path_sends_the_mnema_voice_only_for_mnema() {
+    // Mnema: the fake writes the chat body to its log.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    let body = logged_chat_body(&log);
+    assert_eq!(body["model"], json!("gemma-4-e2b-it"), "{body}");
+    let user = body["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        user.contains("Answer briefly:")
+            && user.trim_end().ends_with("leave out sources that do not."),
+        "the Mnema user message must end with the brevity line: {user:?}"
+    );
+
+    // OpenRouter: the same ask carries no brevity line.
+    let completion =
+        json!({ "choices": [{ "message": { "content": "an answer <c>1</c>" } }] }).to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+    call(&webview, "ask", json!({ "query": "quantum entanglement" })).expect("ask");
+    let request = server.request();
+    assert!(request.contains("/chat/completions"), "{request}");
+    assert!(
+        !request.contains("Answer briefly"),
+        "OpenRouter's prompt must stay the server's: {request}"
+    );
+}
+
+/// A local answer slower than OpenRouter's 15 s still arrives: the chat call
+/// under Mnema waits `LOCAL_CHAT_TIMEOUT`. Pays 20 s.
+#[test]
+fn mnema_chat_gets_the_local_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_CHAT_MS", "20000")]);
+    scan_to_completion(fx.app.handle());
+    let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+}
+
+/// How many processes the fake logged starting.
+fn spawns(log: &std::path::Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("spawn "))
+        .count()
+}
+
+/// Whether `answer` is exactly `passages` alone, with `why` of kind `why`, and
+/// with no stderr of the process anywhere in the payload: not in `why`'s
+/// reason, and not in a failed content arm's (the log keeps it).
+fn passages_with_a_reason(answer: &Result<Value, Value>, why: &str, passages: &Value) -> bool {
+    let no_stderr = |v: &Value| {
+        v.as_str()
+            .is_none_or(|r| !r.is_empty() && !r.contains("fake-mlx"))
+    };
+    matches!(answer, Ok(a) if a["kind"] == json!("citationsOnly")
+        && a["why"]["kind"] == json!(why)
+        && no_stderr(&a["why"]["reason"])
+        && no_stderr(&a["content"]["reason"])
+        && a["citations"] == *passages)
+}
+
+/// The text arm's passages for `query`, as a text-only search returns them —
+/// the passages an ask must keep when the local model cannot answer. Leaves
+/// the content arm off.
+fn text_arm_passages(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
+    call(
+        webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms");
+    let found = call(webview, "search", json!({ "query": query })).expect("search");
+    assert!(
+        found["hits"].as_array().is_some_and(|h| !h.is_empty()),
+        "the text arm finds the passage: {found}"
+    );
+    found["hits"].clone()
+}
+
+/// Task 14.1: a local process that cannot start costs the answer, not the
+/// passages the text arm already found (D171's shape), and one ask starts it
+/// once — with the content arm on (the process is first asked for in
+/// retrieval) and off (first asked for by the chat stage).
+#[test]
+fn a_local_process_that_cannot_start_still_gives_the_passages() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    scan_to_completion(fx.app.handle());
+    let healthy = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    assert_eq!(healthy["kind"], json!("generated"), "{healthy}");
+    let passages = text_arm_passages(&fx.webview, "synthetic topic");
+
+    let log = dir.path().join("broken.log");
+    let log_env = log.display().to_string();
+    fx.app
+        .state::<AppState>()
+        .install_local(support::ready_local(
+            dir.path(),
+            &[("FAKE_MLX_FAIL_START", "1"), ("FAKE_MLX_LOG", &log_env)],
+        ));
+    for content in [true, false] {
+        call(
+            &fx.webview,
+            "set_search_arms",
+            json!({ "text": true, "content": content }),
+        )
+        .expect("set_search_arms");
+        let _ = std::fs::remove_file(&log);
+        let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+        assert!(
+            passages_with_a_reason(&answer, "failed", &passages),
+            "content arm {content}: {answer:?}"
+        );
+        if content {
+            assert_eq!(
+                answer.as_ref().unwrap()["content"]["kind"],
+                json!("failed"),
+                "{answer:?}"
+            );
+        }
+        assert_eq!(spawns(&log), 1, "content arm {content}: one ask, one start");
+    }
+}
+
+/// Task 14.2: a load that does not finish holds a question no longer than the
+/// question's wait, and the next question does not wait it out again — nor
+/// start a second load of its own.
+#[test]
+fn a_hung_load_gives_the_passages_within_the_question_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    scan_to_completion(fx.app.handle());
+    let passages = text_arm_passages(&fx.webview, "synthetic topic");
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .expect("set_search_arms");
+    let log = dir.path().join("hung.log");
+    let log_env = log.display().to_string();
+    let state = fx.app.state::<AppState>();
+    state.install_local(
+        support::ready_local(
+            dir.path(),
+            &[("FAKE_MLX_LOAD_MS", "20000"), ("FAKE_MLX_LOG", &log_env)],
+        )
+        .with_question_wait(Duration::from_secs(2)),
+    );
+    let _loading = mnema_desktop::provider::on_show(&state);
+
+    let asked = std::time::Instant::now();
+    let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+    let took = asked.elapsed();
+    assert!(
+        passages_with_a_reason(&answer, "localLoading", &passages) && took < Duration::from_secs(6),
+        "after {took:?}: {answer:?}"
+    );
+
+    let asked = std::time::Instant::now();
+    let again = call(&fx.webview, "ask", json!({ "query": "synthetic topic" }));
+    let took = asked.elapsed();
+    assert!(
+        passages_with_a_reason(&again, "localLoading", &passages) && took < Duration::from_secs(1),
+        "the second question, after {took:?}: {again:?}"
+    );
+    let loads = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| *l == "start POST /mnema/load")
+        .count();
+    assert_eq!(loads, 1, "two questions, one load in flight");
+}
+
+/// The batch sizes, and the most requests in flight at once, the fake saw for
+/// `/v1/embeddings` (from its `start`/`input`/`end` lines).
+fn scan_embed_shape(log: &std::path::Path) -> (Vec<usize>, usize) {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let (mut sizes, mut open, mut most) = (Vec::new(), 0usize, 0usize);
+    let mut in_embed = false;
+    for line in text.lines() {
+        if line == "start POST /v1/embeddings" {
+            open += 1;
+            most = most.max(open);
+            in_embed = true;
+        } else if line == "end POST /v1/embeddings" {
+            open -= 1;
+        } else if let Some(n) = line.strip_prefix("input ")
+            && in_embed
+        {
+            sizes.push(n.parse().unwrap());
+        }
+    }
+    (sizes, most)
+}
+
+#[test]
+fn a_real_scan_ending_while_cold_unloads_bge_m3() {
+    // The production scan thread calls `Provider::scan_end` when it ends.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 2, &[("FAKE_MLX_LOG", &log_env)]);
+    let gone = r#"body /mnema/unload {"models":["embed"]}"#;
+    // Cold, then a scan: it ends with bge-m3 unloaded.
+    mnema_desktop::provider::on_cold(&fx.app.state::<AppState>());
+    scan_to_completion(fx.app.handle());
+    // The slot is released before the thread's last act, so wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut text = String::new();
+    while std::time::Instant::now() < deadline && !text.lines().any(|l| l == gone) {
+        text = std::fs::read_to_string(&log).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(text.lines().any(|l| l == gone), "{text}");
+}
+
+#[test]
+fn scan_batches_are_small_under_mnema() {
+    // Two batches under Mnema (16 + 4) is the whole claim.
+    const FILES: usize = 20;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), FILES, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert_eq!((chunks, vectors), (FILES as i64, FILES as i64));
+    let (sizes, most) = scan_embed_shape(&log);
+    assert_eq!(sizes.iter().sum::<usize>(), FILES, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= 16), "{sizes:?}");
+    assert_eq!(most, 1, "scan requests in flight at once");
+
+    // OpenRouter: the same scan in one request of all of them.
+    let rows: Vec<Value> = (0..FILES)
+        .map(|i| {
+            let mut v = vec![0.0f32; 1024];
+            v[i] = 1.0;
+            json!({ "embedding": v, "index": i })
+        })
+        .collect();
+    let server = MockServer::new(vec![Reply::ok(&json!({ "data": rows }).to_string())]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-batches").unwrap();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            db.adopt_embedding_model("baai/bge-m3", 1024, "r", &mnema_chunk::chunker_hash())
+        })
+        .unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    for i in 0..FILES {
+        std::fs::write(
+            folder.path().join(format!("note-{i}.txt")),
+            format!("note number {i} about the synthetic topic {i}"),
+        )
+        .unwrap();
+    }
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap();
+    scan_to_completion(app.handle());
+    let request = server.request();
+    let body: Value =
+        serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+    assert_eq!(
+        body["input"].as_array().map(Vec::len),
+        Some(FILES),
+        "one batch of all"
+    );
+}
+
+#[test]
+fn the_query_embedding_goes_to_the_interactive_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+    scan_to_completion(fx.app.handle());
+    let scanned = std::fs::read_to_string(&log).unwrap();
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": false, "content": true }),
+    )
+    .unwrap();
+    call(&fx.webview, "search", json!({ "query": "synthetic topic" })).expect("search");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let asked = &text[scanned.len()..];
+    let embeds = |t: &str, path: &str| {
+        t.lines()
+            .filter(|l| *l == format!("start POST {path}"))
+            .count()
+    };
+    assert!(embeds(&scanned, "/v1/embeddings") > 0, "{scanned}");
+    assert_eq!(
+        embeds(&scanned, "/interactive/v1/embeddings"),
+        0,
+        "{scanned}"
+    );
+    assert_eq!(embeds(asked, "/interactive/v1/embeddings"), 1, "{asked}");
+    assert_eq!(embeds(asked, "/v1/embeddings"), 0, "{asked}");
+}
+
+/// The process dies after its second answer, in the middle of a scan's
+/// embedding: the run ends — within the bound, not hanging — and says why.
+#[test]
+fn a_sidecar_restart_mid_scan_ends_the_job_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    // 33 files: three batches of 16, 16, 1 — the process dies after the
+    // second answer, so the third has nobody to go to.
+    let fx = mnema_app(dir.path(), 33, &[("FAKE_MLX_DIE_AFTER", "2")]);
+    let (_, settled) =
+        run_scan_capturing_snapshots(fx.app.handle(), Entry::Full, Duration::from_secs(60));
+    let report = report_of(&settled);
+    assert_eq!(report.reason, EndReason::Failed, "{report:?}");
+    assert!(
+        report
+            .message
+            .as_deref()
+            .is_some_and(|m| !m.trim().is_empty()),
+        "{report:?}"
+    );
+}
+
+/// An open index under OpenRouter whose active space is `model` (`dim`) and
+/// holds one vector. Answers the space id.
+fn index_with_one_vector(app: &tauri::App<MockRuntime>, model: &str, dim: usize) -> i64 {
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            let space =
+                db.adopt_embedding_model(model, dim as i64, "r", &mnema_chunk::chunker_hash())?;
+            let chunk = write_one_document(db, &"v".repeat(64), "a synthetic vector's text");
+            db.upsert_vector(space.space_id, chunk, &vec![1.0f32; dim])?;
+            Ok(space.space_id)
+        })
+        .unwrap()
+}
+
+fn active_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (Option<i64>, i64) {
+    app.state::<AppState>()
+        .with_index(|db| Ok((db.active_space()?, db.embedded_chunk_count(space_id)?)))
+        .unwrap()
+}
+
+/// F1 as the owner ruled it (option B): bge-m3 is shared, so switching onto
+/// Mnema from it moves nothing; from another model with vectors the switch is
+/// refused like any model change, and only a confirmed Discard makes it.
+#[test]
+fn switching_to_mnema_from_another_space_keeps_it() {
+    use mnema_desktop::models::ExistingVectors;
+    use mnema_desktop::provider::{ProviderChoice, change};
+
+    // (a) From OpenRouter's bge-m3: same space, same vectors, no confirmation.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let bge = index_with_one_vector(&app, "baai/bge-m3", 1024);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    assert!(
+        matches!(&switched, Ok(s) if s.choice == ProviderChoice::Mnema && s.retired.is_empty()),
+        "{switched:?}"
+    );
+    assert_eq!(active_and_vectors(&app, bge), (Some(bge), 1));
+
+    // (b) From a 1536 space with vectors: refused, nothing moved.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    // The existing model-change class, which the window's count-based
+    // confirmation keys on — not any refusal at all.
+    assert!(
+        matches!(
+            refused,
+            Err(mnema_desktop::error::Error::Index(
+                mnema_index::Error::SpaceNotEmpty { space_id, embedded_chunks: 1 }
+            )) if space_id == small
+        ),
+        "a switch that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
+    );
+    assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
+    assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
+
+    // ... and confirmed with Discard: the index is on bge-m3.
+    let confirmed = change(&state, ProviderChoice::Mnema, ExistingVectors::Discard);
+    assert!(
+        matches!(&confirmed, Ok(s) if s.choice == ProviderChoice::Mnema
+            && s.retired.len() == 1
+            && s.retired[0].space_id == small
+            && s.retired[0].embedded_chunks == 1),
+        "the confirmed switch must say which space and how many vectors went: {confirmed:?}"
+    );
+    let model = state
+        .with_index(|db| {
+            let space = db.active_space()?.expect("an active space");
+            db.space_model(space)
+        })
+        .unwrap();
+    assert_eq!(model, ("baai/bge-m3".to_string(), 1024));
+}
+
+/// A scan that stopped mid-embedding and offers «Продовжити», put in the slot
+/// directly: what is under test is what a provider switch does with it.
+fn keep_a_resumable_ending(state: &AppState) -> ScanReport {
+    let report = ScanReport {
+        embedding: EmbedOutcome::Ran {
+            done: 1,
+            total: 2,
+            refused: 0,
+        },
+        ended_in: EndedIn::Embedding,
+        reason: EndReason::Cancelled,
+        message: None,
+        resume: Some(Entry::EmbedOnly),
+    };
+    state
+        .claim_job(
+            Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free")
+        .finish(
+            Terminal::Ended {
+                report: report.clone(),
+            },
+            None,
+        );
+    report
+}
+
+/// Review round 1, Important 1: a switch that leaves the active space where it
+/// was keeps the resumable ending (its counts are still about that space); a
+/// switch that moves the space forgets it.
+#[test]
+fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
+    use mnema_desktop::models::ExistingVectors;
+    use mnema_desktop::provider::{ProviderChoice, change};
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    index_with_one_vector(&app, "baai/bge-m3", 1024);
+    let state = app.state::<AppState>();
+    let report = keep_a_resumable_ending(&state);
+    change(&state, ProviderChoice::Mnema, ExistingVectors::Keep).expect("same space");
+    assert_eq!(
+        state.scan_state().snapshot,
+        ScanSnapshot::Ended { report },
+        "a switch that moved nothing must keep «Продовжити»"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    keep_a_resumable_ending(&state);
+    change(&state, ProviderChoice::Mnema, ExistingVectors::Discard).expect("confirmed");
+    assert_eq!(
+        state.scan_state().snapshot,
+        ScanSnapshot::Idle,
+        "a switch that moved the space must not keep counts about the old one"
+    );
+}
+
+/// Review round 1, Important 2: under Mnema the launcher's status poll answers
+/// from the model files and never starts the local process.
+#[test]
+fn the_status_poll_under_mnema_starts_no_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
+    state.install_local(support::ready_local(
+        dir.path(),
+        &[("FAKE_MLX_LOG", &log_env)],
+    ));
+    state.open_index().unwrap();
+    let webview = main_webview(&app);
+    let status = call(&webview, "provider_status", json!({})).expect("status");
+    assert_eq!(status, json!({ "kind": "ok" }));
+    let spawns = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("spawn "))
+        .count();
+    assert_eq!(spawns, 0, "a status poll started the local process");
+}
+
+/// Review round 1, Important 3: removing a model while a scan embeds through
+/// it is refused and the scan finishes; with nothing running it is allowed.
+#[test]
+fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
+    use mnema_desktop::provider::{LocalModel, remove};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 3, &[]);
+    let answer: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let seen = std::sync::Arc::clone(&answer);
+    let (_, settled) = run_scan_watching(
+        fx.app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |state, now| {
+            let embedding = matches!(
+                &now.snapshot,
+                ScanSnapshot::Running {
+                    phase: Phase::Embedding { .. },
+                    ..
+                }
+            );
+            let mut slot = seen.lock().unwrap();
+            if embedding && slot.is_none() {
+                *slot = Some(format!("{:?}", remove(state, LocalModel::Embed)));
+            }
+        },
+    );
+    let answer = answer.lock().unwrap().clone();
+    assert!(
+        answer.as_deref().is_some_and(|a| a.starts_with("Err(")),
+        "a removal while the scan holds the slot must be refused, got {answer:?}"
+    );
+    assert_eq!(
+        report_of(&settled).reason,
+        EndReason::Completed,
+        "{settled:?}"
+    );
+    let (chunks, vectors) = chunks_and_vectors(&fx.app, fx.space_id);
+    assert!(
+        chunks > 0 && vectors == chunks,
+        "{vectors} of {chunks} embedded"
+    );
+
+    let state = fx.app.state::<AppState>();
+    remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
+    assert!(!state.local().models_ready(), "the model is gone");
+}

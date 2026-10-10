@@ -100,6 +100,16 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 vi.mock('../lib/ipc', () => ({
+  // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
+  // unavailable here, so the section renders `Models` alone.
+  mnemaAvailable: () => Promise.resolve(false),
+  providerChoice: () => Promise.resolve('openRouter'),
+  localModels: () => Promise.resolve([]),
+  listenLocalModelProgress: () => Promise.resolve(() => {}),
+  setProviderChoice: vi.fn(),
+  downloadModel: vi.fn(),
+  cancelDownload: vi.fn(),
+  removeModel: vi.fn(),
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
   forgetKey: (...a: unknown[]) => forgetKey(...a),

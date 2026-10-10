@@ -229,6 +229,7 @@
       const why = embedding.why;
       if (why.kind === 'noKey') return { sentence: t('indexing_note_no_key'), result: null as string | null };
       if (why.kind === 'noModel') return { sentence: t('indexing_note_no_model'), result: null as string | null };
+      if (why.kind === 'localModels') return { sentence: t('indexing_note_local_models'), result: null as string | null };
       return {
         sentence: t('indexing_embed_not_started_store', { message: why.message }),
         result: null as string | null,

@@ -136,7 +136,34 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     setTimeout(tick, 300);
   }
 
+  // Mnema (local): ?local=nospace makes every download answer "no space".
+  let choice: 'openRouter' | 'mnema' = 'openRouter';
+  const local: Record<string, { kind: string; done?: number; total?: number }> = {
+    embed: { kind: 'absent' }, chat: { kind: 'absent' },
+  };
+  const cancelled = new Set<string>();
+  const downloadMock = (id: string) => new Promise<void>((resolve, reject) => {
+    if (query.get('local') === 'nospace') { reject({ kind: 'noSpace', needed: 3.4e9, free: 1.2e9 }); return; }
+    cancelled.delete(id);
+    let done = 0;
+    const tick = () => {
+      if (cancelled.has(id)) { local[id] = { kind: 'absent' }; reject({ kind: 'cancelled' }); return; }
+      done += 10;
+      void emit('local-model-progress', { id, done, total: 100 });
+      if (done >= 100) { local[id] = { kind: 'ready' }; resolve(); } else setTimeout(tick, 400);
+    };
+    local[id] = { kind: 'downloading', done: 0, total: 100 };
+    setTimeout(tick, 400);
+  });
+
   const handlers: Record<string, (a: Args) => unknown> = {
+    mnema_available: () => true,
+    provider_choice: () => choice,
+    set_provider_choice: (a) => { choice = a.choice as typeof choice; return { choice, retired: [] }; },
+    local_models: () => Object.entries(local).map(([id, state]) => ({ id, state })),
+    download_model: (a) => downloadMock(a.id as string),
+    cancel_download: (a) => { cancelled.add(a.id as string); },
+    remove_model: (a) => { local[a.id as string] = { kind: 'absent' }; },
     get_theme: () => ({ choice: s.theme }),
     set_theme: (a) => { s.theme = a.choice as ThemeChoice; void emit('theme-changed', s.theme); },
     get_locale: () => ({ choice: s.locale, effective: s.locale === 'uk' ? 'uk' : 'en' }),

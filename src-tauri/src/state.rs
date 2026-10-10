@@ -163,6 +163,13 @@ pub struct AppState {
     /// `set_key`, `forget_key` and `set_embedding_model`. Never held across the
     /// request itself.
     provider_status: Mutex<ProviderCache>,
+    /// The local provider's models and process. Behind a lock only so a test
+    /// can install a fake ([`AppState::install_local`]); an `Arc` so a job
+    /// thread can hold it without `AppState`.
+    local: Mutex<Arc<crate::provider::Local>>,
+    /// The language of the last question asked under Mnema, for the next
+    /// question that does not show its own (`mnema_rag::detect`'s `previous`).
+    last_lang: Mutex<Option<mnema_rag::Lang>>,
 }
 
 #[derive(Default)]
@@ -178,6 +185,7 @@ impl AppState {
         provider_base: String,
         credential_ref: String,
     ) -> Self {
+        let data_dir_models = data_dir.join("models");
         Self {
             data_dir,
             worker,
@@ -213,6 +221,16 @@ impl AppState {
             job_observer: Arc::new(Mutex::new(None)),
             hotkey_change: Mutex::new(()),
             provider_status: Mutex::new(ProviderCache::default()),
+            // The models where production keeps them, and NO process: the
+            // binary's path is resolved by `lib.rs::manage_state`, with `?`,
+            // and installed there ([`AppState::install_local`]) — the same
+            // start-up surfacing `paths::worker_path` gets. A test installs
+            // its own.
+            local: Mutex::new(Arc::new(crate::provider::Local::new(
+                mnema_local::Store::new(data_dir_models, crate::provider::HUB.to_string()),
+                PathBuf::new(),
+            ))),
+            last_lang: Mutex::new(None),
         }
     }
 
@@ -398,8 +416,106 @@ impl AppState {
         cache.entry = None;
     }
 
-    pub fn provider_base(&self) -> &str {
+    /// OpenRouter's address. Every model request goes through
+    /// [`AppState::endpoint`]; only the two calls that are about OpenRouter
+    /// itself — checking its key, listing its catalogue — name it directly.
+    pub fn openrouter_base(&self) -> &str {
         &self.provider_base
+    }
+
+    /// Replaces the local provider (tests install a fake process and models).
+    pub fn install_local(&self, local: crate::provider::Local) {
+        *self
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(local);
+    }
+
+    pub fn local(&self) -> Arc<crate::provider::Local> {
+        Arc::clone(
+            &self
+                .local
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Everything [`AppState::endpoint`] reads, owned — what a job carries.
+    pub fn provider(&self) -> crate::provider::Provider {
+        crate::provider::Provider {
+            data_dir: self.data_dir.clone(),
+            openrouter_base: self.provider_base.clone(),
+            credential_ref: self.credential_ref.clone(),
+            local: self.local(),
+        }
+    }
+
+    pub fn provider_choice(&self) -> crate::provider::ProviderChoice {
+        crate::prefs::provider_choice(&self.data_dir, self.mnema_available())
+    }
+
+    /// Whether this machine can run the local provider (`Local::available`).
+    pub fn mnema_available(&self) -> bool {
+        self.local().available()
+    }
+
+    /// The one place a model request learns where to go. See
+    /// [`crate::provider::Provider::endpoint`].
+    pub fn endpoint(&self) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().endpoint()
+    }
+
+    pub fn endpoint_as(
+        &self,
+        choice: crate::provider::ProviderChoice,
+    ) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().endpoint_as(choice)
+    }
+
+    /// [`crate::provider::Provider::question_endpoint_as`]: a question's wait
+    /// for the local models is bounded.
+    pub fn question_endpoint_as(
+        &self,
+        choice: crate::provider::ProviderChoice,
+    ) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().question_endpoint_as(choice)
+    }
+
+    /// How the answer to `question` should be voiced: the server's prompt for
+    /// OpenRouter; for Mnema, the question's language, falling back to the
+    /// previous question's and then the system's.
+    pub fn voice(&self, question: &str) -> mnema_rag::Voice {
+        self.voice_as(self.provider_choice(), question)
+    }
+
+    /// [`AppState::voice`] for a choice the caller already read.
+    pub fn voice_as(
+        &self,
+        choice: crate::provider::ProviderChoice,
+        question: &str,
+    ) -> mnema_rag::Voice {
+        self.voice_with(choice, question, sys_locale::get_locale().as_deref())
+    }
+
+    /// [`AppState::voice_as`] with the system locale given, so a test can fix it.
+    pub(crate) fn voice_with(
+        &self,
+        choice: crate::provider::ProviderChoice,
+        question: &str,
+        system: Option<&str>,
+    ) -> mnema_rag::Voice {
+        match choice {
+            crate::provider::ProviderChoice::OpenRouter => mnema_rag::Voice::OpenRouter,
+            crate::provider::ProviderChoice::Mnema => {
+                let mut last = self
+                    .last_lang
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let lang = mnema_rag::detect(question, *last, system);
+                *last = Some(lang);
+                mnema_rag::Voice::Mnema(lang)
+            }
+        }
     }
 
     pub fn credential_ref(&self) -> &str {

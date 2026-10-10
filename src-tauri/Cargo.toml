@@ -67,6 +67,8 @@ mnema-search = { path = "../crates/mnema-search" }
 # each `Hit` — that join is this crate's boundary, not `mnema-rag`'s, since
 # `mnema-rag` knows nothing about `Coordinate` or the database.
 mnema-rag = { path = "../crates/mnema-rag" }
+# The local provider (Mnema): model files and the MLX process's supervision.
+mnema-local = { path = "../crates/mnema-local" }
 tauri = { version = "2.11", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-dialog = "2"

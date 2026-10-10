@@ -24,7 +24,7 @@ import type {
   SubfolderListing,
   SubfolderState,
 } from './ipc';
-import { LAUNCHER_COLD_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
+import { LAUNCHER_COLD_EVENT, LOCAL_MODEL_PROGRESS_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -873,4 +873,9 @@ test('LocaleApplyError surface lists exactly the four Rust LocaleSurface variant
   expect(surfaces.slice().sort()).toEqual(
     rustEnumVariants(LOCALE_RS, 'LocaleSurface').map(camelOf).sort(),
   );
+});
+
+test('the local-model-progress event name is the one provider.rs actually emits', () => {
+  const PROVIDER_RS = readFileSync(join(HERE, '../../../src-tauri/src/provider.rs'), 'utf8');
+  expect(LOCAL_MODEL_PROGRESS_EVENT).toBe(rustStrConst(PROVIDER_RS, 'PROGRESS_EVENT'));
 });

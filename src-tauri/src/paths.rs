@@ -40,6 +40,18 @@ pub fn worker_path() -> std::io::Result<PathBuf> {
     )))
 }
 
+/// Where the local model process (`mnema-mlx`) is: beside the running
+/// executable, exactly as [`worker_path`] finds the extraction worker —
+/// `bundle.externalBin` in `tauri.macos.conf.json` puts it there in a bundle.
+pub fn mlx_path() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(dir.join(format!("mnema-mlx{}", std::env::consts::EXE_SUFFIX)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

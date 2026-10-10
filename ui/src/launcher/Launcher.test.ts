@@ -126,13 +126,6 @@ async function submit(value: string) {
   await fireEvent.keyDown(box, { key: 'Enter' });
 }
 
-test('a blank query never reaches ask and shows the blank message', async () => {
-  render(Launcher);
-  await submit('   ');
-  expect(askCalls()).toHaveLength(0); // model_settings may run on mount; ask must not
-  expect(screen.getByRole('alert').textContent).toMatch(/query|запит/i);
-});
-
 test('a query that refuses shows the F message', async () => {
   mockBackend(refusedNoCandidates);
   render(Launcher);
@@ -160,7 +153,7 @@ test('on ready the line clears', async () => {
 // in the line so Enter asks again. Both directions: `notAsked` (no chat model)
 // is not a failure to retry, and clears the line like every other answer.
 test('a provider failure keeps the query in the line; a model never asked clears it', async () => {
-  for (const why of [{ kind: 'offline' }, { kind: 'noReply' }, { kind: 'embeddingNoReply' }, { kind: 'failed', reason: 'r' }]) {
+  for (const why of [{ kind: 'offline' }, { kind: 'noReply' }, { kind: 'embeddingNoReply' }, { kind: 'failed', reason: 'r' }, { kind: 'localLoading' }]) {
     mockBackend({ ...citationsOnly, why });
     render(Launcher);
     await submit('retry me');
@@ -403,38 +396,38 @@ test('a freshly mounted launcher shows no cards at all (state A)', () => {
 
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
 //
-// The gate keeps the tree for `error`, and `error` carries three reasons. The
-// `Cards`-level test pins `reason: 'blank'`; these pin the transition the ruling
+// The gate keeps the tree for `error`, and `error` carries two reasons. The
+// `Cards`-level test pins `reason: 'tooLong'`; these pin the transition the ruling
 // was actually argued from — a person with three cards on screen mistyping an
 // Enter — which is the half that makes "do not narrow the gate by reason"
 // falsifiable. Anchored on the guard message, which only a completed validation
 // writes (`SearchLine.svelte:46`).
-test('a blank Enter from state B keeps the tree', async () => {
+test('a too-long Enter from state B keeps the tree (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
 
-  await submit('   ');
+  await submit('x'.repeat(2049));
   await screen.findByRole('alert');
 
   expect(screen.getByTestId('card-tree')).toBeTruthy();
 });
 
-test('a blank Enter from state B does not shut a hand-opened folder', async () => {
+test('a too-long Enter from state B does not shut a hand-opened folder (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
 
-  await submit('   ');
+  await submit('x'.repeat(2049));
   await screen.findByRole('alert');
 
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a blank Enter from state B keeps the answer and source cards', async () => {
+test('a too-long Enter from state B keeps the answer and source cards (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
   const before = screen.getByTestId('card-centre').textContent;
 
-  await submit('   ');
+  await submit('x'.repeat(2049));
   await screen.findByRole('alert');
 
   expect(screen.getByTestId('card-centre').textContent).toBe(before);
@@ -1080,4 +1073,59 @@ test('turning the right panel off in the hot state tells Rust', async () => {
   await waitFor(() => expect(layoutCalls().at(-1)).toEqual({ left: true, right: false }));
   expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+});
+
+// The Toolbar takes the provider from `provider_choice`, read with the status.
+test('under Mnema the status button names Mnema, under OpenRouter it does not', async () => {
+  for (const [choice, has, hasNot] of [['mnema', 'Mnema', 'OpenRouter'], ['openRouter', 'OpenRouter', 'Mnema']]) {
+    mockBackend(undefined);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+      cmd === 'provider_choice' ? Promise.resolve(choice) : base(cmd, ...a));
+    render(Launcher);
+    const b = await screen.findByTestId('provider-cloud');
+    expect(b.getAttribute('aria-label'), choice).toContain(has);
+    expect(b.getAttribute('aria-label'), choice).not.toContain(hasNot);
+    cleanup();
+  }
+});
+
+// Owner, live run 2026-10-08: a second Enter on the emptied line put a hint
+// under a visible answer. Owner ruling: no hint at all; Enter on an empty line
+// does nothing in any state.
+test('Enter on an empty line does nothing: nothing on screen, or an answer on screen', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  await submit('   ');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls()).toHaveLength(0);
+  await submit('how much?');
+  await screen.findByTestId('query-echo');
+  await waitFor(() => expect(box.value).toBe(''));
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  await fireEvent.keyDown(box, { key: 'Enter', repeat: true });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls()).toHaveLength(1);
+  expect(screen.getByTestId('query-echo')).toBeTruthy();
+});
+
+// Review of 36436d7, Minor 2: a "too long" message belongs to the line that was
+// too long. Once the line is emptied it is stale, and a blank Enter after it
+// changes nothing further.
+test('the too-long message goes when the line is emptied', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await submit('x'.repeat(2049));
+  expect((await screen.findByRole('alert')).textContent).toContain('2048');
+  // Still too long: the message stays (the other direction).
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  expect(screen.getByRole('alert')).toBeTruthy();
+  await fireEvent.input(box, { target: { value: '' } });
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  await fireEvent.keyDown(box, { key: 'Enter' });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(askCalls()).toHaveLength(0);
 });

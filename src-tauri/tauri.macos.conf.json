@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/mnema-extract-worker", "binaries/mnema-mlx"],
+    "resources": {
+      "binaries/mlx-swift_Cmlx.bundle": "mlx-swift_Cmlx.bundle"
+    },
+    "macOS": {
+      "files": {
+        "lib/libswiftCompatibilitySpan.dylib": "binaries/libswiftCompatibilitySpan.dylib"
+      }
+    }
+  }
+}

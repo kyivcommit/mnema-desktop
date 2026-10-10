@@ -1,0 +1,100 @@
+diff --git a/Source/Cmlx/mlx-generated/conv.cpp b/Source/Cmlx/mlx-generated/conv.cpp
+index 25c6d543..defaaa2c 100644
+--- a/Source/Cmlx/mlx-generated/conv.cpp
++++ b/Source/Cmlx/mlx-generated/conv.cpp
+@@ -1650,12 +1650,19 @@ using Int = integral_constant<int, val>;
+ // Binary Operators on Integral constants
+ ///////////////////////////////////////////////////////////////////////////////
+ 
++// mnema spike: Metal < 3.2 (macOS 14) has no remove_addrspace_t; the pre-#3963 type works there.
++#if __METAL_VERSION__ >= 320
++#define MLX_STRIP_AS(X) metal::remove_addrspace_t<X>
++#else
++#define MLX_STRIP_AS(X) X
++#endif
++
+ #define integral_const_binop(__op__, __operator__)          \
+   template <typename T, T tv, typename U, U uv>             \
+   METAL_FUNC constexpr auto __operator__(                   \
+       integral_constant<T, tv>, integral_constant<U, uv>) { \
+     constexpr auto res = tv __op__ uv;                      \
+-    using res_t = metal::remove_addrspace_t<decltype(res)>; \
++    using res_t = MLX_STRIP_AS(decltype(res)); \
+     return integral_constant<res_t, res>{};                 \
+   }
+ 
+diff --git a/Source/Cmlx/mlx-generated/gemm.cpp b/Source/Cmlx/mlx-generated/gemm.cpp
+index ee4e24cc..c869a65e 100644
+--- a/Source/Cmlx/mlx-generated/gemm.cpp
++++ b/Source/Cmlx/mlx-generated/gemm.cpp
+@@ -394,12 +394,19 @@ using Int = integral_constant<int, val>;
+ // Binary Operators on Integral constants
+ ///////////////////////////////////////////////////////////////////////////////
+ 
++// mnema spike: Metal < 3.2 (macOS 14) has no remove_addrspace_t; the pre-#3963 type works there.
++#if __METAL_VERSION__ >= 320
++#define MLX_STRIP_AS(X) metal::remove_addrspace_t<X>
++#else
++#define MLX_STRIP_AS(X) X
++#endif
++
+ #define integral_const_binop(__op__, __operator__)          \
+   template <typename T, T tv, typename U, U uv>             \
+   METAL_FUNC constexpr auto __operator__(                   \
+       integral_constant<T, tv>, integral_constant<U, uv>) { \
+     constexpr auto res = tv __op__ uv;                      \
+-    using res_t = metal::remove_addrspace_t<decltype(res)>; \
++    using res_t = MLX_STRIP_AS(decltype(res)); \
+     return integral_constant<res_t, res>{};                 \
+   }
+ 
+diff --git a/Source/Cmlx/mlx-generated/steel_attention.cpp b/Source/Cmlx/mlx-generated/steel_attention.cpp
+index 75c2edbd..00e8967d 100644
+--- a/Source/Cmlx/mlx-generated/steel_attention.cpp
++++ b/Source/Cmlx/mlx-generated/steel_attention.cpp
+@@ -520,12 +520,19 @@ using Int = integral_constant<int, val>;
+ // Binary Operators on Integral constants
+ ///////////////////////////////////////////////////////////////////////////////
+ 
++// mnema spike: Metal < 3.2 (macOS 14) has no remove_addrspace_t; the pre-#3963 type works there.
++#if __METAL_VERSION__ >= 320
++#define MLX_STRIP_AS(X) metal::remove_addrspace_t<X>
++#else
++#define MLX_STRIP_AS(X) X
++#endif
++
+ #define integral_const_binop(__op__, __operator__)          \
+   template <typename T, T tv, typename U, U uv>             \
+   METAL_FUNC constexpr auto __operator__(                   \
+       integral_constant<T, tv>, integral_constant<U, uv>) { \
+     constexpr auto res = tv __op__ uv;                      \
+-    using res_t = metal::remove_addrspace_t<decltype(res)>; \
++    using res_t = MLX_STRIP_AS(decltype(res)); \
+     return integral_constant<res_t, res>{};                 \
+   }
+ 
+diff --git a/Source/Cmlx/mlx/mlx/backend/metal/kernels/steel/utils/integral_constant.h b/Source/Cmlx/mlx/mlx/backend/metal/kernels/steel/utils/integral_constant.h
+index 2f153f482..ea68de88c 100644
+--- a/Source/Cmlx/mlx/mlx/backend/metal/kernels/steel/utils/integral_constant.h
++++ b/Source/Cmlx/mlx/mlx/backend/metal/kernels/steel/utils/integral_constant.h
+@@ -47,12 +47,19 @@ using Int = integral_constant<int, val>;
+ // Binary Operators on Integral constants
+ ///////////////////////////////////////////////////////////////////////////////
+ 
++// mnema spike: Metal < 3.2 (macOS 14) has no remove_addrspace_t; the pre-#3963 type works there.
++#if __METAL_VERSION__ >= 320
++#define MLX_STRIP_AS(X) metal::remove_addrspace_t<X>
++#else
++#define MLX_STRIP_AS(X) X
++#endif
++
+ #define integral_const_binop(__op__, __operator__)          \
+   template <typename T, T tv, typename U, U uv>             \
+   METAL_FUNC constexpr auto __operator__(                   \
+       integral_constant<T, tv>, integral_constant<U, uv>) { \
+     constexpr auto res = tv __op__ uv;                      \
+-    using res_t = metal::remove_addrspace_t<decltype(res)>; \
++    using res_t = MLX_STRIP_AS(decltype(res)); \
+     return integral_constant<res_t, res>{};                 \
+   }
+ 

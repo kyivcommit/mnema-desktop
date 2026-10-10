@@ -82,15 +82,31 @@ pub(crate) struct ScanDeps {
     pub(crate) embed: std::sync::Arc<EmbedFn>,
 }
 
-/// The credential store, as one question: the key for this installation, or
-/// `None` when the person has not entered one.
+/// The provider, as one question: where to send this run's embeddings and the
+/// secret for them, or `None` when there is nothing to send with — no key
+/// entered under OpenRouter, the local models not downloaded under Mnema.
+/// Asked ONCE per run: a local process that restarts mid-run ends the run with
+/// its reason rather than being re-resolved per batch (v2, E10).
 ///
 /// It takes **nothing**, and that is what makes it callable from the job
 /// thread: `AppState` does not cross into the thread (see [`start_inner`]), so
 /// a signature taking `&AppState` could only be called before the spawn — which
 /// is the one place D-g says it must not be called from.
-/// [`ScanDeps::production`] captures the credential reference instead.
-pub(crate) type KeyFn = dyn Fn() -> Result<Option<String>, Error> + Send + Sync;
+/// [`ScanDeps::production`] captures a [`crate::provider::Provider`] instead.
+/// What the production key read makes of the provider's answer: only "nobody
+/// entered a key" is the ordinary empty answer. Mnema without its models
+/// (`ProviderNotReady`) stays an error so the scan can say *that*, not "no key".
+pub(crate) fn key_answer(
+    answer: Result<crate::provider::Endpoint, Error>,
+) -> Result<Option<crate::provider::Endpoint>, Error> {
+    match answer {
+        Ok(endpoint) => Ok(Some(endpoint)),
+        Err(Error::NoKey) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) type KeyFn = dyn Fn() -> Result<Option<crate::provider::Endpoint>, Error> + Send + Sync;
 
 /// `mnema_embed::run`, with its own signature rather than a narrowed one: the
 /// point of the seam is that the embedding phase cannot tell the difference.
@@ -112,17 +128,25 @@ impl ScanDeps {
     /// `AppState` and can be called from the job thread, which is where D-g
     /// puts the key read so that a keychain dialog is waited for under the
     /// `Embedding` phase rather than in front of the claim.
+    ///
+    /// The provider CHOICE is read inside both closures, on the job thread,
+    /// after the claim — never here. `set_provider_choice` needs the slot, so
+    /// from the claim on the choice cannot move under this run; read before the
+    /// claim it could, and the run would embed through the provider the person
+    /// had just left.
     pub(crate) fn production(state: &AppState) -> Self {
-        let credential_ref = state.credential_ref().to_string();
+        let provider = state.provider();
+        let for_embed = provider.clone();
         Self {
-            key: std::sync::Arc::new(move || Ok(mnema_secrets::load(&credential_ref)?)),
-            embed: std::sync::Arc::new(|db, base, key, cancel, on_progress| {
+            key: std::sync::Arc::new(move || key_answer(provider.endpoint())),
+            embed: std::sync::Arc::new(move |db, base, key, cancel, on_progress| {
+                let choice = for_embed.choice();
                 mnema_embed::run_with(
                     db,
                     base,
                     key,
-                    crate::embed_job::BATCH,
-                    crate::embed_job::WORKERS,
+                    choice.scan_batch(),
+                    choice.scan_workers(),
                     cancel,
                     on_progress,
                 )
@@ -251,10 +275,6 @@ pub(crate) const LAST_READING_AT: &str = "scan.last_reading_at";
 /// job gets a connection of its own — the same reason the deleted
 /// `start_walk_job` gave its own walk one.
 pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Result<(), Error> {
-    // Resolved on this thread for the reason `ScanDeps::production` gives about
-    // the credential reference: `AppState` does not cross into the job.
-    let base = state.provider_base().to_string();
-
     // 🔴 **D-f: the entry point branches BEFORE any preflight.** `EmbedOnly` is
     // a resumption of a reading pass that already finished, so everything the
     // reading phase does first — reading the list of folders, building the
@@ -299,7 +319,11 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
             },
             true,
         )?;
-        std::thread::spawn(move || embed_after(slot, job_db, deps, base));
+        let provider = state.provider();
+        std::thread::spawn(move || {
+            embed_after(slot, job_db, deps);
+            provider.scan_end();
+        });
         return Ok(());
     }
 
@@ -383,7 +407,11 @@ pub(crate) fn start_inner(state: &AppState, entry: Entry, deps: ScanDeps) -> Res
     // into the thread, and the worker's path is the only thing from it the
     // reading pass still needs.
     let worker = state.worker_path().to_path_buf();
-    std::thread::spawn(move || read_every_root(slot, job_db, worker, roots, deps, base));
+    let provider = state.provider();
+    std::thread::spawn(move || {
+        read_every_root(slot, job_db, worker, roots, deps);
+        provider.scan_end();
+    });
     Ok(())
 }
 
@@ -443,14 +471,7 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
 
 /// The reading pass itself: every folder in turn, on the job's own thread, and
 /// the embedding phase after it.
-fn read_every_root(
-    slot: JobSlot,
-    job_db: Db,
-    worker: PathBuf,
-    roots: Roots,
-    deps: ScanDeps,
-    base: String,
-) {
+fn read_every_root(slot: JobSlot, job_db: Db, worker: PathBuf, roots: Roots, deps: ScanDeps) {
     let root_count = roots.len() as u64;
     let mut outcome = ReadingOutcome {
         root_count,
@@ -695,7 +716,7 @@ fn read_every_root(
         return;
     }
 
-    embed_after(slot, job_db, deps, base);
+    embed_after(slot, job_db, deps);
 }
 
 /// What the embedding phase's counts are measured against: the chunks the
@@ -840,7 +861,7 @@ fn non_negative(answer: Result<i64, mnema_index::Error>) -> u64 {
 ///    while the dialog was up asked for this job to end, and an ending that
 ///    said `Completed` because there happened to be no key would be reporting a
 ///    scan that finished to somebody who stopped it.
-fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
+fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps) {
     // F5. Read before the announcement below because the announcement is made
     // of them — see step 1 of D-g above, and [`IndexCounts`] for why the queue
     // is measured from this side at all.
@@ -863,13 +884,20 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
         return;
     }
 
-    let key = match answer {
-        Ok(Some(key)) => key,
+    let endpoint = match answer {
+        Ok(Some(endpoint)) => endpoint,
         // Nobody has entered one. An ordinary state — a fresh installation is
         // in it — and so the JOB completed: it read every folder and had
         // nothing it was allowed to do next.
         Ok(None) => {
             skip_embedding(slot, &job_db, SkipWhy::NoKey);
+            return;
+        }
+        // Mnema chosen and its models not downloaded: as ordinary as a fresh
+        // installation without a key, but the person's next step is the
+        // download rows, not a key field.
+        Err(Error::ProviderNotReady) => {
+            skip_embedding(slot, &job_db, SkipWhy::LocalModels);
             return;
         }
         // The store would not answer at all: a locked keychain, an absent
@@ -957,8 +985,8 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps, base: String) {
     let caught = catch_unwind(AssertUnwindSafe(|| {
         (deps.embed)(
             &job_db,
-            &base,
-            &key,
+            &endpoint.base,
+            &endpoint.token,
             &|| slot.cancel_flag().load(Ordering::SeqCst),
             &mut |progress| {
                 queue_total.store(progress.total, Ordering::Relaxed);
@@ -1657,13 +1685,22 @@ mod tests {
     }
 
     /// A key read that answers with a key.
-    fn a_key() -> Result<Option<String>, Error> {
-        Ok(Some("a-key".to_string()))
+    fn a_key() -> Result<Option<crate::provider::Endpoint>, Error> {
+        Ok(Some(crate::provider::Endpoint {
+            base: "http://127.0.0.1:1".to_string(),
+            query_base: "http://127.0.0.1:1".to_string(),
+            token: "a-key".to_string(),
+        }))
     }
 
     /// A key read that answers "nobody has entered one".
-    fn no_key() -> Result<Option<String>, Error> {
+    fn no_key() -> Result<Option<crate::provider::Endpoint>, Error> {
         Ok(None)
+    }
+
+    /// The local provider chosen, its models not downloaded.
+    fn local_models_not_ready() -> Result<Option<crate::provider::Endpoint>, Error> {
+        Err(Error::ProviderNotReady)
     }
 
     /// A credential store that will not answer at all.
@@ -1675,8 +1712,9 @@ mod tests {
     /// keychain and an absent Secret Service session, neither of which a test
     /// can arrange and both of which arrive here the same way — as an `Err` from
     /// `load`, which `?` turns into [`Error::Secrets`].
-    fn a_store_that_will_not_answer() -> Result<Option<String>, Error> {
-        Ok(mnema_secrets::load("")?)
+    fn a_store_that_will_not_answer() -> Result<Option<crate::provider::Endpoint>, Error> {
+        mnema_secrets::load("")?;
+        unreachable!("an empty reference is refused before any store is asked")
     }
 
     /// What a fake embedding pass is, once the two things a test actually
@@ -1701,7 +1739,7 @@ mod tests {
     /// never entered at all. A test that asserted only "nothing was sent" would
     /// stay green with every shell-side guard removed.
     fn deps_counting_embeds(
-        key: impl Fn() -> Result<Option<String>, Error> + Send + Sync + 'static,
+        key: impl Fn() -> Result<Option<crate::provider::Endpoint>, Error> + Send + Sync + 'static,
         answer: impl Fn(
             &dyn Fn() -> bool,
             &mut dyn FnMut(mnema_embed::EmbedProgress),
@@ -2341,6 +2379,44 @@ mod tests {
         );
     }
 
+    /// The production key read keeps the two empty answers apart: no key is
+    /// `Ok(None)`, Mnema without models stays `ProviderNotReady`.
+    #[test]
+    fn the_production_key_read_keeps_no_key_and_no_local_models_apart() {
+        assert!(matches!(key_answer(Err(Error::NoKey)), Ok(None)));
+        assert!(matches!(
+            key_answer(Err(Error::ProviderNotReady)),
+            Err(Error::ProviderNotReady)
+        ));
+    }
+
+    /// Mnema chosen, models not downloaded: the scan reads every folder and says so,
+    /// without sending the person to a key field Mnema does not have.
+    #[test]
+    fn local_models_not_downloaded_is_reported_as_such_not_as_no_key() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let (deps, calls) =
+            deps_counting_embeds(local_models_not_ready, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+
+        let report = report_of(&settled);
+        assert_eq!(
+            report.embedding,
+            EmbedOutcome::Skipped {
+                why: SkipWhy::LocalModels
+            },
+            "Mnema without its models must not tell a person to enter a key: {report:?}"
+        );
+        assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
     /// 🔴 A store that will not answer is not a store with no key in it.
     ///
     /// The pair, on one fixture and one code path: `Ok(None)` is a person who
@@ -2446,7 +2522,7 @@ mod tests {
         for (which, answer, model) in [
             (
                 "a key",
-                a_key as fn() -> Result<Option<String>, Error>,
+                a_key as fn() -> Result<Option<crate::provider::Endpoint>, Error>,
                 true,
             ),
             ("no key", no_key, true),

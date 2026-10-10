@@ -31,11 +31,12 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'refusal_no_candidates' | 'refusal_empty_completion'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
-  | 'search_placeholder' | 'query_blank' | 'query_too_long' | 'query_failed'
+  | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
-  | 'provider_ok' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
+  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
+  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -46,6 +47,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
+  | 'no_answer_local_loading'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -105,7 +107,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'indexing_root_volume_missing' | 'indexing_root_message' | 'indexing_root_cancelled'
   | 'indexing_resume' | 'indexing_retry'
   | 'scanning_scan' | 'scanning_incomplete' | 'scanning_continue_embedding'
-  | 'indexing_note_no_key' | 'indexing_note_no_model'
+  | 'indexing_note_no_key' | 'indexing_note_no_model' | 'indexing_note_local_models'
   | 'indexing_cancel'
   | 'indexing_index_files' | 'indexing_index_updated' | 'indexing_index_updated_ago'
   | 'indexing_index_never'
@@ -343,16 +345,32 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
-    query_blank: 'Введіть запит.',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
     arm_text: 'текст', arm_content: 'зміст',
     toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
+    provider_ok_mnema: 'Mnema (локально) готова',
+    provider_unreachable_mnema: 'Mnema (локально) не відповідає: {reason}',
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
+    provider_openrouter: 'OpenRouter',
+    provider_mnema: 'Mnema (локально)',
+    provider_mnema_hint: '~3,1 ГБ диска, ~4 ГБ пам\'яті',
+    provider_model_embed: 'Модель пошуку',
+    provider_model_chat: 'Модель відповідей',
+    provider_download: 'Завантажити',
+    provider_cancel: 'Скасувати',
+    provider_remove: 'Видалити',
+    provider_retry: 'Повторити',
+    provider_no_space: 'Потрібно ~{needed} ГБ, вільно {free} ГБ',
+    provider_row_ready: '✓',
+    provider_downloading: 'Завантаження: {name}',
+    provider_local_ready: 'Моделі Mnema завантажені',
+    provider_missing_local_models: 'Завантажте моделі Mnema — відкрити налаштування моделей',
+    provider_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}}.',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
@@ -408,6 +426,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // model cannot be swapped without re-indexing (D171 review, finding 3).
     no_answer_embedding_no_reply: 'Провайдер не встиг обробити пошуковий запит. Спробуйте ще раз.',
     no_answer_failed: 'Провайдер повернув помилку ({reason}).',
+    // Task 14.2: a load in flight, not an error; it goes on in the background.
+    no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -940,6 +960,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // rather than corrected to name all of them.
     indexing_note_no_key: 'Пошук за змістом не вмикали: ключ провайдера не збережено. Пошук по словах уже працює.',
     indexing_note_no_model: 'Пошук за змістом не вмикали: модель вбудовування не обрана. Пошук по словах уже працює.',
+    indexing_note_local_models: 'Пошук за змістом не вмикали: моделі Mnema ще не завантажені — завантажте їх у налаштуваннях моделей. Пошук по словах уже працює.',
     indexing_cancel: 'Зупинити',
     // §9.3, PR 9 Task 6 — the Scanning SECTION (called Indexing before Task
     // 8), which says what the index holds. Every key here is
@@ -1186,16 +1207,32 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
-    query_blank: 'Enter a query.',
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
     arm_text: 'text', arm_content: 'content',
     toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
+    provider_ok_mnema: 'Mnema (local) is ready',
+    provider_unreachable_mnema: 'Mnema (local) is not responding: {reason}',
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
+    provider_openrouter: 'OpenRouter',
+    provider_mnema: 'Mnema (local)',
+    provider_mnema_hint: '~3.1 GB of disk, ~4 GB of memory',
+    provider_model_embed: 'Search model',
+    provider_model_chat: 'Answer model',
+    provider_download: 'Download',
+    provider_cancel: 'Cancel',
+    provider_remove: 'Remove',
+    provider_retry: 'Retry',
+    provider_no_space: 'About {needed} GB needed, {free} GB free',
+    provider_row_ready: '✓',
+    provider_downloading: 'Downloading: {name}',
+    provider_local_ready: 'Mnema models are downloaded',
+    provider_missing_local_models: 'Download the Mnema models — open the model settings',
+    provider_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}}.',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
@@ -1219,6 +1256,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_no_reply: 'The model did not answer in time. Try again, or choose another model in Settings.',
     no_answer_embedding_no_reply: 'The provider did not process the search query in time. Try again.',
     no_answer_failed: 'The provider returned an error ({reason}).',
+    no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
@@ -1353,6 +1391,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     scanning_continue_embedding: 'Continue embedding',
     indexing_note_no_key: 'Search by meaning was not started: no provider key is stored. Word search already works.',
     indexing_note_no_model: 'Search by meaning was not started: no embedding model has been chosen. Word search already works.',
+    indexing_note_local_models: 'Search by meaning was not started: the Mnema models are not downloaded yet — download them in the model settings. Word search already works.',
     indexing_cancel: 'Stop',
     indexing_index_files: '{count, plural, one {The index holds # file} other {The index holds # files}}.',
     indexing_index_updated: 'Last updated: {date}.',

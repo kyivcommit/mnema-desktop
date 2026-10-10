@@ -1,14 +1,15 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
-  import { openSettings, type ProviderStatus } from '../lib/ipc';
+  import { openSettings, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
   import type { Heat } from './state';
 
-  let { heat, left = $bindable(false), right = $bindable(false), pinned = $bindable(false), status }: {
+  let { heat, left = $bindable(false), right = $bindable(false), pinned = $bindable(false), status, provider = 'openRouter' }: {
     heat: Heat;
     left?: boolean;
     right?: boolean;
     pinned?: boolean;
     status: ProviderStatus | null; // null: not asked yet, or the ask failed
+    provider?: ProviderChoice; // which provider `status` speaks for
   } = $props();
 
   // Cold shows no side panel, so a toggle there would change nothing visible:
@@ -19,10 +20,15 @@
     void $locale;
     if (!status) return '';
     switch (status.kind) {
-      case 'ok': return t('provider_ok');
-      case 'unreachable': return t('provider_unreachable', { reason: status.reason });
+      case 'ok': return t(provider === 'mnema' ? 'provider_ok_mnema' : 'provider_ok');
+      case 'unreachable':
+        return t(provider === 'mnema' ? 'provider_unreachable_mnema' : 'provider_unreachable', { reason: status.reason });
       case 'notConfigured':
-        return t(status.missing === 'key' ? 'provider_missing_key' : 'provider_missing_model');
+        return t(
+          status.missing === 'key' ? 'provider_missing_key'
+            : status.missing === 'localModels' ? 'provider_missing_local_models'
+              : 'provider_missing_model',
+        );
     }
   });
   const leftLabel = $derived.by(() => { void $locale; return t('toolbar_left'); });

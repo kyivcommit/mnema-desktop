@@ -60,24 +60,31 @@ struct CompletionMessage {
 /// belongs to `mnema-rag` and the empty-answer refusal belongs to the bridge
 /// (spec §4); this call's one job is the round trip.
 pub fn complete(base: &str, key: &str, model: &str, messages: &[Message]) -> Result<String, Error> {
+    complete_within(base, key, model, messages, http::INTERACTIVE_TIMEOUT)
+}
+
+/// [`complete`] with the wait chosen by the caller: a local model on a weak Mac
+/// takes longer than the cloud's `INTERACTIVE_TIMEOUT` to write an answer.
+pub fn complete_within(
+    base: &str,
+    key: &str,
+    model: &str,
+    messages: &[Message],
+    timeout: std::time::Duration,
+) -> Result<String, Error> {
     let request = serde_json::json!({ "model": model, "messages": messages }).to_string();
-    let (status, answer) = match http::post_json_within(
-        base,
-        "/chat/completions",
-        key,
-        &request,
-        http::INTERACTIVE_TIMEOUT,
-    ) {
-        Ok(pair) => pair,
-        // A body cut off on a refusal still carries the refusal's verdict, not
-        // the answer — the same trade `check_key`/`check_embedding_model` make.
-        // No 404 here: unlike the embedding check, a 404 from chat has no
-        // special "no such model" verdict, so it keeps `BodyUnreadable`.
-        Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 429) => {
-            return Err(error_for_status(status, KeySent::Yes));
-        }
-        Err(other) => return Err(other),
-    };
+    let (status, answer) =
+        match http::post_json_within(base, "/chat/completions", key, &request, timeout) {
+            Ok(pair) => pair,
+            // A body cut off on a refusal still carries the refusal's verdict, not
+            // the answer — the same trade `check_key`/`check_embedding_model` make.
+            // No 404 here: unlike the embedding check, a 404 from chat has no
+            // special "no such model" verdict, so it keeps `BodyUnreadable`.
+            Err(Error::BodyUnreadable { status, .. }) if matches!(status, 401 | 403 | 429) => {
+                return Err(error_for_status(status, KeySent::Yes));
+            }
+            Err(other) => return Err(other),
+        };
     if status != 200 {
         return Err(attach_reason(
             error_for_status(status, KeySent::Yes),
@@ -124,6 +131,33 @@ fn unreadable_completion(body: &str, key: &str, error: &serde_json::Error) -> Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_within_honours_its_timeout() {
+        use mnema_mock_provider::{MockServer, Reply};
+        use std::time::{Duration, Instant};
+        let body = r#"{"choices":[{"message":{"content":"late"}}]}"#;
+        let ask = || {
+            vec![Message {
+                role: MessageRole::User,
+                content: "q".into(),
+            }]
+        };
+
+        let slow = MockServer::new(vec![Reply::ok_after(2, body)]);
+        let t0 = Instant::now();
+        let short = complete_within(slow.base(), "k", "m", &ask(), Duration::from_secs(1));
+        let waited = t0.elapsed();
+        assert!(
+            matches!(short, Err(Error::NoReply(_)) | Err(Error::Transport(_))),
+            "a 1 s wait on a 2 s answer must time out, got {short:?}"
+        );
+        assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+
+        let patient = MockServer::new(vec![Reply::ok_after(2, body)]);
+        let long = complete_within(patient.base(), "k", "m", &ask(), Duration::from_secs(3));
+        assert_eq!(long.ok().as_deref(), Some("late"));
+    }
 
     #[test]
     fn a_message_serialises_to_the_openai_role_content_shape() {

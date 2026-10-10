@@ -82,6 +82,13 @@ scripts/fetch-pdfium.sh            # bundle.resources names it; see "Pdfium in t
 # The package.
 cargo tauri build
 
+# The MLX sidecar (macOS arm64 only): `cargo tauri build` builds it through before-build.sh
+# (scripts/build-mlx-sidecar.sh, Xcode 26.4 or newer — Swift 6.3, which the pinned mlx-swift
+# requires — with the Metal toolchain). Where it was not built,
+# stage-sidecar.sh stages a placeholder so the shell compiles; verify-bundle.sh rejects it.
+# A release verifies with MNEMA_REQUIRE_METAL=1, which also demands `mnema-mlx --metal-selftest`
+# print METAL OK from inside the image (CI runs it best-effort: a hosted runner may have no GPU).
+
 # What it produced, opened and checked.
 scripts/verify-bundle.sh
 ```
@@ -457,10 +464,13 @@ and `src-tauri/tauri.windows.conf.json` each do, before adding their own library
 platform is bundled; both have to compile.
 
 `tauri.conf.json` is deliberately left alone rather than emptied and split three ways: it
-is the file the signed image was verified against, and a `tauri.macos.conf.json` beside it
-would move macOS onto a merged configuration nothing has measured.
-`src-tauri/tests/vendored_library_resource.rs` fails if one appears, and is also what
-holds the other two in step with the fetch script — it reads every platform's effective
+is the file the signed image was verified against. macOS has had its own
+`tauri.macos.conf.json` since the local provider: it adds only the MLX sidecar (its
+`externalBin`, the Metal bundle and the Swift runtime library), and the signed image built
+from that merge is measured by `scripts/verify-bundle.sh`.
+`src-tauri/tests/vendored_library_resource.rs` pins exactly which files macOS merges, so a
+further platform file fails it, and is also what holds the other two in step with the fetch
+script — it reads every platform's effective
 configuration through the same `read_from`, from whatever host it runs on, so this class
 of defect no longer waits for a CI leg to be reached. It was found by the first Linux job
 that ever completed on the branch that introduced it, three commits late.

@@ -152,6 +152,28 @@ pub fn read_all(data_dir: &Path) -> serde_json::Map<String, serde_json::Value> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// The chosen provider (`provider` key): OpenRouter unless the file says
+/// `"mnema"`. Read on every use, so a job thread and a command read the same
+/// fact without a second copy in memory. Every caller routes through here.
+///
+/// A stored `"mnema"` on a machine that cannot run the local provider (data
+/// moved to an Intel Mac or an older macOS) reads as OpenRouter, so the person
+/// is not left with no radios and a "download the Mnema models" prompt.
+/// `mnema_available` is `Local::available`, the same answer the window's
+/// radios read, so the two cannot disagree.
+pub fn provider_choice(data_dir: &Path, mnema_available: bool) -> crate::provider::ProviderChoice {
+    use crate::provider::ProviderChoice;
+    let stored: ProviderChoice = read_all(data_dir)
+        .get(crate::provider::PREFS_KEY)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if stored == ProviderChoice::Mnema && !mnema_available {
+        return ProviderChoice::OpenRouter;
+    }
+    stored
+}
+
 /// Minutes the launcher may stay hidden before its next show is cold
 /// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
 pub fn cold_after_minutes(data_dir: &Path) -> u32 {
@@ -1319,6 +1341,20 @@ mod tests {
             read_all(dir.path()).get("hotkey"),
             Some(&json!("Ctrl+Space")),
             "a failed write must not change what was persisted"
+        );
+    }
+
+    #[test]
+    fn a_stored_mnema_choice_reads_as_openrouter_where_the_local_provider_cannot_run() {
+        use crate::provider::ProviderChoice::{Mnema, OpenRouter};
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), crate::provider::PREFS_KEY, json!("mnema")).unwrap();
+        assert_eq!(provider_choice(dir.path(), true), Mnema);
+        assert_eq!(provider_choice(dir.path(), false), OpenRouter);
+        // The file itself is untouched: moving back restores the choice.
+        assert_eq!(
+            read_all(dir.path()).get(crate::provider::PREFS_KEY),
+            Some(&json!("mnema"))
         );
     }
 }

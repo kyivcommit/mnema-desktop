@@ -1,0 +1,284 @@
+import Foundation
+import Network
+
+struct Request {
+    let method: String
+    let path: String
+    let headers: [String: String]  // lower-cased names
+    let body: Data
+}
+
+struct Response {
+    let status: Int
+    let body: Data
+
+    init(_ status: Int, _ json: Any? = nil) {
+        self.status = status
+        body = json.flatMap { try? JSONSerialization.data(withJSONObject: $0) } ?? Data()
+    }
+}
+
+/// One worker thread; `urgent` jobs run before the rest, a running job is never interrupted.
+final class WorkQueue {
+    private let cond = NSCondition()
+    private var urgent: [() -> Void] = []
+    private var normal: [() -> Void] = []
+
+    init() {
+        let t = Thread { [self] in
+            while true {
+                cond.lock()
+                while urgent.isEmpty && normal.isEmpty { cond.wait() }
+                let job = urgent.isEmpty ? normal.removeFirst() : urgent.removeFirst()
+                cond.unlock()
+                job()
+            }
+        }
+        t.start()
+    }
+
+    func submit(urgent isUrgent: Bool, _ job: @escaping () -> Void) {
+        cond.lock()
+        if isUrgent { urgent.append(job) } else { normal.append(job) }
+        cond.signal()
+        cond.unlock()
+    }
+}
+
+/// Largest request body accepted; an embed batch of 16 passages is far below it.
+private let maxBodyBytes = 16 << 20
+
+enum Parsed {
+    case incomplete
+    case malformed
+    case request(Request)
+}
+
+public struct ListenError: Error, CustomStringConvertible {
+    public let description: String
+}
+
+public final class Server {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "mnema-mlx.server")
+    private let work = WorkQueue()  // one model at a time
+    private let token: String
+    private let embedDelayMs: Int
+    private let lock = NSLock()
+    private var loaded = ["chat": false, "embed": false]
+    /// nil: `--stub`.
+    private let models: (engine: Engine, embedDir: URL, chatDir: URL)?
+
+    public init(token: String, embedDelayMs: Int = 0) throws {
+        self.token = token
+        self.embedDelayMs = embedDelayMs
+        models = nil
+        listener = try Self.listen()
+    }
+
+    /// Queue-ordering tests need to know a job is queued or running before they send the next one;
+    /// a fixed sleep lost that race on a busy CI runner. Only the stub's delay knob turns this on.
+    private func stubTrace(_ event: String) {
+        guard embedDelayMs > 0 else { return }
+        FileHandle.standardError.write(Data("stub: \(event)\n".utf8))
+    }
+
+    public init(token: String, embedDir: URL, chatDir: URL) throws {
+        self.token = token
+        embedDelayMs = 0
+        models = (Engine(), embedDir, chatDir)
+        listener = try Self.listen()
+    }
+
+    private static func listen() throws -> NWListener {
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 0)
+        return try NWListener(using: params)
+    }
+
+    /// Starts listening and returns the port the OS picked.
+    public func start() throws -> UInt16 {
+        let ready = DispatchSemaphore(value: 0)
+        var failure: String?
+        listener.stateUpdateHandler = {
+            switch $0 {
+            case .ready: ready.signal()
+            case .failed(let e): failure = "listener failed: \(e)"; ready.signal()
+            case .cancelled: failure = "listener cancelled"; ready.signal()
+            default: break
+            }
+        }
+        listener.newConnectionHandler = { [self] conn in
+            conn.start(queue: queue)
+            receive(conn, Data())
+        }
+        listener.start(queue: queue)
+        ready.wait()
+        if let failure { throw ListenError(description: failure) }
+        return listener.port!.rawValue
+    }
+
+    private func receive(_ conn: NWConnection, _ buf: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [self] data, _, done, err in
+            var buf = buf
+            buf.append(data ?? Data())
+            func send(_ resp: Response) {
+                var head = "HTTP/1.1 \(resp.status) X\r\nContent-Length: \(resp.body.count)\r\n"
+                head += "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+                conn.send(content: Data(head.utf8) + resp.body, completion: .contentProcessed { _ in conn.cancel() })
+            }
+            switch parse(buf) {
+            case .request(let req): handle(req, reply: send)
+            case .malformed: send(Response(400, ["error": "bad request"]))
+            case .incomplete:
+                if done || err != nil { conn.cancel() } else { receive(conn, buf) }
+            }
+        }
+    }
+
+    /// `.incomplete` until the whole request (headers and Content-Length body) has arrived.
+    private func parse(_ buf: Data) -> Parsed {
+        guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else {
+            return buf.count > 64 << 10 ? .malformed : .incomplete  // no header block this long is ours
+        }
+        let lines = String(decoding: buf[..<end.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
+        let start = lines[0].split(separator: " ")
+        guard start.count >= 2 else { return .malformed }
+        var headers: [String: String] = [:]
+        for l in lines.dropFirst() {
+            if let c = l.firstIndex(of: ":") {
+                headers[l[..<c].lowercased()] = l[l.index(after: c)...].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        guard let n = Int(headers["content-length"] ?? "0"), n >= 0, n <= maxBodyBytes else { return .malformed }
+        let body = buf[end.upperBound...]
+        guard body.count >= n else { return .incomplete }
+        return .request(Request(method: String(start[0]), path: String(start[1]), headers: headers, body: Data(body.prefix(n))))
+    }
+
+    /// Compares without stopping at the first differing byte.
+    private static func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        var diff = x.count ^ y.count
+        for i in 0..<min(x.count, y.count) { diff |= Int(x[i] ^ y[i]) }
+        return diff == 0
+    }
+
+    private func handle(_ req: Request, reply: @escaping (Response) -> Void) {
+        guard Self.constantTimeEqual(req.headers["authorization"] ?? "", "Bearer \(token)") else {
+            return reply(Response(401, ["error": "unauthorized"]))
+        }
+        let interactive = req.path.hasPrefix("/interactive/v1/")
+        let path = interactive ? String(req.path.dropFirst("/interactive".count)) : req.path
+        let allowed = path == "/v1/models" ? "GET" : "POST"
+        if ["/v1/models", "/v1/embeddings", "/v1/chat/completions", "/mnema/load", "/mnema/unload"].contains(path),
+           req.method != allowed {
+            return reply(Response(405, ["error": "method not allowed"]))
+        }
+        let json = (try? JSONSerialization.jsonObject(with: req.body)) as? [String: Any] ?? [:]
+        switch path {
+        case "/v1/embeddings":
+            guard json["model"] as? String == "baai/bge-m3" else {
+                return reply(Response(404, ["error": "unknown model"]))
+            }
+            guard let input = json["input"] as? [String] else {
+                return reply(Response(400, ["error": "input must be an array of strings"]))
+            }
+            stubTrace("queued \(interactive ? "interactive" : "scan") embed")
+            work.submit(urgent: interactive) { reply(self.embed(input)) }
+        case "/v1/chat/completions":
+            // Every message needs a string role and content: one that does not decode must not vanish.
+            guard let raw = json["messages"] as? [[String: Any]], !raw.isEmpty else {
+                return reply(Response(400, ["error": "messages must be a non-empty array"]))
+            }
+            let messages = raw.compactMap { m -> [String: String]? in
+                guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
+                return ["role": role, "content": content]
+            }
+            guard messages.count == raw.count else {
+                return reply(Response(400, ["error": "each message needs a string role and content"]))
+            }
+            work.submit(urgent: true) { reply(self.chat(messages)) }
+        // Load and unload wait for the running job in the same queue: never free a model in use.
+        case "/mnema/load":
+            work.submit(urgent: false) { reply(self.load(["chat", "embed"])) }
+        case "/mnema/unload":
+            let names = json["models"] as? [String] ?? ["chat", "embed"]
+            work.submit(urgent: false) {
+                self.models?.engine.unload(names)
+                self.setLoaded(names, false)
+                reply(Response(204))
+            }
+        case "/v1/models":
+            lock.lock(); defer { lock.unlock() }
+            reply(Response(200, ["data": [
+                ["id": "baai/bge-m3", "loaded": loaded["embed"]!],
+                ["id": "gemma-4-e2b-it", "loaded": loaded["chat"]!],
+            ]]))
+        default:
+            reply(Response(404, ["error": "not found"]))
+        }
+    }
+
+    private func setLoaded(_ models: [String], _ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        for m in models where loaded[m] != nil { loaded[m] = value }
+    }
+
+    /// Runs on the work queue. Loads the models that are not loaded yet.
+    private func load(_ names: [String]) -> Response {
+        guard let m = models else {
+            setLoaded(names, true)
+            return Response(204)
+        }
+        let r = blocking { try await m.engine.load(embedDir: m.embedDir, chatDir: m.chatDir, models: names) }
+        // From the engine, success or not: one model may have loaded before the other failed.
+        let resident = m.engine.loadedModels
+        setLoaded(["embed", "chat"].filter { resident.contains($0) }, true)
+        setLoaded(["embed", "chat"].filter { !resident.contains($0) }, false)
+        if case .failure(let e) = r { return Response(500, ["error": "load: \(e)"]) }
+        return Response(204)
+    }
+
+    private func chat(_ messages: [[String: String]]) -> Response {
+        guard let m = models else { return Response(200, ["choices": [["message": ["content": "stub <c>1</c>"]]]]) }
+        let r = load(["chat"])
+        guard r.status == 204 else { return r }
+        switch blocking({ try await m.engine.chat(messages) }) {
+        case .success(let content): return Response(200, ["choices": [["message": ["content": content]]]])
+        case .failure(let e): return Response(500, ["error": "chat: \(e)"])
+        }
+    }
+
+    private func embed(_ inputs: [String]) -> Response {
+        if let m = models {
+            let r = load(["embed"])
+            guard r.status == 204 else { return r }
+            switch blocking({ try await m.engine.embed(inputs) }) {
+            case .success(let vecs):
+                return Response(200, ["data": vecs.enumerated().map { ["index": $0.offset, "embedding": $0.element] }])
+            case .failure(let e): return Response(500, ["error": "embed: \(e)"])
+            }
+        }
+        stubTrace("started embed")
+        if embedDelayMs > 0 { usleep(UInt32(embedDelayMs) * 1000) }
+        let data = inputs.indices.map { i -> [String: Any] in
+            var v = [Double](repeating: 0, count: 1024)
+            if i < v.count { v[i] = 1.0 }
+            return ["index": i, "embedding": v]
+        }
+        return Response(200, ["data": data])
+    }
+}
+
+/// The work queue is a plain thread; the engine is async. Block the thread until the job is done.
+private func blocking<T>(_ f: @escaping () async throws -> T) -> Result<T, Error> {
+    var out: Result<T, Error>!
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        do { out = .success(try await f()) } catch { out = .failure(error) }
+        done.signal()
+    }
+    done.wait()
+    return out
+}

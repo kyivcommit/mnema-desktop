@@ -23,6 +23,7 @@ beforeEach(() => {
         embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     });
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
+    if (cmd === 'provider_choice') return Promise.resolve('openRouter');
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'ask') return Promise.resolve(generated);
     if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
