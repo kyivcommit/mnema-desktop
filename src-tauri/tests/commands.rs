@@ -4755,7 +4755,8 @@ fn list_tree_enumerates_roots_and_indexed_files() {
 /// [`mnema_index::Db::recent_indexed_documents`]'s INNER JOIN reaches it) and a
 /// real path under `root`. The four writes
 /// [`list_tree_enumerates_roots_and_indexed_files`] already makes,
-/// gathered into one call for the race guard's decoys and its intruder.
+/// gathered into one call so every test that needs an indexed file writes the
+/// same four rows.
 fn seed_indexed_file(db: &mnema_index::Db, root: i64, id: &str, relative_path: &str) {
     use mnema_core::OnDisk;
     db.insert_document(id, "text/plain", 1, SourceKind::Document)

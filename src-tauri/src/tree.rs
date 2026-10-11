@@ -98,11 +98,10 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
 /// Off the main thread for the reason given on [`crate::bridge::open_index`].
 ///
 /// The roots and every root's files are read inside one
-/// [`mnema_index::Db::read_snapshot`], not as autocommit reads. Otherwise the
-/// indexing job's `pending → indexed` commit, landing on its own connection
-/// between the roots read and a root's files read, could show a listing the
-/// index never held. `build_tree_listing` only reads, so it is a safe closure
-/// for `read_snapshot`.
+/// [`mnema_index::Db::read_snapshot`], not as autocommit reads, so each root
+/// and the files listed under it come from the same state of the index. The
+/// indexing job commits on its own connection, outside this window's mutex.
+/// `build_tree_listing` only reads, so it is a safe closure for `read_snapshot`.
 #[tauri::command(async)]
 pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))

@@ -72,6 +72,9 @@
   // `null` until the first read lands, so an empty list is not drawn before the
   // question of whether it is empty has been answered.
   let history = $state<HistoryEntry[] | null>(null);
+  // A first read that failed, while nothing is on screen: the Recents tab says so.
+  // A read that fails after a list is already shown keeps the list, as list_tree does.
+  let historyFailed = $state(false);
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -154,24 +157,31 @@
     const mine = ++historyAsked;
     listHistory()
       .then((h) => {
-        if (mine > historyApplied) { historyApplied = mine; history = h; }
+        if (mine > historyApplied) { historyApplied = mine; history = h; historyFailed = false; }
       })
-      .catch((e) => console.error('list_history failed', e));
+      .catch((e) => {
+        console.error('list_history failed', e);
+        if (history === null) historyFailed = true;
+      });
   }
 
-  // A question's remove button: the entry is gone at once, and the list is read
-  // again so the row goes with it. Nothing is confirmed and nothing is opened.
+  // A question's remove button deletes the entry. The row goes once the delete has
+  // resolved and the list has been read again, so a delete that fails leaves the
+  // row where it was. Nothing is confirmed and nothing is opened.
   function removeHistory(id: number) {
     deleteHistoryEntry(id)
       .then(loadHistory)
       .catch((e) => console.error('delete_history_entry failed', e));
   }
 
-  // `historyGen` is the launcher's signal that a question was just answered. It
-  // is read inside `untrack` so the read itself is not a dependency; the effect
-  // runs once on mount, which is the first read.
+  // `historyGen` is the launcher's signal that a question was just answered. The
+  // effect depends on the number, not on the prop read: a parent that re-sets its
+  // props (a new selection) must not read the questions again, and an equal value
+  // does not propagate through a `$derived`. It runs once on mount, which is the
+  // first read; the read itself is inside `untrack`.
+  const generation = $derived(historyGen);
   $effect(() => {
-    void historyGen;
+    void generation;
     untrack(loadHistory);
   });
 
@@ -180,7 +190,6 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
   const historyEmptyLabel = $derived.by(() => { void $locale; return t('history_empty'); });
-  const removeLabel = $derived.by(() => { void $locale; return t('history_remove'); });
 
   // Ruling P: selection is by documentId, never by relativePath — two roots
   // can hold the same relative path under different documents.
@@ -205,6 +214,8 @@
     return (history ?? []).map((entry) => ({
       entry,
       asked: formatIndexedAt(entry.askedAt, now),
+      // Named for its own question: a screen reader hears the row, not a count.
+      removeName: t('history_remove', { query: entry.query }),
     }));
   });
 
@@ -397,11 +408,13 @@
         </section>
       {/each}
     {/if}
+  {:else if history === null && historyFailed}
+    <p data-testid="history-failed">{failedLabel}</p>
   {:else if history !== null && history.length === 0}
     <p data-testid="history-empty">{historyEmptyLabel}</p>
   {:else}
     <ul>
-      {#each historyRows as { entry, asked } (entry.id)}
+      {#each historyRows as { entry, asked, removeName } (entry.id)}
         <li>
           <!-- The row is a span, not a button: its two buttons are the actions.
                `tree-history-*` is the row namespace, so the parts inside carry
@@ -419,7 +432,7 @@
                  `visibility`: a hidden control cannot take focus, and this one must
                  always be reachable from a keyboard. -->
             <button type="button" class="history-remove" data-testid={`history-remove-${entry.id}`}
-              aria-label={removeLabel}
+              aria-label={removeName}
               onclick={() => removeHistory(entry.id)}>×</button>
           </span>
         </li>

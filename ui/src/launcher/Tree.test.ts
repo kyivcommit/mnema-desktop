@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Tree, { buildFolderTree } from './Tree.svelte';
@@ -26,10 +26,18 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // whichever shape happened to be wrong.
 let treeReply: () => Promise<TreeListing> = () => Promise.resolve(emptyListing);
 let history: HistoryEntry[] = [];
+// Set by the failure tests only; reset before each test.
+let failHistory = false;
+let failDelete = false;
 function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'list_tree') return treeReply();
-  if (cmd === 'list_history') return Promise.resolve(history.map((h) => ({ ...h })));
+  if (cmd === 'list_history') {
+    return failHistory
+      ? Promise.reject(new Error('list_history failed'))
+      : Promise.resolve(history.map((h) => ({ ...h })));
+  }
   if (cmd === 'delete_history_entry') {
+    if (failDelete) return Promise.reject(new Error('delete_history_entry failed'));
     const { id } = args as { id: number };
     history = history.filter((h) => h.id !== id);
     return Promise.resolve();
@@ -108,6 +116,8 @@ beforeEach(() => {
   invoke.mockImplementation(route);
   treeReply = () => Promise.resolve(emptyListing);
   history = [];
+  failHistory = false;
+  failDelete = false;
 });
 
 // Mirrors Cards.test.ts / Answer.test.ts: `locale` is a module-level store
@@ -310,6 +320,50 @@ test('the files tab lists each root with its files; the recents tab lists the qu
   await fireEvent.click(screen.getByTestId('tree-tab-files'));
   expect(screen.getByTestId('tree-folder-notes')).toBeTruthy();
   expect(screen.queryByTestId('tree-history-1')).toBeNull();
+});
+
+test('the selected citation selects its file by documentId, not by path string', async () => {
+  mockTree(twoRootsSameRelativePath); // two roots, both holding README.md
+  const { rerender } = render(Tree, { selected: null });
+  expect(await screen.findByTestId('tree-file-doc-a')).toBeTruthy();
+
+  // The citation's own path is 'README.md' — the path BOTH roots hold. An
+  // implementation keyed on the path string marks both rows, and it is the
+  // doc-a assertion below that catches it; a citation with a non-matching path
+  // would only prove that a wrong lookup finds nothing.
+  await rerender({ selected: citationFor('doc-b', 'README.md') });
+  // Enumerated, not two spot checks: `aria-selected` used to be asserted here
+  // as the second statement that could contradict the first, and P5 removed it
+  // with the `treeitem` role it belonged to. What replaces it is the closed
+  // list — exactly one row in the whole card is current, and it is doc-b.
+  expect(currentRows()).toEqual(['tree-file-doc-b']);
+  expect(screen.getByTestId('tree-file-doc-a').getAttribute('aria-current')).toBeNull();
+});
+
+// The decision, and its reason. `toggled` wins over `openByDefault` so that
+// folders do not snap shut on every question — that is Ruling M's point and it
+// stands. But "a new citation is now selected" is a different event from "an
+// answer arrived": it is the person's own click on a citation, and its whole
+// purpose is to be shown where the passage came from. So a NEW selection clears
+// the hand-toggle on the folders along its own path, and only on those.
+//
+// What is deliberately NOT undone: a person who shuts the folder of the passage
+// already on screen keeps it shut. They acted on a row they could see, no new
+// event has happened since, and re-opening it under their hands would be the
+// snapping-shut defect with the sign flipped.
+test('a folder the person shut opens again when the next citation lands inside it', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = render(Tree, { selected: citationFor('doc-1') }); // notes/ opens
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+
+  await rerender({ selected: citationFor('doc-2', 'notes/b.md') }); // a new citation, same folder
+  await tick();
+
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+  expect(currentRows()).toEqual(['tree-file-doc-2']);
 });
 
 // --- P3: the listing is not a mount-time snapshot ---------------------------
@@ -576,6 +630,63 @@ test('an empty history says so, in the words of the catalog', async () => {
   expect(await screen.findByTestId('history-empty')).toBeTruthy();
   expect(screen.getByTestId('history-empty').textContent).toBe('Your questions will appear here');
   expect(screen.queryByTestId('tree-empty')).toBeNull();
+
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('history-empty').textContent).toBe('Тут з’являться ваші запити');
+});
+
+// The remove button's accessible name is the only thing that tells two rows apart
+// for a screen reader, so it is asserted by name, scoped to its own row, in both
+// directions: row 1's button names row 1's question and not row 2's.
+test('each remove button is named for its own question, so two rows can be told apart', async () => {
+  setLocale('en'); // seed, do not inherit
+  mockTree(oneRootTwoFolders);
+  mockHistory(historyTwoQuestions);
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  const row1 = await screen.findByTestId('tree-history-1');
+  const row2 = screen.getByTestId('tree-history-2');
+  expect(within(row1).getByRole('button', { name: 'Remove from history: invoice payment terms' })).toBeTruthy();
+  expect(within(row2).getByRole('button', { name: 'Remove from history: when does the lease renew' })).toBeTruthy();
+  expect(within(row1).queryByRole('button', { name: 'Remove from history: when does the lease renew' })).toBeNull();
+});
+
+// A first read that fails leaves the Recents tab saying so, in the wording the
+// Files tab uses for a failed listing, and not drawing an empty list that would
+// read as "no questions".
+test('a question list that cannot be read says so on the Recents tab', async () => {
+  setLocale('en'); // seed, do not inherit
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockTree(oneRootTwoFolders);
+  failHistory = true;
+  render(Tree, { selected: null });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(await screen.findByTestId('history-failed')).toBeTruthy();
+  expect(screen.getByTestId('history-failed').textContent).toBe('The tree could not be loaded.');
+  expect(screen.queryByTestId('history-empty')).toBeNull();
+  expect(err).toHaveBeenCalled(); // logged, so the rejection was handled, not left unhandled
+});
+
+// A delete that fails must not take the row off the screen: the list is what the
+// database still holds, and the person was not told the question is gone.
+test('a question whose delete fails stays on screen and is not opened', async () => {
+  mockTree(oneRootTwoFolders);
+  mockHistory(historyTwoQuestions);
+  failDelete = true;
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const onOpenHistory = vi.fn();
+  render(Tree, { selected: null, historyId: null, historyGen: 0, onOpenHistory });
+
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId('history-remove-1'));
+  await waitFor(() => expect(err).toHaveBeenCalled()); // the failure was logged, so the rejection was handled
+
+  expect(screen.getByTestId('tree-history-1')).toBeTruthy();
+  expect(screen.getByTestId('tree-history-2')).toBeTruthy();
+  expect(onOpenHistory).not.toHaveBeenCalled();
 });
 
 
@@ -741,6 +852,21 @@ test('the remove button deletes the question, does not open it, and the row goes
   expect(screen.getByTestId('tree-history-2')).toBeTruthy();
   expect(onOpenHistory).not.toHaveBeenCalled();
   expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toEqual([]);
+});
+
+// The twin of `list_tree does not run again when the selection changes`: a change
+// of selection does not re-read the questions. They are read on mount, on focus
+// and when a question is answered, and never because the citation moved.
+test('a change of selection does not read the questions again', async () => {
+  mockTree(twoRootsSameRelativePath);
+  mockHistory(historyTwoQuestions);
+  const { rerender } = render(Tree, { selected: null, historyId: null, historyGen: 0, onOpenHistory: vi.fn() });
+  expect(await screen.findByTestId('tree-file-doc-a')).toBeTruthy();
+  expect(historyCalls()).toHaveLength(1);
+
+  await rerender({ selected: citationFor('doc-b'), historyId: null, historyGen: 0, onOpenHistory: vi.fn() });
+  await tick();
+  expect(historyCalls()).toHaveLength(1);
 });
 
 // The questions are read when the card mounts, when the launcher comes back in
