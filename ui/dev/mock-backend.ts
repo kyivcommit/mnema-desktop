@@ -15,11 +15,14 @@
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { LAUNCHER_COLD_EVENT } from '../src/lib/ipc';
-import { excerptSpanA, generated, oneRootTwoFolders } from '../src/lib/fixtures';
+import { excerptSpanA, generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, Catalogue, IndexRead, KeyState, LocaleChoice, ModelRole, ScanState, ThemeChoice,
-  TreeListing,
+  AppPrefs, AskAnswer, Catalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
+  ScanState, ThemeChoice, TreeListing,
 } from '../src/lib/ipc';
+
+// The history as `list_history` keeps it, with the answer each question got.
+type StoredQuestion = HistoryEntry & { answer: AskAnswer };
 
 type Args = Record<string, unknown>;
 
@@ -40,7 +43,8 @@ function initialState(scenario: string) {
     searchTextArm: true,
     searchContentArm: !fresh,
   };
-  const tree: TreeListing = fresh ? { roots: [], recents: [] } : structuredClone(oneRootTwoFolders);
+  const tree: TreeListing = fresh ? { roots: [] } : structuredClone(oneRootTwoFolders);
+  const history: StoredQuestion[] = fresh ? [] : historyTwoQuestions.map((h) => ({ ...h, answer: generated }));
   const scan: ScanState = {
     revision: 1, files: index.indexedFiles, readSeq: 1, jobsDone: 0, lastReading: null,
     snapshot: { kind: 'idle' },
@@ -56,6 +60,8 @@ function initialState(scenario: string) {
     key: (fresh ? { kind: 'absent' } : { kind: 'present' }) as KeyState,
     index,
     tree,
+    history,
+    nextHistoryId: history.length + 1,
     masks: fresh ? [] : ['*.tmp'],
     exclusions: new Map<number, string[]>(),
     scan,
@@ -274,7 +280,21 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     set_launcher_layout: () => null,
     launcher_answered: () => null,
     set_search_arms: (a) => { s.index = { ...s.index, searchTextArm: !!a.text, searchContentArm: !!a.content }; },
-    ask: () => generated,
+    ask: (a) => {
+      // The same rule the backend keeps: one row per trimmed query, moved to the top.
+      const query = (a.query as string).trim();
+      s.history = [
+        { id: s.nextHistoryId++, query, askedAt: Math.floor(Date.now() / 1000), answer: generated },
+        ...s.history.filter((h) => h.query !== query),
+      ];
+      return generated;
+    },
+    list_history: () => s.history.map(({ id, query, askedAt }) => ({ id, query, askedAt })),
+    history_entry: (a) => {
+      const hit = s.history.find((h) => h.id === a.id);
+      return hit ? { kind: 'answer', query: hit.query, answer: hit.answer } : { kind: 'gone' };
+    },
+    delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
     source_around: () => excerptSpanA,
 
     'plugin:dialog|open': () => '/Users/demo/Documents/Projects',

@@ -76,8 +76,18 @@ export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentA
 
 export type TreeFile = { relativePath: string; documentId: string };
 export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[] };
-export type RecentDoc = { documentId: string; rootId: number; relativePath: string; indexedAt: number };
-export type TreeListing = { roots: TreeRoot[]; recents: RecentDoc[] };
+export type TreeListing = { roots: TreeRoot[] };
+
+// One question the person asked, as the launcher's Recents tab lists it
+// (`bridge.rs` `HistoryEntry`). `askedAt` is SECONDS since the epoch, newest first.
+export type HistoryEntry = { id: number; query: string; askedAt: number };
+
+// What opening an entry answers with (`bridge.rs` `HistoryOpen`): a typed reply,
+// not an error, so the window branches on `kind` rather than on a message.
+export type HistoryOpen =
+  | { kind: 'answer'; query: string; answer: AskAnswer }
+  | { kind: 'unreadable' }
+  | { kind: 'gone' };
 
 // PR 8a. The subfolder listing the folder row expands into (`src-tauri/src/tree.rs`),
 // mirrored IN FULL rather than in the subset the row draws today — `JobEnded`'s
@@ -202,6 +212,9 @@ export type SourceAround =
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
+export const listHistory = () => invoke<HistoryEntry[]>('list_history');
+export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
+export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id });
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
 // The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes
 // the row only while that id still names that path, so a folder swapped out

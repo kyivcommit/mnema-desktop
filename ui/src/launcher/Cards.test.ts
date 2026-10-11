@@ -122,6 +122,7 @@ beforeEach(() => {
   sources = defaultSources();
   invoke.mockImplementation((cmd: string, args: { chunkId: number }) => {
     if (cmd === 'list_tree') return tree;
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') {
       const found = sources[args.chunkId];
       // Loud, never `undefined`: a silent one would make the card read fields off

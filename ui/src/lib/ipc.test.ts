@@ -19,6 +19,8 @@ import type {
   RootOutcome,
   ScanReport,
   ScanState,
+  HistoryEntry,
+  HistoryOpen,
   SourceAround,
   StoredExclusion,
   SubfolderListing,
@@ -55,11 +57,33 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 test('listTree invokes list_tree', async () => {
-  invoke.mockResolvedValue({ roots: [], recents: [] });
+  invoke.mockResolvedValue({ roots: [] });
 
   await ipc.listTree();
 
   expect(invoke).toHaveBeenCalledWith('list_tree');
+});
+
+// The launcher's Recents tab reads questions through these three, not through
+// `list_tree`. Each is answered by its own command name, and the id travels as
+// `{ id }` because that is the argument name `bridge.rs` takes.
+test('listHistory invokes list_history with the command name alone', async () => {
+  invoke.mockResolvedValue([]);
+
+  await ipc.listHistory();
+
+  expect(invoke.mock.calls.filter((c) => c[0] === 'list_history')).toEqual([['list_history']]);
+});
+
+test('historyEntry and deleteHistoryEntry send the id they are given, under the name the command takes', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.historyEntry(7);
+  await ipc.deleteHistoryEntry(7);
+
+  expect(invoke.mock.calls.filter((c) => c[0] === 'history_entry')).toEqual([['history_entry', { id: 7 }]]);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'delete_history_entry'))
+    .toEqual([['delete_history_entry', { id: 7 }]]);
 });
 
 // PR 7 Task 4: the two model-settings commands `Models.svelte` calls.
@@ -878,4 +902,29 @@ test('LocaleApplyError surface lists exactly the four Rust LocaleSurface variant
 test('the local-model-progress event name is the one provider.rs actually emits', () => {
   const PROVIDER_RS = readFileSync(join(HERE, '../../../src-tauri/src/provider.rs'), 'utf8');
   expect(LOCAL_MODEL_PROGRESS_EVENT).toBe(rustStrConst(PROVIDER_RS, 'PROGRESS_EVENT'));
+});
+
+// Task 3 of query-history: the two history wire types, pinned against the Rust
+// structs in `bridge.rs` the same way the scan and subfolder mirrors are above.
+// `HistoryOpen` is a tagged enum, and `rustVariantFields` refuses an enum that
+// does not declare `rename_all_fields`, so only its variant names are pinned
+// here; its `answer` variant carries the single-word fields `query` and `answer`,
+// which no spelling rule can change.
+const BRIDGE_RS = readFileSync(join(HERE, '../../../src-tauri/src/bridge.rs'), 'utf8');
+
+test('HistoryEntry is exactly what bridge.rs defines, field for field', () => {
+  const fixture: HistoryEntry = { id: 0, query: '', askedAt: 0 };
+  expect(Object.keys(fixture).sort()).toEqual(
+    rustStructFields(BRIDGE_RS, 'HistoryEntry').map(camelOfSnake).sort(),
+  );
+});
+
+test('HistoryOpen is exactly what bridge.rs defines, variant for variant', () => {
+  // `Record<…>` checks the union against itself as well: a variant added to the
+  // TypeScript side and not to this object is a compile error, and the list
+  // below checks the other direction against Rust.
+  const byKind: Record<HistoryOpen['kind'], true> = { answer: true, unreadable: true, gone: true };
+  expect(Object.keys(byKind).sort()).toEqual(
+    rustEnumVariants(BRIDGE_RS, 'HistoryOpen').map(camelOf).sort(),
+  );
 });

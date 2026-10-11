@@ -110,7 +110,7 @@ function root(overrides: Partial<TreeRoot> = {}): TreeRoot {
   };
 }
 function listing(roots: TreeRoot[]): TreeListing {
-  return { roots, recents: [] };
+  return { roots };
 }
 
 test('empty state: a sentence and the add control, not a bare list', async () => {

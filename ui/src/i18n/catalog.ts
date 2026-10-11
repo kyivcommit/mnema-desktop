@@ -39,6 +39,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
+  | 'history_empty' | 'history_remove'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
@@ -378,6 +379,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
+    history_empty: 'Тут з\'являться ваші запити',
+    history_remove: 'Видалити з історії',
     fresh_current: 'Актуально',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
@@ -1235,6 +1238,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
+    history_empty: 'Your questions will appear here',
+    history_remove: 'Remove from history',
     fresh_current: 'Up to date',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',

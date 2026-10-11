@@ -50,6 +50,7 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
     return Promise.resolve();
@@ -68,6 +69,7 @@ function mockAsks(...replies: unknown[]) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
     // same policy for the same reason: a test that asks once more than its
@@ -190,6 +192,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return pending;
     return Promise.resolve();
@@ -226,6 +229,7 @@ function mockAsksThenReject(first: unknown) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return n++ === 0 ? Promise.resolve(first) : Promise.reject('offline');
     return Promise.resolve();
@@ -851,6 +855,7 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
@@ -872,6 +877,7 @@ test('an ask in flight when launcher-cold arrives is dropped when it resolves', 
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
@@ -896,6 +902,7 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     return Promise.resolve();
   });
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});

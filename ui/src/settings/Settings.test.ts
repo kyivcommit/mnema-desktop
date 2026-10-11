@@ -173,7 +173,7 @@ beforeEach(() => {
   // this a `vi.fn`. A test that needs a folder to expand says so itself,
   // BEFORE `render` — the window reads `list_tree` on its own mount now.
   listTree.mockReset();
-  listTree.mockResolvedValue({ roots: [], recents: [] });
+  listTree.mockResolvedValue({ roots: [] });
   listSubfolders.mockReset();
   listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
   listExclusions.mockReset();
@@ -240,8 +240,8 @@ test('clicking Folders shows the Folders heading and hides the Models section, s
   // The heading alone only proves the <h2> in Settings.svelte rendered — it
   // says nothing about whether <Folders /> is mounted underneath it. This
   // reads text only Folders.svelte itself renders (its own empty-state
-  // sentence, from its `../lib/ipc` mock's `listTree: () => ({ roots: [],
-  // recents: [] })` above), so deleting `<Folders />` and keeping the <h2>
+  // sentence, from its `../lib/ipc` mock's `listTree: () => ({ roots: [] })`
+  // above), so deleting `<Folders />` and keeping the <h2>
   // fails here.
   await waitFor(() =>
     expect(within(panel()!).getByText('No folder has been added yet.')).toBeTruthy(),
@@ -1002,7 +1002,6 @@ const ONE_ROOT = {
     name: 'root',
     files: [{ relativePath: 'drop/x.md', documentId: 'doc-1' }],
   }],
-  recents: [],
 };
 const ONE_SUBFOLDER = {
   entries: [{ name: 'drop', relativePath: 'drop', state: { kind: 'open' } }],
