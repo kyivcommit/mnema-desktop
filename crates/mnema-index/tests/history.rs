@@ -115,6 +115,30 @@ fn delete_removes_one_and_reports_whether_it_existed() {
 /// Removing a root takes the documents its paths named, and the history keeps
 /// every row and every answer: the answers are snapshots, and nothing in the
 /// table references a document.
+/// An id the window may still hold must never name a different question.
+/// A plain `INTEGER PRIMARY KEY` hands out `max(id) + 1`, so deleting the
+/// newest row and recording another question would give the new one the
+/// deleted id — and a stale row's remove button would then delete it.
+#[test]
+fn a_deleted_newest_id_is_never_given_to_another_question() {
+    let db = temp_db();
+    db.history_record("q1", "{}").unwrap();
+    db.history_record("q2", "{}").unwrap();
+    let q2 = db.history_list().unwrap()[0].id;
+    assert!(db.history_delete(q2).unwrap());
+
+    db.history_record("q3", "{}").unwrap();
+    let q3 = db.history_list().unwrap()[0].id;
+    assert_ne!(q3, q2, "q3 reused the id of the deleted q2");
+
+    // The stale delete finds nothing and leaves q3 in place.
+    assert!(!db.history_delete(q2).unwrap());
+    assert_eq!(
+        db.history_answer(q3).unwrap().map(|(q, _)| q).as_deref(),
+        Some("q3")
+    );
+}
+
 #[test]
 fn history_survives_removing_every_document() {
     let db = temp_db();

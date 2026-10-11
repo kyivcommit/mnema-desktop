@@ -139,10 +139,12 @@ CREATE TABLE file_mask (
 ///
 /// `asked_at` is in seconds, like `ingest_stage.updated_at`. The index on it
 /// serves the newest-first read; the trim in `history_record` orders by
-/// `(asked_at, id)` and does not depend on it.
+/// `(asked_at, id)` and does not depend on it. `AUTOINCREMENT` because the
+/// window holds ids across a refresh: a plain rowid would hand a deleted
+/// newest id to the next question, and a stale row would then act on it.
 const ADD_QUERY_HISTORY: &str = "\
 CREATE TABLE query_history (
-    id       INTEGER PRIMARY KEY,
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
     query    TEXT NOT NULL UNIQUE,
     answer   TEXT NOT NULL,
     asked_at INTEGER NOT NULL DEFAULT (unixepoch())
