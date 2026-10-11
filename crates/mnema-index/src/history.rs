@@ -37,8 +37,13 @@ impl Db {
         );
         self.transaction(|tx| {
             tx.execute("DELETE FROM query_history WHERE query = ?1", params![query])?;
+            // The stamp never goes backwards. If the clock stepped back, the new
+            // row takes the newest existing stamp instead, so the trim below
+            // cannot remove the answer that was just given.
             tx.execute(
-                "INSERT INTO query_history (query, answer) VALUES (?1, ?2)",
+                "INSERT INTO query_history (query, answer, asked_at)
+                 VALUES (?1, ?2, max(unixepoch(),
+                     COALESCE((SELECT max(asked_at) FROM query_history), 0)))",
                 params![query, answer_json],
             )?;
             tx.execute(

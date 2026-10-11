@@ -4,6 +4,7 @@
 
 use mnema_core::{Block, BlockType, Coordinate, Locator, OnDisk, Segment, SourceKind};
 use mnema_index::{Db, DocumentStatus};
+use rusqlite::params;
 
 mod support;
 use support::temp_db;
@@ -68,6 +69,34 @@ fn the_fifty_first_record_drops_the_oldest_even_within_one_second() {
     assert!(
         list.iter().all(|r| r.query != "q0"),
         "the oldest record must be the one dropped"
+    );
+}
+
+/// The clock stepped back while the table was full. Fifty rows are stamped in
+/// the future, so a plain `unixepoch()` stamp for the new row would sort it
+/// below all of them, and the trim in the same transaction would delete the
+/// answer that was just given. The new row must take a stamp no older than the
+/// newest existing one.
+#[test]
+fn a_record_written_after_the_clock_stepped_back_is_kept_and_first() {
+    let db = temp_db();
+    for i in 0..50 {
+        db.conn()
+            .execute(
+                "INSERT INTO query_history (query, answer, asked_at)
+                 VALUES (?1, '{}', unixepoch() + 100000)",
+                params![format!("old{i}")],
+            )
+            .unwrap();
+    }
+
+    db.history_record("new", r#""fresh""#).unwrap();
+
+    let list = db.history_list().unwrap();
+    assert_eq!(list.len(), 50);
+    assert_eq!(
+        list[0].query, "new",
+        "the record just written must be first"
     );
 }
 

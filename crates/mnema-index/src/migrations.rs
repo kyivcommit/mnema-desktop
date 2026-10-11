@@ -433,6 +433,20 @@ mod tests {
             .query_row("SELECT count(*) FROM query_history", [], |r| r.get(0))
             .expect("the migrated table exists and is readable");
         assert_eq!(rows, 0, "a migrated index starts with an empty history");
+
+        // No foreign key: an answer is a snapshot, and removing the documents it
+        // was built from must leave the row alone (see ADD_QUERY_HISTORY).
+        let foreign_keys: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_foreign_key_list('query_history')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            foreign_keys, 0,
+            "query_history must not reference any other table"
+        );
     }
 
     /// The DDL a version-1 database ends up with, comments removed and
