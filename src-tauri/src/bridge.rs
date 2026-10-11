@@ -1649,7 +1649,10 @@ pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen,
     };
     Ok(match serde_json::from_str::<AskAnswer>(&stored) {
         Ok(answer) => HistoryOpen::Answer { query, answer },
-        Err(_) => HistoryOpen::Unreadable,
+        Err(e) => {
+            eprintln!("mnema: history entry {id} does not parse: {e}");
+            HistoryOpen::Unreadable
+        }
     })
 }
 

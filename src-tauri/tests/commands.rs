@@ -13253,6 +13253,7 @@ fn history_survives_removing_the_watched_folder() {
         "the fixture must give a citation, or this proves nothing: {answer}"
     );
     let rows = history_rows(&webview);
+    assert!(!rows.is_empty(), "the ask above was not recorded: {rows:?}");
     let id = rows[0]["id"].as_i64().expect("the row has an id");
 
     call(
@@ -13277,18 +13278,74 @@ fn a_failed_history_write_does_not_fail_the_ask() {
         "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
     })
     .to_string();
-    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    // One completion per ask: A, B (refused by the trigger), B again.
+    let server = MockServer::new(vec![
+        Reply::ok(&completion),
+        Reply::ok(&completion),
+        Reply::ok(&completion),
+    ]);
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
     let webview = ask_ready_with_one_passage(&app);
-    app.state::<AppState>()
+
+    // A is written while the table is healthy, so its row is the baseline.
+    let first = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(first["kind"], json!("generated"), "{first}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "A is recorded before the fault: {rows:?}");
+    let a_id = rows[0]["id"].as_i64().expect("the row has an id");
+    let a_before =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+
+    // Every later insert aborts. The attempt is what this test makes visible:
+    // without the trigger a missing row would look the same as no write at all.
+    state
         .with_index(|db| {
-            db.conn().execute("DROP TABLE query_history", [])?;
+            db.conn().execute_batch(
+                "CREATE TRIGGER refuse_history BEFORE INSERT ON query_history
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )?;
             Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+    let second = call(&webview, "ask", json!({ "query": "quantum resonance" }))
         .expect("a history write that fails must not fail the ask");
-    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "B's insert was refused, so only A is kept: {rows:?}"
+    );
+    assert_eq!(rows[0]["id"], json!(a_id), "A keeps its id: {rows:?}");
+    let a_after =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+    assert_eq!(
+        a_after, a_before,
+        "the refused write must not touch A's stored answer"
+    );
+
+    // B's absence is the trigger's doing: with it gone, the same question is kept.
+    state
+        .with_index(|db| {
+            db.conn().execute_batch("DROP TRIGGER refuse_history")?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+    let third =
+        call(&webview, "ask", json!({ "query": "quantum resonance" })).expect("ask was rejected");
+    assert_eq!(third["kind"], json!("generated"), "{third}");
+    let queries: Vec<Value> = history_rows(&webview)
+        .iter()
+        .map(|r| r["query"].clone())
+        .collect();
+    assert_eq!(
+        queries,
+        vec![json!("quantum resonance"), json!("quantum entanglement")],
+        "with the trigger gone, B is recorded and newest"
+    );
 }
