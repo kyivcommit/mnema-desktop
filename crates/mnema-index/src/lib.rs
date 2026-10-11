@@ -1,3 +1,4 @@
+mod history;
 mod journal;
 mod meta;
 mod migrations;
@@ -7,6 +8,7 @@ mod space;
 mod text_prep;
 mod write;
 
+pub use history::{HISTORY_LIMIT, HistoryRow};
 pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use meta::{
     META_ACTIVE_SPACE, META_CHAT_MODEL, META_RERANK_MODEL, META_SEARCH_CONTENT_ARM,

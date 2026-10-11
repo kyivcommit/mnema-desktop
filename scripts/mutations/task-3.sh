@@ -36,13 +36,15 @@ case_ "schema.sql is frozen at migration 1 and must not grow these columns" \
 # `M::up(ADD_IGNORE_RULE_UNIQUE)` after this migration — so deleting this
 # line no longer collapses the list down to the bare schema entry, it now
 # leaves that third migration immediately behind it. Staleness debt from
-# that commit, not from this case's own subject.
+# that commit, not from this case's own subject. Marker extended for the
+# query-history migration, which is appended after `ADD_FILE_MASK`.
 case_ "the migration is registered, not merely written" \
   crates/mnema-index/src/migrations.rs \
   's~        M::up\(ADD_PATH_READER\),\n~~' \
   '        M::up(include_str!("schema.sql")),
         M::up(ADD_IGNORE_RULE_UNIQUE),
         M::up(ADD_FILE_MASK),
+        M::up(ADD_QUERY_HISTORY),
     ])' \
   mnema-index \
   'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib
