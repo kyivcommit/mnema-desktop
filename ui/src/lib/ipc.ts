@@ -201,8 +201,6 @@ export type SourceAround =
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
-export const setSearchArms = (text: boolean, content: boolean) =>
-  invoke<void>('set_search_arms', { text, content });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
 // The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes

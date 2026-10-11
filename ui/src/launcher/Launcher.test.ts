@@ -81,22 +81,6 @@ function mockAsks(...replies: unknown[]) {
   });
 }
 
-// The arms-row seeds each need their OWN `model_settings` answer, which is why
-// they cannot use `mockBackend`. They still need every other command answered:
-// they render in state A today, where no card draws, so a blanket
-// `Promise.resolve()` is green for a reason unrelated to what they claim — and
-// one state along `Tree` reads `.roots` off `undefined` and throws. Same trap as
-// Ruling Y, fourth home.
-function mockSettings(settings: unknown) {
-  invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(settings);
-    if (cmd === 'provider_status') return providerReply();
-    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
-    return Promise.resolve();
-  });
-}
-
 // The product-level sequences below share this opening: one answered question
 // and a folder opened by hand — the state a person is actually in when they type
 // the next thing.
@@ -515,7 +499,7 @@ test('a blur right after a press on the drag handle is the drag, not a dismissal
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!; // inside .searchbar, not clickable
+    const handle = container.querySelector('.sb-tools')!; // inside .searchbar, not clickable
     fireEvent.pointerDown(handle, { button: 0 });
     vi.advanceTimersByTime(600);
     fireEvent.blur(window);
@@ -532,7 +516,7 @@ test('a release after the press disarms the drag window: a click on the handle, 
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!;
+    const handle = container.querySelector('.sb-tools')!;
     fireEvent.pointerDown(handle);
     vi.advanceTimersByTime(50);
     fireEvent.pointerUp(handle);
@@ -552,7 +536,7 @@ test('a right-button press on the handle does not arm the drag window', () => {
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!;
+    const handle = container.querySelector('.sb-tools')!;
     handle.dispatchEvent(new MouseEvent('pointerdown', { button: 2, bubbles: true }));
     vi.advanceTimersByTime(50);
     fireEvent.blur(window);
@@ -569,7 +553,7 @@ test('a press off the handle disarms an earlier arming even with no release', ()
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    fireEvent.pointerDown(container.querySelector('.arms')!, { button: 0 });
+    fireEvent.pointerDown(container.querySelector('.sb-tools')!, { button: 0 });
     vi.advanceTimersByTime(50);
     fireEvent.pointerDown(screen.getByRole('textbox'), { button: 0 });
     vi.advanceTimersByTime(50);
@@ -594,53 +578,6 @@ test('a press on the input or the pin does not arm the drag window', () => {
   } finally { vi.useRealTimers(); }
 });
 
-test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
-    expect(content.disabled).toBe(false); // seed applied: present key + chosen model enable content
-  });
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
-// §9.1 / owner ruling 2026-08-24: the exact configuration the owner's live run hit — a stored
-// provider key with no chosen embedding model. A key alone cannot embed a query, so content must
-// stay disabled. Against the pre-fix `provider = s.key.kind === 'present'` this fails (content
-// would wrongly enable on a present key alone) — that failure is the regression proof.
-//
-// `searchTextArm: false` here is not part of the ruling under test — it is a marker seeded away
-// from `textOn`'s `true` default so the `waitFor` below cannot pass before `model_settings`
-// resolves. `content.disabled` alone is already `true` in the pre-seed default (provider starts
-// `false`), so asserting it directly would pass vacuously, seed or no seed.
-test('the arms row seeds from model_settings — a present key with no chosen model leaves content disabled', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: false, searchContentArm: false } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    // Proves the seed actually ran before the real assertion below reads `provider`'s result.
-    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
-    expect(text.checked).toBe(false);
-  });
-  const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
-  expect(content.disabled).toBe(true); // no chosen model: content stays off despite a present key
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
-test('the arms row seeds from model_settings — searchTextArm:false unchecks the text arm', async () => {
-  // The test above only proves the provider flag reached the row (content's
-  // `disabled` depends solely on `provider`). This proves the arm *values*
-  // flow too: `textOn` defaults to true, so an unchanged default would pass
-  // silently — seeding false is the only way to catch a broken or renamed
-  // `s.index.searchTextArm` read.
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
-    expect(text.checked).toBe(false); // seed applied: searchTextArm:false flowed to the checkbox
-  });
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
 test('the search panel is the drag handle and nothing else is', async () => {
   // `Cards` renders a different component per backend state (review finding
   // 7): a `data-tauri-drag-region` added to, say, the refusal card would pass
@@ -656,8 +593,8 @@ test('the search panel is the drag handle and nothing else is', async () => {
     } else {
       await screen.findByRole('status');
     }
-    // "deep": any click inside the panel drags, except on the input, the toolbar buttons
-    // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
+    // "deep": any click inside the panel drags, except on the input and the toolbar
+    // buttons, which Tauri's own drag script excludes by tag (D155).
     const handles = container.querySelectorAll('[data-tauri-drag-region]');
     expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
     expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
@@ -1024,14 +961,12 @@ test('the left panel off and on again keeps the tree: hidden, not unmounted (Rul
   expect(listTreeCalls()).toHaveLength(1);
 });
 
-test('provider_status and model_settings are asked again when the window gains focus', async () => {
+test('provider_status is asked again when the window gains focus', async () => {
   render(Launcher);
   const count = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).length;
   await waitFor(() => expect(count('provider_status')).toBe(1));
-  expect(count('model_settings')).toBe(1);
   await fireEvent.focus(window);
   await waitFor(() => expect(count('provider_status')).toBe(2));
-  expect(count('model_settings')).toBe(2);
 });
 
 const cloud = () => screen.getByTestId('provider-cloud');

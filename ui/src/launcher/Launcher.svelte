@@ -2,9 +2,8 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
-  import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
-  import Arms from './Arms.svelte';
+  import { ask, launcherAnswered, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { checkQuery, heatAfter, stateFromAnswer, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -25,12 +24,9 @@
       ? previous
       : launcherState,
   );
-  let provider = $state(false);
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
-  let textOn = $state(true);
-  let contentOn = $state(false);
   // Cold: the search column alone. The first answer with something to show
   // makes it hot and opens both side panels; after that the person's choice
   // stands across questions. `launcher-cold` is the only way back.
@@ -54,8 +50,8 @@
 
   // Read on mount and again whenever the window gains focus: the key and the
   // model are changed in another window, and the launcher is hidden, not
-  // closed, so nothing else would tell it. Non-fatal: on failure the arms row
-  // keeps its last value and the cloud its last state — log, do not swallow.
+  // closed, so nothing else would tell it. Non-fatal: on failure the cloud keeps
+  // its last state — log, do not swallow.
   // A later call supersedes an earlier one still in flight: a slow probe that
   // lands after a newer answer must not put the old state back on the cloud.
   let providerGen = 0;
@@ -64,12 +60,6 @@
     Promise.all([providerStatus(), providerChoice().catch((): ProviderChoice => 'openRouter')])
       .then(([s, c]) => { if (gen === providerGen) { status = s; statusProvider = c ?? 'openRouter'; } })
       .catch((e) => console.error('provider_status failed', e));
-    modelSettings()
-      .then((s) => {
-        provider = providerReady(s);
-        if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
-      })
-      .catch((e) => console.error('model_settings failed', e));
   }
 
   onMount(() => {
@@ -203,7 +193,7 @@
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
-       click inside it except the input, the toolbar buttons and the Arms labels — Tauri's
+       click inside it except the input, and the toolbar buttons — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
   <Cards state={cardsState} query={echo} {left} {right} {heat}>
     {#snippet search()}
@@ -212,7 +202,6 @@
         <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
       </div>
       <div class="sb-tools">
-        <Arms bind:textOn bind:contentOn {provider} />
         <Toolbar {heat} bind:left bind:right bind:pinned {status} provider={statusProvider} />
       </div>
     </div>

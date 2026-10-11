@@ -57,7 +57,7 @@ test('real launcher places all cards and keeps the document transparent', async 
   expect(bar).not.toBeNull();
   expect(bar.contains(screen.getByRole('textbox'))).toBe(true);
   expect(bar.contains(screen.getByTestId('pin'))).toBe(true);
-  expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
+  expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(0); // the search arms are not a choice
   expect(screen.queryByTestId('card-tree')).toBeNull();
   const box = screen.getByRole('textbox');
   await fireEvent.input(box, { target: { value: 'question' } });
