@@ -1076,8 +1076,8 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedReject?: boolean } = {}) {
-  let entries = [OLD];
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean } = {}) {
+  let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
@@ -1087,7 +1087,8 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
     if (cmd === 'history_entry') {
       if (opts.openedReject) return Promise.reject('offline');
-      return opts.opened instanceof Promise ? opts.opened : Promise.resolve(opts.opened);
+      const opened = opts.openedFor?.[args!.id!] ?? opts.opened;
+      return opened instanceof Promise ? opened : Promise.resolve(opened);
     }
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') {
@@ -1300,4 +1301,68 @@ test('launcher-cold while an entry is read drops it', async () => {
   await new Promise((r) => setTimeout(r, 0));
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+});
+
+test('a refused search takes the mark off the opened question and does not reread Recents', async () => {
+  mockRecents({ asks: [generated, refusedNoCandidates], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  const reads = listHistoryCalls().length;
+
+  await submit('second');
+  await screen.findByRole('status');
+
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(listHistoryCalls()).toHaveLength(reads);
+});
+
+test('an entry read that lands after a search has answered is dropped, not drawn over it', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated, generated], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second'));
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.getByTestId('query-echo').textContent).toBe('second');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('two opens that resolve out of order: the later click wins', async () => {
+  const NEWER = { id: 8, query: 'newer q', askedAt: 1_700_000_100 };
+  const NEWER_ANSWER = { kind: 'answer', query: 'newer q', answer: generated };
+  let resolveFirst!: (v: unknown) => void;
+  let resolveSecond!: (v: unknown) => void;
+  mockRecents({
+    asks: [generated],
+    list: [NEWER, OLD],
+    openedFor: {
+      7: new Promise((r) => { resolveFirst = r; }),
+      8: new Promise((r) => { resolveSecond = r; }),
+    },
+  });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId('history-open-7'));
+  await fireEvent.click(await screen.findByTestId('history-open-8'));
+
+  resolveSecond(NEWER_ANSWER);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('newer q'));
+  resolveFirst(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.getByTestId('query-echo').textContent).toBe('newer q');
+  expect(screen.getByTestId('tree-history-8').getAttribute('aria-current')).toBe('true');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
 });

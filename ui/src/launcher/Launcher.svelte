@@ -95,11 +95,15 @@
   // Bumped by `launcher-cold`: an ask that was in flight when the launcher went
   // cold belongs to an answer the person has been told is forgotten.
   let coldGen = 0;
+  // Bumped by every submit and every open: a Recents read that started before
+  // the screen changed hands does not draw over what is on it now.
+  let screenGen = 0;
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
     // Enter on an empty line does nothing, in every state (owner, 2026-10-08).
     if (raw.trim() === '') return;
+    screenGen += 1;
     // What is on screen, not what the machine holds: after an error the
     // machine says `error` while the restored answer is still showing, and a
     // second error must restore that same answer again.
@@ -116,12 +120,11 @@
       const answer = await ask(check.query);
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      // Whatever answer lands, it is not an opened question, refusals included.
+      historyId = null;
       // The backend records a generated or citations-only answer inside `ask`, so
-      // the list has a new row and the question on screen is not an opened one.
-      if (answer.kind === 'generated' || answer.kind === 'citationsOnly') {
-        historyId = null;
-        historyGen += 1;
-      }
+      // the list has a new row. A refusal records nothing, so it does not reread it.
+      if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
       // The idle clock restarts when an answer lands, so one that arrived while
       // the launcher was hidden is not dropped by the hide's older clock.
       launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
@@ -161,9 +164,10 @@
     const shown = cardsState;
     previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
     const gen = coldGen;
-    // A launcher that went cold, or a search that started while the entry was
-    // read, owns the screen now; the entry is dropped.
-    const superseded = () => gen !== coldGen || launcherState.kind === 'inFlight';
+    const screenAt = ++screenGen;
+    // A launcher that went cold, or any search or other open that began while
+    // the entry was read, owns the screen now; the entry is dropped.
+    const superseded = () => gen !== coldGen || screenAt !== screenGen;
     try {
       const opened = await historyEntry(id);
       if (superseded()) return;

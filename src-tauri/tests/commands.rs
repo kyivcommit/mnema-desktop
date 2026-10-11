@@ -12971,6 +12971,52 @@ fn a_citations_only_ask_is_recorded() {
     assert_eq!(opened["answer"], answer, "{opened}");
 }
 
+/// A failed chat call answers citations-only with a `why`, and that answer is
+/// not kept: asking the same question again after a generated answer must
+/// leave the generated row exactly as it was, same id and same answer.
+#[test]
+fn a_failed_ask_does_not_replace_a_generated_answer_in_history() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![
+        Reply::ok(&completion),
+        Reply::status(
+            503,
+            r#"{"error":{"message":"upstream model is overloaded"}}"#,
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let generated = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(generated["kind"], json!("generated"), "{generated}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "the generated answer is recorded: {rows:?}");
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let before =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+
+    let failed = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a failed chat call must not reject the ask");
+    assert_eq!(failed["kind"], json!("citationsOnly"), "{failed}");
+    assert_eq!(failed["why"]["kind"], json!("failed"), "{failed}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "the failed ask adds no row: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(id), "the row keeps its id: {rows:?}");
+    let after =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(
+        after, before,
+        "a failed ask must not replace the generated answer"
+    );
+    assert_eq!(after["answer"], generated, "{after}");
+}
+
 #[test]
 fn a_refused_ask_is_not_recorded() {
     let dir = tempfile::tempdir().unwrap();
@@ -13113,6 +13159,15 @@ fn history_survives_removing_the_watched_folder() {
     )
     .expect("remove_watched_folder was rejected");
 
+    // Positive control: the document really is gone, so the snapshot below
+    // is the only thing left that can answer.
+    let gone = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert_eq!(
+        gone["hits"],
+        json!([]),
+        "the cited document must be gone from the index: {gone}"
+    );
+
     let opened =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
     assert_eq!(opened["kind"], json!("answer"), "{opened}");
@@ -13128,9 +13183,15 @@ fn a_failed_history_write_does_not_fail_the_ask() {
         "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
     })
     .to_string();
-    // One completion per ask: A, B (refused by the trigger), B again.
+    let rewritten = json!({
+        "choices": [{ "message": { "content": "A rewritten answer <c>1</c>." } }]
+    })
+    .to_string();
+    // One completion per ask: A, A again (under the trigger), B (refused by
+    // the trigger), B again.
     let server = MockServer::new(vec![
         Reply::ok(&completion),
+        Reply::ok(&rewritten),
         Reply::ok(&completion),
         Reply::ok(&completion),
     ]);
@@ -13160,6 +13221,21 @@ fn a_failed_history_write_does_not_fail_the_ask() {
             Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
+
+    // A asked again under the trigger: its delete-before-insert must roll back
+    // with the refused insert, so A keeps its id and its stored answer.
+    let again = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a history write that fails must not fail the ask");
+    assert_eq!(again["kind"], json!("generated"), "{again}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "A's delete was rolled back: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(a_id), "A keeps its id: {rows:?}");
+    let a_again =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+    assert_eq!(
+        a_again, a_before,
+        "a refused re-ask must not touch A's stored answer"
+    );
 
     let second = call(&webview, "ask", json!({ "query": "quantum resonance" }))
         .expect("a history write that fails must not fail the ask");

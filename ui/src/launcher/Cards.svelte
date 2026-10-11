@@ -66,9 +66,10 @@
   // and this condition already covers it — a bonus, not a decision made here.
   //
   // 🔴 Ruling I-C — the known cost of taking `error` whole, stated rather than
-  // discovered. `error` carries two reasons (`state.ts`) and only `askFailed`
-  // is an answer state: `tooLong` comes from `checkQuery` BEFORE any ask, so an
-  // over-long first Enter is `error` with no answer behind it. That Enter
+  // discovered. `error` carries four reasons (`state.ts`). `askFailed` and the
+  // two Recents ones (`historyUnreadable`, `historyFailed`) keep the answer on
+  // screen the way `askFailed` does. `tooLong` comes from `checkQuery` BEFORE any
+  // ask, so an over-long first Enter is `error` with no answer behind it. That Enter
   // mounts the tree, and mounting fires `list_tree`; in the cold launcher the
   // section is `hidden` below, so nothing is drawn, and `launcher-cold` (which
   // sets `idle`) is the way back to the bare line. A blank Enter is not an

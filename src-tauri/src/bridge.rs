@@ -1585,14 +1585,22 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
 }
 
 /// Keeps a question that got an answer, so the launcher's history can reopen
-/// it. A refusal or an error is not an answer and is not kept.
+/// it. A refusal or an error is not an answer and is not kept, and neither is
+/// a citations-only answer whose model failed to answer (any `why` but
+/// `NotAsked`): it must not replace the row of an earlier generated answer.
 ///
 /// A failed write is logged and then ignored: the person asked and must still
 /// get the answer, and losing a history row is the lesser harm.
 fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
+    // Only a question nobody asked a model keeps its citations: any other
+    // reason is a failure, and a failure must not replace a stored answer.
     if !matches!(
         answer,
-        AskAnswer::Generated { .. } | AskAnswer::CitationsOnly { .. }
+        AskAnswer::Generated { .. }
+            | AskAnswer::CitationsOnly {
+                why: NoAnswer::NotAsked,
+                ..
+            }
     ) {
         return;
     }
