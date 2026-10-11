@@ -11,12 +11,16 @@
   // as a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { state: launcherState, query, left, right, heat, search }: {
+  let { state: launcherState, query, left, right, heat, search, historyId = null, historyGen = 0, onOpenHistory }: {
     state: LauncherState;
     query: string;
     left: boolean;
     right: boolean;
     heat: Heat;
+    // Recents, forwarded to the tree unchanged (see `Tree.svelte`).
+    historyId?: number | null;
+    historyGen?: number;
+    onOpenHistory?: (id: number) => void;
     // The search panel. It lives in the centre column with the results, so
     // that no card spans two grid rows (see `launcher.css`).
     search?: Snippet;
@@ -119,7 +123,7 @@
     data-testid="card-tree"
     aria-label={treeLabel}
     hidden={!(heat === 'hot' && left)}>
-    <Tree {selected} />
+    <Tree {selected} {historyId} {historyGen} {onOpenHistory} />
   </section>
 {/if}
 

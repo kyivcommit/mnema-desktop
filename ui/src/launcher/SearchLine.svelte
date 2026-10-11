@@ -18,7 +18,8 @@
     void $locale;
     if (state.kind !== 'error') return '';
     if (state.reason === 'tooLong') return t('query_too_long', { limit: MAX_ASK_QUERY });
-    return t('query_failed'); // askFailed
+    if (state.reason === 'historyUnreadable') return t('history_unreadable');
+    return t('query_failed'); // askFailed, historyFailed
   });
   const refusalMessage = $derived.by(() => {
     void $locale;

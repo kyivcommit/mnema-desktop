@@ -1071,3 +1071,233 @@ test('the too-long message goes when the line is emptied', async () => {
   expect(screen.queryByRole('alert')).toBeNull();
   expect(askCalls()).toHaveLength(0);
 });
+
+// Opening a question from Recents (Task 4). `list_history` answers `entries` and
+// a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
+// `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
+const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedReject?: boolean } = {}) {
+  let entries = [OLD];
+  let next = 0;
+  invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve(entries);
+    if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
+    if (cmd === 'history_entry') {
+      if (opts.openedReject) return Promise.reject('offline');
+      return opts.opened instanceof Promise ? opts.opened : Promise.resolve(opts.opened);
+    }
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'ask') {
+      if (opts.ask) return opts.ask;
+      if (next >= (opts.asks ?? []).length) throw new Error(`mockRecents: no reply for ask #${next + 1}`);
+      const reply = opts.asks![next++];
+      return reply instanceof Promise ? reply : Promise.resolve(reply);
+    }
+    return Promise.resolve();
+  });
+}
+const historyEntryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'history_entry');
+const listHistoryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_history');
+const OPENED_OLD = { kind: 'answer', query: 'old q', answer: generated };
+
+async function openRecent(id: number) {
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId(`history-open-${id}`));
+}
+
+test('opening a question draws its snapshot without asking', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await fireEvent.input(box, { target: { value: 'a draft' } });
+  const asks = askCalls().length;
+  const answered = answeredCalls().length;
+
+  await openRecent(7);
+
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  expect(historyEntryCalls()).toEqual([['history_entry', { id: 7 }]]);
+  expect(askCalls()).toHaveLength(asks);
+  expect(answeredCalls()).toHaveLength(answered + 1);
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true');
+  expect(box.value).toBe('a draft');
+});
+
+test('a cold launcher warms on an opened question', async () => {
+  mockRecents({ asks: [emptyCitationsOnly], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+
+  await openRecent(7);
+
+  await screen.findByTestId('card-source');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual(ON));
+});
+
+test('opening is ignored while an ask is in flight', async () => {
+  mockRecents({ ask: new Promise(() => {}) });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  await openRecent(7);
+  expect(historyEntryCalls()).toHaveLength(0);
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+});
+
+test('an unreadable entry keeps the answer on screen and says so', async () => {
+  mockRecents({ asks: [generated], opened: { kind: 'unreadable' } });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await openRecent(7);
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/cannot be opened|не відкривається/);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a gone entry rereads the list and changes nothing else', async () => {
+  mockRecents({ asks: [generated], opened: { kind: 'gone' } });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  const reads = listHistoryCalls().length;
+  await openRecent(7);
+  await waitFor(() => expect(listHistoryCalls()).toHaveLength(reads + 1));
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a rejected open keeps the answer and says the query failed', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockRecents({ asks: [generated], openedReject: true });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await openRecent(7);
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(err).toHaveBeenCalled();
+  err.mockRestore();
+});
+
+test('deleting the question on screen keeps the answer and removes only its row', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  const before = screen.getByTestId('card-centre').textContent;
+  const asks = askCalls().length;
+
+  await fireEvent.click(screen.getByTestId('history-remove-7'));
+
+  await waitFor(() => expect(screen.queryByTestId('tree-history-7')).toBeNull());
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(askCalls()).toHaveLength(asks);
+  // The × does not open the row it sits in: only the first open read an entry.
+  expect(historyEntryCalls()).toHaveLength(1);
+});
+
+test('a recorded answer bumps the history list; a refusal does not', async () => {
+  mockRecents({ asks: [generated, refusedNoCandidates] });
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-centre');
+  await waitFor(() => expect(listHistoryCalls()).toHaveLength(2));
+  await submit('two');
+  await screen.findByRole('status');
+  expect(listHistoryCalls()).toHaveLength(2);
+});
+
+test('a new recorded answer clears the mark on the question that was opened', async () => {
+  mockRecents({ asks: [generated, generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull());
+});
+
+test('an opened answer without citations opens cold and draws no source card', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'answer', query: 'old q', answer: emptyCitationsOnly } });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(err).not.toHaveBeenCalled();
+  err.mockRestore();
+});
+
+test('launcher-cold clears the mark with the answer it belonged to', async () => {
+  mockRecents({ asks: [refusedNoCandidates, refusedNoCandidates], opened: OPENED_OLD });
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+  await submit('first');
+  await screen.findByRole('status');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  fireCold();
+  await waitFor(() => expect(screen.queryByTestId('card-centre')).toBeNull());
+  await submit('again');
+  await screen.findByRole('status');
+  // The tree remounted on the Files tab after the cold reset: Recents again.
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a search started while an entry is read is not overwritten by the entry', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated, new Promise(() => {})], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBe('true');
+  expect(screen.queryByTestId('query-echo')).toBeNull();
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('launcher-cold while an entry is read drops it', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  fireCold();
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+});

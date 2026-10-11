@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, launcherAnswered, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { ask, historyEntry, launcherAnswered, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
@@ -18,6 +18,12 @@
   // when there was none, and for every submit that did not start from a hot
   // launcher's answer.
   let previous = $state<LauncherState | null>(null);
+  // Recents: bumped whenever the list of questions may have changed (a recorded
+  // answer, a gone entry); the tree re-reads the list on each change.
+  let historyGen = $state(0);
+  // The row of the question on screen, when it was opened from Recents. Null for
+  // a question asked from the search line.
+  let historyId = $state<number | null>(null);
   // What the cards draw. The search line always gets `launcherState` itself.
   const cardsState = $derived(
     launcherState.kind === 'error' && previous
@@ -75,6 +81,7 @@
       left = right = false;
       launcherState = { kind: 'idle' };
       previous = null;
+      historyId = null;
       echo = '';
     })
       .then((u) => { if (gone) u(); else unlisten = u; })
@@ -109,6 +116,12 @@
       const answer = await ask(check.query);
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      // The backend records a generated or citations-only answer inside `ask`, so
+      // the list has a new row and the question on screen is not an opened one.
+      if (answer.kind === 'generated' || answer.kind === 'citationsOnly') {
+        historyId = null;
+        historyGen += 1;
+      }
       // The idle clock restarts when an answer lands, so one that arrived while
       // the launcher was hidden is not dropped by the hide's older clock.
       launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
@@ -136,6 +149,36 @@
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
       if (previous) echo = shownEcho; // the restored answer's own question
+    }
+  }
+
+  // Recents: a question asked before, drawn from its stored snapshot. No `ask` and
+  // no network, and the search line is left alone. Same one-at-a-time rule as a
+  // search: a click while an ask is in flight does nothing.
+  async function openHistory(id: number) {
+    if (launcherState.kind === 'inFlight') return;
+    // Kept as `runSearch` keeps it: an error puts back what was on screen.
+    const shown = cardsState;
+    previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
+    const gen = coldGen;
+    // A launcher that went cold, or a search that started while the entry was
+    // read, owns the screen now; the entry is dropped.
+    const superseded = () => gen !== coldGen || launcherState.kind === 'inFlight';
+    try {
+      const opened = await historyEntry(id);
+      if (superseded()) return;
+      if (opened.kind === 'gone') { historyGen += 1; return; }
+      if (opened.kind === 'unreadable') { launcherState = { kind: 'error', reason: 'historyUnreadable' }; return; }
+      launcherState = stateFromAnswer(opened.query, opened.answer);
+      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
+      const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
+      if (warmed) { heat = 'hot'; left = right = true; }
+      echo = opened.query;
+      historyId = id;
+    } catch (e) {
+      if (superseded()) return;
+      console.error('history_entry failed', e);
+      launcherState = { kind: 'error', reason: 'historyFailed' };
     }
   }
 
@@ -195,7 +238,7 @@
   <!-- D155: the search panel is the drag handle. "deep" drags from any
        click inside it except the input, and the toolbar buttons — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
-  <Cards state={cardsState} query={echo} {left} {right} {heat}>
+  <Cards state={cardsState} query={echo} {left} {right} {heat} {historyId} {historyGen} onOpenHistory={openHistory}>
     {#snippet search()}
     <div class="searchbar" data-tauri-drag-region="deep">
       <div class="sb-row">
