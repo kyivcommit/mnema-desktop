@@ -39,13 +39,29 @@
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { formatIndexedAt } from '../i18n/recency';
-  import { listTree } from '../lib/ipc';
-  import type { AskCitation, Hit, TreeListing } from '../lib/ipc';
+  import { deleteHistoryEntry, listHistory, listTree } from '../lib/ipc';
+  import type { AskCitation, Hit, HistoryEntry, TreeListing } from '../lib/ipc';
 
   // Ruling O: Task 8b holds the selection as exactly this union, so pinning
   // the narrower type here would force a signature change one task later.
   // Both members carry `documentId`, which is all this card reads.
-  let { selected }: { selected: AskCitation | Hit | null } = $props();
+  //
+  // The Recents tab lists the person's questions, not documents, so the card
+  // needs to know which question is on screen (`historyId`, the launcher's
+  // answer) and when a question was asked since it last read the list
+  // (`historyGen`). Both default to "none", so a card with no history wired
+  // still draws; `onOpenHistory` is the launcher's to supply.
+  let {
+    selected,
+    historyId = null,
+    historyGen = 0,
+    onOpenHistory,
+  }: {
+    selected: AskCitation | Hit | null;
+    historyId?: number | null;
+    historyGen?: number;
+    onOpenHistory?: (id: number) => void;
+  } = $props();
 
   let listing = $state<TreeListing | null>(null);
   let failed = $state(false);
@@ -53,6 +69,12 @@
   // Folders the person opened or shut by hand, keyed per root: two roots may
   // hold the same folder path and must not share one open flag.
   let toggled = $state<Record<string, boolean>>({});
+  // `null` until the first read lands, so an empty list is not drawn before the
+  // question of whether it is empty has been answered.
+  let history = $state<HistoryEntry[] | null>(null);
+  // A first read that failed, while nothing is on screen: the Recents tab says so.
+  // A read that fails after a list is already shown keeps the list, as list_tree does.
+  let historyFailed = $state(false);
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -124,10 +146,50 @@
 
   onMount(load);
 
+  // The questions, newest first, as `list_history` sends them. Read on mount, on
+  // focus, and whenever `historyGen` moves (see the effect below). Two reads can
+  // be in flight at once, and the one that started last is the one that counts:
+  // a reply to an older read is not applied over a newer answer, but a read that
+  // is still on the wire does not stop a newer one from being asked for.
+  let historyAsked = 0;
+  let historyApplied = 0;
+  function loadHistory() {
+    const mine = ++historyAsked;
+    listHistory()
+      .then((h) => {
+        if (mine > historyApplied) { historyApplied = mine; history = h; historyFailed = false; }
+      })
+      .catch((e) => {
+        console.error('list_history failed', e);
+        if (history === null) historyFailed = true;
+      });
+  }
+
+  // A question's remove button deletes the entry. The row goes once the delete has
+  // resolved and the list has been read again, so a delete that fails leaves the
+  // row where it was. Nothing is confirmed and nothing is opened.
+  function removeHistory(id: number) {
+    deleteHistoryEntry(id)
+      .then(loadHistory)
+      .catch((e) => console.error('delete_history_entry failed', e));
+  }
+
+  // `historyGen` is the launcher's signal that a question was just answered. The
+  // effect depends on the number, not on the prop read: a parent that re-sets its
+  // props (a new selection) must not read the questions again, and an equal value
+  // does not propagate through a `$derived`. It runs once on mount, which is the
+  // first read; the read itself is inside `untrack`.
+  const generation = $derived(historyGen);
+  $effect(() => {
+    void generation;
+    untrack(loadHistory);
+  });
+
   const filesLabel = $derived.by(() => { void $locale; return t('tree_tab_files'); });
   const recentsLabel = $derived.by(() => { void $locale; return t('tree_tab_recents'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
+  const historyEmptyLabel = $derived.by(() => { void $locale; return t('history_empty'); });
 
   // Ruling P: selection is by documentId, never by relativePath — two roots
   // can hold the same relative path under different documents.
@@ -136,28 +198,31 @@
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
   );
-  // Review Minor 5: the Recents rows carry WHEN each document was indexed. The
-  // whole list is rebuilt inside one `$derived.by` that reads `$locale` —
-  // `formatIndexedAt` goes through `t()` and is not reactive on its own, the
-  // house pattern (`Answer.svelte:40-43`, `Passages.svelte:62-69`).
+  // Review Minor 5: each question says HOW LONG AGO it was asked. The whole list
+  // is rebuilt inside one `$derived.by` that reads `$locale` — `formatIndexedAt`
+  // goes through `t()` and is not reactive on its own, the house pattern
+  // (`Answer.svelte:40-43`, `Passages.svelte:62-69`).
   //
   // The clock is read here rather than ticked: these labels do not update on
-  // their own, they are recomputed when the listing changes, when the language
-  // changes, and — since P3 — every time the launcher is raised, which is the
-  // only moment a person is reading them. A timer would redraw the card behind
-  // a person who is not looking at it.
-  const recents = $derived.by(() => {
+  // their own, they are recomputed when the list changes, when the language
+  // changes, and every time the launcher is raised, which is the only moment a
+  // person is reading them. A timer would redraw the card behind a person who
+  // is not looking at it.
+  const historyRows = $derived.by(() => {
     void $locale;
     const now = Date.now();
-    return (listing?.recents ?? []).map((recent) => ({
-      recent,
-      indexed: formatIndexedAt(recent.indexedAt, now),
+    return (history ?? []).map((entry) => ({
+      entry,
+      asked: formatIndexedAt(entry.askedAt, now),
+      // Named for its own question: a screen reader hears the row, not a count.
+      removeName: t('history_remove', { query: entry.query }),
     }));
   });
 
-  const isEmpty = $derived(
-    listing !== null && listing.roots.length === 0 && listing.recents.length === 0,
-  );
+  // The Files tab is empty when there are no roots, and only then. Questions do
+  // not count: an index with nothing indexed can still have been asked things,
+  // and the Recents tab says so for itself.
+  const isEmpty = $derived(listing !== null && listing.roots.length === 0);
 
   // NUL as the separator because no path component can contain one, so no two
   // distinct (root, folder) pairs can collide on one key. It must be written as
@@ -232,13 +297,6 @@
   // (`a refresh that moves the selected file…` and its control, `a refresh that
   // changes nothing…`).
   //
-  // The second half is the Recents tab, where marking a row is not enough
-  // because the selected document may have no row there at all (recents is a
-  // short list of what was indexed last). When the tab on screen cannot show
-  // the selection and the other one can, the card shows the one that can. A tab
-  // the person picks while the selection stands is left alone — this runs on a
-  // CHANGE of selection only.
-  //
   // The stamp is what makes "a change" precise: it holds the selected document
   // and the folders on its way, so it also fires when the listing arrives after
   // the selection did. Everything it writes is read inside `untrack`, so this
@@ -276,10 +334,6 @@
         if (next[k] === false) { next[k] = true; changed = true; }
       }
       if (changed) toggled = next;
-
-      const inRecents = l.recents.some((r) => r.documentId === id);
-      const inFiles = l.roots.some((r) => r.files.some((f) => f.documentId === id));
-      if (tab === 'recents' && !inRecents && inFiles) tab = 'files';
     });
   });
 </script>
@@ -325,7 +379,7 @@
   </ul>
 {/snippet}
 
-<svelte:window onfocus={load} />
+<svelte:window onfocus={() => { load(); loadHistory(); }} />
 
 <div class="tree" data-testid="tree-body">
   <div class="tabs">
@@ -341,37 +395,46 @@
       onclick={() => (tab = 'recents')}>{recentsLabel}</button>
   </div>
 
-  {#if failed}
-    <p data-testid="tree-failed">{failedLabel}</p>
-  {:else if isEmpty}
-    <p data-testid="tree-empty">{emptyLabel}</p>
-  {:else if tab === 'files'}
-    {#each roots as { root, nodes } (root.rootId)}
-      <section data-testid={`tree-root-${root.rootId}`}>
-        <h4>{root.name}</h4>
-        {@render branch(nodes, root.rootId)}
-      </section>
-    {/each}
+  {#if tab === 'files'}
+    {#if failed}
+      <p data-testid="tree-failed">{failedLabel}</p>
+    {:else if isEmpty}
+      <p data-testid="tree-empty">{emptyLabel}</p>
+    {:else}
+      {#each roots as { root, nodes } (root.rootId)}
+        <section data-testid={`tree-root-${root.rootId}`}>
+          <h4>{root.name}</h4>
+          {@render branch(nodes, root.rootId)}
+        </section>
+      {/each}
+    {/if}
+  {:else if history === null && historyFailed}
+    <p data-testid="history-failed">{failedLabel}</p>
+  {:else if history !== null && history.length === 0}
+    <p data-testid="history-empty">{historyEmptyLabel}</p>
   {:else}
     <ul>
-      {#each recents as { recent, indexed } (recent.documentId)}
+      {#each historyRows as { entry, asked, removeName } (entry.id)}
         <li>
-          <!-- P5, the same finding one tab over: a focusable button with no
-               action of any kind. A row, rendered as one.
-               P4: and it carries the mark, which it never did — selecting a
-               citation while this tab was showing left no current row
-               anywhere, so the source card was reading out a passage the tree
-               could not place.
-               Minor 5: and it says how recently the document was indexed, which
-               is the fact that makes a list called Recents an ordering a person
-               can see rather than one they have to take on trust.
-               `recent-path`/`recent-indexed`, NOT `tree-recent-*`: the row ids
-               are a namespace and a second id inside it would be counted as a
-               row — the same rule `Passages` and `Answer` follow. -->
-          <span data-testid={`tree-recent-${recent.documentId}`}
-            aria-current={recent.documentId === selectedId ? 'true' : undefined}
-            ><span data-testid="recent-path">{recent.relativePath}</span>
-            <span data-testid="recent-indexed">{indexed}</span></span>
+          <!-- The row is a span, not a button: its two buttons are the actions.
+               `tree-history-*` is the row namespace, so the parts inside carry
+               ids that do not start with it — the rule `Passages` and `Answer`
+               follow. `aria-current` sits on the row because the style keys on
+               it there, and the row is what the launcher's `historyId` marks. -->
+          <span data-testid={`tree-history-${entry.id}`} class="history-row"
+            aria-current={entry.id === historyId ? 'true' : undefined}>
+            <button type="button" class="history-open" data-testid={`history-open-${entry.id}`}
+              onclick={() => onOpenHistory?.(entry.id)}>
+              <span data-testid="history-query" class="history-query">{entry.query}</span>
+              <span data-testid="history-asked" class="history-asked">{asked}</span>
+            </button>
+            <!-- Shown on hover and on focus, through opacity and never through
+                 `visibility`: a hidden control cannot take focus, and this one must
+                 always be reachable from a keyboard. -->
+            <button type="button" class="history-remove" data-testid={`history-remove-${entry.id}`}
+              aria-label={removeName}
+              onclick={() => removeHistory(entry.id)}>×</button>
+          </span>
         </li>
       {/each}
     </ul>

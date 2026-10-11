@@ -1,10 +1,10 @@
 import { t, type Loc } from './index';
 
-// How long ago a document was indexed, for the Recents tab (review Minor 5).
+// How long ago a question was asked, for the Recents tab (review Minor 5).
 //
-// 🔴 The unit is what this file exists to get right. `RecentDoc.indexedAt`
-// (`lib/ipc.ts:65`) is `ingest_stage.updated_at` (`mnema-index/src/write.rs:286`),
-// an `INTEGER … DEFAULT (unixepoch())` column (`crates/mnema-index/src/schema.sql:261`)
+// 🔴 The unit is what this file exists to get right. `HistoryEntry.askedAt`
+// (`lib/ipc.ts`) is `query_history.asked_at` (`crates/mnema-index/src/migrations.rs:148`),
+// an `INTEGER NOT NULL DEFAULT (unixepoch())` column
 // — SECONDS since the epoch, where `Date.now()` is milliseconds. A comparison
 // that mixed the two would be wrong by a factor of a thousand and would still
 // render a plausible sentence.
@@ -14,8 +14,8 @@ import { t, type Loc } from './index';
 // and on which zone a test happens to run in, while "how long ago" is the
 // question the card's own name asks and needs no zone at all. The cost is that
 // an old entry reads as `412 days ago` rather than as a date; the Recents list
-// is what was indexed LAST, so that is a state the person has arrived at by
-// having indexed nothing since, and the sentence is still true.
+// is what was asked LAST, so the sentence stays true for as long as nothing new
+// has been asked.
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

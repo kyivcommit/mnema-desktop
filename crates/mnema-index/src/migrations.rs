@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -128,6 +128,29 @@ CREATE TABLE file_mask (
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );";
 
+/// The questions the person has asked, with the answer each one was shown.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` gives: an index already at
+/// version 4 is given only what comes after it.
+///
+/// No foreign key to `document` or `chunk`, on purpose. An answer is a snapshot
+/// of its own text, paths and coordinates, so removing the documents it was
+/// built from must leave the row alone.
+///
+/// `asked_at` is in seconds, like `ingest_stage.updated_at`. The index on it
+/// serves the newest-first read; the trim in `history_record` orders by
+/// `(asked_at, id)` and does not depend on it. `AUTOINCREMENT` because the
+/// window holds ids across a refresh: a plain rowid would hand a deleted
+/// newest id to the next question, and a stale row would then act on it.
+const ADD_QUERY_HISTORY: &str = "\
+CREATE TABLE query_history (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    query    TEXT NOT NULL UNIQUE,
+    answer   TEXT NOT NULL,
+    asked_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX query_history_asked_at ON query_history(asked_at);";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -143,6 +166,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_PATH_READER),
         M::up(ADD_IGNORE_RULE_UNIQUE),
         M::up(ADD_FILE_MASK),
+        M::up(ADD_QUERY_HISTORY),
     ])
 }
 
@@ -363,6 +387,68 @@ mod tests {
             .query_row("SELECT pattern FROM file_mask", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored, "*.pdf");
+    }
+
+    /// `query_history` arrives as its own migration, for the same reason
+    /// `file_mask` did: a database already at version 4 is given only the
+    /// migrations after it. The `meta` row written first is what says the
+    /// migration left existing data alone rather than rebuilding around it.
+    #[test]
+    fn a_v4_index_migrates_to_v5_keeping_its_rows() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations()
+            .to_version(&mut conn, 4)
+            .expect("version 4 is the schema before query history");
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('chat_model', 'vendor/chat')",
+            [],
+        )
+        .unwrap();
+
+        let before: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'query_history'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 0, "`query_history` must not be part of migration 4");
+
+        apply(&mut conn).expect("a version-4 database migrates to the current version");
+
+        assert_eq!(SCHEMA_VERSION, 5);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+
+        let value: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {
+                r.get(0)
+            })
+            .expect("the meta row written before the migration is still there");
+        assert_eq!(value, "vendor/chat");
+
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM query_history", [], |r| r.get(0))
+            .expect("the migrated table exists and is readable");
+        assert_eq!(rows, 0, "a migrated index starts with an empty history");
+
+        // No foreign key: an answer is a snapshot, and removing the documents it
+        // was built from must leave the row alone (see ADD_QUERY_HISTORY).
+        let foreign_keys: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_foreign_key_list('query_history')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            foreign_keys, 0,
+            "query_history must not reference any other table"
+        );
     }
 
     /// The DDL a version-1 database ends up with, comments removed and

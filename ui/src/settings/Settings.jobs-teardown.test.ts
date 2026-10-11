@@ -68,7 +68,7 @@ vi.mock('../lib/ipc', () => ({
   forgetKey: vi.fn(),
   providerModels: () => Promise.resolve({ entries: [], unreadable: 0, unreadableRecords: [] }),
   setChatModel: vi.fn(),
-  listTree: () => Promise.resolve({ roots: [], recents: [] }),
+  listTree: () => Promise.resolve({ roots: [] }),
   listSubfolders: () => Promise.resolve({ entries: [], unnameable: 0 }),
   listExclusions: () => Promise.resolve([]),
   excludeSubfolder: vi.fn(),

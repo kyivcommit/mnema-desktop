@@ -88,10 +88,6 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 .cloud[data-status="unreachable"] { color: var(--err); }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
-.arms { display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-soft); font-size: 12.5px; }
-.arms label { display: inline-flex; align-items: center; gap: 6px; }
-.arms input { accent-color: var(--accent); }
-.arms .unavailable { color: var(--ink-soft); }
 .search-line :is(.guard, .refusal) {
   margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px;
 }
@@ -132,6 +128,23 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 .tree li > span > span { display: block; }
 .tree li > span > span + span { font-size: 11px; color: var(--ink-soft); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
+/* A question row: the open button takes the width, the remove button sits at its
+   right. Text is one line with an ellipsis; the full query is in the DOM. */
+.tree .history-row { display: flex; align-items: center; gap: 4px; padding: 0; }
+.tree .history-open {
+  flex: 1; min-width: 0; padding: 4px 7px; border: 0; background: transparent;
+  color: var(--ink); text-align: left; font: inherit;
+}
+.tree .history-query, .tree .history-asked {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree .history-asked { font-size: 11px; color: var(--ink-soft); }
+/* Opacity, not visibility: a hidden control cannot take focus. */
+.tree .history-remove {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink-soft); font-size: 14px; line-height: 1; opacity: 0;
+}
+.tree .history-row:hover .history-remove, .tree .history-row:focus-within .history-remove { opacity: 1; }
 .tree h4 {
   margin: 10px 0 4px; overflow-wrap: anywhere;
   font-family: var(--sans); font-weight: 500; font-style: normal;

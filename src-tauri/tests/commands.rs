@@ -4655,7 +4655,7 @@ fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
 }
 
 #[test]
-fn list_tree_enumerates_roots_indexed_files_and_recents() {
+fn list_tree_enumerates_roots_and_indexed_files() {
     use mnema_core::OnDisk; // SourceKind is already in file scope (commands.rs:14, from mnema_core)
     use mnema_index::DocumentStatus;
 
@@ -4678,26 +4678,6 @@ fn list_tree_enumerates_roots_indexed_files_and_recents() {
             }
             db.set_document_status(&older, DocumentStatus::Indexed)?;
             db.set_document_status(&newer, DocumentStatus::Indexed)?;
-            // Recency is the chunk/done completion time (`ingest_stage`), not
-            // `document.created_at`. `pending` carries a chunk/done stage too —
-            // the state a downgraded document is in — and the newest one, so the
-            // indexed-only filter (not the INNER JOIN) is what keeps it out of
-            // recents.
-            for id in [&older, &newer, &pending] {
-                db.record_stage(id, "chunk", "done")?;
-            }
-            db.conn().execute(
-                "UPDATE ingest_stage SET updated_at = 1000 WHERE content_hash = ?1 AND stage = 'chunk'",
-                [&older],
-            )?;
-            db.conn().execute(
-                "UPDATE ingest_stage SET updated_at = 2000 WHERE content_hash = ?1 AND stage = 'chunk'",
-                [&newer],
-            )?;
-            db.conn().execute(
-                "UPDATE ingest_stage SET updated_at = 3000 WHERE content_hash = ?1 AND stage = 'chunk'",
-                [&pending],
-            )?;
             // Two paths under A, deliberately out of sorted order; the pending doc under B.
             db.insert_path(
                 a,
@@ -4759,27 +4739,24 @@ fn list_tree_enumerates_roots_indexed_files_and_recents() {
     // Root B: the pending doc is excluded — an empty, still-listed root.
     assert!(roots[1]["files"].as_array().unwrap().is_empty());
 
-    // Recents: newest first, indexed-only (the pending doc is absent).
-    let recents = v["recents"].as_array().unwrap();
-    let rec: Vec<&str> = recents
-        .iter()
-        .map(|d| d["relativePath"].as_str().unwrap())
-        .collect();
-    assert_eq!(rec, vec!["new.txt", "notes/old.txt"]);
-    assert_eq!(recents[0]["indexedAt"].as_i64().unwrap(), 2000);
-    assert_eq!(recents[0]["rootId"].as_i64().unwrap(), root_a);
+    // No recents on this wire: the launcher's Recents tab lists questions, read
+    // through `list_history`.
+    assert!(
+        v.get("recents").is_none(),
+        "list_tree still carries recents: {v}"
+    );
 
-    // Wire shape, both directions: snake_case must not leak (guards rename_all).
+    // Wire shape: snake_case must not leak (guards rename_all).
     assert!(roots[0].get("root_id").is_none());
-    assert!(recents[0].get("indexed_at").is_none());
 }
 
 /// One indexed document the tree listing returns, written the way the pipeline
 /// leaves it: an `Indexed` status, a `chunk`/`done` stage (so
 /// [`mnema_index::Db::recent_indexed_documents`]'s INNER JOIN reaches it) and a
 /// real path under `root`. The four writes
-/// [`list_tree_enumerates_roots_indexed_files_and_recents`] already makes,
-/// gathered into one call for the race guard's decoys and its intruder.
+/// [`list_tree_enumerates_roots_and_indexed_files`] already makes,
+/// gathered into one call so every test that needs an indexed file writes the
+/// same four rows.
 fn seed_indexed_file(db: &mnema_index::Db, root: i64, id: &str, relative_path: &str) {
     use mnema_core::OnDisk;
     db.insert_document(id, "text/plain", 1, SourceKind::Document)
@@ -4800,136 +4777,6 @@ fn seed_indexed_file(db: &mnema_index::Db, root: i64, id: &str, relative_path: &
         1,
     )
     .expect("seed: insert_path");
-}
-
-/// Coherence-only, never false-red — the tree twin of
-/// [`assert_coherent_or_absent`]. Every `recents[i]`'s `(rootId,
-/// relativePath)` must be one the same listing reports under some
-/// `roots[].files`. A coherent listing passes whichever way the race fell — the
-/// intruder in both phases or in neither; only a torn read, a recent reaching
-/// the listing while its file is absent from every `roots[].files`, fails.
-///
-/// One direction on purpose: `recents ⊆ files` is the whole invariant
-/// `read_snapshot` buys here, and requiring equality would false-red on the
-/// ordinary case where `files` holds far more than the `RECENTS_LIMIT` rows
-/// `recents` caps at.
-fn assert_coherent_recents(v: &Value) {
-    let mut files: std::collections::HashSet<(i64, String)> = std::collections::HashSet::new();
-    for root in v["roots"].as_array().expect("a roots array") {
-        let root_id = root["rootId"].as_i64().expect("a rootId");
-        for f in root["files"].as_array().expect("a files array") {
-            let rel = f["relativePath"].as_str().expect("a relativePath");
-            files.insert((root_id, rel.to_string()));
-        }
-    }
-    for rec in v["recents"].as_array().expect("a recents array") {
-        let pair = (
-            rec["rootId"].as_i64().expect("a recent rootId"),
-            rec["relativePath"]
-                .as_str()
-                .expect("a recent relativePath")
-                .to_string(),
-        );
-        assert!(
-            files.contains(&pair),
-            "recents carries {:?} under root {}, absent from every roots[].files — a torn read: \
-             list_tree returned a state the index never held: {v}",
-            pair.1,
-            pair.0
-        );
-    }
-}
-
-/// The P1-1 fix (`src-tauri/src/tree.rs`): `list_tree` reads the whole listing
-/// inside one [`mnema_index::Db::read_snapshot`]. The `mnema-index` regression
-/// (`the_tree_listing_reads_files_and_recents_from_one_snapshot`) composes the
-/// two phases by hand and proves the *snapshot* holds; it pins nothing about
-/// whether `list_tree` ITSELF wraps its reads — revert the command to
-/// `with_index(build_tree_listing)` (three autocommit reads) and that test, and
-/// the whole suite, stays green. The search path closed this exact gap with
-/// [`a_rebuild_racing_the_ipc_search_does_not_reach_its_citation`], and this
-/// mirrors it for `list_tree`. See the private guard-report for the measured
-/// catch rate.
-///
-/// A second connection commits a full new indexed document — path and
-/// chunk/done stage — while the real `list_tree` IPC command runs. Under one
-/// snapshot the intruder is in neither the files nor the recents; under
-/// autocommit it can reach the recents read (phase 2) while the files read
-/// (phase 1) already snapshotted without it, and [`assert_coherent_recents`]
-/// fails on that tear.
-#[test]
-fn a_write_racing_the_ipc_list_tree_cannot_tear_recents_from_its_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("index.sqlite");
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-
-    // The window and this writer are two connections on one file — the running
-    // indexing job's shape, the same arrangement `a_search_through_the_ipc_
-    // finds_what_another_connection_wrote` relies on. The root is committed on
-    // the writer; the window sees it across the connection.
-    let writer = mnema_index::open(&path).unwrap();
-    let root = writer
-        .insert_watched_root(&dir.path().display().to_string())
-        .unwrap();
-
-    // Widen the race window the way the search fixture uses 6000 decoys: many
-    // indexed files under the root make `indexed_files_under_root`'s
-    // `ORDER BY relative_path` (phase 1) materialise a temp b-tree over every
-    // row before it returns — low milliseconds, the same order as the writer's
-    // head start below — and it is the gap between that read and the recents
-    // read (phase 2) an autocommit `list_tree` leaves for the writer to land in.
-    // One transaction around the seed keeps setup fast; it changes no read cost.
-    const DECOYS: usize = 6000;
-    writer.conn().execute_batch("BEGIN").unwrap();
-    for i in 0..DECOYS {
-        seed_indexed_file(
-            &writer,
-            root,
-            &format!("{i:064x}"),
-            &format!("decoy/{i:06}.txt"),
-        );
-    }
-    // Rank every decoy below any live `unixepoch()`, so the intruder — whose
-    // chunk/done stage stamps the real clock — always reaches recents' top
-    // `RECENTS_LIMIT` when phase 2 sees it. Without this the intruder ties the
-    // decoys on the one-second `unixepoch()` grid and its place in recents would
-    // turn on `d.id`, not on whether the race reached the recents read.
-    writer
-        .conn()
-        .execute(
-            "UPDATE ingest_stage SET updated_at = 1 WHERE stage = 'chunk'",
-            [],
-        )
-        .unwrap();
-    writer.conn().execute_batch("COMMIT").unwrap();
-
-    // Control, before the writer thread exists to race against: the listing is
-    // coherent on its own, so a failure below can only mean the race reached the
-    // recents read.
-    let control = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
-    assert_coherent_recents(&control);
-
-    let intruder = "f".repeat(64);
-    let writer_handle = std::thread::spawn(move || {
-        // A short, deliberately generous head start over the listing this thread
-        // races: the files read's sort over `DECOYS` rows, comment above, gives
-        // the commit room to land after that read's snapshot but before the
-        // recents read.
-        std::thread::sleep(Duration::from_millis(2));
-        // A full new indexed document under the root. Its chunk/done
-        // `unixepoch()` puts it at the head of recents; it is absent from any
-        // `roots[].files` a phase-1 snapshot took before this commit landed —
-        // which is what makes a recent for it, with no matching file, provable
-        // incoherence rather than a harmless extra row.
-        seed_indexed_file(&writer, root, &intruder, "intruder.txt");
-    });
-
-    let v = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
-    writer_handle.join().expect("the writer thread panicked");
-
-    assert_coherent_recents(&v);
 }
 
 /// Hazard (1) of PR 5's "what disappears" pass, and what makes
@@ -11235,13 +11082,16 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
         "the settings count and the folder row's own file list must agree: {after} / {listing}"
     );
 
-    let recent = listing["recents"][0]["indexedAt"]
-        .as_i64()
-        .expect("the walked root draws a recents row with a moment");
+    // The moment the settings line names is the top of the same join the
+    // Recents read used to draw from; `list_tree` no longer carries it.
+    let state = app.state::<AppState>();
+    let top = state
+        .with_index(|db| db.recent_indexed_documents(1))
+        .expect("recent_indexed_documents was rejected");
     assert_eq!(
         after["index"]["lastIndexedAt"].as_i64(),
-        Some(recent),
-        "the settings line and the top of Recents must name one moment: {after} / {listing}"
+        top.first().map(|d| d.indexed_at),
+        "the settings line must name the newest indexed moment: {after} / {listing}"
     );
 
     // The third field the window's read arm now requires, and the only one of
@@ -13026,4 +12876,402 @@ fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
     let state = fx.app.state::<AppState>();
     remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
     assert!(!state.local().models_ready(), "the model is gone");
+}
+
+// ---- Query history: `ask` records, three commands list, reopen and delete. ----
+
+/// A `set_search_arms` that keeps retrieval off the content arm, so no query
+/// embedding is sent anywhere — the history tests need the text arm only.
+fn text_arm_only(webview: &WebviewWindow<MockRuntime>) {
+    call(
+        webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+}
+
+/// The ids and queries `list_history` answers with, newest first.
+fn history_rows(webview: &WebviewWindow<MockRuntime>) -> Vec<Value> {
+    call(webview, "list_history", json!({}))
+        .expect("list_history was rejected")
+        .as_array()
+        .expect("list_history did not answer with an array")
+        .clone()
+}
+
+#[test]
+fn a_generated_ask_is_recorded_and_reopens_identically() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "one generated ask is one row: {rows:?}");
+    assert_eq!(rows[0]["query"], json!("quantum entanglement"), "{rows:?}");
+    assert!(
+        rows[0]["askedAt"].is_i64(),
+        "askedAt is the camelCase wire name: {rows:?}"
+    );
+    assert!(
+        rows[0].get("asked_at").is_none(),
+        "no snake_case key reaches the window: {rows:?}"
+    );
+
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(opened["query"], json!("quantum entanglement"), "{opened}");
+    assert_eq!(
+        opened["answer"], answer,
+        "the reopened answer must be the JSON ask gave, value for value: {opened}"
+    );
+}
+
+#[test]
+fn a_citations_only_ask_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"c".repeat(64),
+                "quantum entanglement resonance",
+            ))
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    // No chat model is set, so the answer is citations-only and no model is asked.
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"]["kind"], json!("notAsked"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "a citations-only ask is kept: {rows:?}");
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(opened["answer"], answer, "{opened}");
+}
+
+/// A failed chat call answers citations-only with a `why`, and that answer is
+/// not kept: asking the same question again after a generated answer must
+/// leave the generated row exactly as it was, same id and same answer.
+#[test]
+fn a_failed_ask_does_not_replace_a_generated_answer_in_history() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![
+        Reply::ok(&completion),
+        Reply::status(
+            503,
+            r#"{"error":{"message":"upstream model is overloaded"}}"#,
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let generated = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(generated["kind"], json!("generated"), "{generated}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "the generated answer is recorded: {rows:?}");
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let before =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+
+    let failed = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a failed chat call must not reject the ask");
+    assert_eq!(failed["kind"], json!("citationsOnly"), "{failed}");
+    assert_eq!(failed["why"]["kind"], json!("failed"), "{failed}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "the failed ask adds no row: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(id), "the row keeps its id: {rows:?}");
+    let after =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(
+        after, before,
+        "a failed ask must not replace the generated answer"
+    );
+    assert_eq!(after["answer"], generated, "{after}");
+}
+
+#[test]
+fn a_refused_ask_is_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    // A key and a chat model make the ask Ready, so an empty index refuses
+    // (NoCandidates) rather than answering citations-only.
+    mnema_secrets::store(state.credential_ref(), "test-key-history-refused")
+        .expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let answer =
+        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("refused"), "{answer}");
+    assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
+
+    assert_eq!(
+        history_rows(&webview),
+        Vec::<Value>::new(),
+        "a refusal is not an answer and is not kept"
+    );
+}
+
+#[test]
+fn asking_the_same_query_with_spaces_keeps_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    // Citations-only with no chat model: recorded, and nothing to retrieve is needed.
+    call(&webview, "ask", json!({ "query": "q" })).expect("ask was rejected");
+    assert_eq!(history_rows(&webview).len(), 1, "the first ask is recorded");
+
+    let answer = call(&webview, "ask", json!({ "query": "  q  " })).expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the same question, trimmed, is one row: {rows:?}"
+    );
+    assert_eq!(
+        rows[0]["query"],
+        json!("q"),
+        "the stored query is trimmed: {rows:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_snapshot_opens_as_unreadable_and_can_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| db.history_record("q", "{\"kind\":\"nope\"}"))
+        .unwrap();
+    let webview = main_webview(&app);
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the unreadable row is still listed: {rows:?}"
+    );
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("unreadable"), "{opened}");
+
+    call(&webview, "delete_history_entry", json!({ "id": id }))
+        .expect("delete_history_entry was rejected");
+    assert_eq!(history_rows(&webview), Vec::<Value>::new());
+}
+
+#[test]
+fn a_missing_id_opens_as_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": 999 })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("gone"), "{opened}");
+}
+
+#[test]
+fn deleting_a_missing_id_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+
+    call(&webview, "delete_history_entry", json!({ "id": 999 }))
+        .expect("deleting an id that is not there must not be an error");
+}
+
+#[test]
+fn history_survives_removing_the_watched_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    text_arm_only(&webview);
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    scan_to_completion(app.handle());
+
+    // No chat model: citations-only, but the citation is a real document.
+    let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
+    assert!(
+        answer["citations"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the fixture must give a citation, or this proves nothing: {answer}"
+    );
+    let rows = history_rows(&webview);
+    assert!(!rows.is_empty(), "the ask above was not recorded: {rows:?}");
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+
+    call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": fixture.path().display().to_string() }),
+    )
+    .expect("remove_watched_folder was rejected");
+
+    // Positive control: the document really is gone, so the snapshot below
+    // is the only thing left that can answer.
+    let gone = call(&webview, "search", json!({ "query": "fox" })).expect("search was rejected");
+    assert_eq!(
+        gone["hits"],
+        json!([]),
+        "the cited document must be gone from the index: {gone}"
+    );
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(
+        opened["answer"], answer,
+        "the snapshot outlives the document it cites: {opened}"
+    );
+}
+
+#[test]
+fn a_failed_history_write_does_not_fail_the_ask() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let rewritten = json!({
+        "choices": [{ "message": { "content": "A rewritten answer <c>1</c>." } }]
+    })
+    .to_string();
+    // One completion per ask: A, A again (under the trigger), B (refused by
+    // the trigger), B again.
+    let server = MockServer::new(vec![
+        Reply::ok(&completion),
+        Reply::ok(&rewritten),
+        Reply::ok(&completion),
+        Reply::ok(&completion),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    let webview = ask_ready_with_one_passage(&app);
+
+    // A is written while the table is healthy, so its row is the baseline.
+    let first = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(first["kind"], json!("generated"), "{first}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "A is recorded before the fault: {rows:?}");
+    let a_id = rows[0]["id"].as_i64().expect("the row has an id");
+    let a_before =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+
+    // Every later insert aborts. The attempt is what this test makes visible:
+    // without the trigger a missing row would look the same as no write at all.
+    state
+        .with_index(|db| {
+            db.conn().execute_batch(
+                "CREATE TRIGGER refuse_history BEFORE INSERT ON query_history
+                 BEGIN SELECT RAISE(ABORT, 'test'); END;",
+            )?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+
+    // A asked again under the trigger: its delete-before-insert must roll back
+    // with the refused insert, so A keeps its id and its stored answer.
+    let again = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a history write that fails must not fail the ask");
+    assert_eq!(again["kind"], json!("generated"), "{again}");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "A's delete was rolled back: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(a_id), "A keeps its id: {rows:?}");
+    let a_again =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+    assert_eq!(
+        a_again, a_before,
+        "a refused re-ask must not touch A's stored answer"
+    );
+
+    let second = call(&webview, "ask", json!({ "query": "quantum resonance" }))
+        .expect("a history write that fails must not fail the ask");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "B's insert was refused, so only A is kept: {rows:?}"
+    );
+    assert_eq!(rows[0]["id"], json!(a_id), "A keeps its id: {rows:?}");
+    let a_after =
+        call(&webview, "history_entry", json!({ "id": a_id })).expect("history_entry was rejected");
+    assert_eq!(
+        a_after, a_before,
+        "the refused write must not touch A's stored answer"
+    );
+
+    // B's absence is the trigger's doing: with it gone, the same question is kept.
+    state
+        .with_index(|db| {
+            db.conn().execute_batch("DROP TRIGGER refuse_history")?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+    let third =
+        call(&webview, "ask", json!({ "query": "quantum resonance" })).expect("ask was rejected");
+    assert_eq!(third["kind"], json!("generated"), "{third}");
+    let queries: Vec<Value> = history_rows(&webview)
+        .iter()
+        .map(|r| r["query"].clone())
+        .collect();
+    assert_eq!(
+        queries,
+        vec![json!("quantum resonance"), json!("quantum entanglement")],
+        "with the trigger gone, B is recorded and newest"
+    );
 }

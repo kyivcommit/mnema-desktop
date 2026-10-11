@@ -50,6 +50,7 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
     return Promise.resolve();
@@ -68,6 +69,7 @@ function mockAsks(...replies: unknown[]) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
     // same policy for the same reason: a test that asks once more than its
@@ -77,22 +79,6 @@ function mockAsks(...replies: unknown[]) {
       if (next >= replies.length) throw new Error(`mockAsks: no reply for ask #${next + 1}`);
       return Promise.resolve(replies[next++]);
     }
-    return Promise.resolve();
-  });
-}
-
-// The arms-row seeds each need their OWN `model_settings` answer, which is why
-// they cannot use `mockBackend`. They still need every other command answered:
-// they render in state A today, where no card draws, so a blanket
-// `Promise.resolve()` is green for a reason unrelated to what they claim — and
-// one state along `Tree` reads `.roots` off `undefined` and throws. Same trap as
-// Ruling Y, fourth home.
-function mockSettings(settings: unknown) {
-  invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(settings);
-    if (cmd === 'provider_status') return providerReply();
-    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
 }
@@ -206,6 +192,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return pending;
     return Promise.resolve();
@@ -242,6 +229,7 @@ function mockAsksThenReject(first: unknown) {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return n++ === 0 ? Promise.resolve(first) : Promise.reject('offline');
     return Promise.resolve();
@@ -515,7 +503,7 @@ test('a blur right after a press on the drag handle is the drag, not a dismissal
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!; // inside .searchbar, not clickable
+    const handle = container.querySelector('.sb-tools')!; // inside .searchbar, not clickable
     fireEvent.pointerDown(handle, { button: 0 });
     vi.advanceTimersByTime(600);
     fireEvent.blur(window);
@@ -532,7 +520,7 @@ test('a release after the press disarms the drag window: a click on the handle, 
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!;
+    const handle = container.querySelector('.sb-tools')!;
     fireEvent.pointerDown(handle);
     vi.advanceTimersByTime(50);
     fireEvent.pointerUp(handle);
@@ -552,7 +540,7 @@ test('a right-button press on the handle does not arm the drag window', () => {
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    const handle = container.querySelector('.arms')!;
+    const handle = container.querySelector('.sb-tools')!;
     handle.dispatchEvent(new MouseEvent('pointerdown', { button: 2, bubbles: true }));
     vi.advanceTimersByTime(50);
     fireEvent.blur(window);
@@ -569,7 +557,7 @@ test('a press off the handle disarms an earlier arming even with no release', ()
   try {
     mockBackend(generated);
     const { container } = render(Launcher);
-    fireEvent.pointerDown(container.querySelector('.arms')!, { button: 0 });
+    fireEvent.pointerDown(container.querySelector('.sb-tools')!, { button: 0 });
     vi.advanceTimersByTime(50);
     fireEvent.pointerDown(screen.getByRole('textbox'), { button: 0 });
     vi.advanceTimersByTime(50);
@@ -594,53 +582,6 @@ test('a press on the input or the pin does not arm the drag window', () => {
   } finally { vi.useRealTimers(); }
 });
 
-test('the arms row seeds from model_settings — a present key and a chosen model enable content', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: true, searchContentArm: true } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
-    expect(content.disabled).toBe(false); // seed applied: present key + chosen model enable content
-  });
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
-// §9.1 / owner ruling 2026-08-24: the exact configuration the owner's live run hit — a stored
-// provider key with no chosen embedding model. A key alone cannot embed a query, so content must
-// stay disabled. Against the pre-fix `provider = s.key.kind === 'present'` this fails (content
-// would wrongly enable on a present key alone) — that failure is the regression proof.
-//
-// `searchTextArm: false` here is not part of the ruling under test — it is a marker seeded away
-// from `textOn`'s `true` default so the `waitFor` below cannot pass before `model_settings`
-// resolves. `content.disabled` alone is already `true` in the pre-seed default (provider starts
-// `false`), so asserting it directly would pass vacuously, seed or no seed.
-test('the arms row seeds from model_settings — a present key with no chosen model leaves content disabled', async () => {
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: false, searchContentArm: false } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    // Proves the seed actually ran before the real assertion below reads `provider`'s result.
-    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
-    expect(text.checked).toBe(false);
-  });
-  const content = (screen.getAllByRole('checkbox') as HTMLInputElement[])[1];
-  expect(content.disabled).toBe(true); // no chosen model: content stays off despite a present key
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
-test('the arms row seeds from model_settings — searchTextArm:false unchecks the text arm', async () => {
-  // The test above only proves the provider flag reached the row (content's
-  // `disabled` depends solely on `provider`). This proves the arm *values*
-  // flow too: `textOn` defaults to true, so an unchanged default would pass
-  // silently — seeding false is the only way to catch a broken or renamed
-  // `s.index.searchTextArm` read.
-  mockSettings({ key: { kind: 'present' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'text-embedding-3-small', searchTextArm: false, searchContentArm: true } });
-  render(Launcher);
-  await vi.waitFor(() => {
-    const text = (screen.getAllByRole('checkbox') as HTMLInputElement[])[0];
-    expect(text.checked).toBe(false); // seed applied: searchTextArm:false flowed to the checkbox
-  });
-  expect(invoke).toHaveBeenCalledWith('model_settings');
-});
-
 test('the search panel is the drag handle and nothing else is', async () => {
   // `Cards` renders a different component per backend state (review finding
   // 7): a `data-tauri-drag-region` added to, say, the refusal card would pass
@@ -656,8 +597,8 @@ test('the search panel is the drag handle and nothing else is', async () => {
     } else {
       await screen.findByRole('status');
     }
-    // "deep": any click inside the panel drags, except on the input, the toolbar buttons
-    // and the Arms labels, which Tauri's own drag script excludes by tag (D155).
+    // "deep": any click inside the panel drags, except on the input and the toolbar
+    // buttons, which Tauri's own drag script excludes by tag (D155).
     const handles = container.querySelectorAll('[data-tauri-drag-region]');
     expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
     expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
@@ -914,6 +855,7 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
@@ -935,6 +877,7 @@ test('an ask in flight when launcher-cold arrives is dropped when it resolves', 
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     return Promise.resolve();
   });
@@ -959,6 +902,7 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
     return Promise.resolve();
   });
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1024,14 +968,12 @@ test('the left panel off and on again keeps the tree: hidden, not unmounted (Rul
   expect(listTreeCalls()).toHaveLength(1);
 });
 
-test('provider_status and model_settings are asked again when the window gains focus', async () => {
+test('provider_status is asked again when the window gains focus', async () => {
   render(Launcher);
   const count = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).length;
   await waitFor(() => expect(count('provider_status')).toBe(1));
-  expect(count('model_settings')).toBe(1);
   await fireEvent.focus(window);
   await waitFor(() => expect(count('provider_status')).toBe(2));
-  expect(count('model_settings')).toBe(2);
 });
 
 const cloud = () => screen.getByTestId('provider-cloud');
@@ -1128,4 +1070,299 @@ test('the too-long message goes when the line is emptied', async () => {
   await fireEvent.keyDown(box, { key: 'Enter' });
   expect(screen.queryByRole('alert')).toBeNull();
   expect(askCalls()).toHaveLength(0);
+});
+
+// Opening a question from Recents (Task 4). `list_history` answers `entries` and
+// a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
+// `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
+const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean } = {}) {
+  let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
+  let next = 0;
+  invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
+    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve(entries);
+    if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
+    if (cmd === 'history_entry') {
+      if (opts.openedReject) return Promise.reject('offline');
+      const opened = opts.openedFor?.[args!.id!] ?? opts.opened;
+      return opened instanceof Promise ? opened : Promise.resolve(opened);
+    }
+    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'ask') {
+      if (opts.ask) return opts.ask;
+      if (next >= (opts.asks ?? []).length) throw new Error(`mockRecents: no reply for ask #${next + 1}`);
+      const reply = opts.asks![next++];
+      return reply instanceof Promise ? reply : Promise.resolve(reply);
+    }
+    return Promise.resolve();
+  });
+}
+const historyEntryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'history_entry');
+const listHistoryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_history');
+const OPENED_OLD = { kind: 'answer', query: 'old q', answer: generated };
+
+async function openRecent(id: number) {
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId(`history-open-${id}`));
+}
+
+test('opening a question draws its snapshot without asking', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await fireEvent.input(box, { target: { value: 'a draft' } });
+  const asks = askCalls().length;
+  const answered = answeredCalls().length;
+
+  await openRecent(7);
+
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  expect(historyEntryCalls()).toEqual([['history_entry', { id: 7 }]]);
+  expect(askCalls()).toHaveLength(asks);
+  expect(answeredCalls()).toHaveLength(answered + 1);
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true');
+  expect(box.value).toBe('a draft');
+});
+
+test('a cold launcher warms on an opened question', async () => {
+  mockRecents({ asks: [emptyCitationsOnly], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+
+  await openRecent(7);
+
+  await screen.findByTestId('card-source');
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
+  await waitFor(() => expect(layoutCalls().at(-1)).toEqual(ON));
+});
+
+test('opening is ignored while an ask is in flight', async () => {
+  mockRecents({ ask: new Promise(() => {}) });
+  render(Launcher);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  await openRecent(7);
+  expect(historyEntryCalls()).toHaveLength(0);
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+});
+
+test('an unreadable entry keeps the answer on screen and says so', async () => {
+  mockRecents({ asks: [generated], opened: { kind: 'unreadable' } });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await openRecent(7);
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/cannot be opened|не відкривається/);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a gone entry rereads the list and changes nothing else', async () => {
+  mockRecents({ asks: [generated], opened: { kind: 'gone' } });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  const reads = listHistoryCalls().length;
+  await openRecent(7);
+  await waitFor(() => expect(listHistoryCalls()).toHaveLength(reads + 1));
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('query-echo').textContent).toBe('first');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a rejected open keeps the answer and says the query failed', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockRecents({ asks: [generated], openedReject: true });
+  render(Launcher);
+  await submit('first');
+  const before = (await screen.findByTestId('card-centre')).textContent;
+  await openRecent(7);
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(err).toHaveBeenCalled();
+  err.mockRestore();
+});
+
+test('deleting the question on screen keeps the answer and removes only its row', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  const before = screen.getByTestId('card-centre').textContent;
+  const asks = askCalls().length;
+
+  await fireEvent.click(screen.getByTestId('history-remove-7'));
+
+  await waitFor(() => expect(screen.queryByTestId('tree-history-7')).toBeNull());
+  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(askCalls()).toHaveLength(asks);
+  // The × does not open the row it sits in: only the first open read an entry.
+  expect(historyEntryCalls()).toHaveLength(1);
+});
+
+test('a recorded answer bumps the history list; a refusal does not', async () => {
+  mockRecents({ asks: [generated, refusedNoCandidates] });
+  render(Launcher);
+  await submit('one');
+  await screen.findByTestId('card-centre');
+  await waitFor(() => expect(listHistoryCalls()).toHaveLength(2));
+  await submit('two');
+  await screen.findByRole('status');
+  expect(listHistoryCalls()).toHaveLength(2);
+});
+
+test('a new recorded answer clears the mark on the question that was opened', async () => {
+  mockRecents({ asks: [generated, generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull());
+});
+
+test('an opened answer without citations opens cold and draws no source card', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'answer', query: 'old q', answer: emptyCitationsOnly } });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('card-centre')).toBeTruthy();
+  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(err).not.toHaveBeenCalled();
+  err.mockRestore();
+});
+
+test('launcher-cold clears the mark with the answer it belonged to', async () => {
+  mockRecents({ asks: [refusedNoCandidates, refusedNoCandidates], opened: OPENED_OLD });
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+  await submit('first');
+  await screen.findByRole('status');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  fireCold();
+  await waitFor(() => expect(screen.queryByTestId('card-centre')).toBeNull());
+  await submit('again');
+  await screen.findByRole('status');
+  // The tree remounted on the Files tab after the cold reset: Recents again.
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('a search started while an entry is read is not overwritten by the entry', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated, new Promise(() => {})], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBe('true');
+  expect(screen.queryByTestId('query-echo')).toBeNull();
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('launcher-cold while an entry is read drops it', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await waitFor(() => expect(cold.names).toContain('launcher-cold'));
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  fireCold();
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+});
+
+test('a refused search takes the mark off the opened question and does not reread Recents', async () => {
+  mockRecents({ asks: [generated, refusedNoCandidates], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  const reads = listHistoryCalls().length;
+
+  await submit('second');
+  await screen.findByRole('status');
+
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(listHistoryCalls()).toHaveLength(reads);
+});
+
+test('an entry read that lands after a search has answered is dropped, not drawn over it', async () => {
+  let resolveOpen!: (v: unknown) => void;
+  mockRecents({ asks: [generated, generated], opened: new Promise((r) => { resolveOpen = r; }) });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second'));
+  resolveOpen(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.getByTestId('query-echo').textContent).toBe('second');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('two opens that resolve out of order: the later click wins', async () => {
+  const NEWER = { id: 8, query: 'newer q', askedAt: 1_700_000_100 };
+  const NEWER_ANSWER = { kind: 'answer', query: 'newer q', answer: generated };
+  let resolveFirst!: (v: unknown) => void;
+  let resolveSecond!: (v: unknown) => void;
+  mockRecents({
+    asks: [generated],
+    list: [NEWER, OLD],
+    openedFor: {
+      7: new Promise((r) => { resolveFirst = r; }),
+      8: new Promise((r) => { resolveSecond = r; }),
+    },
+  });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId('history-open-7'));
+  await fireEvent.click(await screen.findByTestId('history-open-8'));
+
+  resolveSecond(NEWER_ANSWER);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('newer q'));
+  resolveFirst(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.getByTestId('query-echo').textContent).toBe('newer q');
+  expect(screen.getByTestId('tree-history-8').getAttribute('aria-current')).toBe('true');
+  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
 });

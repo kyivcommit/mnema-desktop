@@ -11,12 +11,16 @@
   // as a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { state: launcherState, query, left, right, heat, search }: {
+  let { state: launcherState, query, left, right, heat, search, historyId = null, historyGen = 0, onOpenHistory }: {
     state: LauncherState;
     query: string;
     left: boolean;
     right: boolean;
     heat: Heat;
+    // Recents, forwarded to the tree unchanged (see `Tree.svelte`).
+    historyId?: number | null;
+    historyGen?: number;
+    onOpenHistory?: (id: number) => void;
     // The search panel. It lives in the centre column with the results, so
     // that no card spans two grid rows (see `launcher.css`).
     search?: Snippet;
@@ -62,9 +66,10 @@
   // and this condition already covers it — a bonus, not a decision made here.
   //
   // 🔴 Ruling I-C — the known cost of taking `error` whole, stated rather than
-  // discovered. `error` carries two reasons (`state.ts`) and only `askFailed`
-  // is an answer state: `tooLong` comes from `checkQuery` BEFORE any ask, so an
-  // over-long first Enter is `error` with no answer behind it. That Enter
+  // discovered. `error` carries four reasons (`state.ts`). `askFailed` and the
+  // two Recents ones (`historyUnreadable`, `historyFailed`) keep the answer on
+  // screen the way `askFailed` does. `tooLong` comes from `checkQuery` BEFORE any
+  // ask, so an over-long first Enter is `error` with no answer behind it. That Enter
   // mounts the tree, and mounting fires `list_tree`; in the cold launcher the
   // section is `hidden` below, so nothing is drawn, and `launcher-cold` (which
   // sets `idle`) is the way back to the bare line. A blank Enter is not an
@@ -119,7 +124,7 @@
     data-testid="card-tree"
     aria-label={treeLabel}
     hidden={!(heat === 'hot' && left)}>
-    <Tree {selected} />
+    <Tree {selected} {historyId} {historyGen} {onOpenHistory} />
   </section>
 {/if}
 

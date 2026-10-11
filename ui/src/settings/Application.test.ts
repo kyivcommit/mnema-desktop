@@ -129,7 +129,7 @@ beforeEach(() => {
   getLocale.mockResolvedValue({ choice: 'auto', effective: 'uk' });
   modelSettings.mockResolvedValue(SETTINGS);
   providerModels.mockResolvedValue({ entries: [], unreadable: 0, unreadableRecords: [] });
-  listTree.mockResolvedValue({ roots: [], recents: [] });
+  listTree.mockResolvedValue({ roots: [] });
   listMasks.mockResolvedValue([]);
   jobStatus.mockResolvedValue(IDLE_SCAN);
   setLocale('uk');

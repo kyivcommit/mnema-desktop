@@ -1,6 +1,6 @@
 //! Read-only reads for the launcher's two side cards: the left card's watched
-//! folders, their indexed files, and recently-indexed documents (§7,
-//! [`list_tree`]); the right card's paragraphs around a cited passage (§7.1,
+//! folders and their indexed files (§7, [`list_tree`]); the right card's
+//! paragraphs around a cited passage (§7.1,
 //! [`source_around`]). Read-only, so neither command adds a data-loss surface
 //! (spec §12) — they only reflect the index at query time, and `source_around`
 //! refuses rather than answer with text a rebuild has since replaced.
@@ -18,10 +18,6 @@ use mnema_walk::{BuiltinLayers, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
-
-/// The "Recent" tab cap. Tunable; the launcher shows a bounded list, not the
-/// whole corpus.
-const RECENTS_LIMIT: i64 = 50;
 
 /// The widest window `source_around` will read, in blocks either side.
 ///
@@ -41,7 +37,6 @@ const MAX_RADIUS: u32 = 20;
 #[serde(rename_all = "camelCase")]
 pub struct TreeListing {
     pub roots: Vec<TreeRoot>,
-    pub recents: Vec<RecentDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -58,15 +53,6 @@ pub struct TreeRoot {
 pub struct TreeFile {
     pub relative_path: String,
     pub document_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentDoc {
-    pub document_id: String,
-    pub root_id: i64,
-    pub relative_path: String,
-    pub indexed_at: i64,
 }
 
 /// Display name for a watched root: the final path component, or the whole path
@@ -106,30 +92,16 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
         })
         .collect::<Result<Vec<_>, mnema_index::Error>>()?;
 
-    let recents = db
-        .recent_indexed_documents(RECENTS_LIMIT)?
-        .into_iter()
-        .map(|d| RecentDoc {
-            document_id: d.document_id,
-            root_id: d.watched_root_id,
-            relative_path: d.relative_path,
-            indexed_at: d.indexed_at,
-        })
-        .collect();
-
-    Ok(TreeListing { roots, recents })
+    Ok(TreeListing { roots })
 }
 
 /// Off the main thread for the reason given on [`crate::bridge::open_index`].
 ///
-/// The whole listing is read inside one [`mnema_index::Db::read_snapshot`], not
-/// as three autocommit reads. The roots-and-files reads and the recents read
-/// would otherwise be able to straddle the indexing job's `pending → indexed`
-/// commit — landing on its own connection, outside the window's mutex — and the
-/// returned listing could then carry a recent whose `(rootId, relativePath)` is
-/// absent from every `roots[].files`, a torn read the selection consumer (PR 6)
-/// cannot resolve. `build_tree_listing` only reads, so it is a safe closure for
-/// `read_snapshot`.
+/// The roots and every root's files are read inside one
+/// [`mnema_index::Db::read_snapshot`], not as autocommit reads, so each root
+/// and the files listed under it come from the same state of the index. The
+/// indexing job commits on its own connection, outside this window's mutex.
+/// `build_tree_listing` only reads, so it is a safe closure for `read_snapshot`.
 #[tauri::command(async)]
 pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
@@ -1568,12 +1540,6 @@ mod tests {
                     document_id: "d".repeat(64),
                 }],
             }],
-            recents: vec![RecentDoc {
-                document_id: "d".repeat(64),
-                root_id: 7,
-                relative_path: "a.txt".into(),
-                indexed_at: 2000,
-            }],
         }
     }
 
@@ -1773,21 +1739,23 @@ mod tests {
     fn wire_shape_is_camel_case() {
         let v = serde_json::to_value(sample()).unwrap();
         let root = &v["roots"][0];
-        let recent = &v["recents"][0];
 
         // Present, camelCase.
         assert!(root["rootId"].is_i64());
         assert!(root["absolutePath"].is_string());
         assert!(root["files"][0]["relativePath"].is_string());
         assert!(root["files"][0]["documentId"].is_string());
-        assert!(recent["indexedAt"].is_i64());
-        assert!(recent["documentId"].is_string());
 
         // Absent — the snake_case names must not leak (guards rename_all).
         assert!(root.get("root_id").is_none());
         assert!(root.get("absolute_path").is_none());
         assert!(root["files"][0].get("relative_path").is_none());
-        assert!(recent.get("indexed_at").is_none());
-        assert!(recent.get("document_id").is_none());
+
+        // The listing carries no recents: the launcher's history is read by its
+        // own commands (`list_history`), not from here.
+        assert!(
+            v.get("recents").is_none(),
+            "list_tree still carries recents: {v}"
+        );
     }
 }

@@ -44,7 +44,6 @@ const ROOTS = {
     { rootId: 1, absolutePath: '/home/a/notes', name: 'notes', files: [] },
     { rootId: 4, absolutePath: '/home/a/papers', name: 'papers', files: [] },
   ],
-  recents: [],
 };
 
 // 🔴 Annotated `ModelSettings`, and the annotation is the guard rather than

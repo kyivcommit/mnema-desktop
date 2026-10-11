@@ -1218,7 +1218,7 @@
   // a call inside `{#each}` reads `get(locale)` non-reactively (`i18n/index.ts:11`)
   // and would not update on a language switch. The whole array is rebuilt
   // under `void $locale` instead, the shape `launcher/Tree.svelte`'s own
-  // `recents` derived already uses for the same reason.
+  // `historyRows` derived already uses for the same reason.
   //
   // `settings_folders_indexed`, not the shared `indexed_documents` (P2-4
   // review): a bare "0 documents" beside a folder path reads as a claim

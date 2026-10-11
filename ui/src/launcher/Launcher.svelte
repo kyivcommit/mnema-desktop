@@ -2,9 +2,8 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, launcherAnswered, listenLauncherCold, modelSettings, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
-  import { checkQuery, heatAfter, stateFromAnswer, providerReady, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
-  import Arms from './Arms.svelte';
+  import { ask, historyEntry, launcherAnswered, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { checkQuery, heatAfter, stateFromAnswer, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -19,18 +18,21 @@
   // when there was none, and for every submit that did not start from a hot
   // launcher's answer.
   let previous = $state<LauncherState | null>(null);
+  // Recents: bumped whenever the list of questions may have changed (a recorded
+  // answer, a gone entry); the tree re-reads the list on each change.
+  let historyGen = $state(0);
+  // The row of the question on screen, when it was opened from Recents. Null for
+  // a question asked from the search line.
+  let historyId = $state<number | null>(null);
   // What the cards draw. The search line always gets `launcherState` itself.
   const cardsState = $derived(
     launcherState.kind === 'error' && previous
       ? previous
       : launcherState,
   );
-  let provider = $state(false);
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
-  let textOn = $state(true);
-  let contentOn = $state(false);
   // Cold: the search column alone. The first answer with something to show
   // makes it hot and opens both side panels; after that the person's choice
   // stands across questions. `launcher-cold` is the only way back.
@@ -54,8 +56,8 @@
 
   // Read on mount and again whenever the window gains focus: the key and the
   // model are changed in another window, and the launcher is hidden, not
-  // closed, so nothing else would tell it. Non-fatal: on failure the arms row
-  // keeps its last value and the cloud its last state — log, do not swallow.
+  // closed, so nothing else would tell it. Non-fatal: on failure the cloud keeps
+  // its last state — log, do not swallow.
   // A later call supersedes an earlier one still in flight: a slow probe that
   // lands after a newer answer must not put the old state back on the cloud.
   let providerGen = 0;
@@ -64,12 +66,6 @@
     Promise.all([providerStatus(), providerChoice().catch((): ProviderChoice => 'openRouter')])
       .then(([s, c]) => { if (gen === providerGen) { status = s; statusProvider = c ?? 'openRouter'; } })
       .catch((e) => console.error('provider_status failed', e));
-    modelSettings()
-      .then((s) => {
-        provider = providerReady(s);
-        if (s.index.kind === 'read') { textOn = s.index.searchTextArm; contentOn = s.index.searchContentArm; }
-      })
-      .catch((e) => console.error('model_settings failed', e));
   }
 
   onMount(() => {
@@ -85,6 +81,7 @@
       left = right = false;
       launcherState = { kind: 'idle' };
       previous = null;
+      historyId = null;
       echo = '';
     })
       .then((u) => { if (gone) u(); else unlisten = u; })
@@ -98,11 +95,15 @@
   // Bumped by `launcher-cold`: an ask that was in flight when the launcher went
   // cold belongs to an answer the person has been told is forgotten.
   let coldGen = 0;
+  // Bumped by every submit and every open: a Recents read that started before
+  // the screen changed hands does not draw over what is on it now.
+  let screenGen = 0;
 
   async function runSearch(raw: string) {
     if (launcherState.kind === 'inFlight') return; // one ask at a time
     // Enter on an empty line does nothing, in every state (owner, 2026-10-08).
     if (raw.trim() === '') return;
+    screenGen += 1;
     // What is on screen, not what the machine holds: after an error the
     // machine says `error` while the restored answer is still showing, and a
     // second error must restore that same answer again.
@@ -119,6 +120,11 @@
       const answer = await ask(check.query);
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      // Whatever answer lands, it is not an opened question, refusals included.
+      historyId = null;
+      // The backend records a generated or citations-only answer inside `ask`, so
+      // the list has a new row. A refusal records nothing, so it does not reread it.
+      if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
       // The idle clock restarts when an answer lands, so one that arrived while
       // the launcher was hidden is not dropped by the hide's older clock.
       launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
@@ -146,6 +152,37 @@
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
       if (previous) echo = shownEcho; // the restored answer's own question
+    }
+  }
+
+  // Recents: a question asked before, drawn from its stored snapshot. No `ask` and
+  // no network, and the search line is left alone. Same one-at-a-time rule as a
+  // search: a click while an ask is in flight does nothing.
+  async function openHistory(id: number) {
+    if (launcherState.kind === 'inFlight') return;
+    // Kept as `runSearch` keeps it: an error puts back what was on screen.
+    const shown = cardsState;
+    previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
+    const gen = coldGen;
+    const screenAt = ++screenGen;
+    // A launcher that went cold, or any search or other open that began while
+    // the entry was read, owns the screen now; the entry is dropped.
+    const superseded = () => gen !== coldGen || screenAt !== screenGen;
+    try {
+      const opened = await historyEntry(id);
+      if (superseded()) return;
+      if (opened.kind === 'gone') { historyGen += 1; return; }
+      if (opened.kind === 'unreadable') { launcherState = { kind: 'error', reason: 'historyUnreadable' }; return; }
+      launcherState = stateFromAnswer(opened.query, opened.answer);
+      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
+      const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
+      if (warmed) { heat = 'hot'; left = right = true; }
+      echo = opened.query;
+      historyId = id;
+    } catch (e) {
+      if (superseded()) return;
+      console.error('history_entry failed', e);
+      launcherState = { kind: 'error', reason: 'historyFailed' };
     }
   }
 
@@ -203,16 +240,15 @@
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
-       click inside it except the input, the toolbar buttons and the Arms labels — Tauri's
+       click inside it except the input, and the toolbar buttons — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
-  <Cards state={cardsState} query={echo} {left} {right} {heat}>
+  <Cards state={cardsState} query={echo} {left} {right} {heat} {historyId} {historyGen} onOpenHistory={openHistory}>
     {#snippet search()}
     <div class="searchbar" data-tauri-drag-region="deep">
       <div class="sb-row">
         <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
       </div>
       <div class="sb-tools">
-        <Arms bind:textOn bind:contentOn {provider} />
         <Toolbar {heat} bind:left bind:right bind:pinned {status} provider={statusProvider} />
       </div>
     </div>

@@ -6,7 +6,9 @@ import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
 import Tree from './Tree.svelte';
 import Source from './Source.svelte';
-import { citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excerptSpanB } from '../lib/fixtures';
+import {
+  citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excerptSpanB, historyTwoQuestions,
+} from '../lib/fixtures';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
@@ -25,6 +27,7 @@ beforeEach(() => {
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
     if (cmd === 'provider_choice') return Promise.resolve('openRouter');
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
     if (cmd === 'ask') return Promise.resolve(generated);
     if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
@@ -57,7 +60,7 @@ test('real launcher places all cards and keeps the document transparent', async 
   expect(bar).not.toBeNull();
   expect(bar.contains(screen.getByRole('textbox'))).toBe(true);
   expect(bar.contains(screen.getByTestId('pin'))).toBe(true);
-  expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
+  expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(0); // the search arms are not a choice
   expect(screen.queryByTestId('card-tree')).toBeNull();
   const box = screen.getByRole('textbox');
   await fireEvent.input(box, { target: { value: 'question' } });
@@ -85,7 +88,7 @@ test('real launcher places all cards and keeps the document transparent', async 
 });
 
 test('real tree marks current file and recent while leaving neighbours plain', async () => {
-  render(Tree, { selected: citationA });
+  render(Tree, { selected: citationA, historyId: 1 });
   const selected = await screen.findByTestId('tree-file-doc-1');
   const other = screen.getByTestId('tree-file-doc-2');
   function check(on: Element, off: Element) {
@@ -98,7 +101,7 @@ test('real tree marks current file and recent while leaving neighbours plain', a
   }
   check(selected, other);
   await fireEvent.click(screen.getByTestId('tree-tab-recents'));
-  check(screen.getByTestId('tree-recent-doc-1'), screen.getByTestId('tree-recent-doc-3'));
+  check(await screen.findByTestId('tree-history-1'), screen.getByTestId('tree-history-2'));
   const on = getComputedStyle(screen.getByTestId('tree-tab-recents'));
   const off = getComputedStyle(screen.getByTestId('tree-tab-files'));
   expect(on.background).toBe('var(--surface)');

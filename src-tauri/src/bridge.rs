@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mnema_core::Coordinate;
 use mnema_index::QueryRule;
 use mnema_search::{Arms, ContentArm, FusionRule, Missing, Provider, TextArm};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Channel;
 
@@ -860,7 +860,7 @@ pub fn remove_mask(state: State<'_, AppState>, pattern: String) -> Result<bool, 
 /// re-exports `Citation` and it is `Serialize` (its derive in `write.rs`), so this
 /// crosses the seam without touching the dependency graph — the seam was
 /// simply never crossed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hit {
     pub chunk_id: i64,
@@ -882,7 +882,7 @@ pub struct Hit {
 /// Not [`mnema_search::TextArm`] reused: this needs `Serialize` and a
 /// camelCase `kind`, and a count keeps this and `hits` from being two lists
 /// that could disagree about what the arm found.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum TextArmReport {
     Off,
@@ -906,7 +906,7 @@ impl From<TextArm> for TextArmReport {
 /// nested under one `NotConfigured`: each is fixed in a different place, and
 /// the window's mirror (`ui/src/lib/ipc.ts`, `ContentArmReport`) is a union
 /// with one member per `kind`, not one member with a nested field.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ContentArmReport {
     Off,
@@ -1265,7 +1265,7 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
 /// A citation in a generated answer: the existing [`Hit`], plus which anchor
 /// resolved to it. Not the server's `Citation` (no `bbox`/`snippet`/verify
 /// fields — spec §6, D124): the desktop set.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskCitation {
     pub anchor: usize,
@@ -1283,7 +1283,7 @@ pub struct AskCitation {
 
 /// Why generation did not produce an answer (spec §6). Ports the server's two
 /// guards (`service.py:66-68,80-82`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum RefusalKind {
     /// `Ready` but retrieval found nothing — chat is not called at all.
@@ -1295,7 +1295,7 @@ pub enum RefusalKind {
 /// What [`ask`] answers with. Different states are different variants, never a
 /// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
 /// variant carries the arm reports, because retrieval is identical across them.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum AskAnswer {
     Generated {
@@ -1330,7 +1330,7 @@ pub enum AskAnswer {
 /// say why (ruling AF), and a person whose model stopped answering read the
 /// same banner as one who never chose a model — or, worse, lost the passages
 /// to a bare "the query could not be run".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum NoAnswer {
     /// Chat readiness was not `Ready` — no chat model, no key, or a key store
@@ -1443,6 +1443,13 @@ const MAX_ASK_QUERY: usize = 2048;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+    let answer = answer_question(&state, &query)?;
+    record_answer(&state, &query, &answer);
+    Ok(answer)
+}
+
+/// The answer [`ask`] gives, before anything is kept of it.
+fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer, Error> {
     if query.trim().is_empty() {
         return Err(Error::QueryBlank);
     }
@@ -1454,11 +1461,11 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
         });
     }
 
-    let arms = read_arms(&state)?;
+    let arms = read_arms(state)?;
     // Read once: retrieval, readiness, voice and timeout all answer for the
     // same provider.
     let choice = state.provider_choice();
-    let (hits, text, content, unreachable) = retrieve(&state, &query, arms, ASK_TOP_K, choice)?;
+    let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
 
     // Under Mnema the chat model is fixed, so readiness would only ask for the
     // process again — and a process retrieval already saw fail would be
@@ -1467,7 +1474,7 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
         Some(why) if choice == crate::provider::ProviderChoice::Mnema => {
             ChatReadiness::Unavailable(why.clone())
         }
-        _ => chat_readiness(&state, choice)?,
+        _ => chat_readiness(state, choice)?,
     };
     let (model, endpoint) = match readiness {
         ChatReadiness::Ready { model, endpoint } => (model, endpoint),
@@ -1521,9 +1528,9 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
         &endpoint.base,
         &endpoint.token,
         &model,
-        &query,
+        query,
         &passages,
-        state.voice_as(choice, &query),
+        state.voice_as(choice, query),
         choice.chat_timeout(),
     ) {
         Ok(generated) => generated,
@@ -1575,6 +1582,94 @@ pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error
             })
         }
     }
+}
+
+/// Keeps a question that got an answer, so the launcher's history can reopen
+/// it. A refusal or an error is not an answer and is not kept, and neither is
+/// a citations-only answer whose model failed to answer (any `why` but
+/// `NotAsked`): it must not replace the row of an earlier generated answer.
+///
+/// A failed write is logged and then ignored: the person asked and must still
+/// get the answer, and losing a history row is the lesser harm.
+fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
+    // Only a question nobody asked a model keeps its citations: any other
+    // reason is a failure, and a failure must not replace a stored answer.
+    if !matches!(
+        answer,
+        AskAnswer::Generated { .. }
+            | AskAnswer::CitationsOnly {
+                why: NoAnswer::NotAsked,
+                ..
+            }
+    ) {
+        return;
+    }
+    let json = match serde_json::to_string(answer) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("mnema: could not record the answer in the history: {e}");
+            return;
+        }
+    };
+    if let Err(e) = state.with_index(|db| db.history_record(query, &json)) {
+        eprintln!("mnema: could not record the answer in the history: {e}");
+    }
+}
+
+/// One row of the launcher's history: a question, without its answer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub id: i64,
+    pub query: String,
+    pub asked_at: i64,
+}
+
+/// What opening a history entry answers with. `Unreadable` is a row whose
+/// stored answer no longer parses; `Gone` is an id no longer in the history.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum HistoryOpen {
+    Answer { query: String, answer: AskAnswer },
+    Unreadable,
+    Gone,
+}
+
+/// The history, newest first.
+#[tauri::command(async)]
+pub fn list_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, Error> {
+    let rows = state.with_index(|db| db.history_list())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| HistoryEntry {
+            id: r.id,
+            query: r.query,
+            asked_at: r.asked_at,
+        })
+        .collect())
+}
+
+/// One entry's query and the answer that was given, as it was given.
+#[tauri::command(async)]
+pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen, Error> {
+    let Some((query, stored)) = state.with_index(|db| db.history_answer(id))? else {
+        return Ok(HistoryOpen::Gone);
+    };
+    Ok(match serde_json::from_str::<AskAnswer>(&stored) {
+        Ok(answer) => HistoryOpen::Answer { query, answer },
+        Err(e) => {
+            eprintln!("mnema: history entry {id} does not parse: {e}");
+            HistoryOpen::Unreadable
+        }
+    })
+}
+
+/// Removes one entry. An id that is not there is not an error: the window may
+/// be a moment behind the history it draws.
+#[tauri::command(async)]
+pub fn delete_history_entry(state: State<'_, AppState>, id: i64) -> Result<(), Error> {
+    state.with_index(|db| db.history_delete(id))?;
+    Ok(())
 }
 
 /// The one way the window changes a toggle. `search` reads the same two rows,

@@ -33,13 +33,13 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
-  | 'arm_text' | 'arm_content'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
+  | 'history_empty' | 'history_remove' | 'history_unreadable'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
@@ -348,7 +348,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
-    arm_text: 'текст', arm_content: 'зміст',
     toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
     provider_ok_mnema: 'Mnema (локально) готова',
@@ -380,6 +379,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
+    history_empty: 'Тут з’являться ваші запити',
+    history_remove: 'Видалити з історії: {query}',
+    history_unreadable: 'Цей запис не відкривається.',
     fresh_current: 'Актуально',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
@@ -1210,7 +1212,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
-    arm_text: 'text', arm_content: 'content',
     toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
     provider_ok_mnema: 'Mnema (local) is ready',
@@ -1238,6 +1239,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
+    history_empty: 'Your questions will appear here',
+    history_remove: 'Remove from history: {query}',
+    history_unreadable: 'This entry cannot be opened.',
     fresh_current: 'Up to date',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',

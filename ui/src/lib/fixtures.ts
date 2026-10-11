@@ -1,4 +1,6 @@
-import type { AskAnswer, AskCitation, Hit, SourceAround, SourceBlock, TreeListing } from './ipc';
+import type {
+  AskAnswer, AskCitation, Hit, HistoryEntry, SourceAround, SourceBlock, TreeListing,
+} from './ipc';
 
 // Anchors 3 and 7, NOT 1 and 2: `anchor` is the model's own ordinal into
 // `hits`, not a position in `citations` (PR 6 plan, Decision 5) — a fixture
@@ -240,10 +242,6 @@ export const oneRootTwoFolders: TreeListing = {
       ],
     },
   ],
-  recents: [
-    { documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md', indexedAt: 1_700_000_100 },
-    { documentId: 'doc-3', rootId: 1, relativePath: 'archive/old.md', indexedAt: 1_700_000_000 },
-  ],
 };
 
 // Two roots holding the SAME relative path under different documentIds. A card
@@ -254,7 +252,6 @@ export const twoRootsSameRelativePath: TreeListing = {
     { rootId: 1, absolutePath: '/home/u/alpha', name: 'alpha', files: [{ relativePath: 'README.md', documentId: 'doc-a' }] },
     { rootId: 2, absolutePath: '/home/u/beta', name: 'beta', files: [{ relativePath: 'README.md', documentId: 'doc-b' }] },
   ],
-  recents: [],
 };
 
 // A file at a root's top level (no `/` at all — `split('/')` returns one
@@ -274,7 +271,6 @@ export const oneRootMixedDepths: TreeListing = {
       ],
     },
   ],
-  recents: [],
 };
 
 // A single root holding a single top-level file. The negative selection test
@@ -283,7 +279,6 @@ export const oneRootMixedDepths: TreeListing = {
 // between them and neither test can be satisfied by an empty tree.
 export const oneRoot: TreeListing = {
   roots: [{ rootId: 3, absolutePath: '/home/u/solo', name: 'solo', files: [{ relativePath: 'a.md', documentId: 'doc-1' }] }],
-  recents: [],
 };
 
 // ONE document named from TWO roots — the same `documentId` under both, which
@@ -311,12 +306,19 @@ export const oneDocumentTwoRoots: TreeListing = {
       files: [{ relativePath: 'notes/shared.md', documentId: 'doc-shared' }],
     },
   ],
-  recents: [],
 };
 
 // Empty but SUCCESSFUL (Ruling N): nothing indexed is not the same event as a
 // listing that could not be read, and the card must not say the same thing.
-export const emptyListing: TreeListing = { roots: [], recents: [] };
+export const emptyListing: TreeListing = { roots: [] };
+
+// The Recents tab's list, as `list_history` answers it: newest first, `askedAt`
+// in seconds and 100 s apart, so a pinned clock puts the rows in two different
+// minutes. Latin text on purpose, the same reason as the folder names above.
+export const historyTwoQuestions: HistoryEntry[] = [
+  { id: 2, query: 'when does the lease renew', askedAt: 1_700_000_100 },
+  { id: 1, query: 'invoice payment terms', askedAt: 1_700_000_000 },
+];
 
 // ---------------------------------------------------------------------------
 // Source fixtures (Task 8). Block text is Latin for the same reason the folder
