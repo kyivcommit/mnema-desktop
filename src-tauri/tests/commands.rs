@@ -13027,3 +13027,268 @@ fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
     remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
     assert!(!state.local().models_ready(), "the model is gone");
 }
+
+// ---- Query history: `ask` records, three commands list, reopen and delete. ----
+
+/// A `set_search_arms` that keeps retrieval off the content arm, so no query
+/// embedding is sent anywhere — the history tests need the text arm only.
+fn text_arm_only(webview: &WebviewWindow<MockRuntime>) {
+    call(
+        webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .expect("set_search_arms was rejected");
+}
+
+/// The ids and queries `list_history` answers with, newest first.
+fn history_rows(webview: &WebviewWindow<MockRuntime>) -> Vec<Value> {
+    call(webview, "list_history", json!({}))
+        .expect("list_history was rejected")
+        .as_array()
+        .expect("list_history did not answer with an array")
+        .clone()
+}
+
+#[test]
+fn a_generated_ask_is_recorded_and_reopens_identically() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "one generated ask is one row: {rows:?}");
+    assert_eq!(rows[0]["query"], json!("quantum entanglement"), "{rows:?}");
+    assert!(
+        rows[0]["askedAt"].is_i64(),
+        "askedAt is the camelCase wire name: {rows:?}"
+    );
+    assert!(
+        rows[0].get("asked_at").is_none(),
+        "no snake_case key reaches the window: {rows:?}"
+    );
+
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(opened["query"], json!("quantum entanglement"), "{opened}");
+    assert_eq!(
+        opened["answer"], answer,
+        "the reopened answer must be the JSON ask gave, value for value: {opened}"
+    );
+}
+
+#[test]
+fn a_citations_only_ask_is_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"c".repeat(64),
+                "quantum entanglement resonance",
+            ))
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    // No chat model is set, so the answer is citations-only and no model is asked.
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"]["kind"], json!("notAsked"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "a citations-only ask is kept: {rows:?}");
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(opened["answer"], answer, "{opened}");
+}
+
+#[test]
+fn a_refused_ask_is_not_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    // A key and a chat model make the ask Ready, so an empty index refuses
+    // (NoCandidates) rather than answering citations-only.
+    mnema_secrets::store(state.credential_ref(), "test-key-history-refused")
+        .expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let answer =
+        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("refused"), "{answer}");
+    assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
+
+    assert_eq!(
+        history_rows(&webview),
+        Vec::<Value>::new(),
+        "a refusal is not an answer and is not kept"
+    );
+}
+
+#[test]
+fn asking_the_same_query_with_spaces_keeps_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    // Citations-only with no chat model: recorded, and nothing to retrieve is needed.
+    call(&webview, "ask", json!({ "query": "q" })).expect("ask was rejected");
+    assert_eq!(history_rows(&webview).len(), 1, "the first ask is recorded");
+
+    let answer = call(&webview, "ask", json!({ "query": "  q  " })).expect("ask was rejected");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the same question, trimmed, is one row: {rows:?}"
+    );
+    assert_eq!(
+        rows[0]["query"],
+        json!("q"),
+        "the stored query is trimmed: {rows:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_snapshot_opens_as_unreadable_and_can_be_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().unwrap();
+    state
+        .with_index(|db| db.history_record("q", "{\"kind\":\"nope\"}"))
+        .unwrap();
+    let webview = main_webview(&app);
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the unreadable row is still listed: {rows:?}"
+    );
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("unreadable"), "{opened}");
+
+    call(&webview, "delete_history_entry", json!({ "id": id }))
+        .expect("delete_history_entry was rejected");
+    assert_eq!(history_rows(&webview), Vec::<Value>::new());
+}
+
+#[test]
+fn a_missing_id_opens_as_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": 999 })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("gone"), "{opened}");
+}
+
+#[test]
+fn deleting_a_missing_id_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    let webview = main_webview(&app);
+
+    call(&webview, "delete_history_entry", json!({ "id": 999 }))
+        .expect("deleting an id that is not there must not be an error");
+}
+
+#[test]
+fn history_survives_removing_the_watched_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    text_arm_only(&webview);
+    let fixture = fixture_dir();
+    let root = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": fixture.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .expect("add_watched_folder did not return an id");
+    scan_to_completion(app.handle());
+
+    // No chat model: citations-only, but the citation is a real document.
+    let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
+    assert!(
+        answer["citations"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the fixture must give a citation, or this proves nothing: {answer}"
+    );
+    let rows = history_rows(&webview);
+    let id = rows[0]["id"].as_i64().expect("the row has an id");
+
+    call(
+        &webview,
+        "remove_watched_folder",
+        json!({ "rootId": root, "path": fixture.path().display().to_string() }),
+    )
+    .expect("remove_watched_folder was rejected");
+
+    let opened =
+        call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
+    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(
+        opened["answer"], answer,
+        "the snapshot outlives the document it cites: {opened}"
+    );
+}
+
+#[test]
+fn a_failed_history_write_does_not_fail_the_ask() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.conn().execute("DROP TABLE query_history", [])?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+
+    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("a history write that fails must not fail the ask");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+}
