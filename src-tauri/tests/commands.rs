@@ -12930,10 +12930,14 @@ fn a_generated_ask_is_recorded_and_reopens_identically() {
     let id = rows[0]["id"].as_i64().expect("the row has an id");
     let opened =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
-    assert_eq!(opened["kind"], json!("answer"), "{opened}");
-    assert_eq!(opened["query"], json!("quantum entanglement"), "{opened}");
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
     assert_eq!(
-        opened["answer"], answer,
+        opened["turns"][0]["query"],
+        json!("quantum entanglement"),
+        "{opened}"
+    );
+    assert_eq!(
+        opened["turns"][0]["answer"], answer,
         "the reopened answer must be the JSON ask gave, value for value: {opened}"
     );
 }
@@ -12967,8 +12971,8 @@ fn a_citations_only_ask_is_recorded() {
     let id = rows[0]["id"].as_i64().expect("the row has an id");
     let opened =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
-    assert_eq!(opened["kind"], json!("answer"), "{opened}");
-    assert_eq!(opened["answer"], answer, "{opened}");
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
+    assert_eq!(opened["turns"][0]["answer"], answer, "{opened}");
 }
 
 /// A failed chat call answers citations-only with a `why`, and that answer is
@@ -13014,7 +13018,7 @@ fn a_failed_ask_does_not_replace_a_generated_answer_in_history() {
         after, before,
         "a failed ask must not replace the generated answer"
     );
-    assert_eq!(after["answer"], generated, "{after}");
+    assert_eq!(after["turns"][0]["answer"], generated, "{after}");
 }
 
 #[test]
@@ -13170,9 +13174,9 @@ fn history_survives_removing_the_watched_folder() {
 
     let opened =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
-    assert_eq!(opened["kind"], json!("answer"), "{opened}");
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
     assert_eq!(
-        opened["answer"], answer,
+        opened["turns"][0]["answer"], answer,
         "the snapshot outlives the document it cites: {opened}"
     );
 }
@@ -13199,6 +13203,8 @@ fn a_failed_history_write_does_not_fail_the_ask() {
     let app = app_with_provider(dir.path(), server.base());
     let state = app.state::<AppState>();
     let webview = ask_ready_with_one_passage(&app);
+    // Two independent questions, not a conversation: the row is per session.
+    call(&webview, "set_chat_tools", json!({ "on": false })).unwrap();
 
     // A is written while the table is healthy, so its row is the baseline.
     let first = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
@@ -13596,4 +13602,216 @@ fn going_cold_drops_the_session() {
     };
     assert_eq!(run(61), None);
     assert_eq!(run(59), Some("q".to_string()));
+}
+
+// ---- A conversation is one history row, and a row can be continued ----
+
+fn only_row(webview: &WebviewWindow<MockRuntime>) -> Value {
+    let rows = history_rows(webview);
+    assert_eq!(rows.len(), 1, "one row expected: {rows:?}");
+    rows[0].clone()
+}
+
+fn open_row(webview: &WebviewWindow<MockRuntime>, id: i64) -> Value {
+    call(webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected")
+}
+
+fn seed_row(
+    app: &tauri::App<MockRuntime>,
+    webview: &WebviewWindow<MockRuntime>,
+    query: &str,
+    stored: &Value,
+) -> i64 {
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.history_record(query, &stored.to_string()))
+        .unwrap();
+    history_rows(webview)
+        .iter()
+        .find(|r| r["query"] == json!(query))
+        .expect("the seeded row is listed")["id"]
+        .as_i64()
+        .unwrap()
+}
+
+#[test]
+fn a_dialogue_is_one_row_keyed_by_its_first_question() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    ask_q(&webview, "tell me more");
+
+    let row = only_row(&webview);
+    assert_eq!(row["query"], json!(FIRST_Q), "{row}");
+    let opened = open_row(&webview, row["id"].as_i64().unwrap());
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
+    let turns = opened["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2, "{opened}");
+    assert_eq!(turns[0]["query"], json!(FIRST_Q));
+    assert_eq!(turns[1]["query"], json!("tell me more"));
+    assert_eq!(turns[1]["answer"]["answer"], json!("Glad to help."));
+}
+
+#[test]
+fn a_failed_turn_does_not_rewrite_the_row() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::status(503, r#"{"error":{"message":"overloaded"}}"#),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let before = only_row(&webview);
+    let opened_before = open_row(&webview, before["id"].as_i64().unwrap());
+    let failed = ask_q(&webview, "the failing question");
+    assert_eq!(failed["why"]["kind"], json!("failed"), "{failed}");
+
+    let after = only_row(&webview);
+    assert_eq!(after["id"], before["id"], "the row was rewritten: {after}");
+    assert_eq!(
+        open_row(&webview, after["id"].as_i64().unwrap()),
+        opened_before
+    );
+    assert_eq!(opened_before["turns"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn an_old_single_answer_row_opens_as_one_turn() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    // The format before dialogues: the bare answer, no `turns`.
+    let single = ask_q(&webview, FIRST_Q);
+    let id = seed_row(&app, &webview, "old question", &single);
+
+    let opened = open_row(&webview, id);
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
+    let turns = opened["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1, "{opened}");
+    assert_eq!(turns[0]["query"], json!("old question"));
+    assert_eq!(turns[0]["answer"], single);
+}
+
+#[test]
+fn opening_a_row_continues_it() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("More, still <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    server.request();
+    call(&webview, "new_chat", json!({})).unwrap();
+    let id = only_row(&webview)["id"].as_i64().unwrap();
+    open_row(&webview, id);
+
+    let next = ask_q(&webview, "tell me more");
+    assert_eq!(next["via"], json!("conversation"), "{next}");
+    let request = server.request();
+    assert!(request.contains("\"tools\""), "{request}");
+    assert!(request.contains(FIRST_Q), "the opened question: {request}");
+    assert!(request.contains("It resonates"), "its answer: {request}");
+
+    let row = only_row(&webview);
+    assert_eq!(row["query"], json!(FIRST_Q), "{row}");
+    let opened = open_row(&webview, row["id"].as_i64().unwrap());
+    assert_eq!(opened["turns"].as_array().unwrap().len(), 2, "{opened}");
+}
+
+#[test]
+fn opened_sources_are_the_cited_passages_renumbered() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("Both <c>1</c> <c>2</c>.")),
+        Reply::ok(&chat_text("Fine.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    // A stored answer whose anchors are sparse (3 and 7, listed out of order).
+    let mut stored = ask_q(&webview, FIRST_Q);
+    stored["answer"] = json!("A<c>3</c> B<c>7</c>.");
+    let cites = stored["citations"].as_array_mut().unwrap();
+    cites[0]["anchor"] = json!(7);
+    cites[0]["text"] = json!("second passage text");
+    cites[1]["anchor"] = json!(3);
+    cites[1]["text"] = json!("first passage text");
+    let id = seed_row(
+        &app,
+        &webview,
+        "seeded question",
+        &json!({ "turns": [{ "query": "seeded question", "answer": stored }] }),
+    );
+    server.request();
+    call(&webview, "new_chat", json!({})).unwrap();
+    open_row(&webview, id);
+
+    ask_q(&webview, "go on");
+    let request = server.request();
+    let first = request.find("first passage text").expect(&request);
+    let second = request.find("second passage text").expect(&request);
+    assert!(first < second, "sources in anchor order: {request}");
+    assert!(request.contains("A<c>1</c> B<c>2</c>."), "{request}");
+    assert!(
+        !request.contains("A<c>3</c>") && !request.contains("<c>7</c>"),
+        "{request}"
+    );
+}
+
+#[test]
+fn with_the_switch_off_an_opened_row_is_a_snapshot() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    call(&webview, "set_chat_tools", json!({ "on": false })).unwrap();
+
+    ask_q(&webview, FIRST_Q);
+    let id = only_row(&webview)["id"].as_i64().unwrap();
+    let opened = open_row(&webview, id);
+    assert_eq!(opened["turns"].as_array().unwrap().len(), 1, "{opened}");
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query(),
+        None,
+        "opening must not fill the session"
+    );
+
+    ask_q(&webview, "ext4");
+    server.request();
+    let request = server.request();
+    assert!(
+        !request.contains("\"tools\"") && !request.contains(FIRST_Q),
+        "{request}"
+    );
+}
+
+#[test]
+fn an_unreadable_row_does_not_touch_the_session() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let id = seed_row(&app, &webview, "broken", &json!({ "kind": "nope" }));
+    let opened = open_row(&webview, id);
+    assert_eq!(opened["kind"], json!("unreadable"), "{opened}");
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query().as_deref(),
+        Some(FIRST_Q)
+    );
 }

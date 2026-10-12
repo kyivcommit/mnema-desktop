@@ -1485,8 +1485,7 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     // The conversation is off under Mnema (the local model has no tool call)
     // and with the switch off; either way each question stands alone, and a
     // session left from before is dropped.
-    let dialogue = choice != crate::provider::ProviderChoice::Mnema
-        && crate::prefs::chat_tools(state.data_dir());
+    let dialogue = dialogue_enabled(state, choice);
     if !dialogue {
         state.dialogue.clear();
     }
@@ -1718,6 +1717,12 @@ fn follow_up(
     })
 }
 
+/// Whether questions join a conversation: not under Mnema (the local model
+/// has no tool call), and only with the tool-support switch on.
+fn dialogue_enabled(state: &State<'_, AppState>, choice: crate::provider::ProviderChoice) -> bool {
+    choice != crate::provider::ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir())
+}
+
 fn question_lang(query: &str) -> mnema_rag::Lang {
     mnema_rag::detect(query, None, sys_locale::get_locale().as_deref())
 }
@@ -1838,16 +1843,139 @@ fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
     ) {
         return;
     }
-    let json = match serde_json::to_string(answer) {
+    // The row is the whole conversation, keyed by its first question. A turn
+    // the session did not take (an answer nobody asked a model for, or a
+    // session that is off) is added here.
+    let mut turns: Vec<StoredTurn> = state
+        .dialogue
+        .snapshot()
+        .1
+        .into_iter()
+        .map(|t| StoredTurn {
+            query: t.query,
+            answer: t.answer,
+        })
+        .collect();
+    let joined = turns.last().is_some_and(|t| {
+        t.query == query
+            && serde_json::to_value(&t.answer).ok() == serde_json::to_value(answer).ok()
+    });
+    if !joined {
+        turns.push(StoredTurn {
+            query: query.to_string(),
+            answer: answer.clone(),
+        });
+    }
+    let key = turns[0].query.clone();
+    let json = match serde_json::to_string(&serde_json::json!({ "turns": turns })) {
         Ok(json) => json,
         Err(e) => {
             eprintln!("mnema: could not record the answer in the history: {e}");
             return;
         }
     };
-    if let Err(e) = state.with_index(|db| db.history_record(query, &json)) {
+    if let Err(e) = state.with_index(|db| db.history_record(&key, &json)) {
         eprintln!("mnema: could not record the answer in the history: {e}");
     }
+}
+
+/// One question and its answer inside a stored conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTurn {
+    pub query: String,
+    pub answer: AskAnswer,
+}
+
+/// A history row's JSON: a conversation, or the single answer rows had before
+/// conversations (opened as a conversation of one turn).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Dialogue { turns: Vec<StoredTurn> },
+    Single(AskAnswer),
+}
+
+/// The session an opened conversation continues from. Only the last generated
+/// turn carries sources — the passages it cited, renumbered 1..n with its
+/// answer — which are all a later turn can cite.
+fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
+    let last_generated = turns
+        .iter()
+        .rposition(|t| matches!(t.answer, AskAnswer::Generated { .. }));
+    turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (answer, hits) = match (&t.answer, Some(i) == last_generated) {
+                (
+                    AskAnswer::Generated {
+                        answer,
+                        citations,
+                        via,
+                        text,
+                        content,
+                    },
+                    true,
+                ) => {
+                    let mut cited: Vec<&AskCitation> = citations.iter().collect();
+                    cited.sort_by_key(|c| c.anchor);
+                    let order: Vec<usize> = cited.iter().map(|c| c.anchor).collect();
+                    let hits: Vec<Hit> = cited
+                        .iter()
+                        .map(|&c| {
+                            let AskCitation {
+                                chunk_id,
+                                text,
+                                relative_path,
+                                section_title,
+                                coordinate,
+                                document_id,
+                                ord,
+                                root_id,
+                                ..
+                            } = c.clone();
+                            Hit {
+                                chunk_id,
+                                text,
+                                relative_path,
+                                section_title,
+                                coordinate,
+                                document_id,
+                                ord,
+                                root_id,
+                            }
+                        })
+                        .collect();
+                    let renumbered = citations
+                        .iter()
+                        .map(|c| AskCitation {
+                            anchor: order
+                                .iter()
+                                .position(|&o| o == c.anchor)
+                                .map_or(0, |p| p + 1),
+                            ..c.clone()
+                        })
+                        .collect();
+                    (
+                        AskAnswer::Generated {
+                            answer: mnema_rag::renumber_anchors(answer, &order),
+                            citations: renumbered,
+                            via: *via,
+                            text: text.clone(),
+                            content: content.clone(),
+                        },
+                        Some(hits),
+                    )
+                }
+                (answer, _) => (answer.clone(), None),
+            };
+            crate::dialogue::SessionTurn {
+                query: t.query.clone(),
+                answer,
+                hits,
+            }
+        })
+        .collect()
 }
 
 /// One row of the launcher's history: a question, without its answer.
@@ -1864,7 +1992,7 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum HistoryOpen {
-    Answer { query: String, answer: AskAnswer },
+    Dialogue { turns: Vec<StoredTurn> },
     Unreadable,
     Gone,
 }
@@ -1889,13 +2017,19 @@ pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen,
     let Some((query, stored)) = state.with_index(|db| db.history_answer(id))? else {
         return Ok(HistoryOpen::Gone);
     };
-    Ok(match serde_json::from_str::<AskAnswer>(&stored) {
-        Ok(answer) => HistoryOpen::Answer { query, answer },
+    let turns = match serde_json::from_str::<Stored>(&stored) {
+        Ok(Stored::Dialogue { turns }) => turns,
+        Ok(Stored::Single(answer)) => vec![StoredTurn { query, answer }],
         Err(e) => {
             eprintln!("mnema: history entry {id} does not parse: {e}");
-            HistoryOpen::Unreadable
+            return Ok(HistoryOpen::Unreadable);
         }
-    })
+    };
+    // Opening a row continues it, when conversations are on.
+    if dialogue_enabled(&state, state.provider_choice()) {
+        state.dialogue.replace(session_from(&turns));
+    }
+    Ok(HistoryOpen::Dialogue { turns })
 }
 
 /// Removes one entry. An id that is not there is not an error: the window may

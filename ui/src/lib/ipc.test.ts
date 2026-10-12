@@ -923,7 +923,7 @@ test('HistoryOpen is exactly what bridge.rs defines, variant for variant', () =>
   // `Record<…>` checks the union against itself as well: a variant added to the
   // TypeScript side and not to this object is a compile error, and the list
   // below checks the other direction against Rust.
-  const byKind: Record<HistoryOpen['kind'], true> = { answer: true, unreadable: true, gone: true };
+  const byKind: Record<HistoryOpen['kind'], true> = { dialogue: true, unreadable: true, gone: true };
   expect(Object.keys(byKind).sort()).toEqual(
     rustEnumVariants(BRIDGE_RS, 'HistoryOpen').map(camelOf).sort(),
   );

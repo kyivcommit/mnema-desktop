@@ -1102,7 +1102,7 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
 }
 const historyEntryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'history_entry');
 const listHistoryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_history');
-const OPENED_OLD = { kind: 'answer', query: 'old q', answer: generated };
+const OPENED_OLD = { kind: 'dialogue', turns: [{ query: 'old q', answer: generated }] };
 
 async function openRecent(id: number) {
   await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
@@ -1241,7 +1241,7 @@ test('a new recorded answer clears the mark on the question that was opened', as
 
 test('an opened answer without citations opens cold and draws no source card', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'answer', query: 'old q', answer: emptyCitationsOnly } });
+  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'dialogue', turns: [{ query: 'old q', answer: emptyCitationsOnly }] } });
   render(Launcher);
   await submit('first');
   await screen.findByTestId('card-centre');
@@ -1339,7 +1339,7 @@ test('an entry read that lands after a search has answered is dropped, not drawn
 
 test('two opens that resolve out of order: the later click wins', async () => {
   const NEWER = { id: 8, query: 'newer q', askedAt: 1_700_000_100 };
-  const NEWER_ANSWER = { kind: 'answer', query: 'newer q', answer: generated };
+  const NEWER_ANSWER = { kind: 'dialogue', turns: [{ query: 'newer q', answer: generated }] };
   let resolveFirst!: (v: unknown) => void;
   let resolveSecond!: (v: unknown) => void;
   mockRecents({

@@ -173,11 +173,13 @@
       if (superseded()) return;
       if (opened.kind === 'gone') { historyGen += 1; return; }
       if (opened.kind === 'unreadable') { launcherState = { kind: 'error', reason: 'historyUnreadable' }; return; }
-      launcherState = stateFromAnswer(opened.query, opened.answer);
+      // Drawing every turn is the dialogue screen's job; this draws the last.
+      const last = opened.turns[opened.turns.length - 1];
+      launcherState = stateFromAnswer(last.query, last.answer);
       launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
       const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
       if (warmed) { heat = 'hot'; left = right = true; }
-      echo = opened.query;
+      echo = last.query;
       historyId = id;
     } catch (e) {
       if (superseded()) return;

@@ -85,8 +85,11 @@ export type HistoryEntry = { id: number; query: string; askedAt: number };
 
 // What opening an entry answers with (`bridge.rs` `HistoryOpen`): a typed reply,
 // not an error, so the window branches on `kind` rather than on a message.
+// One question and its answer inside a stored conversation (`bridge.rs` `StoredTurn`).
+export type StoredTurn = { query: string; answer: AskAnswer };
+
 export type HistoryOpen =
-  | { kind: 'answer'; query: string; answer: AskAnswer }
+  | { kind: 'dialogue'; turns: StoredTurn[] }
   | { kind: 'unreadable' }
   | { kind: 'gone' };
 
