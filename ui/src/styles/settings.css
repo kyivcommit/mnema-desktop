@@ -393,6 +393,25 @@ main select:focus-visible {
   color: var(--ink);
 }
 
+/* the chat tab's «Tool support» checkbox: box and words on one line. The
+ * generic `main input` rule sizes text fields (37px, 13px padding) and would
+ * turn the box into a tall field and push the words to the next line. */
+.tools-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.tools-switch input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: none;
+}
+
 /* a bordered panel (mockup .tabpane) */
 .group {
   padding: 17px;

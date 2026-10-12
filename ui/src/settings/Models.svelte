@@ -1212,7 +1212,7 @@
 </div>
 
 <div class="tabpanel">
-{#if activeTab === 'chat'}<label><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
+{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
   {#if unreadableSentence}<p data-testid="model-catalogue-unreadable">{unreadableSentence}</p>{/if}
