@@ -30,14 +30,16 @@ impl Session {
         self.lock().clone()
     }
 
-    /// Adds `turn` unless the session changed since `generation` was read.
-    pub fn push_if(&self, generation: u64, turn: SessionTurn) -> bool {
+    /// Adds `turn` unless the session changed since `generation` was read, and
+    /// answers with the session's turns right after the push (taken under the
+    /// same lock, so a later clear cannot slip in between); `None` when refused.
+    pub fn push_if(&self, generation: u64, turn: SessionTurn) -> Option<Vec<SessionTurn>> {
         let mut guard = self.lock();
         if guard.0 != generation {
-            return false;
+            return None;
         }
         guard.1.push(turn);
-        true
+        Some(guard.1.clone())
     }
 
     pub fn clear(&self) {
@@ -78,10 +80,10 @@ mod tests {
         let session = Session::default();
         let (old, _) = session.snapshot();
         session.clear();
-        assert!(!session.push_if(old, turn("late")));
+        assert!(session.push_if(old, turn("late")).is_none());
         assert!(session.snapshot().1.is_empty());
         let (now, _) = session.snapshot();
-        assert!(session.push_if(now, turn("fresh")));
+        assert!(session.push_if(now, turn("fresh")).is_some());
         assert_eq!(session.first_query().as_deref(), Some("fresh"));
     }
 
@@ -90,7 +92,19 @@ mod tests {
         let session = Session::default();
         let (old, _) = session.snapshot();
         session.replace(vec![turn("kept")]);
-        assert!(!session.push_if(old, turn("late")));
+        assert!(session.push_if(old, turn("late")).is_none());
         assert_eq!(session.snapshot().1.len(), 1);
+    }
+
+    #[test]
+    fn a_push_answers_with_the_turns_it_made_and_none_once_refused() {
+        let session = Session::default();
+        let (generation, _) = session.snapshot();
+        assert!(session.push_if(generation, turn("one")).is_some());
+        let after = session.push_if(generation, turn("two")).unwrap();
+        let queries: Vec<&str> = after.iter().map(|t| t.query.as_str()).collect();
+        assert_eq!(queries, ["one", "two"]);
+        session.clear();
+        assert!(session.push_if(generation, turn("late")).is_none());
     }
 }

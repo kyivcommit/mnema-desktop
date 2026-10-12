@@ -1460,20 +1460,21 @@ const MAX_ASK_QUERY: usize = 2048;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
-    let mut joined = false;
-    let answer = answer_question(&state, &query, &mut joined)?;
-    record_answer(&state, &query, &answer, joined);
+    let mut taken = None;
+    let answer = answer_question(&state, &query, &mut taken)?;
+    record_answer(&state, &query, &answer, taken);
     Ok(answer)
 }
 
 /// The answer [`ask`] gives, before anything is kept of it.
 ///
-/// `joined` is set when the session took the turn, so the history row can be
-/// written from the session; otherwise the turn stands alone.
+/// `taken` is set to the session's turns when the session took this one, so
+/// the history row is written from exactly that list; otherwise the turn
+/// stands alone.
 fn answer_question(
     state: &State<'_, AppState>,
     query: &str,
-    joined: &mut bool,
+    taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
 ) -> Result<AskAnswer, Error> {
     if query.trim().is_empty() {
         return Err(Error::QueryBlank);
@@ -1505,7 +1506,7 @@ fn answer_question(
             .iter()
             .any(|t| matches!(t.answer, AskAnswer::Generated { .. }))
     {
-        return follow_up(state, query, arms, choice, generation, &turns, joined);
+        return follow_up(state, query, arms, choice, generation, &turns, taken);
     }
     let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
@@ -1539,7 +1540,7 @@ fn answer_question(
             };
             // A recorded turn belongs to the session, or the next write of
             // the row would drop it.
-            *joined = remember_turn(state, remember, query, &answer, Some(hits));
+            *taken = remember_turn(state, remember, query, &answer, Some(hits));
             return Ok(answer);
         }
     };
@@ -1611,7 +1612,7 @@ fn answer_question(
         }),
         Some(a) => {
             let answer = generated_answer(a, &hits, Via::Search, text, content);
-            *joined = remember_turn(state, remember, query, &answer, Some(hits));
+            *taken = remember_turn(state, remember, query, &answer, Some(hits));
             Ok(answer)
         }
     }
@@ -1627,7 +1628,7 @@ fn follow_up(
     choice: crate::provider::ProviderChoice,
     generation: u64,
     turns: &[crate::dialogue::SessionTurn],
-    joined: &mut bool,
+    taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
 ) -> Result<AskAnswer, Error> {
     let (mut hits, mut text, mut content) = match turns.iter().rfind(|t| t.hits.is_some()) {
         Some(t) => {
@@ -1663,7 +1664,7 @@ fn follow_up(
                     ..
                 }
             ) {
-                *joined = remember_turn(state, Some(generation), query, &answer, None);
+                *taken = remember_turn(state, Some(generation), query, &answer, None);
             }
             return Ok(answer);
         }
@@ -1743,7 +1744,7 @@ fn follow_up(
         },
         Some(a) => {
             let answer = generated_answer(a, &hits, via, text, content);
-            *joined = remember_turn(state, Some(generation), query, &answer, found);
+            *taken = remember_turn(state, Some(generation), query, &answer, found);
             answer
         }
     })
@@ -1836,8 +1837,8 @@ fn remember_turn(
     query: &str,
     answer: &AskAnswer,
     hits: Option<Vec<Hit>>,
-) -> bool {
-    generation.is_some_and(|generation| {
+) -> Option<Vec<crate::dialogue::SessionTurn>> {
+    generation.and_then(|generation| {
         state.dialogue.push_if(
             generation,
             crate::dialogue::SessionTurn {
@@ -1862,7 +1863,12 @@ pub fn new_chat(state: State<'_, AppState>) {
 ///
 /// A failed write is logged and then ignored: the person asked and must still
 /// get the answer, and losing a history row is the lesser harm.
-fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer, joined: bool) {
+fn record_answer(
+    state: &State<'_, AppState>,
+    query: &str,
+    answer: &AskAnswer,
+    taken: Option<Vec<crate::dialogue::SessionTurn>>,
+) {
     // Only a question nobody asked a model keeps its citations: any other
     // reason is a failure, and a failure must not replace a stored answer.
     if !matches!(
@@ -1878,24 +1884,22 @@ fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer, j
     // The row is the whole conversation, keyed by its first question. A turn
     // the session did not take (the switch is off, or the session changed
     // while it was answered) stands alone.
-    let turns: Vec<StoredTurn> = if joined {
-        state
-            .dialogue
-            .snapshot()
-            .1
+    let turns: Vec<StoredTurn> = match taken {
+        Some(session) => session
             .into_iter()
             .map(|t| StoredTurn {
                 query: t.query,
                 answer: t.answer,
             })
-            .collect()
-    } else {
-        vec![StoredTurn {
+            .collect(),
+        None => vec![StoredTurn {
             query: query.to_string(),
             answer: answer.clone(),
-        }]
+        }],
     };
-    let key = turns[0].query.clone();
+    let Some(key) = turns.first().map(|t| t.query.clone()) else {
+        return;
+    };
     let json = match serde_json::to_string(&serde_json::json!({ "turns": turns })) {
         Ok(json) => json,
         Err(e) => {
