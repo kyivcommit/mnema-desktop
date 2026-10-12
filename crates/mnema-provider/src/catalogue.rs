@@ -70,6 +70,9 @@ pub struct ModelEntry {
     /// (spec §2.5): a model the provider lists and we hide sends the user
     /// looking for a fault in this application.
     pub refusal: Option<Refusal>,
+    /// `supported_parameters` lists `"tools"`: at least one provider of the
+    /// model accepts tools. Absent or oddly shaped reads as `false`.
+    pub tools: bool,
 }
 
 /// What `context_length` and `top_provider.context_length`, taken together,
@@ -348,6 +351,9 @@ struct Raw {
     architecture: Option<Architecture>,
     #[serde(default)]
     top_provider: Option<TopProvider>,
+    /// Loosely typed: a foreign shape must not make the whole record unreadable.
+    #[serde(default)]
+    supported_parameters: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -664,7 +670,13 @@ pub fn models_from_json(role: Role, json: &str) -> Result<Catalogue, Error> {
             .pricing
             .map(|p| (p.prompt, p.completion))
             .unwrap_or_default();
+        let tools = raw
+            .supported_parameters
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().any(|p| p.as_str() == Some("tools")));
         entries.push(ModelEntry {
+            tools,
             name: raw.name.clone().unwrap_or_else(|| raw.id.clone()),
             price,
             output_price,

@@ -900,7 +900,7 @@ function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
   return {
     id, name: id,
     inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' },
-    refusal: null,
+    refusal: null, tools: false,
     ...overrides,
   };
 }

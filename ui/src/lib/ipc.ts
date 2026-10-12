@@ -415,6 +415,8 @@ export type ModelEntry = {
   /** One output token (`pricing.completion`). */
   outputPrice: Price;
   refusal: ModelRefusal | null;
+  /** The model accepts tools (`supported_parameters`). */
+  tools: boolean;
 };
 
 // `catalogue.rs:293-304`: three states on purpose, not folded together — see
