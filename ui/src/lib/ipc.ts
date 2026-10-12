@@ -938,6 +938,8 @@ export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after'
 // The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
 // the chat list to models that take tools. `setChatTools` answers the stored value.
 export const chatTools = () => invoke<boolean>('chat_tools_enabled');
+// Starts a new conversation: the backend forgets the session (`new_chat`).
+export const newChat = () => invoke<void>('new_chat');
 export const setChatTools = (on: boolean) => invoke<boolean>('set_chat_tools', { on });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an

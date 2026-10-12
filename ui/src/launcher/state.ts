@@ -78,6 +78,20 @@ export function heatAfter(prev: Heat, s: LauncherState): Heat {
   return prev;
 }
 
+// One question with the answer it got. A conversation is a list of these.
+export type Turn = { query: string; answer: CardAnswer };
+
+// A turn joins the conversation when the model answered it, or when it was
+// never asked (`notAsked`: the cause-free citations-only answer). A refusal or a
+// provider failure is not a turn: it is drawn as the current answer and the next
+// good one replaces it, so `turns` comes back unchanged.
+export function turnsAfter(turns: Turn[], query: string, a: AskAnswer): Turn[] {
+  if (a.kind === 'generated' || (a.kind === 'citationsOnly' && a.why.kind === 'notAsked')) {
+    return [...turns, { query, answer: a }];
+  }
+  return turns;
+}
+
 // The card the source panel opens on. The centre lists previews (generated) or
 // ranked passages (citations only) in `citations` order, so the first of that
 // list is the first card it draws; `Cards.test.ts` holds this against the DOM.

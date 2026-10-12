@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, heatAfter, firstCard } from './state';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, heatAfter, firstCard, turnsAfter } from './state';
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
-import type { ModelSettings, IndexSettings } from '../lib/ipc';
+import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
 test('a non-blank query within the limit is accepted', () => {
   expect(checkQuery('hello')).toEqual({ ok: true, query: 'hello' });
@@ -119,4 +119,18 @@ test('firstCard: the first citation of either answer, null when there is none', 
   expect(firstCard(g.answer)).toBe(g.answer.citations[0]);
   expect(firstCard(c.answer)).toBe(c.answer.citations[0]);
   expect(firstCard(e.answer)).toBeNull();
+});
+
+test('turnsAfter adds a generated answer and a not-asked citations-only one', () => {
+  const t1 = turnsAfter([], 'q1', generated);
+  expect(t1).toEqual([{ query: 'q1', answer: generated }]);
+  const t2 = turnsAfter(t1, 'q2', citationsOnly);
+  expect(t2.map((t) => t.query)).toEqual(['q1', 'q2']);
+});
+
+test('turnsAfter leaves the turns alone for a refusal and for a failed citations-only answer', () => {
+  const t1 = turnsAfter([], 'q1', generated);
+  expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toBe(t1);
+  expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'offline' } } as AskAnswer)).toBe(t1);
+  expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'noToolUse' } } as AskAnswer)).toBe(t1);
 });

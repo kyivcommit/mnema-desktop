@@ -177,3 +177,18 @@ test('the preview label and both headings follow a live language switch', async 
   expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 });
+
+test('the answer says where it came from, in both languages', async () => {
+  const via = (v: 'search' | 'conversation') => ({ ...gen(generated), via: v });
+  const { unmount } = render(Answer, { query: 'q', answer: via('search'), onSelect: vi.fn() });
+  expect(screen.getByTestId('answer-via').textContent).toBe('search');
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('answer-via').textContent).toBe('пошук');
+  unmount();
+  render(Answer, { query: 'q', answer: via('conversation'), onSelect: vi.fn() });
+  expect(screen.getByTestId('answer-via').textContent).toBe('з розмови');
+  setLocale('en');
+  await tick();
+  expect(screen.getByTestId('answer-via').textContent).toBe('from the conversation');
+});

@@ -269,6 +269,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       return s.prefs.coldAfterMinutes;
     },
     chat_tools_enabled: () => s.chatTools,
+    new_chat: () => {},
     set_chat_tools: (a) => (s.chatTools = a.on as boolean),
     provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
       : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
@@ -295,7 +296,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     list_history: () => s.history.map(({ id, query, askedAt }) => ({ id, query, askedAt })),
     history_entry: (a) => {
       const hit = s.history.find((h) => h.id === a.id);
-      return hit ? { kind: 'answer', query: hit.query, answer: hit.answer } : { kind: 'gone' };
+      return hit ? { kind: 'dialogue', turns: [{ query: hit.query, answer: hit.answer }] } : { kind: 'gone' };
     },
     delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
     source_around: () => excerptSpanA,

@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, historyEntry, launcherAnswered, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
-  import { checkQuery, heatAfter, stateFromAnswer, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState } from './state';
+  import { ask, chatTools, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { checkQuery, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -11,13 +11,15 @@
   let query = $state('');
   let echo = $state('');
   let pinned = $state(false);
-  let launcherState = $state<LauncherState>({ kind: 'idle' });
+  // `$state.raw`, here and for `previous`: `Cards` finds a turn by the identity of its
+  // answer, and a deep proxy of the same object is not `===` to it.
+  let launcherState = $state.raw<LauncherState>({ kind: 'idle' });
   // The answer a hot launcher was showing when the current submit started. Any
   // error puts it back (a too-long line, a failed ask): the error is
   // told in the search line, and the person keeps what they were reading. Null
   // when there was none, and for every submit that did not start from a hot
   // launcher's answer.
-  let previous = $state<LauncherState | null>(null);
+  let previous = $state.raw<LauncherState | null>(null);
   // Recents: bumped whenever the list of questions may have changed (a recorded
   // answer, a gone entry); the tree re-reads the list on each change.
   let historyGen = $state(0);
@@ -30,6 +32,12 @@
       ? previous
       : launcherState,
   );
+  // The conversation on screen, oldest first (the backend keeps the same session).
+  // `$state.raw`: `Cards` finds a turn by the identity of its answer.
+  let turns = $state.raw<Turn[]>([]);
+  // The «Tool support» switch (ruling R4): off keeps the launcher at one turn
+  // and hides «New chat». Read like the provider status, on mount and on focus.
+  let chatOn = $state(false);
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
@@ -52,6 +60,8 @@
     setLauncherLayout(showLeft, showRight).catch((e) => console.error('set_launcher_layout failed', e));
   });
 
+  const newChatLabel = $derived.by(() => { void $locale; return t('new_chat'); });
+
   const appWindow = getCurrentWebviewWindow();
 
   // Read on mount and again whenever the window gains focus: the key and the
@@ -68,8 +78,29 @@
       .catch((e) => console.error('provider_status failed', e));
   }
 
+  function refreshChatTools() {
+    chatTools().then((on) => { chatOn = on === true; }).catch((e) => console.error('chat_tools_enabled failed', e));
+  }
+  function refreshAll() { refreshProvider(); refreshChatTools(); }
+
+  async function startNewChat() {
+    if (launcherState.kind === 'inFlight') return;
+    screenGen += 1; // an open that is still reading does not draw over the empty screen
+    // Idle is a cold launcher (a hot one is never idle), so this is the cold reset
+    // less the search line: the next answer warms it again.
+    coldGen += 1;
+    heat = 'cold';
+    left = right = false;
+    turns = [];
+    launcherState = { kind: 'idle' };
+    previous = null;
+    historyId = null;
+    echo = '';
+    try { await newChat(); } catch (e) { console.error('new_chat failed', e); }
+  }
+
   onMount(() => {
-    refreshProvider();
+    refreshAll();
 
     // The window was hidden past the threshold: forget the answer, keep the
     // text in the line (the person may still want to ask it).
@@ -80,6 +111,7 @@
       heat = 'cold';
       left = right = false;
       launcherState = { kind: 'idle' };
+      turns = [];
       previous = null;
       historyId = null;
       echo = '';
@@ -114,12 +146,14 @@
     // A rejected line keeps the echo: the answer it belongs to stays drawn.
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     echo = '';
+    if (!chatOn) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
     const gen = coldGen;
     try {
       const answer = await ask(check.query);
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
+      turns = turnsAfter(turns, check.query, answer);
       // Whatever answer lands, it is not an opened question, refusals included.
       historyId = null;
       // The backend records a generated or citations-only answer inside `ask`, so
@@ -173,9 +207,9 @@
       if (superseded()) return;
       if (opened.kind === 'gone') { historyGen += 1; return; }
       if (opened.kind === 'unreadable') { launcherState = { kind: 'error', reason: 'historyUnreadable' }; return; }
-      // Drawing every turn is the dialogue screen's job; this draws the last.
       const last = opened.turns[opened.turns.length - 1];
       launcherState = stateFromAnswer(last.query, last.answer);
+      turns = opened.turns.reduce<Turn[]>((acc, t) => turnsAfter(acc, t.query, t.answer), []);
       launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
       const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
       if (warmed) { heat = 'hot'; left = right = true; }
@@ -238,17 +272,20 @@
   }
 </script>
 
-<svelte:window onfocus={refreshProvider} onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
+<svelte:window onfocus={refreshAll} onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
        click inside it except the input, and the toolbar buttons — Tauri's
        own drag script skips clickable tags. The other panels select text. -->
-  <Cards state={cardsState} query={echo} {left} {right} {heat} {historyId} {historyGen} onOpenHistory={openHistory}>
+  <Cards state={cardsState} query={echo} {left} {right} {heat} {historyId} {historyGen} onOpenHistory={openHistory} {turns}>
     {#snippet search()}
     <div class="searchbar" data-tauri-drag-region="deep">
       <div class="sb-row">
         <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
+        {#if chatOn}
+          <button type="button" class="new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>{newChatLabel}</button>
+        {/if}
       </div>
       <div class="sb-tools">
         <Toolbar {heat} bind:left bind:right bind:pinned {status} provider={statusProvider} />
