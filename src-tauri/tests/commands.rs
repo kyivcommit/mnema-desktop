@@ -13854,3 +13854,31 @@ fn a_not_asked_follow_up_stays_in_the_row_when_a_ready_turn_follows() {
         "{opened}"
     );
 }
+
+#[test]
+fn a_session_without_a_generated_turn_still_searches_first() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+
+    mnema_secrets::forget(state.credential_ref()).expect("the key is forgotten");
+    let first = ask_q(&webview, FIRST_Q);
+    assert_eq!(first["why"]["kind"], json!("notAsked"), "{first}");
+    mnema_secrets::store(state.credential_ref(), "test-key-dialogue").unwrap();
+
+    let second = ask_q(&webview, FIRST_Q);
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(second["via"], json!("search"), "{second}");
+    let request = server.request();
+    assert!(!request.contains("\"tools\""), "{request}");
+    assert!(
+        request.contains("quantum entanglement resonance"),
+        "sources: {request}"
+    );
+
+    let row = only_row(&webview);
+    let opened = open_row(&webview, row["id"].as_i64().unwrap());
+    assert_eq!(opened["turns"].as_array().unwrap().len(), 2, "{opened}");
+}

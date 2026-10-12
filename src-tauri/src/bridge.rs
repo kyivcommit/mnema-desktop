@@ -1498,7 +1498,13 @@ fn answer_question(
         state.dialogue.clear();
     }
     let (generation, turns) = state.dialogue.snapshot();
-    if dialogue && !turns.is_empty() {
+    // Turns nobody asked a model about are in the session for the history row
+    // only: until a generated one exists the question searches first.
+    if dialogue
+        && turns
+            .iter()
+            .any(|t| matches!(t.answer, AskAnswer::Generated { .. }))
+    {
         return follow_up(state, query, arms, choice, generation, &turns, joined);
     }
     let remember = dialogue.then_some(generation);
