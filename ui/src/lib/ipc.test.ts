@@ -86,6 +86,12 @@ test('historyEntry and deleteHistoryEntry send the id they are given, under the 
     .toEqual([['delete_history_entry', { id: 7 }]]);
 });
 
+test('continueHistory sends the id under the name the command takes', async () => {
+  invoke.mockResolvedValue(true);
+  await ipc.continueHistory(7);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'continue_history')).toEqual([['continue_history', { id: 7 }]]);
+});
+
 // PR 7 Task 4: the two model-settings commands `Models.svelte` calls.
 test('setKey invokes set_key with the typed key', async () => {
   invoke.mockResolvedValue({ balance: { kind: 'notStated' } });

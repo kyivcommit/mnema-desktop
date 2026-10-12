@@ -1077,7 +1077,7 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; newChatReject?: boolean } = {}) {
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
@@ -1094,6 +1094,7 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
       const opened = opts.openedFor?.[args!.id!] ?? opts.opened;
       return opened instanceof Promise ? opened : Promise.resolve(opened);
     }
+    if (cmd === 'continue_history') return opts.continued ?? Promise.resolve(true);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') {
       if (opts.ask) return opts.ask;
@@ -1553,4 +1554,87 @@ test('a no-tool-use answer says so in the banner, in both languages', async () =
     setLocale('uk');
     await waitFor(() => expect(screen.getByTestId('citations-banner').textContent).toContain('Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».'));
   } finally { setLocale('en'); }
+});
+
+// The backend session changes only for the open the screen draws, and every
+// call that changes it reaches the backend in the order the person acted.
+const continueCalls = () => invoke.mock.calls.filter((c) => c[0] === 'continue_history');
+const OLD8 = { id: 8, query: 'second q', askedAt: 1_700_000_100 };
+const OPENED_8 = { kind: 'dialogue', turns: [{ query: 'second q', answer: generatedOther }] };
+
+test('of two overlapping opens only the one drawn continues the backend session', async () => {
+  let slow!: (v: unknown) => void;
+  const first = new Promise((r) => { slow = r; });
+  mockRecents({ chatTools: true, asks: [generated], list: [OLD, OLD8], openedFor: { 7: first, 8: OPENED_8 } });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId('history-open-7'));
+  await fireEvent.click(await screen.findByTestId('history-open-8'));
+  await waitFor(() => expect(echoes()).toEqual(['second q']));
+  slow(OPENED_OLD); // the stale read lands after the newer open is drawn
+  await waitFor(() => expect(historyEntryCalls()).toHaveLength(2));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(continueCalls()).toEqual([['continue_history', { id: 8 }]]);
+  expect(echoes()).toEqual(['second q']);
+});
+
+test('an open that a submit superseded never continues the backend session', async () => {
+  let slow!: (v: unknown) => void;
+  const read = new Promise((r) => { slow = r; });
+  mockRecents({ chatTools: true, asks: [generated, generatedOther], opened: read });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(historyEntryCalls()).toHaveLength(1));
+  await submit('typed meanwhile');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  slow(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(continueCalls()).toHaveLength(0);
+});
+
+test('an open continues the session before the next ask reaches the backend', async () => {
+  mockRecents({ chatTools: true, asks: [generated, generatedOther], opened: OPENED_OLD });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(echoes()).toEqual(['old q']));
+  await submit('next');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  const order = invoke.mock.calls.map((c) => c[0]).filter((c) => c === 'ask' || c === 'continue_history' || c === 'new_chat');
+  expect(order).toEqual(['ask', 'continue_history', 'ask']);
+});
+
+test('with conversations off an open does not touch the backend session', async () => {
+  mockRecents({ chatTools: false, asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  expect(continueCalls()).toHaveLength(0);
+});
+
+test('New chat waits for a continue that is still on its way to the backend', async () => {
+  let done!: (v: boolean) => void;
+  const continued = new Promise<boolean>((r) => { done = r; });
+  mockRecents({ chatTools: true, asks: [generated], opened: OPENED_OLD, continued });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(continueCalls()).toHaveLength(1));
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(callsOf('new_chat')).toHaveLength(0);
+  done(true);
+  await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
 });

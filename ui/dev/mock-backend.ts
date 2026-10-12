@@ -298,6 +298,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const hit = s.history.find((h) => h.id === a.id);
       return hit ? { kind: 'dialogue', turns: [{ query: hit.query, answer: hit.answer }] } : { kind: 'gone' };
     },
+    continue_history: (a) => s.history.some((h) => h.id === a.id),
     delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
     source_around: () => excerptSpanA,
 

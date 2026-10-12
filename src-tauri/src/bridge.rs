@@ -1710,8 +1710,14 @@ fn follow_up(
         Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
     };
     if let mnema_provider::Reply::Search(call) = &reply {
-        let (new_hits, new_text, new_content, unreachable) =
-            retrieve(state, &call.query, arms, ASK_TOP_K, choice)?;
+        // The model's query is held to the limit a typed one is: a blank or
+        // oversized one is a search that found nothing, and costs no embedding.
+        let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
+        let (new_hits, new_text, new_content, unreachable) = if usable {
+            retrieve(state, &call.query, arms, ASK_TOP_K, choice)?
+        } else {
+            (Vec::new(), text.clone(), content.clone(), None)
+        };
         if let Some(why) = unreachable {
             state.forget_provider_status();
             return Ok(AskAnswer::CitationsOnly {
@@ -2047,25 +2053,54 @@ pub fn list_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, Err
         .collect())
 }
 
-/// One entry's query and the answer that was given, as it was given.
-#[tauri::command(async)]
-pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen, Error> {
+/// An entry's turns, or why it has none: `Gone` for an id no longer in the
+/// history, `Unreadable` for a row that does not parse or holds no turn.
+fn history_turns(
+    state: &State<'_, AppState>,
+    id: i64,
+) -> Result<Result<Vec<StoredTurn>, HistoryOpen>, Error> {
     let Some((query, stored)) = state.with_index(|db| db.history_answer(id))? else {
-        return Ok(HistoryOpen::Gone);
+        return Ok(Err(HistoryOpen::Gone));
     };
     let turns = match serde_json::from_str::<Stored>(&stored) {
         Ok(Stored::Dialogue { turns }) => turns,
         Ok(Stored::Single(answer)) => vec![StoredTurn { query, answer }],
         Err(e) => {
             eprintln!("mnema: history entry {id} does not parse: {e}");
-            return Ok(HistoryOpen::Unreadable);
+            return Ok(Err(HistoryOpen::Unreadable));
         }
     };
-    // Opening a row continues it, when conversations are on.
-    if dialogue_enabled(&state, state.provider_choice()) {
-        state.dialogue.replace(session_from(&turns));
+    if turns.is_empty() {
+        eprintln!("mnema: history entry {id} holds no turn");
+        return Ok(Err(HistoryOpen::Unreadable));
     }
-    Ok(HistoryOpen::Dialogue { turns })
+    Ok(Ok(turns))
+}
+
+/// One entry's query and the answer that was given, as it was given. Reads
+/// only: the session changes in `continue_history`, once the window knows
+/// the open is still the one it draws.
+#[tauri::command(async)]
+pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen, Error> {
+    Ok(match history_turns(&state, id)? {
+        Ok(turns) => HistoryOpen::Dialogue { turns },
+        Err(open) => open,
+    })
+}
+
+/// Makes the opened entry the conversation a next question continues. `false`
+/// when the entry is gone, unreadable or empty, or conversations are off:
+/// the session is then left as it was.
+#[tauri::command(async)]
+pub fn continue_history(state: State<'_, AppState>, id: i64) -> Result<bool, Error> {
+    let Ok(turns) = history_turns(&state, id)? else {
+        return Ok(false);
+    };
+    if !dialogue_enabled(&state, state.provider_choice()) {
+        return Ok(false);
+    }
+    state.dialogue.replace(session_from(&turns));
+    Ok(true)
 }
 
 /// Removes one entry. An id that is not there is not an error: the window may

@@ -13432,6 +13432,37 @@ fn an_empty_tool_search_keeps_the_previous_sources() {
 }
 
 #[test]
+fn an_oversized_tool_query_is_not_retrieved() {
+    // 2049 characters that the text arm WOULD match, so a retrieval would show.
+    let long = format!("{}q", "quantum ".repeat(256));
+    assert_eq!(long.chars().count(), 2049);
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("Both <c>1</c> <c>2</c>.")),
+        Reply::ok(&chat_search(
+            &json!({ "query": long }).to_string(),
+            Value::Null,
+        )),
+        Reply::ok(&chat_text("Only the first <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "anything on that?");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(second["via"], json!("conversation"), "{second}");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[0]), "{second}");
+    server.request();
+    let follow_up = server.request();
+    assert!(follow_up.contains("/chat/completions"), "{follow_up}");
+    let last = server.request();
+    assert!(last.contains("/chat/completions"), "no embedding: {last}");
+    assert!(!last.contains("\"tools\""), "{last}");
+    assert!(server.request_if_any().is_none(), "no other request");
+}
+
+#[test]
 fn a_broken_tool_call_answers_from_the_conversation() {
     let server = MockServer::new(vec![
         Reply::ok(&chat_text("It resonates <c>1</c>.")),
@@ -13617,6 +13648,10 @@ fn open_row(webview: &WebviewWindow<MockRuntime>, id: i64) -> Value {
     call(webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected")
 }
 
+fn continue_row(webview: &WebviewWindow<MockRuntime>, id: i64) -> Value {
+    call(webview, "continue_history", json!({ "id": id })).expect("continue_history was rejected")
+}
+
 fn seed_row(
     app: &tauri::App<MockRuntime>,
     webview: &WebviewWindow<MockRuntime>,
@@ -13717,6 +13752,7 @@ fn opening_a_row_continues_it() {
     call(&webview, "new_chat", json!({})).unwrap();
     let id = only_row(&webview)["id"].as_i64().unwrap();
     open_row(&webview, id);
+    assert_eq!(continue_row(&webview, id), json!(true));
 
     let next = ask_q(&webview, "tell me more");
     assert_eq!(next["via"], json!("conversation"), "{next}");
@@ -13757,6 +13793,7 @@ fn opened_sources_are_the_cited_passages_renumbered() {
     server.request();
     call(&webview, "new_chat", json!({})).unwrap();
     open_row(&webview, id);
+    assert_eq!(continue_row(&webview, id), json!(true));
 
     ask_q(&webview, "go on");
     let request = server.request();
@@ -13800,6 +13837,8 @@ fn with_the_switch_off_an_opened_row_is_a_snapshot() {
         None,
         "opening must not fill the session"
     );
+    assert_eq!(continue_row(&webview, id), json!(false));
+    assert_eq!(app.state::<AppState>().dialogue.first_query(), None);
 
     ask_q(&webview, "ext4");
     server.request();
@@ -13892,4 +13931,88 @@ fn a_session_without_a_generated_turn_still_searches_first() {
     let row = only_row(&webview);
     let opened = open_row(&webview, row["id"].as_i64().unwrap());
     assert_eq!(opened["turns"].as_array().unwrap().len(), 2, "{opened}");
+}
+
+#[test]
+fn opening_a_row_leaves_the_session_untouched() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let other = json!({ "turns": [{ "query": "another question", "answer": ask_q_stored(&app) }] });
+    let id = seed_row(&app, &webview, "another question", &other);
+    let opened = open_row(&webview, id);
+    assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
+
+    // The session is still the first conversation.
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query().as_deref(),
+        Some(FIRST_Q)
+    );
+    ask_q(&webview, "thanks");
+    server.request();
+    let request = server.request();
+    assert!(request.contains(FIRST_Q), "{request}");
+    assert!(!request.contains("another question"), "{request}");
+}
+
+fn ask_q_stored(app: &tauri::App<MockRuntime>) -> Value {
+    // Any stored answer will do: the last row's own.
+    let state = app.state::<AppState>();
+    let (_, stored) = state
+        .with_index(|db| db.history_answer(1))
+        .unwrap()
+        .expect("the first row");
+    let turns: Value = serde_json::from_str(&stored).unwrap();
+    turns["turns"][0]["answer"].clone()
+}
+
+#[test]
+fn continuing_a_row_replaces_the_session_and_a_gone_row_changes_nothing() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let answer = ask_q_stored(&app);
+    let id = seed_row(
+        &app,
+        &webview,
+        "another question",
+        &json!({ "turns": [{ "query": "another question", "answer": answer }] }),
+    );
+    assert_eq!(continue_row(&webview, 9999), json!(false));
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query().as_deref(),
+        Some(FIRST_Q)
+    );
+    assert_eq!(continue_row(&webview, id), json!(true));
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query().as_deref(),
+        Some("another question")
+    );
+}
+
+#[test]
+fn an_empty_saved_dialogue_is_unreadable_and_keeps_the_session() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let id = seed_row(&app, &webview, "empty", &json!({ "turns": [] }));
+    let opened = open_row(&webview, id);
+    assert_eq!(opened["kind"], json!("unreadable"), "{opened}");
+    assert_eq!(continue_row(&webview, id), json!(false));
+    assert_eq!(
+        app.state::<AppState>().dialogue.first_query().as_deref(),
+        Some(FIRST_Q)
+    );
 }

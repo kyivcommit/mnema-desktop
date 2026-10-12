@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, chatTools, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
@@ -85,10 +85,20 @@
   }
   function refreshAll() { refreshProvider(); refreshChatTools(); }
 
+  // Every call that changes the backend session (ask, new chat, continue a
+  // stored one) goes through this chain, so they arrive in the order the person
+  // acted whatever order their own answers take.
+  let sessionOps: Promise<unknown> = Promise.resolve();
+  function inSession<T>(call: () => Promise<T>): Promise<T> {
+    const run = sessionOps.then(call, call);
+    sessionOps = run.catch(() => {});
+    return run;
+  }
+
   async function startNewChat() {
     if (launcherState.kind === 'inFlight') return;
     // The backend first: a screen that says "new" while the session goes on would lie.
-    try { await newChat(); } catch (e) { console.error('new_chat failed', e); return; }
+    try { await inSession(newChat); } catch (e) { console.error('new_chat failed', e); return; }
     screenGen += 1; // an open that is still reading does not draw over the empty screen
     coldGen += 1;
     // Only the conversation clears; heat and the panels stay as the person left them.
@@ -150,7 +160,7 @@
     launcherState = { kind: 'inFlight', query: check.query };
     const gen = coldGen;
     try {
-      const answer = await ask(check.query);
+      const answer = await inSession(() => ask(check.query));
       if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
       turns = turnsAfter(turns, check.query, answer);
@@ -207,6 +217,13 @@
       if (superseded()) return;
       if (opened.kind === 'gone') { historyGen += 1; return; }
       if (opened.kind === 'unreadable') { launcherState = { kind: 'error', reason: 'historyUnreadable' }; return; }
+      // The backend continues this conversation only if the screen is still to
+      // draw it: the check runs when the call's turn in the chain comes.
+      if (dialogue) {
+        let skipped = false;
+        await inSession(() => { if (superseded()) { skipped = true; return Promise.resolve(false); } return continueHistory(id); });
+        if (skipped || superseded()) return;
+      }
       const last = opened.turns[opened.turns.length - 1];
       launcherState = stateFromAnswer(last.query, last.answer);
       turns = opened.turns.reduce<Turn[]>((acc, t) => turnsAfter(acc, t.query, t.answer), []);

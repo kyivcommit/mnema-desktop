@@ -218,6 +218,8 @@ export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const listHistory = () => invoke<HistoryEntry[]>('list_history');
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
+// Makes an opened entry the conversation the next question continues; false when it cannot be.
+export const continueHistory = (id: number) => invoke<boolean>('continue_history', { id });
 export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id });
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
 // The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes

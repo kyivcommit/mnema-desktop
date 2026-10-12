@@ -75,6 +75,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::new_chat,
         bridge::list_history,
         bridge::history_entry,
+        bridge::continue_history,
         bridge::delete_history_entry,
         bridge::set_search_arms,
         bridge::skips,
