@@ -80,7 +80,7 @@ const catalogue = (role: ModelRole): Catalogue => {
   const usd = (perMillion: number) => ({ kind: 'known' as const, amount: perMillion / 1e6 });
   const ok = (id: string, price: number, out = 0): Catalogue['entries'][number] => ({
     id, name: id.split('/')[1], inputLimit: { kind: 'known', tokens: 8192 },
-    price: usd(price), outputPrice: usd(out), refusal: null,
+    price: usd(price), outputPrice: usd(out), refusal: null, tools: false,
   });
   const refused = (id: string, refusal: NonNullable<Catalogue['entries'][number]['refusal']>) =>
     ({ ...ok(id, 0), refusal });
