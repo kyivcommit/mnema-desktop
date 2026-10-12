@@ -90,9 +90,6 @@ fn language_directive(voice: Voice) -> String {
     }
 }
 
-/// Build the two chat messages for synthesis (`prompt.py:95-124`). Each source
-/// shows its FULL text — the chunker already size-bounds chunks, and a per-source
-/// cap would silently hide a fact past the cap (`prompt.py:103-108`).
 /// The numbered `[N] (meta)\ntext` blocks of one search, blank-line separated.
 pub(crate) fn sources_block(passages: &[Passage]) -> String {
     let blocks: Vec<String> = passages
@@ -111,6 +108,9 @@ pub(crate) fn sources_block(passages: &[Passage]) -> String {
     blocks.join("\n\n")
 }
 
+/// Build the two chat messages for synthesis (`prompt.py:95-124`). Each source
+/// shows its FULL text — the chunker already size-bounds chunks, and a per-source
+/// cap would silently hide a fact past the cap (`prompt.py:103-108`).
 pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec<Message> {
     let sources = sources_block(passages);
     let mut user = format!("Sources:\n\n{sources}\n\nQuestion: {question}");

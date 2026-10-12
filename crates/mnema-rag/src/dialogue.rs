@@ -206,6 +206,26 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_after_the_latest_search_keeps_its_anchors() {
+        let turns = [
+            turn("q1", "one<c>1</c>", Some(ps("A"))),
+            turn("q2", "two<c>1</c>", Some(ps("B"))),
+            turn("q3", "three<c>1</c>", None),
+        ];
+        let d = build_dialogue(&turns, "q4", None, &NO_PROFILE, EN);
+        let answers: Vec<&str> = d
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(answers, ["one", "two<c>1</c>", "three<c>1</c>"]);
+        assert_eq!(
+            d[5].content, "q3",
+            "a turn without a search is a plain question"
+        );
+    }
+
+    #[test]
     fn every_model_gets_the_search_hint() {
         let p = profile("anthropic/x");
         assert!(p.system_addendum.contains("search"));
