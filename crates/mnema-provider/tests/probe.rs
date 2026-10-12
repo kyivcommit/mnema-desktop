@@ -1979,10 +1979,14 @@ fn probe_messages() -> Vec<mnema_provider::Message> {
         Message {
             role: MessageRole::System,
             content: "answer with citations".into(),
+            tool_calls: None,
+            tool_call_id: None,
         },
         Message {
             role: MessageRole::User,
             content: "what did the report say?".into(),
+            tool_calls: None,
+            tool_call_id: None,
         },
     ]
 }

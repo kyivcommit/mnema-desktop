@@ -169,6 +169,8 @@ fn a_process_dying_mid_request_fails_at_once() {
         let messages = [Message {
             role: MessageRole::User,
             content: "hi".into(),
+            tool_calls: None,
+            tool_call_id: None,
         }];
         mnema_provider::complete(&e.base, &e.token, "chat", &messages)
     });
