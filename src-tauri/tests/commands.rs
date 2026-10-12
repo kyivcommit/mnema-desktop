@@ -13815,3 +13815,42 @@ fn an_unreadable_row_does_not_touch_the_session() {
         Some(FIRST_Q)
     );
 }
+
+#[test]
+fn a_not_asked_follow_up_stays_in_the_row_when_a_ready_turn_follows() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Back again.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+
+    ask_q(&webview, FIRST_Q);
+    // Without the key the next question is not asked of any model (R8).
+    mnema_secrets::forget(state.credential_ref()).expect("the key is forgotten");
+    let second = ask_q(&webview, "the unasked question");
+    assert_eq!(second["why"]["kind"], json!("notAsked"), "{second}");
+    mnema_secrets::store(state.credential_ref(), "test-key-dialogue").unwrap();
+    let third = ask_q(&webview, "the third question");
+    assert_eq!(third["kind"], json!("generated"), "{third}");
+
+    let row = only_row(&webview);
+    let opened = open_row(&webview, row["id"].as_i64().unwrap());
+    let queries: Vec<&Value> = opened["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| &t["query"])
+        .collect();
+    assert_eq!(
+        queries,
+        vec![
+            &json!(FIRST_Q),
+            &json!("the unasked question"),
+            &json!("the third question")
+        ],
+        "{opened}"
+    );
+}

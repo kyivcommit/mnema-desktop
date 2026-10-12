@@ -1460,13 +1460,21 @@ const MAX_ASK_QUERY: usize = 2048;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
-    let answer = answer_question(&state, &query)?;
-    record_answer(&state, &query, &answer);
+    let mut joined = false;
+    let answer = answer_question(&state, &query, &mut joined)?;
+    record_answer(&state, &query, &answer, joined);
     Ok(answer)
 }
 
 /// The answer [`ask`] gives, before anything is kept of it.
-fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer, Error> {
+///
+/// `joined` is set when the session took the turn, so the history row can be
+/// written from the session; otherwise the turn stands alone.
+fn answer_question(
+    state: &State<'_, AppState>,
+    query: &str,
+    joined: &mut bool,
+) -> Result<AskAnswer, Error> {
     if query.trim().is_empty() {
         return Err(Error::QueryBlank);
     }
@@ -1491,7 +1499,7 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     }
     let (generation, turns) = state.dialogue.snapshot();
     if dialogue && !turns.is_empty() {
-        return follow_up(state, query, arms, choice, generation, &turns);
+        return follow_up(state, query, arms, choice, generation, &turns, joined);
     }
     let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
@@ -1517,12 +1525,16 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
             });
         }
         ChatReadiness::NoModel | ChatReadiness::NoKey | ChatReadiness::KeyUnreadable => {
-            return Ok(AskAnswer::CitationsOnly {
-                citations: hits,
+            let answer = AskAnswer::CitationsOnly {
+                citations: hits.clone(),
                 why: NoAnswer::NotAsked,
                 text,
                 content,
-            });
+            };
+            // A recorded turn belongs to the session, or the next write of
+            // the row would drop it.
+            *joined = remember_turn(state, remember, query, &answer, Some(hits));
+            return Ok(answer);
         }
     };
 
@@ -1593,7 +1605,7 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
         }),
         Some(a) => {
             let answer = generated_answer(a, &hits, Via::Search, text, content);
-            remember_turn(state, remember, query, &answer, Some(hits));
+            *joined = remember_turn(state, remember, query, &answer, Some(hits));
             Ok(answer)
         }
     }
@@ -1609,6 +1621,7 @@ fn follow_up(
     choice: crate::provider::ProviderChoice,
     generation: u64,
     turns: &[crate::dialogue::SessionTurn],
+    joined: &mut bool,
 ) -> Result<AskAnswer, Error> {
     let (mut hits, mut text, mut content) = match turns.iter().rfind(|t| t.hits.is_some()) {
         Some(t) => {
@@ -1631,22 +1644,35 @@ fn follow_up(
                 }
                 _ => NoAnswer::NotAsked,
             };
-            return Ok(AskAnswer::CitationsOnly {
+            let answer = AskAnswer::CitationsOnly {
                 citations: hits,
                 why,
                 text,
                 content,
-            });
+            };
+            if matches!(
+                answer,
+                AskAnswer::CitationsOnly {
+                    why: NoAnswer::NotAsked,
+                    ..
+                }
+            ) {
+                *joined = remember_turn(state, Some(generation), query, &answer, None);
+            }
+            return Ok(answer);
         }
     };
+    // Only generated turns enter the model's context; the others are in the
+    // session for the history row.
     let past: Vec<mnema_rag::Turn> = turns
         .iter()
-        .map(|t| mnema_rag::Turn {
+        .filter_map(|t| match &t.answer {
+            AskAnswer::Generated { answer, .. } => Some((t, answer)),
+            _ => None,
+        })
+        .map(|(t, answer)| mnema_rag::Turn {
             question: t.query.clone(),
-            answer: match &t.answer {
-                AskAnswer::Generated { answer, .. } => answer.clone(),
-                _ => String::new(),
-            },
+            answer: answer.clone(),
             sources: t
                 .hits
                 .as_ref()
@@ -1711,7 +1737,7 @@ fn follow_up(
         },
         Some(a) => {
             let answer = generated_answer(a, &hits, via, text, content);
-            remember_turn(state, Some(generation), query, &answer, found);
+            *joined = remember_turn(state, Some(generation), query, &answer, found);
             answer
         }
     })
@@ -1804,8 +1830,8 @@ fn remember_turn(
     query: &str,
     answer: &AskAnswer,
     hits: Option<Vec<Hit>>,
-) {
-    if let Some(generation) = generation {
+) -> bool {
+    generation.is_some_and(|generation| {
         state.dialogue.push_if(
             generation,
             crate::dialogue::SessionTurn {
@@ -1813,8 +1839,8 @@ fn remember_turn(
                 answer: answer.clone(),
                 hits,
             },
-        );
-    }
+        )
+    })
 }
 
 /// «New chat»: the next question starts a session of its own.
@@ -1830,7 +1856,7 @@ pub fn new_chat(state: State<'_, AppState>) {
 ///
 /// A failed write is logged and then ignored: the person asked and must still
 /// get the answer, and losing a history row is the lesser harm.
-fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
+fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer, joined: bool) {
     // Only a question nobody asked a model keeps its citations: any other
     // reason is a failure, and a failure must not replace a stored answer.
     if !matches!(
@@ -1844,28 +1870,25 @@ fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
         return;
     }
     // The row is the whole conversation, keyed by its first question. A turn
-    // the session did not take (an answer nobody asked a model for, or a
-    // session that is off) is added here.
-    let mut turns: Vec<StoredTurn> = state
-        .dialogue
-        .snapshot()
-        .1
-        .into_iter()
-        .map(|t| StoredTurn {
-            query: t.query,
-            answer: t.answer,
-        })
-        .collect();
-    let joined = turns.last().is_some_and(|t| {
-        t.query == query
-            && serde_json::to_value(&t.answer).ok() == serde_json::to_value(answer).ok()
-    });
-    if !joined {
-        turns.push(StoredTurn {
+    // the session did not take (the switch is off, or the session changed
+    // while it was answered) stands alone.
+    let turns: Vec<StoredTurn> = if joined {
+        state
+            .dialogue
+            .snapshot()
+            .1
+            .into_iter()
+            .map(|t| StoredTurn {
+                query: t.query,
+                answer: t.answer,
+            })
+            .collect()
+    } else {
+        vec![StoredTurn {
             query: query.to_string(),
             answer: answer.clone(),
-        });
-    }
+        }]
+    };
     let key = turns[0].query.clone();
     let json = match serde_json::to_string(&serde_json::json!({ "turns": turns })) {
         Ok(json) => json,
