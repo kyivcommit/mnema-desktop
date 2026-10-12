@@ -184,9 +184,46 @@ pub fn resolve_anchors(text: &str, n_candidates: usize) -> (String, Vec<usize>) 
     (clean, valid)
 }
 
+/// Rewrite anchors so `order[i]` becomes `i + 1`; an anchor not in `order` is
+/// cut, like an out-of-range one in [`resolve_anchors`].
+pub fn renumber_anchors(text: &str, order: &[usize]) -> String {
+    let text = canonicalize(text);
+    let out = ANCHOR_RE.replace_all(&text, |caps: &Captures| {
+        parse_ordinal(&caps[1])
+            .and_then(|k| order.iter().position(|&o| o == k))
+            .map(|i| format!("<c>{}</c>", i + 1))
+            .unwrap_or_default()
+    });
+    MULTISPACE_RE.replace_all(&out, " ").into_owned()
+}
+
+/// The prose with every anchor removed.
+pub fn strip_anchors(text: &str) -> String {
+    resolve_anchors(text, 0).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renumber_maps_sparse_anchors_to_dense() {
+        assert_eq!(
+            renumber_anchors("a<c>3</c> b<c>7</c><c>3</c>", &[3, 7]),
+            "a<c>1</c> b<c>2</c><c>1</c>"
+        );
+    }
+
+    #[test]
+    fn renumber_cuts_an_anchor_outside_the_order() {
+        assert_eq!(renumber_anchors("a<c>5</c> b<c>3</c>", &[3]), "a b<c>1</c>");
+    }
+
+    #[test]
+    fn strip_anchors_leaves_the_prose() {
+        assert_eq!(strip_anchors("x <c>1</c><c>2</c>."), "x .");
+        assert_eq!(strip_anchors("A <c>9</c> B"), "A B");
+    }
 
     #[test]
     fn keeps_valid_canonical_anchors_and_returns_ordinals_in_order() {

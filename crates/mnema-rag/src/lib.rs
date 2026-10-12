@@ -6,10 +6,12 @@
 
 mod anchors;
 mod answer;
+mod dialogue;
 mod lang;
 mod prompt;
 
-pub use anchors::{extract_anchor_ids, resolve_anchors};
+pub use anchors::{extract_anchor_ids, renumber_anchors, resolve_anchors, strip_anchors};
 pub use answer::{Answer, answer};
+pub use dialogue::{Profile, Turn, build_dialogue, profile, with_search_result};
 pub use lang::{EN, Lang, UK, detect};
 pub use prompt::{Passage, Voice, build_messages};

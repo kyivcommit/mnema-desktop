@@ -20,7 +20,7 @@ pub struct Passage {
 /// Rules 1-4 plus `"5. "`, ready for the language directive to be appended
 /// (`prompt.py:17-41`, `_SYSTEM_PROMPT_TEMPLATE` with `{language_directive}` as
 /// the tail of rule 5). Segments mirror the Python literal breaks 1:1.
-const SYSTEM_PROMPT_HEAD: &str = concat!(
+pub(crate) const SYSTEM_PROMPT_HEAD: &str = concat!(
     "You are a careful research assistant answering questions about a collection of documents. ",
     "You are given numbered SOURCE passages.\n",
     "Rules (follow strictly):\n",
@@ -41,7 +41,7 @@ const SYSTEM_PROMPT_HEAD: &str = concat!(
 /// Rule-5 directive when no explicit target language is given (`prompt.py:50-57`,
 /// `_AUTO_DIRECTIVE`). FORCEFUL on purpose — a lite chat model otherwise drifts
 /// into the source language or English.
-const AUTO_DIRECTIVE: &str = concat!(
+pub(crate) const AUTO_DIRECTIVE: &str = concat!(
     "OUTPUT LANGUAGE — THIS IS THE MOST IMPORTANT RULE, AND IT OVERRIDES THE SOURCE LANGUAGE: ",
     "write the ENTIRE answer in the same language as the question. Detect the question's ",
     "language and use exactly that language (for example, a Ukrainian question gets a Ukrainian ",
@@ -93,7 +93,8 @@ fn language_directive(voice: Voice) -> String {
 /// Build the two chat messages for synthesis (`prompt.py:95-124`). Each source
 /// shows its FULL text — the chunker already size-bounds chunks, and a per-source
 /// cap would silently hide a fact past the cap (`prompt.py:103-108`).
-pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec<Message> {
+/// The numbered `[N] (meta)\ntext` blocks of one search, blank-line separated.
+pub(crate) fn sources_block(passages: &[Passage]) -> String {
     let blocks: Vec<String> = passages
         .iter()
         .enumerate()
@@ -107,7 +108,11 @@ pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec
             format!("{header}\n{}", p.text)
         })
         .collect();
-    let sources = blocks.join("\n\n");
+    blocks.join("\n\n")
+}
+
+pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec<Message> {
+    let sources = sources_block(passages);
     let mut user = format!("Sources:\n\n{sources}\n\nQuestion: {question}");
     user.push_str("\n\n");
     match voice {
