@@ -53,6 +53,8 @@ const modelSettings = vi.fn();
 // `Settings.svelte` listens for `settings-section`; nothing here sends it.
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
+  chatTools: () => Promise.resolve(true),
+  setChatTools: () => Promise.resolve(true),
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.
   mnemaAvailable: () => Promise.resolve(false),

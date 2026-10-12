@@ -116,6 +116,8 @@ vi.mock('../lib/ipc', () => ({
   providerModels: (...a: unknown[]) => providerModels(...a),
   setChatModel: vi.fn(),
   setEmbeddingModel: (...a: unknown[]) => setEmbeddingModel(...a),
+  chatTools: () => Promise.resolve(true),
+  setChatTools: () => Promise.resolve(true),
   listTree: (...a: unknown[]) => listTree(...a),
   listSubfolders: (...a: unknown[]) => listSubfolders(...a),
   listExclusions: (...a: unknown[]) => listExclusions(...a),

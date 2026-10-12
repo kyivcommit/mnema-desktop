@@ -1,6 +1,5 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { locale, t } from '../i18n';
   import Answer from './Answer.svelte';
   import Passages from './Passages.svelte';
   import type { AskCitation, Hit } from '../lib/ipc';
@@ -44,48 +43,20 @@
   // cannot read `selected` from in here, so it is reported upward. This fires on
   // mount too — which is exactly what lets go of the left card's mark when a new
   // answer recreates this component.
+  //
+  // Only `selected` is tracked: the callback is a fresh closure whenever `Cards`
+  // re-derives its turns, and re-reporting on that would let an older turn's
+  // effect run after a newer turn's and take the selection back.
   $effect(() => {
-    onSelected(selected);
+    const value = selected;
+    untrack(() => onSelected(value));
   });
-
-  // 🔴 One `<section>`, two names. The centre card is one region, but it is not
-  // one FACT: in state E it announced itself by the answer card's name, in both
-  // locales, while the first sentence inside it said generation is unavailable.
-  // That is the window stating what is not so — Ruling AF's failure — moved
-  // down into the layer
-  // where a person using a screen reader cannot see the contradiction and
-  // correct for it. Only the NAME switches; the element, its `card-centre`
-  // testid and the `{#key}` above it are untouched.
-  //
-  // The label stays HERE rather than moving into `Answer` and `Passages`: the
-  // `<section>` belongs to this component, and splitting one region's identity
-  // across two files would duplicate the `void $locale` pattern a third time —
-  // the drift Rulings AG and AJ exist to stop.
-  //
-  // 🔴 Exhaustive, not a ternary, and for Ruling W's own reason one card over
-  // (`Source.svelte`'s `freshnessText`/`goneText`): a default branch is how a
-  // wrong verdict gets drawn for a variant nobody added a case for. A third
-  // member of `CardAnswer` would compile against `x ? a : b`, render an empty
-  // card — the markup below has `{#if}/{:else if}` and no `else` — and announce
-  // it under the passages name. No test can prove this, because the third
-  // member does not exist to test with; the proof is the compiler's. Add one to
-  // `CardAnswer` and this line stops compiling.
-  function labelFor(a: CardAnswer): string {
-    switch (a.kind) {
-      case 'generated': return t('card_answer');
-      case 'citationsOnly': return t('card_passages');
-    }
-    const unreachable: never = a;
-    return unreachable;
-  }
-
-  const centreLabel = $derived.by(() => { void $locale; return labelFor(answer); });
 </script>
 
-<section class="float results" data-testid="card-centre" aria-label={centreLabel}>
+<div class="turn">
   {#if generatedAnswer !== null}
     <Answer answer={generatedAnswer} {query} onSelect={(citation) => (selected = citation)} />
   {:else if passagesAnswer !== null}
     <Passages answer={passagesAnswer} onSelect={(passage) => (selected = passage)} />
   {/if}
-</section>
+</div>

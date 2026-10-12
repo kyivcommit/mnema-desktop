@@ -870,3 +870,25 @@ fn a_non_finite_price_does_not_hide_a_model_as_a_router() {
         }
     }
 }
+
+#[test]
+fn a_model_listing_tools_supports_them() {
+    let json = r#"{"data":[{"id":"v/a","supported_parameters":["tools","max_tokens"]},
+        {"id":"v/b","supported_parameters":["max_tokens"]}]}"#;
+    let c = models_from_json(Role::Chat, json).expect("parses");
+    assert!(find(&c.entries, "v/a").tools);
+    assert!(!find(&c.entries, "v/b").tools);
+}
+
+#[test]
+fn no_or_odd_supported_parameters_means_no_tools() {
+    let json = r#"{"data":[{"id":"v/absent"},
+        {"id":"v/null","supported_parameters":null},
+        {"id":"v/str","supported_parameters":"tools"},
+        {"id":"v/nums","supported_parameters":[1,2]}]}"#;
+    let c = models_from_json(Role::Chat, json).expect("parses");
+    assert_eq!(c.unreadable, 0);
+    for id in ["v/absent", "v/null", "v/str", "v/nums"] {
+        assert!(!find(&c.entries, id).tools, "{id}");
+    }
+}

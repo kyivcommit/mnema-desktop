@@ -170,6 +170,8 @@ pub struct AppState {
     /// The language of the last question asked under Mnema, for the next
     /// question that does not show its own (`mnema_rag::detect`'s `previous`).
     last_lang: Mutex<Option<mnema_rag::Lang>>,
+    /// The launcher's conversation; memory only (see [`crate::dialogue`]).
+    pub dialogue: crate::dialogue::Session,
 }
 
 #[derive(Default)]
@@ -231,6 +233,7 @@ impl AppState {
                 PathBuf::new(),
             ))),
             last_lang: Mutex::new(None),
+            dialogue: crate::dialogue::Session::default(),
         }
     }
 

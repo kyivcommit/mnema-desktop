@@ -14,7 +14,7 @@ pub use catalogue::{
     Catalogue, InputLimit, MIN_CONTEXT_TOKENS, ModelEntry, Price, RecordId, Refusal, Role,
     UnreadableRecord, models_from_json,
 };
-pub use chat::{Message, MessageRole, complete, complete_within};
+pub use chat::{Message, MessageRole, Reply, ToolCall, complete, complete_turn, complete_within};
 pub use http::INTERACTIVE_TIMEOUT;
 pub use probe::{
     Balance, EmbeddingCheck, KeyCheck, ProviderMessage, SanitisedText, check_embedding_model,
@@ -306,6 +306,12 @@ pub enum Error {
     /// readable message stays `Malformed`.
     #[error("the provider answered 200 with an error instead of a completion: {reason}")]
     ErrorInsteadOfCompletion { reason: ProviderMessage },
+    /// A `404` from the router's tool-compatibility filter: the chosen model
+    /// has no endpoint that takes tools, so the chat cannot offer `search`.
+    /// Kept apart from `Provider { status: 404 }` because the remedy differs
+    /// (pick another model, or turn tool support off).
+    #[error("no endpoint of this model supports tool use")]
+    NoToolEndpoint,
     /// The status was read successfully, but reading the rest of the
     /// response failed — kept apart from `Transport`, which means the
     /// opposite: no answer was ever read at all. `detail` is `ureq`'s own

@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, generated, citationsOnly, emptyCitationsOnly, oneRootTwoFolders, excerptSpanA } from '../lib/fixtures';
+import { refusedNoCandidates, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders, excerptSpanA } from '../lib/fixtures';
 import { DRAG_GRAB_WINDOW_MS } from './state';
+import { setLocale } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
@@ -1076,7 +1077,7 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean } = {}) {
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
@@ -1084,12 +1085,16 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
     if (cmd === 'provider_status') return providerReply();
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
+    if (cmd === 'chat_tools_enabled') return Promise.resolve(opts.chatTools ?? false);
+    if (cmd === 'provider_choice' && opts.provider) return Promise.resolve(opts.provider);
+    if (cmd === 'new_chat' && opts.newChatReject) return Promise.reject('boom');
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
     if (cmd === 'history_entry') {
       if (opts.openedReject) return Promise.reject('offline');
       const opened = opts.openedFor?.[args!.id!] ?? opts.opened;
       return opened instanceof Promise ? opened : Promise.resolve(opened);
     }
+    if (cmd === 'continue_history') return opts.continued ?? Promise.resolve(true);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') {
       if (opts.ask) return opts.ask;
@@ -1102,7 +1107,7 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
 }
 const historyEntryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'history_entry');
 const listHistoryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_history');
-const OPENED_OLD = { kind: 'answer', query: 'old q', answer: generated };
+const OPENED_OLD = { kind: 'dialogue', turns: [{ query: 'old q', answer: generated }] };
 
 async function openRecent(id: number) {
   await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
@@ -1241,7 +1246,7 @@ test('a new recorded answer clears the mark on the question that was opened', as
 
 test('an opened answer without citations opens cold and draws no source card', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'answer', query: 'old q', answer: emptyCitationsOnly } });
+  mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'dialogue', turns: [{ query: 'old q', answer: emptyCitationsOnly }] } });
   render(Launcher);
   await submit('first');
   await screen.findByTestId('card-centre');
@@ -1339,7 +1344,7 @@ test('an entry read that lands after a search has answered is dropped, not drawn
 
 test('two opens that resolve out of order: the later click wins', async () => {
   const NEWER = { id: 8, query: 'newer q', askedAt: 1_700_000_100 };
-  const NEWER_ANSWER = { kind: 'answer', query: 'newer q', answer: generated };
+  const NEWER_ANSWER = { kind: 'dialogue', turns: [{ query: 'newer q', answer: generated }] };
   let resolveFirst!: (v: unknown) => void;
   let resolveSecond!: (v: unknown) => void;
   mockRecents({
@@ -1365,4 +1370,271 @@ test('two opens that resolve out of order: the later click wins', async () => {
   expect(screen.getByTestId('query-echo').textContent).toBe('newer q');
   expect(screen.getByTestId('tree-history-8').getAttribute('aria-current')).toBe('true');
   expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+});
+
+// Task 8: the launcher draws a conversation. `chat_tools_enabled` is the «Tool
+// support» switch (ruling R4): off keeps today's one-turn launcher.
+const callsOf = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
+const echoes = () => screen.queryAllByTestId('query-echo').map((e) => e.textContent);
+async function askTwice(chatTools: boolean) {
+  mockRecents({ chatTools, asks: [generated, generatedOther] });
+  render(Launcher);
+  if (chatTools) await screen.findByTestId('new-chat');
+  else await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('preview-2');
+}
+
+test('with tool support on, two asks draw two turns in order, each with its own previews', async () => {
+  await askTwice(true);
+  expect(echoes()).toEqual(['first', 'second']);
+  expect(screen.getByTestId('preview-3')).toBeTruthy(); // the first turn's, still there
+  expect(screen.getByTestId('preview-2')).toBeTruthy();
+  expect(screen.getAllByTestId('card-centre')).toHaveLength(1);
+});
+
+test('a citation of the first turn opens the first turn\'s passage', async () => {
+  await askTwice(true);
+  await waitFor(() => expect(callsOf('source_around').at(-1)![1]).toMatchObject({ chunkId: 61 })); // the latest turn is selected
+  const before = callsOf('source_around').length;
+  await fireEvent.click(screen.getByTestId('preview-3'));
+  // The siblings in the same document load after the clicked one, so look at all the new calls.
+  await waitFor(() => expect(callsOf('source_around').slice(before).map((c) => c[1].chunkId)).toContain(42));
+  // ...and its own sibling in the same document (43), not the latest turn's citations.
+  await waitFor(() => expect(callsOf('source_around').slice(before).map((c) => c[1].chunkId)).toContain(43));
+});
+
+test('with tool support off there is no New chat button and the second ask replaces the first turn', async () => {
+  await askTwice(false);
+  expect(screen.queryByTestId('new-chat')).toBeNull();
+  expect(echoes()).toEqual(['second']);
+  expect(screen.queryByTestId('preview-3')).toBeNull();
+});
+
+test('with tool support off the first turn leaves the screen while the second ask is in flight', async () => {
+  mockRecents({ chatTools: false, asks: [generated] });
+  render(Launcher);
+  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  mockRecents({ chatTools: false, ask: new Promise(() => {}) });
+  await submit('second');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  expect(screen.queryByTestId('preview-3')).toBeNull();
+});
+
+test('New chat calls new_chat, empties the centre and leaves the search line alone', async () => {
+  await askTwice(true);
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  await fireEvent.input(box, { target: { value: 'a draft' } });
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
+  expect(echoes()).toEqual([]);
+  expect(screen.queryByTestId('preview-3')).toBeNull();
+  expect(screen.queryByTestId('preview-2')).toBeNull();
+  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(box.value).toBe('a draft');
+  // The next ask starts the new conversation: one turn, not three.
+  mockRecents({ chatTools: true, asks: [generated] });
+  await submit('third');
+  await screen.findByTestId('preview-3');
+  expect(echoes()).toEqual(['third']);
+});
+
+test('under Mnema with the switch on the launcher shows one turn and no New chat', async () => {
+  mockRecents({ chatTools: true, provider: 'mnema', asks: [generated, generatedOther] });
+  render(Launcher);
+  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('provider_choice')).toHaveLength(1));
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('preview-2');
+  expect(echoes()).toEqual(['second']);
+  expect(screen.queryByTestId('new-chat')).toBeNull();
+});
+
+test('New chat keeps the panels: the left one stays, the centre and right ones are empty', async () => {
+  await askTwice(true);
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(echoes()).toEqual([]));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(screen.getByTestId('card-results-empty')).toBeTruthy();
+  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+});
+
+test('a failed new_chat keeps the screen as it was', async () => {
+  mockRecents({ chatTools: true, newChatReject: true, asks: [generated] });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
+  await waitFor(() => expect(err).toHaveBeenCalled());
+  expect(echoes()).toEqual(['first']);
+  expect(screen.getByTestId('preview-3')).toBeTruthy();
+  err.mockRestore();
+});
+
+test('New chat is disabled while an ask is in flight', async () => {
+  mockRecents({ chatTools: true, ask: new Promise(() => {}) });
+  render(Launcher);
+  const button = (await screen.findByTestId('new-chat')) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  await submit('slow');
+  await waitFor(() => expect(askCalls()).toHaveLength(1));
+  expect(button.disabled).toBe(true);
+  await fireEvent.click(button);
+  expect(callsOf('new_chat')).toHaveLength(0);
+});
+
+test('the switch is read again when the window gains focus', async () => {
+  mockRecents({ chatTools: false });
+  render(Launcher);
+  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  expect(screen.queryByTestId('new-chat')).toBeNull();
+  mockRecents({ chatTools: true });
+  await fireEvent.focus(window);
+  await screen.findByTestId('new-chat');
+  expect(callsOf('chat_tools_enabled')).toHaveLength(2);
+});
+
+test('launcher-cold forgets the turns', async () => {
+  await askTwice(true);
+  fireCold();
+  await waitFor(() => expect(echoes()).toEqual([]));
+  mockRecents({ chatTools: true, asks: [generated] });
+  await submit('again');
+  await screen.findByTestId('preview-3');
+  expect(echoes()).toEqual(['again']);
+});
+
+test('opening a stored conversation draws every turn and the next ask adds a third', async () => {
+  const opened = { kind: 'dialogue', turns: [{ query: 'old q', answer: generated }, { query: 'old q2', answer: generatedOther }] };
+  mockRecents({ chatTools: true, opened, asks: [generated] });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('first'); // warm the launcher so Recents is reachable
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(echoes()).toEqual(['old q', 'old q2']));
+  mockRecents({ chatTools: true, opened, asks: [{ ...generatedOther }] });
+  await submit('third');
+  await waitFor(() => expect(echoes()).toEqual(['old q', 'old q2', 'third']));
+});
+
+test('a failed turn is drawn as the current one and goes after the next good answer', async () => {
+  const failed = { ...citationsOnly, why: { kind: 'noReply' } };
+  mockRecents({ chatTools: true, asks: [generated, failed, generatedOther] });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('citations-banner');
+  expect(screen.getByTestId('preview-3')).toBeTruthy(); // the good turn stays above it
+  await submit('third');
+  await screen.findByTestId('preview-2');
+  expect(screen.queryByTestId('citations-banner')).toBeNull();
+  expect(echoes()).toEqual(['first', 'third']);
+});
+
+test('a no-tool-use answer says so in the banner, in both languages', async () => {
+  const noTools = { ...citationsOnly, why: { kind: 'noToolUse' } };
+  try {
+    mockRecents({ chatTools: true, asks: [noTools] });
+    render(Launcher);
+    await submit('q');
+    const banner = await screen.findByTestId('citations-banner');
+    expect(banner.textContent).toContain('This model cannot continue a conversation. Choose another one or turn off Tool support.');
+    setLocale('uk');
+    await waitFor(() => expect(screen.getByTestId('citations-banner').textContent).toContain('Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».'));
+  } finally { setLocale('en'); }
+});
+
+// The backend session changes only for the open the screen draws, and every
+// call that changes it reaches the backend in the order the person acted.
+const continueCalls = () => invoke.mock.calls.filter((c) => c[0] === 'continue_history');
+const OLD8 = { id: 8, query: 'second q', askedAt: 1_700_000_100 };
+const OPENED_8 = { kind: 'dialogue', turns: [{ query: 'second q', answer: generatedOther }] };
+
+test('of two overlapping opens only the one drawn continues the backend session', async () => {
+  let slow!: (v: unknown) => void;
+  const first = new Promise((r) => { slow = r; });
+  mockRecents({ chatTools: true, asks: [generated], list: [OLD, OLD8], openedFor: { 7: first, 8: OPENED_8 } });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
+  await fireEvent.click(await screen.findByTestId('history-open-7'));
+  await fireEvent.click(await screen.findByTestId('history-open-8'));
+  await waitFor(() => expect(echoes()).toEqual(['second q']));
+  slow(OPENED_OLD); // the stale read lands after the newer open is drawn
+  await waitFor(() => expect(historyEntryCalls()).toHaveLength(2));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(continueCalls()).toEqual([['continue_history', { id: 8 }]]);
+  expect(echoes()).toEqual(['second q']);
+});
+
+test('an open that a submit superseded never continues the backend session', async () => {
+  let slow!: (v: unknown) => void;
+  const read = new Promise((r) => { slow = r; });
+  mockRecents({ chatTools: true, asks: [generated, generatedOther], opened: read });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(historyEntryCalls()).toHaveLength(1));
+  await submit('typed meanwhile');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  slow(OPENED_OLD);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(continueCalls()).toHaveLength(0);
+});
+
+test('an open continues the session before the next ask reaches the backend', async () => {
+  mockRecents({ chatTools: true, asks: [generated, generatedOther], opened: OPENED_OLD });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(echoes()).toEqual(['old q']));
+  await submit('next');
+  await waitFor(() => expect(askCalls()).toHaveLength(2));
+  const order = invoke.mock.calls.map((c) => c[0]).filter((c) => c === 'ask' || c === 'continue_history' || c === 'new_chat');
+  expect(order).toEqual(['ask', 'continue_history', 'ask']);
+});
+
+test('with conversations off an open does not touch the backend session', async () => {
+  mockRecents({ chatTools: false, asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  expect(continueCalls()).toHaveLength(0);
+});
+
+test('New chat waits for a continue that is still on its way to the backend', async () => {
+  let done!: (v: boolean) => void;
+  const continued = new Promise<boolean>((r) => { done = r; });
+  mockRecents({ chatTools: true, asks: [generated], opened: OPENED_OLD, continued });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('warm');
+  await screen.findByTestId('card-centre');
+  await openRecent(7);
+  await waitFor(() => expect(continueCalls()).toHaveLength(1));
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(callsOf('new_chat')).toHaveLength(0);
+  done(true);
+  await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
 });

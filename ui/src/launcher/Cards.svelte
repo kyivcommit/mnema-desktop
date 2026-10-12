@@ -5,18 +5,21 @@
   import Tree from './Tree.svelte';
   import type { Snippet } from 'svelte';
   import type { AskCitation, Hit } from '../lib/ipc';
-  import type { Heat, LauncherState } from './state';
+  import type { CardAnswer, Heat, LauncherState, Turn } from './state';
 
   // The prop is `state`; the LOCAL binding is renamed. Svelte reads `$state`
   // as a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { state: launcherState, query, left, right, heat, search, historyId = null, historyGen = 0, onOpenHistory }: {
+  let { state: launcherState, query, left, right, heat, search, historyId = null, historyGen = 0, onOpenHistory, turns = [] }: {
     state: LauncherState;
     query: string;
     left: boolean;
     right: boolean;
     heat: Heat;
+    // The conversation so far, oldest first; the answer in `state` joins it as the
+    // last card when it is not one of them (a failed turn).
+    turns?: Turn[];
     // Recents, forwarded to the tree unchanged (see `Tree.svelte`).
     historyId?: number | null;
     historyGen?: number;
@@ -86,28 +89,74 @@
   // below. A switch that
   // unmounted the tree would refetch it and shut every folder on the way back
   // on — C1 again, reached through a button.
-  const showTree = $derived(launcherState.kind !== 'idle');
+  // A hot launcher may be idle (after «New chat»): the left panel stays, the rest is empty.
+  const showTree = $derived(launcherState.kind !== 'idle' || heat === 'hot');
+
+  // Every turn drawn in the centre, oldest first, each keyed by its own answer
+  // so a turn already on screen is never remounted (and never loses its
+  // selection) when a later one arrives. The answer on screen that is not a turn
+  // (a failed one) comes last, with the echo as its question.
+  const items = $derived.by(() => {
+    const drawn = turns.map((t) => ({ answer: t.answer as CardAnswer, query: t.query }));
+    if (answerState !== null && !drawn.some((d) => d.answer === answerState.answer)) {
+      drawn.push({ answer: answerState.answer, query });
+    }
+    return drawn;
+  });
   const showSource = $derived(heat === 'hot' && right);
 
-  // What `Selection` reports up, tagged with the state it belongs to. Read by
-  // the tree ONLY — the tree lives outside the keyed block, so it cannot read
-  // the selection from the component that owns it.
+  // What `Selection` reports up, tagged with the answer it belongs to. Read by
+  // the tree and the source card, which live outside the keyed blocks and so
+  // cannot read the selection from the component that owns it.
   //
   // 🔴 The tag is the `{#key}`'s defence applied to the one copy that cannot be
-  // keyed, and it is C1's other half: `Selection` is destroyed by the `{#if}`
-  // above and never reports `null` on its way out, so a plain mirror would keep
-  // the previous answer's row marked for the whole length of the next ask now
-  // that the tree survives state D. A mark is trusted only while the exact state
-  // that produced it is still on screen.
+  // keyed: a `Selection` is destroyed by the `{#each}` below and never reports
+  // `null` on its way out, so a plain mirror would keep a vanished answer's row
+  // marked. A mark is trusted only while the answer that produced it is still
+  // on screen.
   //
   // ⚠️ `$state.raw`, not `$state`, and it is load-bearing: plain `$state` DEEP
-  // PROXIES whatever is assigned into it, so `reported.state` came back as a
-  // proxy OF `launcherState` and `===` was false forever — the tag would never
-  // match and the tree's mark would never appear at all. Measured, not guessed.
-  let reported = $state.raw<{ state: LauncherState; value: AskCitation | Hit | null } | null>(null);
-  const selected = $derived(
-    reported !== null && reported.state === launcherState ? reported.value : null,
+  // PROXIES whatever is assigned into it, so `===` against the answer is false
+  // forever and the mark would never appear at all. Measured, not guessed.
+  let reported = $state.raw<{ answer: CardAnswer; value: AskCitation | Hit | null } | null>(null);
+  const selection = $derived(
+    reported !== null && reported.value !== null && items.some((d) => d.answer === reported!.answer)
+      ? { answer: reported.answer, value: reported.value }
+      : null,
   );
+  const selected = $derived(selection?.value ?? null);
+
+  // 🔴 One `<section>`, two names. The centre card is one region, but it is not
+  // one FACT: in state E it announced itself by the answer card's name, in both
+  // locales, while the first sentence inside it said generation is unavailable.
+  // That is the window stating what is not so — Ruling AF's failure — moved
+  // down into the layer
+  // where a person using a screen reader cannot see the contradiction and
+  // correct for it. Only the NAME switches; the element, its `card-centre`
+  // testid and the `{#key}` above it are untouched.
+  //
+  // The label lives with the `<section>`, which belongs to this component, and splitting one region's identity
+  // across two files would duplicate the `void $locale` pattern a third time —
+  // the drift Rulings AG and AJ exist to stop.
+  //
+  // 🔴 Exhaustive, not a ternary, and for Ruling W's own reason one card over
+  // (`Source.svelte`'s `freshnessText`/`goneText`): a default branch is how a
+  // wrong verdict gets drawn for a variant nobody added a case for. A third
+  // member of `CardAnswer` would compile against `x ? a : b`, render an empty
+  // card — the markup below has `{#if}/{:else if}` and no `else` — and announce
+  // it under the passages name. No test can prove this, because the third
+  // member does not exist to test with; the proof is the compiler's. Add one to
+  // `CardAnswer` and this line stops compiling.
+  function labelFor(a: CardAnswer): string {
+    switch (a.kind) {
+      case 'generated': return t('card_answer');
+      case 'citationsOnly': return t('card_passages');
+    }
+    const unreachable: never = a;
+    return unreachable;
+  }
+
+  const centreLabel = $derived.by(() => { void $locale; return items.length === 0 ? '' : labelFor(items[items.length - 1].answer); });
 
   const treeLabel = $derived.by(() => { void $locale; return t('card_tree'); });
   const sourceLabel = $derived.by(() => { void $locale; return t('card_source'); });
@@ -133,18 +182,21 @@
      new answer never remounts the input. -->
 <div class="col-centre">
   {@render search?.()}
-  {#if answerState !== null}
-    <!-- Only the answer card is keyed, and the key is on the component that
-         owns the selection (Ruling AC) — see `Selection.svelte` for why a key
-         around the cards alone resets nothing. The key is the STATE object, so
-         a generated answer followed by a citations-only one recreates the
-         selection just as two generated answers do. -->
-    {#key answerState}
-      <Selection
-        answer={answerState.answer}
-        {query}
-        onSelected={(value) => (reported = { state: launcherState, value })} />
-    {/key}
+  {#if items.length > 0}
+    <!-- One card for the whole conversation. Each turn is keyed by its own
+         answer, on the component that owns the selection (Ruling AC) — see
+         `Selection.svelte` for why a key around the cards alone resets
+         nothing. A new answer is a new object, so a generated answer followed by
+         a citations-only one recreates the selection just as two generated
+         answers do. -->
+    <section class="float results" data-testid="card-centre" aria-label={centreLabel}>
+      {#each items as item (item.answer)}
+        <Selection
+          answer={item.answer}
+          query={item.query}
+          onSelected={(value) => (reported = { answer: item.answer, value })} />
+      {/each}
+    </section>
   {:else if heat === 'hot'}
     <!-- A column that is on screen with nothing to put in it is an opaque empty
          panel, not a hole in the window (owner, 2026-09-25): the window is as
@@ -155,7 +207,7 @@
 </div>
 
 {#if showSource}
-  {#if answerState !== null && selected !== null}
+  {#if selection !== null}
     <!-- §7: the source card needs a selection, and `Source` takes a
          non-nullable one, so this guard is what the type asks for as well as
          what the mockup shows. The answer's first card is preselected (it is
@@ -164,9 +216,9 @@
          and the key recreates `Source` for each answer. `siblings` is the whole
          citation list: `Source` drops the clicked one and everything in another
          document itself (Decision 4, Ruling U). -->
-    {#key answerState}
+    {#key selection.answer}
       <section class="float doc" data-testid="card-source" aria-label={sourceLabel}>
-        <Source {selected} siblings={answerState.answer.citations} />
+        <Source selected={selection.value!} siblings={selection.answer.citations} />
       </section>
     {/key}
   {:else}

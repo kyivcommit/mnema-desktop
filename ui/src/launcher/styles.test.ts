@@ -32,6 +32,7 @@ beforeEach(() => {
     if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
     if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
+    if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
     throw new Error(`unexpected command ${cmd}`);
   });
   for (const path of ['base.css', 'launcher.css']) {

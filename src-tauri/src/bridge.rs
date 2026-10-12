@@ -1292,6 +1292,17 @@ pub enum RefusalKind {
     EmptyCompletion,
 }
 
+/// Where a generated answer's sources came from: a search made for this turn,
+/// or the conversation so far. Old stored answers have no `via` and were
+/// searches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Via {
+    #[default]
+    Search,
+    Conversation,
+}
+
 /// What [`ask`] answers with. Different states are different variants, never a
 /// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
 /// variant carries the arm reports, because retrieval is identical across them.
@@ -1301,6 +1312,8 @@ pub enum AskAnswer {
     Generated {
         answer: String,
         citations: Vec<AskCitation>,
+        #[serde(default)]
+        via: Via,
         text: TextArmReport,
         content: ContentArmReport,
     },
@@ -1355,6 +1368,9 @@ pub enum NoAnswer {
     /// and the load had not finished; it goes on in the background. Not
     /// `Failed`: nothing failed, and the launcher says so in its own words.
     LocalLoading,
+    /// The chat model has no endpoint that takes tools, so a follow-up cannot
+    /// be asked of it. The passages of the last search stay.
+    NoToolUse,
 }
 
 impl NoAnswer {
@@ -1363,6 +1379,7 @@ impl NoAnswer {
         match e {
             mnema_provider::Error::Transport(_) => Self::Offline,
             mnema_provider::Error::NoReply(_) => Self::NoReply,
+            mnema_provider::Error::NoToolEndpoint => Self::NoToolUse,
             other => Self::Failed {
                 reason: other.to_string(),
             },
@@ -1443,13 +1460,22 @@ const MAX_ASK_QUERY: usize = 2048;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
-    let answer = answer_question(&state, &query)?;
-    record_answer(&state, &query, &answer);
+    let mut taken = None;
+    let answer = answer_question(&state, &query, &mut taken)?;
+    record_answer(&state, &query, &answer, taken);
     Ok(answer)
 }
 
 /// The answer [`ask`] gives, before anything is kept of it.
-fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer, Error> {
+///
+/// `taken` is set to the session's turns when the session took this one, so
+/// the history row is written from exactly that list; otherwise the turn
+/// stands alone.
+fn answer_question(
+    state: &State<'_, AppState>,
+    query: &str,
+    taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
+) -> Result<AskAnswer, Error> {
     if query.trim().is_empty() {
         return Err(Error::QueryBlank);
     }
@@ -1465,6 +1491,24 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     // Read once: retrieval, readiness, voice and timeout all answer for the
     // same provider.
     let choice = state.provider_choice();
+    // The conversation is off under Mnema (the local model has no tool call)
+    // and with the switch off; either way each question stands alone, and a
+    // session left from before is dropped.
+    let dialogue = dialogue_enabled(state, choice);
+    if !dialogue {
+        state.dialogue.clear();
+    }
+    let (generation, turns) = state.dialogue.snapshot();
+    // Turns nobody asked a model about are in the session for the history row
+    // only: until a generated one exists the question searches first.
+    if dialogue
+        && turns
+            .iter()
+            .any(|t| matches!(t.answer, AskAnswer::Generated { .. }))
+    {
+        return follow_up(state, query, arms, choice, generation, &turns, taken);
+    }
+    let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
 
     // Under Mnema the chat model is fixed, so readiness would only ask for the
@@ -1488,12 +1532,16 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
             });
         }
         ChatReadiness::NoModel | ChatReadiness::NoKey | ChatReadiness::KeyUnreadable => {
-            return Ok(AskAnswer::CitationsOnly {
-                citations: hits,
+            let answer = AskAnswer::CitationsOnly {
+                citations: hits.clone(),
                 why: NoAnswer::NotAsked,
                 text,
                 content,
-            });
+            };
+            // A recorded turn belongs to the session, or the next write of
+            // the row would drop it.
+            *taken = remember_turn(state, remember, query, &answer, Some(hits));
+            return Ok(answer);
         }
     };
 
@@ -1524,28 +1572,37 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     // A chat call that fails keeps what retrieval found: the passages are on
     // this machine, and only the prose was the provider's to give (D171,
     // owner's ruling 2026-10-02).
-    let generated = match mnema_rag::answer(
-        &endpoint.base,
-        &endpoint.token,
-        &model,
-        query,
-        &passages,
-        state.voice_as(choice, query),
-        choice.chat_timeout(),
-    ) {
+    let generated = if remember.is_some() {
+        let messages = mnema_rag::build_dialogue(
+            &[],
+            query,
+            Some(&passages),
+            &mnema_rag::profile(&model),
+            question_lang(query),
+        );
+        mnema_provider::complete_turn(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            &messages,
+            false,
+            choice.chat_timeout(),
+        )
+        .map(|reply| text_answer(reply, passages.len()))
+    } else {
+        mnema_rag::answer(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            query,
+            &passages,
+            state.voice_as(choice, query),
+            choice.chat_timeout(),
+        )
+    };
+    let generated = match generated {
         Ok(generated) => generated,
-        Err(e) => {
-            let why = NoAnswer::from_chat(&e);
-            if why.about_the_network() {
-                state.forget_provider_status();
-            }
-            return Ok(AskAnswer::CitationsOnly {
-                citations: hits,
-                why,
-                text,
-                content,
-            });
-        }
+        Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
     };
     match generated {
         None => Ok(AskAnswer::Refused {
@@ -1554,34 +1611,256 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
             content,
         }),
         Some(a) => {
-            let citations = a
-                .cited
-                .iter()
-                .map(|&n| {
-                    // resolve_anchors guarantees 1 <= n <= passages.len() ==
-                    // hits.len(), so hits[n - 1] is always in range (spec §6).
-                    let h = &hits[n - 1];
-                    AskCitation {
-                        anchor: n,
-                        chunk_id: h.chunk_id,
-                        text: h.text.clone(),
-                        relative_path: h.relative_path.clone(),
-                        section_title: h.section_title.clone(),
-                        coordinate: h.coordinate.clone(),
-                        document_id: h.document_id.clone(),
-                        ord: h.ord,
-                        root_id: h.root_id,
-                    }
-                })
-                .collect();
-            Ok(AskAnswer::Generated {
-                answer: a.text,
-                citations,
-                text,
-                content,
-            })
+            let answer = generated_answer(a, &hits, Via::Search, text, content);
+            *taken = remember_turn(state, remember, query, &answer, Some(hits));
+            Ok(answer)
         }
     }
+}
+
+/// A question after the first of a session: the model sees the conversation
+/// and may call `search` itself. Anchors resolve against the latest search,
+/// whether this turn made it or an earlier one did.
+fn follow_up(
+    state: &State<'_, AppState>,
+    query: &str,
+    arms: Arms,
+    choice: crate::provider::ProviderChoice,
+    generation: u64,
+    turns: &[crate::dialogue::SessionTurn],
+    taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
+) -> Result<AskAnswer, Error> {
+    let (mut hits, mut text, mut content) = match turns.iter().rfind(|t| t.hits.is_some()) {
+        Some(t) => {
+            let (text, content) = match &t.answer {
+                AskAnswer::Generated { text, content, .. }
+                | AskAnswer::CitationsOnly { text, content, .. }
+                | AskAnswer::Refused { text, content, .. } => (text.clone(), content.clone()),
+            };
+            (t.hits.clone().unwrap_or_default(), text, content)
+        }
+        None => (Vec::new(), TextArmReport::Off, ContentArmReport::Off),
+    };
+    let (model, endpoint) = match chat_readiness(state, choice)? {
+        ChatReadiness::Ready { model, endpoint } => (model, endpoint),
+        other => {
+            let why = match other {
+                ChatReadiness::Unavailable(why) => {
+                    state.forget_provider_status();
+                    why
+                }
+                _ => NoAnswer::NotAsked,
+            };
+            let answer = AskAnswer::CitationsOnly {
+                citations: hits,
+                why,
+                text,
+                content,
+            };
+            if matches!(
+                answer,
+                AskAnswer::CitationsOnly {
+                    why: NoAnswer::NotAsked,
+                    ..
+                }
+            ) {
+                *taken = remember_turn(state, Some(generation), query, &answer, None);
+            }
+            return Ok(answer);
+        }
+    };
+    // Only generated turns enter the model's context; the others are in the
+    // session for the history row.
+    let past: Vec<mnema_rag::Turn> = turns
+        .iter()
+        .filter_map(|t| match &t.answer {
+            AskAnswer::Generated { answer, .. } => Some((t, answer)),
+            _ => None,
+        })
+        .map(|(t, answer)| mnema_rag::Turn {
+            question: t.query.clone(),
+            answer: answer.clone(),
+            sources: t
+                .hits
+                .as_ref()
+                .map(|h| h.iter().map(passage_from_hit).collect()),
+        })
+        .collect();
+    let mut messages = mnema_rag::build_dialogue(
+        &past,
+        query,
+        None,
+        &mnema_rag::profile(&model),
+        question_lang(query),
+    );
+    let chat = |messages: &[mnema_provider::Message], offer_search| {
+        mnema_provider::complete_turn(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            messages,
+            offer_search,
+            choice.chat_timeout(),
+        )
+    };
+    let mut via = Via::Conversation;
+    let mut found = None;
+    let mut reply = match chat(&messages, true) {
+        Ok(reply) => reply,
+        Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
+    };
+    if let mnema_provider::Reply::Search(call) = &reply {
+        // The model's query is held to the limit a typed one is: a blank or
+        // oversized one is a search that found nothing, and costs no embedding.
+        let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
+        let (new_hits, new_text, new_content, unreachable) = if usable {
+            retrieve(state, &call.query, arms, ASK_TOP_K, choice)?
+        } else {
+            (Vec::new(), text.clone(), content.clone(), None)
+        };
+        if let Some(why) = unreachable {
+            state.forget_provider_status();
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why,
+                text,
+                content,
+            });
+        }
+        let passages: Vec<mnema_rag::Passage> = new_hits.iter().map(passage_from_hit).collect();
+        mnema_rag::with_search_result(&mut messages, call, &passages);
+        // An empty search leaves the earlier one the latest.
+        if !new_hits.is_empty() {
+            hits = new_hits.clone();
+            text = new_text;
+            content = new_content;
+            via = Via::Search;
+            found = Some(new_hits);
+        }
+        reply = match chat(&messages, false) {
+            Ok(reply) => reply,
+            Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
+        };
+    }
+    Ok(match text_answer(reply, hits.len()) {
+        None => AskAnswer::Refused {
+            kind: RefusalKind::EmptyCompletion,
+            text,
+            content,
+        },
+        Some(a) => {
+            let answer = generated_answer(a, &hits, via, text, content);
+            *taken = remember_turn(state, Some(generation), query, &answer, found);
+            answer
+        }
+    })
+}
+
+/// Whether questions join a conversation: not under Mnema (the local model
+/// has no tool call), and only with the tool-support switch on.
+fn dialogue_enabled(state: &State<'_, AppState>, choice: crate::provider::ProviderChoice) -> bool {
+    choice != crate::provider::ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir())
+}
+
+fn question_lang(query: &str) -> mnema_rag::Lang {
+    mnema_rag::detect(query, None, sys_locale::get_locale().as_deref())
+}
+
+/// The model's prose with its anchors resolved against `n` passages; `None`
+/// for a blank reply (a search call where text was expected counts as one).
+fn text_answer(reply: mnema_provider::Reply, n: usize) -> Option<mnema_rag::Answer> {
+    let raw = match reply {
+        mnema_provider::Reply::Text(raw) => raw,
+        mnema_provider::Reply::Search(_) => String::new(),
+    };
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let (text, cited) = mnema_rag::resolve_anchors(&raw, n);
+    Some(mnema_rag::Answer { text, cited })
+}
+
+/// The passages kept and the reason, for a chat call that failed (D171).
+fn chat_failed(
+    state: &State<'_, AppState>,
+    e: &mnema_provider::Error,
+    hits: Vec<Hit>,
+    text: TextArmReport,
+    content: ContentArmReport,
+) -> AskAnswer {
+    let why = NoAnswer::from_chat(e);
+    if why.about_the_network() {
+        state.forget_provider_status();
+    }
+    AskAnswer::CitationsOnly {
+        citations: hits,
+        why,
+        text,
+        content,
+    }
+}
+
+fn generated_answer(
+    a: mnema_rag::Answer,
+    hits: &[Hit],
+    via: Via,
+    text: TextArmReport,
+    content: ContentArmReport,
+) -> AskAnswer {
+    let citations = a
+        .cited
+        .iter()
+        .map(|&n| {
+            // resolve_anchors guarantees 1 <= n <= hits.len() (spec §6).
+            let h = &hits[n - 1];
+            AskCitation {
+                anchor: n,
+                chunk_id: h.chunk_id,
+                text: h.text.clone(),
+                relative_path: h.relative_path.clone(),
+                section_title: h.section_title.clone(),
+                coordinate: h.coordinate.clone(),
+                document_id: h.document_id.clone(),
+                ord: h.ord,
+                root_id: h.root_id,
+            }
+        })
+        .collect();
+    AskAnswer::Generated {
+        answer: a.text,
+        citations,
+        via,
+        text,
+        content,
+    }
+}
+
+/// Adds the answered turn to the session, if there is one and it is still the
+/// session the question started from; the answer is given either way.
+fn remember_turn(
+    state: &State<'_, AppState>,
+    generation: Option<u64>,
+    query: &str,
+    answer: &AskAnswer,
+    hits: Option<Vec<Hit>>,
+) -> Option<Vec<crate::dialogue::SessionTurn>> {
+    generation.and_then(|generation| {
+        state.dialogue.push_if(
+            generation,
+            crate::dialogue::SessionTurn {
+                query: query.to_string(),
+                answer: answer.clone(),
+                hits,
+                stored: None,
+            },
+        )
+    })
+}
+
+/// «New chat»: the next question starts a session of its own.
+#[tauri::command]
+pub fn new_chat(state: State<'_, AppState>) {
+    state.dialogue.clear();
 }
 
 /// Keeps a question that got an answer, so the launcher's history can reopen
@@ -1591,7 +1870,12 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
 ///
 /// A failed write is logged and then ignored: the person asked and must still
 /// get the answer, and losing a history row is the lesser harm.
-fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
+fn record_answer(
+    state: &State<'_, AppState>,
+    query: &str,
+    answer: &AskAnswer,
+    taken: Option<Vec<crate::dialogue::SessionTurn>>,
+) {
     // Only a question nobody asked a model keeps its citations: any other
     // reason is a failure, and a failure must not replace a stored answer.
     if !matches!(
@@ -1604,16 +1888,136 @@ fn record_answer(state: &State<'_, AppState>, query: &str, answer: &AskAnswer) {
     ) {
         return;
     }
-    let json = match serde_json::to_string(answer) {
+    // The row is the whole conversation, keyed by its first question. A turn
+    // the session did not take (the switch is off, or the session changed
+    // while it was answered) stands alone.
+    let turns: Vec<StoredTurn> = match taken {
+        Some(session) => session
+            .into_iter()
+            .map(|t| StoredTurn {
+                query: t.query,
+                answer: t.stored.unwrap_or(t.answer),
+            })
+            .collect(),
+        None => vec![StoredTurn {
+            query: query.to_string(),
+            answer: answer.clone(),
+        }],
+    };
+    let Some(key) = turns.first().map(|t| t.query.clone()) else {
+        return;
+    };
+    let json = match serde_json::to_string(&serde_json::json!({ "turns": turns })) {
         Ok(json) => json,
         Err(e) => {
             eprintln!("mnema: could not record the answer in the history: {e}");
             return;
         }
     };
-    if let Err(e) = state.with_index(|db| db.history_record(query, &json)) {
+    if let Err(e) = state.with_index(|db| db.history_record(&key, &json)) {
         eprintln!("mnema: could not record the answer in the history: {e}");
     }
+}
+
+/// One question and its answer inside a stored conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTurn {
+    pub query: String,
+    pub answer: AskAnswer,
+}
+
+/// A history row's JSON: a conversation, or the single answer rows had before
+/// conversations (opened as a conversation of one turn).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stored {
+    Dialogue { turns: Vec<StoredTurn> },
+    Single(AskAnswer),
+}
+
+/// The session an opened conversation continues from. Only the last generated
+/// turn carries sources — the passages it cited, renumbered 1..n with its
+/// answer — which are all a later turn can cite.
+fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
+    let last_generated = turns
+        .iter()
+        .rposition(|t| matches!(t.answer, AskAnswer::Generated { .. }));
+    turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (answer, hits, stored) = match (&t.answer, Some(i) == last_generated) {
+                (
+                    AskAnswer::Generated {
+                        answer,
+                        citations,
+                        via,
+                        text,
+                        content,
+                    },
+                    true,
+                ) => {
+                    let mut cited: Vec<&AskCitation> = citations.iter().collect();
+                    cited.sort_by_key(|c| c.anchor);
+                    let order: Vec<usize> = cited.iter().map(|c| c.anchor).collect();
+                    let hits: Vec<Hit> = cited
+                        .iter()
+                        .map(|&c| {
+                            let AskCitation {
+                                chunk_id,
+                                text,
+                                relative_path,
+                                section_title,
+                                coordinate,
+                                document_id,
+                                ord,
+                                root_id,
+                                ..
+                            } = c.clone();
+                            Hit {
+                                chunk_id,
+                                text,
+                                relative_path,
+                                section_title,
+                                coordinate,
+                                document_id,
+                                ord,
+                                root_id,
+                            }
+                        })
+                        .collect();
+                    let renumbered = citations
+                        .iter()
+                        .map(|c| AskCitation {
+                            anchor: order
+                                .iter()
+                                .position(|&o| o == c.anchor)
+                                .map_or(0, |p| p + 1),
+                            ..c.clone()
+                        })
+                        .collect();
+                    (
+                        AskAnswer::Generated {
+                            answer: mnema_rag::renumber_anchors(answer, &order),
+                            citations: renumbered,
+                            via: *via,
+                            text: text.clone(),
+                            content: content.clone(),
+                        },
+                        Some(hits),
+                        Some(t.answer.clone()),
+                    )
+                }
+                (answer, _) => (answer.clone(), None, None),
+            };
+            crate::dialogue::SessionTurn {
+                query: t.query.clone(),
+                answer,
+                hits,
+                stored,
+            }
+        })
+        .collect()
 }
 
 /// One row of the launcher's history: a question, without its answer.
@@ -1630,7 +2034,7 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum HistoryOpen {
-    Answer { query: String, answer: AskAnswer },
+    Dialogue { turns: Vec<StoredTurn> },
     Unreadable,
     Gone,
 }
@@ -1649,19 +2053,54 @@ pub fn list_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, Err
         .collect())
 }
 
-/// One entry's query and the answer that was given, as it was given.
-#[tauri::command(async)]
-pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen, Error> {
+/// An entry's turns, or why it has none: `Gone` for an id no longer in the
+/// history, `Unreadable` for a row that does not parse or holds no turn.
+fn history_turns(
+    state: &State<'_, AppState>,
+    id: i64,
+) -> Result<Result<Vec<StoredTurn>, HistoryOpen>, Error> {
     let Some((query, stored)) = state.with_index(|db| db.history_answer(id))? else {
-        return Ok(HistoryOpen::Gone);
+        return Ok(Err(HistoryOpen::Gone));
     };
-    Ok(match serde_json::from_str::<AskAnswer>(&stored) {
-        Ok(answer) => HistoryOpen::Answer { query, answer },
+    let turns = match serde_json::from_str::<Stored>(&stored) {
+        Ok(Stored::Dialogue { turns }) => turns,
+        Ok(Stored::Single(answer)) => vec![StoredTurn { query, answer }],
         Err(e) => {
             eprintln!("mnema: history entry {id} does not parse: {e}");
-            HistoryOpen::Unreadable
+            return Ok(Err(HistoryOpen::Unreadable));
         }
+    };
+    if turns.is_empty() {
+        eprintln!("mnema: history entry {id} holds no turn");
+        return Ok(Err(HistoryOpen::Unreadable));
+    }
+    Ok(Ok(turns))
+}
+
+/// One entry's query and the answer that was given, as it was given. Reads
+/// only: the session changes in `continue_history`, once the window knows
+/// the open is still the one it draws.
+#[tauri::command(async)]
+pub fn history_entry(state: State<'_, AppState>, id: i64) -> Result<HistoryOpen, Error> {
+    Ok(match history_turns(&state, id)? {
+        Ok(turns) => HistoryOpen::Dialogue { turns },
+        Err(open) => open,
     })
+}
+
+/// Makes the opened entry the conversation a next question continues. `false`
+/// when the entry is gone, unreadable or empty, or conversations are off:
+/// the session is then left as it was.
+#[tauri::command(async)]
+pub fn continue_history(state: State<'_, AppState>, id: i64) -> Result<bool, Error> {
+    let Ok(turns) = history_turns(&state, id)? else {
+        return Ok(false);
+    };
+    if !dialogue_enabled(&state, state.provider_choice()) {
+        return Ok(false);
+    }
+    state.dialogue.replace(session_from(&turns));
+    Ok(true)
 }
 
 /// Removes one entry. An id that is not there is not an error: the window may
@@ -1829,6 +2268,43 @@ pub fn cancel_job(state: State<'_, AppState>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_source_of_an_answer_has_a_wire_name_and_an_old_record_was_a_search() {
+        use serde_json::json;
+        let generated = |via: Via| {
+            serde_json::to_value(AskAnswer::Generated {
+                answer: "a".into(),
+                citations: vec![],
+                via,
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            })
+            .unwrap()
+        };
+        assert_eq!(generated(Via::Search)["via"], json!("search"));
+        assert_eq!(generated(Via::Conversation)["via"], json!("conversation"));
+        let mut old = generated(Via::Conversation);
+        old.as_object_mut().unwrap().remove("via");
+        match serde_json::from_value::<AskAnswer>(old).unwrap() {
+            AskAnswer::Generated { via, .. } => assert_eq!(via, Via::Search),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_model_without_tools_is_named_and_is_not_about_the_network() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(NoAnswer::NoToolUse).unwrap(),
+            json!({ "kind": "noToolUse" })
+        );
+        assert_eq!(
+            NoAnswer::from_chat(&mnema_provider::Error::NoToolEndpoint),
+            NoAnswer::NoToolUse
+        );
+        assert!(!NoAnswer::NoToolUse.about_the_network());
+    }
+
     use super::*;
 
     /// Every discriminant the window sees has its camel-case spelling pinned
@@ -1975,6 +2451,7 @@ mod tests {
         let generated = AskAnswer::Generated {
             answer: "a".into(),
             citations: vec![],
+            via: Via::Search,
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };

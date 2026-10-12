@@ -65,10 +65,11 @@ export type NoAnswer =
   | { kind: 'noReply' }
   | { kind: 'embeddingNoReply' }
   | { kind: 'failed'; reason: string }
-  | { kind: 'localLoading' };
+  | { kind: 'localLoading' }
+  | { kind: 'noToolUse' };
 
 export type AskAnswer =
-  | { kind: 'generated'; answer: string; citations: AskCitation[]; text: TextArmReport; content: ContentArmReport }
+  | { kind: 'generated'; answer: string; citations: AskCitation[]; via: 'search' | 'conversation'; text: TextArmReport; content: ContentArmReport }
   | { kind: 'citationsOnly'; citations: Hit[]; why: NoAnswer; text: TextArmReport; content: ContentArmReport }
   | { kind: 'refused'; reason: Refusal; text: TextArmReport; content: ContentArmReport };
 
@@ -84,8 +85,11 @@ export type HistoryEntry = { id: number; query: string; askedAt: number };
 
 // What opening an entry answers with (`bridge.rs` `HistoryOpen`): a typed reply,
 // not an error, so the window branches on `kind` rather than on a message.
+// One question and its answer inside a stored conversation (`bridge.rs` `StoredTurn`).
+export type StoredTurn = { query: string; answer: AskAnswer };
+
 export type HistoryOpen =
-  | { kind: 'answer'; query: string; answer: AskAnswer }
+  | { kind: 'dialogue'; turns: StoredTurn[] }
   | { kind: 'unreadable' }
   | { kind: 'gone' };
 
@@ -214,6 +218,8 @@ export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const listHistory = () => invoke<HistoryEntry[]>('list_history');
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
+// Makes an opened entry the conversation the next question continues; false when it cannot be.
+export const continueHistory = (id: number) => invoke<boolean>('continue_history', { id });
 export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id });
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
 // The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes
@@ -404,7 +410,8 @@ export type ModelRefusal =
   | { kind: 'noStatedOutputModalities' }
   | { kind: 'noTextOutput' }
   | { kind: 'batchOnly' }
-  | { kind: 'router' };
+  | { kind: 'router' }
+  | { kind: 'noToolUse' };
 
 export type ModelEntry = {
   id: string;
@@ -415,6 +422,8 @@ export type ModelEntry = {
   /** One output token (`pricing.completion`). */
   outputPrice: Price;
   refusal: ModelRefusal | null;
+  /** The model accepts tools (`supported_parameters`). */
+  tools: boolean;
 };
 
 // `catalogue.rs:293-304`: three states on purpose, not folded together — see
@@ -927,6 +936,13 @@ export const setAutostart = (enabled: boolean) =>
 // fractional number (the command would fail to deserialise it). Answers the
 // stored value.
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
+
+// The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
+// the chat list to models that take tools. `setChatTools` answers the stored value.
+export const chatTools = () => invoke<boolean>('chat_tools_enabled');
+// Starts a new conversation: the backend forgets the session (`new_chat`).
+export const newChat = () => invoke<void>('new_chat');
+export const setChatTools = (on: boolean) => invoke<boolean>('set_chat_tools', { on });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is

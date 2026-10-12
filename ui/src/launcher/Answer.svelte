@@ -21,6 +21,8 @@
 
   // `known` must come from the citations' own anchor values (Decision 5) —
   // an anchor number that has no matching citation stays literal text.
+  const viaText = $derived.by(() => { void $locale; return t(answer.via === 'conversation' ? 'answer_via_conversation' : 'answer_via_search'); });
+
   const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
   const segments = $derived(splitAnchors(answer.answer, known));
 
@@ -47,6 +49,7 @@
   <div class="umsg" data-testid="query-echo">{query}</div>
 
   <h3>{answerHeading}</h3>
+  <span class="via" data-testid="answer-via">{viaText}</span>
   <p data-testid="answer-body">{#each segments as segment}{#if segment.kind === 'text'}{segment.text}{:else}<button type="button" onclick={() => onSelect(citationFor(segment.n))}>[{segment.n}]</button>{/if}{/each}</p>
 
   <h3>{citationsHeading}</h3>

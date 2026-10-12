@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
-    modelSettings, setKey, forgetKey, providerModels, setChatModel,
+    modelSettings, setKey, forgetKey, providerModels, setChatModel, chatTools, setChatTools,
     setEmbeddingModel, jobStatus,
     type ModelSettings, type KeyRemoval, type Catalogue,
     type ModelEntry, type ModelRefusal, type Price, type UnreadableRecord,
@@ -166,6 +166,7 @@
     // an unhandled promise rejection.
     refresh().catch(() => {});
     void loadCatalogue('embedding');
+    chatTools().then((on) => (toolsOn = on), () => {});
     // The index is asked again whenever a scan ends, because an ending is the
     // one moment the counts `degraded` is read from can have changed. The
     // listener that used to do this belonged to a channel this component
@@ -272,6 +273,7 @@
     keyGroupEl?.querySelector<HTMLElement>('input, button')?.focus();
   }
 
+  const chatToolsLabel = $derived.by(() => { void $locale; return t('models_chat_tools'); });
   const providerLabel = $derived.by(() => { void $locale; return t('models_provider_label'); });
   // The one guard on this screen no test can tell from its absence: the
   // provider name is the same string in both locales — a brand, not a
@@ -359,6 +361,19 @@
       if (seq !== catalogueSeq[role]) return;
       catalogueErrors = { ...catalogueErrors, [role]: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  let toolsOn = $state(true);
+  async function toggleTools(e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    try {
+      toolsOn = await setChatTools(!toolsOn);
+    } catch (err) {
+      console.error('set_chat_tools failed', err);
+      box.checked = toolsOn; // unchanged state does not re-render: put the native box back
+      return;
+    }
+    await loadCatalogue('chat');
   }
 
   function selectTab(role: Tab) {
@@ -566,6 +581,8 @@
         return t('models_hidden_batch_only', { count });
       case 'router':
         return t('models_hidden_router', { count });
+      case 'noToolUse':
+        return t('models_hidden_no_tool_use', { count });
       default: {
         const exhaustive: never = r;
         throw new Error(`unhandled model refusal kind: ${(exhaustive as { kind: string }).kind}`);
@@ -1195,7 +1212,7 @@
 </div>
 
 <div class="tabpanel">
-{#if activeCatalogueError}
+{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
   {#if unreadableSentence}<p data-testid="model-catalogue-unreadable">{unreadableSentence}</p>{/if}

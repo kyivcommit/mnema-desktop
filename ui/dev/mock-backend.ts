@@ -69,6 +69,7 @@ function initialState(scenario: string) {
     theme: 'system' as ThemeChoice,
     locale: 'auto' as LocaleChoice,
     nextRootId: 100,
+    chatTools: true,
   };
 }
 
@@ -80,7 +81,7 @@ const catalogue = (role: ModelRole): Catalogue => {
   const usd = (perMillion: number) => ({ kind: 'known' as const, amount: perMillion / 1e6 });
   const ok = (id: string, price: number, out = 0): Catalogue['entries'][number] => ({
     id, name: id.split('/')[1], inputLimit: { kind: 'known', tokens: 8192 },
-    price: usd(price), outputPrice: usd(out), refusal: null,
+    price: usd(price), outputPrice: usd(out), refusal: null, tools: false,
   });
   const refused = (id: string, refusal: NonNullable<Catalogue['entries'][number]['refusal']>) =>
     ({ ...ok(id, 0), refusal });
@@ -267,6 +268,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
     },
+    chat_tools_enabled: () => s.chatTools,
+    new_chat: () => {},
+    set_chat_tools: (a) => (s.chatTools = a.on as boolean),
     provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
       : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
       : { kind: 'ok' },
@@ -292,8 +296,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     list_history: () => s.history.map(({ id, query, askedAt }) => ({ id, query, askedAt })),
     history_entry: (a) => {
       const hit = s.history.find((h) => h.id === a.id);
-      return hit ? { kind: 'answer', query: hit.query, answer: hit.answer } : { kind: 'gone' };
+      return hit ? { kind: 'dialogue', turns: [{ query: hit.query, answer: hit.answer }] } : { kind: 'gone' };
     },
+    continue_history: (a) => s.history.some((h) => h.id === a.id),
     delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
     source_around: () => excerptSpanA,
 

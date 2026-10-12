@@ -645,6 +645,27 @@ pub fn set_autostart(
     Ok(read_autostart(&state))
 }
 
+/// Whether the chat list shows only models that take tools (`chat_tools`): a
+/// bool, else on.
+pub fn chat_tools(data_dir: &Path) -> bool {
+    read_all(data_dir)
+        .get("chat_tools")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+#[tauri::command(async)]
+pub fn chat_tools_enabled(state: tauri::State<'_, AppState>) -> bool {
+    chat_tools(state.data_dir())
+}
+
+/// Stores the tool-support switch and answers with the stored value.
+#[tauri::command(async)]
+pub fn set_chat_tools(state: tauri::State<'_, AppState>, on: bool) -> Result<bool, Error> {
+    write_key(state.data_dir(), "chat_tools", serde_json::Value::from(on))?;
+    Ok(chat_tools(state.data_dir()))
+}
+
 /// Sets the idle threshold after which the launcher forgets its last answer,
 /// and answers with the stored value. `go_cold_if_idle` reads the key on every
 /// show, so the next show already uses it.
@@ -762,6 +783,26 @@ mod tests {
             assert_eq!(set(bad.clone()), 5, "{bad} must fall back to 5");
         }
         assert_eq!(set(json!(7)), 7);
+    }
+
+    #[test]
+    fn chat_tools_defaults_to_on() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(chat_tools(dir.path()));
+        write_key(dir.path(), "chat_tools", json!(false)).unwrap();
+        assert!(
+            !chat_tools(dir.path()),
+            "positive control: an explicit false is read"
+        );
+    }
+
+    #[test]
+    fn a_non_bool_chat_tools_reads_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [json!("false"), json!(0), json!(null)] {
+            write_key(dir.path(), "chat_tools", bad.clone()).unwrap();
+            assert!(chat_tools(dir.path()), "{bad} must read as on");
+        }
     }
 
     #[test]

@@ -90,3 +90,4 @@ AGENTS.md
 # `.gitignore` containing `*`, and one `git clean` would have taken them.
 docs/superpowers
 /.superpowers
+*.profraw

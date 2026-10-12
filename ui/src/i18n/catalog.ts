@@ -19,7 +19,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
   | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
-  | 'models_hidden_no_text_output' | 'models_hidden_batch_only' | 'models_hidden_router'
+  | 'models_hidden_no_text_output' | 'models_hidden_batch_only' | 'models_hidden_router' | 'models_hidden_no_tool_use' | 'models_chat_tools'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -47,7 +47,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
-  | 'no_answer_local_loading'
+  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'answer_via_search' | 'answer_via_conversation' | 'new_chat'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -314,6 +314,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_no_stated_output_modalities: 'Приховано {count}: постачальник не вказує, що видає модель',
     models_hidden_no_text_output: 'Приховано {count}: модель не видає текст',
     models_hidden_batch_only: 'Приховано {count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує',
+    models_hidden_no_tool_use: 'Приховано {count}: не підтримує інструменти',
+    models_chat_tools: 'Підтримка інструментів',
     models_hidden_router: 'Приховано {count}: маршрутизатори — модель і ціну обирає постачальник під час запиту',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
@@ -430,6 +432,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_failed: 'Провайдер повернув помилку ({reason}).',
     // Task 14.2: a load in flight, not an error; it goes on in the background.
     no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
+    no_answer_no_tool_use: 'Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».',
+    answer_via_search: 'пошук', answer_via_conversation: 'з розмови', new_chat: 'Новий чат',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1185,6 +1189,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_no_stated_output_modalities: '{count} hidden: the provider does not say what the model outputs',
     models_hidden_no_text_output: '{count} hidden: the model outputs no text',
     models_hidden_batch_only: '{count} hidden: batch variants (results within 24 hours), which this application does not use',
+    models_hidden_no_tool_use: '{count} hidden: no tool support',
+    models_chat_tools: 'Tool support',
     models_hidden_router: '{count} hidden: routers — the provider picks the model and the price at request time',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
@@ -1261,6 +1267,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_embedding_no_reply: 'The provider did not process the search query in time. Try again.',
     no_answer_failed: 'The provider returned an error ({reason}).',
     no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
+    no_answer_no_tool_use: 'This model cannot continue a conversation. Choose another one or turn off Tool support.',
+    answer_via_search: 'search', answer_via_conversation: 'from the conversation', new_chat: 'New chat',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',

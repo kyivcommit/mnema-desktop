@@ -86,6 +86,12 @@ test('historyEntry and deleteHistoryEntry send the id they are given, under the 
     .toEqual([['delete_history_entry', { id: 7 }]]);
 });
 
+test('continueHistory sends the id under the name the command takes', async () => {
+  invoke.mockResolvedValue(true);
+  await ipc.continueHistory(7);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'continue_history')).toEqual([['continue_history', { id: 7 }]]);
+});
+
 // PR 7 Task 4: the two model-settings commands `Models.svelte` calls.
 test('setKey invokes set_key with the typed key', async () => {
   invoke.mockResolvedValue({ balance: { kind: 'notStated' } });
@@ -923,7 +929,7 @@ test('HistoryOpen is exactly what bridge.rs defines, variant for variant', () =>
   // `Record<…>` checks the union against itself as well: a variant added to the
   // TypeScript side and not to this object is a compile error, and the list
   // below checks the other direction against Rust.
-  const byKind: Record<HistoryOpen['kind'], true> = { answer: true, unreadable: true, gone: true };
+  const byKind: Record<HistoryOpen['kind'], true> = { dialogue: true, unreadable: true, gone: true };
   expect(Object.keys(byKind).sort()).toEqual(
     rustEnumVariants(BRIDGE_RS, 'HistoryOpen').map(camelOf).sort(),
   );
