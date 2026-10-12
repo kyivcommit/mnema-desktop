@@ -65,10 +65,11 @@ export type NoAnswer =
   | { kind: 'noReply' }
   | { kind: 'embeddingNoReply' }
   | { kind: 'failed'; reason: string }
-  | { kind: 'localLoading' };
+  | { kind: 'localLoading' }
+  | { kind: 'noToolUse' };
 
 export type AskAnswer =
-  | { kind: 'generated'; answer: string; citations: AskCitation[]; text: TextArmReport; content: ContentArmReport }
+  | { kind: 'generated'; answer: string; citations: AskCitation[]; via: 'search' | 'conversation'; text: TextArmReport; content: ContentArmReport }
   | { kind: 'citationsOnly'; citations: Hit[]; why: NoAnswer; text: TextArmReport; content: ContentArmReport }
   | { kind: 'refused'; reason: Refusal; text: TextArmReport; content: ContentArmReport };
 

@@ -39,6 +39,7 @@ export const citationB: AskCitation = {
 
 export const generated: AskAnswer = {
   kind: 'generated',
+  via: 'search',
   // Both anchors appear in the prose, non-contiguous — a two-anchor test that
   // used <c>1</c><c>2</c> could not fail against citations[n-1].
   answer: 'Costs four hryvnias<c>3</c> and the total cannot exceed the cap<c>7</c>.',
@@ -55,6 +56,7 @@ export const generated: AskAnswer = {
 // can mark it. Latin only, like every other string in this file (Ruling K).
 export const generatedOther: AskAnswer = {
   kind: 'generated',
+  via: 'search',
   answer: 'A second answer entirely<c>2</c>.',
   citations: [
     {
@@ -82,6 +84,7 @@ export const generatedOther: AskAnswer = {
 // with no path row, not specifically an archive member.
 export const generatedArchived: AskAnswer = {
   kind: 'generated',
+  via: 'search',
   answer: 'An archived source says so<c>1</c>.',
   citations: [
     {
@@ -104,6 +107,7 @@ export const generatedArchived: AskAnswer = {
 // only branch that shows the "no path on disk" string.
 export const generatedNoPath: AskAnswer = {
   kind: 'generated',
+  via: 'search',
   answer: 'Nothing locates this passage<c>1</c>.',
   citations: [
     {

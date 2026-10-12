@@ -13275,3 +13275,325 @@ fn a_failed_history_write_does_not_fail_the_ask() {
         "with the trigger gone, B is recorded and newest"
     );
 }
+
+// ---- Launcher dialogue: the session in memory and `ask` over it ----
+
+fn chat_text(content: &str) -> String {
+    json!({ "choices": [{ "message": { "content": content } }] }).to_string()
+}
+
+fn chat_search(arguments: &str, content: Value) -> String {
+    json!({ "choices": [{ "message": {
+        "content": content,
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "search", "arguments": arguments },
+        }],
+    } }] })
+    .to_string()
+}
+
+/// A key, a chat model, the text arm only and three documents: two that tie on
+/// "quantum entanglement" (the first and second hits of that search) and one
+/// only "ext4" finds. Returns the window and the three chunk ids.
+fn dialogue_ready(app: &tauri::App<MockRuntime>) -> (WebviewWindow<MockRuntime>, [i64; 3]) {
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-dialogue").expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+    let ids = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>([
+                write_one_document(db, &"a".repeat(64), "quantum entanglement resonance"),
+                write_one_document(db, &"b".repeat(64), "quantum entanglement resonance"),
+                write_one_document(db, &"c".repeat(64), "ext4 journal filesystem"),
+            ])
+        })
+        .unwrap();
+    (webview, ids)
+}
+
+fn ask_q(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
+    call(webview, "ask", json!({ "query": query })).expect("ask was rejected")
+}
+
+const FIRST_Q: &str = "quantum entanglement";
+
+#[test]
+fn a_follow_up_does_not_search_by_itself() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    assert_eq!(ask_q(&webview, FIRST_Q)["kind"], json!("generated"));
+    // Nothing in the index matches this: a search of its own would refuse.
+    let second = ask_q(&webview, "thanks, that is enough");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(second["via"], json!("conversation"), "{second}");
+
+    assert!(
+        !server.request().contains("\"tools\""),
+        "the first turn offers no tool"
+    );
+    let follow_up = server.request();
+    assert!(follow_up.contains("/chat/completions") && follow_up.contains("\"tools\""));
+    assert!(
+        server.request_if_any().is_none(),
+        "no other request: no embedding"
+    );
+}
+
+#[test]
+fn a_search_call_runs_retrieval_and_answers_with_its_sources() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_search(r#"{"query":"ext4"}"#, Value::Null)),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "and the filesystem?");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(second["via"], json!("search"), "{second}");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[2]), "{second}");
+    assert_eq!(
+        second["citations"][0]["text"],
+        json!("ext4 journal filesystem")
+    );
+
+    server.request();
+    server.request();
+    let last = server.request();
+    assert!(
+        !last.contains("\"tools\""),
+        "the answer after a search offers no tool"
+    );
+    assert!(
+        last.contains("ext4 journal filesystem"),
+        "the new sources are in it"
+    );
+}
+
+#[test]
+fn a_follow_up_without_a_search_cites_the_previous_sources() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("Both <c>1</c> <c>2</c>.")),
+        Reply::ok(&chat_text("The second one <c>2</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "which one is better?");
+    assert_eq!(second["via"], json!("conversation"), "{second}");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[1]), "{second}");
+}
+
+#[test]
+fn an_empty_tool_search_keeps_the_previous_sources() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("Both <c>1</c> <c>2</c>.")),
+        Reply::ok(&chat_search(r#"{"query":"zzzznothing"}"#, Value::Null)),
+        Reply::ok(&chat_text("Only the first <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "anything on zzzznothing?");
+    assert_eq!(second["via"], json!("conversation"), "{second}");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[0]), "{second}");
+    server.request();
+    server.request();
+    assert!(server.request().contains("No passages found."));
+}
+
+#[test]
+fn a_broken_tool_call_answers_from_the_conversation() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_search("{}", json!("ok"))),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "tell me more");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(second["answer"], json!("ok"));
+    assert_eq!(second["via"], json!("conversation"));
+}
+
+#[test]
+fn with_the_switch_off_every_question_stands_alone() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+    call(&webview, "set_chat_tools", json!({ "on": false })).unwrap();
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "ext4");
+    assert_eq!(second["via"], json!("search"), "{second}");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[2]), "{second}");
+    server.request();
+    let r = server.request();
+    assert!(!r.contains("\"tools\""), "{r}");
+    assert!(!r.contains(FIRST_Q), "the first turn is not in the context");
+}
+
+#[test]
+fn turning_the_switch_off_mid_session_drops_the_session() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+        Reply::ok(&chat_text("Resonance again <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    call(&webview, "set_chat_tools", json!({ "on": false })).unwrap();
+    ask_q(&webview, "ext4");
+    call(&webview, "set_chat_tools", json!({ "on": true })).unwrap();
+    let third = ask_q(&webview, FIRST_Q);
+    assert_eq!(third["via"], json!("search"), "{third}");
+    server.request();
+    server.request();
+    let r = server.request();
+    assert!(
+        !r.contains("\"tools\""),
+        "the third question is a first one"
+    );
+    assert!(!r.contains("It resonates"), "and carries no earlier turn");
+}
+
+#[test]
+fn a_model_without_tool_endpoints_keeps_the_passages_and_says_why() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::status(
+            404,
+            r#"{"error":{"message":"No endpoints found","metadata":{"failed_routing_step":"Filter by Tool Compatibility"}}}"#,
+        ),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "tell me more");
+    assert_eq!(second["kind"], json!("citationsOnly"), "{second}");
+    assert_eq!(second["why"]["kind"], json!("noToolUse"), "{second}");
+    let got: Vec<&Value> = second["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["chunkId"])
+        .collect();
+    assert_eq!(got, vec![&json!(ids[0]), &json!(ids[1])], "{second}");
+}
+
+#[test]
+fn new_chat_brings_back_search_first() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    call(&webview, "new_chat", json!({})).expect("new_chat was rejected");
+    let second = ask_q(&webview, "ext4");
+    assert_eq!(second["citations"][0]["chunkId"], json!(ids[2]), "{second}");
+    server.request();
+    assert!(!server.request().contains("\"tools\""));
+}
+
+#[test]
+fn a_failed_follow_up_keeps_the_session() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::status(503, r#"{"error":{"message":"overloaded"}}"#),
+        Reply::ok(&chat_text("Back again.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    let failed = ask_q(&webview, "the failing question");
+    assert_eq!(failed["kind"], json!("citationsOnly"), "{failed}");
+    assert_eq!(failed["why"]["kind"], json!("failed"), "{failed}");
+    let third = ask_q(&webview, "the third question");
+    assert_eq!(third["via"], json!("conversation"), "{third}");
+    server.request();
+    server.request();
+    let r = server.request();
+    assert!(
+        r.contains("\"tools\"") && r.contains(FIRST_Q),
+        "still the session: {r}"
+    );
+    assert!(
+        !r.contains("the failing question"),
+        "the failed turn is not in it"
+    );
+}
+
+/// Going cold drops the conversation (D169); a show short of the threshold
+/// keeps it.
+#[test]
+fn going_cold_drops_the_session() {
+    use mnema_desktop::dialogue::SessionTurn;
+    use mnema_desktop::launcher_layout::HiddenAt;
+    use tauri::{Manager, WebviewWindowBuilder};
+
+    let run = |after: u64| {
+        let dir = tempfile::tempdir().unwrap();
+        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
+            .unwrap();
+        let app = app_in(dir.path());
+        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+            .build()
+            .unwrap();
+        app.state::<AppState>().dialogue.replace(vec![SessionTurn {
+            query: "q".into(),
+            answer: bridge::AskAnswer::Refused {
+                kind: bridge::RefusalKind::NoCandidates,
+                text: bridge::TextArmReport::Off,
+                content: bridge::ContentArmReport::Off,
+            },
+            hits: None,
+        }]);
+        app.state::<HiddenAt>().mark();
+        let marked = app.state::<HiddenAt>().get().unwrap();
+        mnema_desktop::go_cold_if_idle(app.handle(), &window, marked + Duration::from_secs(after));
+        app.state::<AppState>().dialogue.first_query()
+    };
+    assert_eq!(run(61), None);
+    assert_eq!(run(59), Some("q".to_string()));
+}

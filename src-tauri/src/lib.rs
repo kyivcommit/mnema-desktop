@@ -6,6 +6,7 @@
 //! webview calls them.
 
 pub mod bridge;
+pub mod dialogue;
 pub mod embed_job;
 pub mod error;
 pub mod job;
@@ -71,6 +72,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::remove_mask,
         bridge::search,
         bridge::ask,
+        bridge::new_chat,
         bridge::list_history,
         bridge::history_entry,
         bridge::delete_history_entry,
@@ -301,6 +303,9 @@ pub fn go_cold_if_idle<R: tauri::Runtime>(
     let hidden_at = app.state::<launcher_layout::HiddenAt>().get();
     if !launcher_layout::goes_cold(hidden_at, now, minutes) {
         return false;
+    }
+    if let Some(state) = app.try_state::<state::AppState>() {
+        state.dialogue.clear();
     }
     let cold = launcher_layout::Layout::default();
     app.state::<launcher_layout::Current>().set(cold);

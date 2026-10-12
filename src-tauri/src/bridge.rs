@@ -1292,6 +1292,17 @@ pub enum RefusalKind {
     EmptyCompletion,
 }
 
+/// Where a generated answer's sources came from: a search made for this turn,
+/// or the conversation so far. Old stored answers have no `via` and were
+/// searches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Via {
+    #[default]
+    Search,
+    Conversation,
+}
+
 /// What [`ask`] answers with. Different states are different variants, never a
 /// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
 /// variant carries the arm reports, because retrieval is identical across them.
@@ -1301,6 +1312,8 @@ pub enum AskAnswer {
     Generated {
         answer: String,
         citations: Vec<AskCitation>,
+        #[serde(default)]
+        via: Via,
         text: TextArmReport,
         content: ContentArmReport,
     },
@@ -1355,6 +1368,9 @@ pub enum NoAnswer {
     /// and the load had not finished; it goes on in the background. Not
     /// `Failed`: nothing failed, and the launcher says so in its own words.
     LocalLoading,
+    /// The chat model has no endpoint that takes tools, so a follow-up cannot
+    /// be asked of it. The passages of the last search stay.
+    NoToolUse,
 }
 
 impl NoAnswer {
@@ -1363,6 +1379,7 @@ impl NoAnswer {
         match e {
             mnema_provider::Error::Transport(_) => Self::Offline,
             mnema_provider::Error::NoReply(_) => Self::NoReply,
+            mnema_provider::Error::NoToolEndpoint => Self::NoToolUse,
             other => Self::Failed {
                 reason: other.to_string(),
             },
@@ -1465,6 +1482,19 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     // Read once: retrieval, readiness, voice and timeout all answer for the
     // same provider.
     let choice = state.provider_choice();
+    // The conversation is off under Mnema (the local model has no tool call)
+    // and with the switch off; either way each question stands alone, and a
+    // session left from before is dropped.
+    let dialogue = choice != crate::provider::ProviderChoice::Mnema
+        && crate::prefs::chat_tools(state.data_dir());
+    if !dialogue {
+        state.dialogue.clear();
+    }
+    let (generation, turns) = state.dialogue.snapshot();
+    if dialogue && !turns.is_empty() {
+        return follow_up(state, query, arms, choice, generation, &turns);
+    }
+    let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
 
     // Under Mnema the chat model is fixed, so readiness would only ask for the
@@ -1524,28 +1554,37 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
     // A chat call that fails keeps what retrieval found: the passages are on
     // this machine, and only the prose was the provider's to give (D171,
     // owner's ruling 2026-10-02).
-    let generated = match mnema_rag::answer(
-        &endpoint.base,
-        &endpoint.token,
-        &model,
-        query,
-        &passages,
-        state.voice_as(choice, query),
-        choice.chat_timeout(),
-    ) {
+    let generated = if remember.is_some() {
+        let messages = mnema_rag::build_dialogue(
+            &[],
+            query,
+            Some(&passages),
+            &mnema_rag::profile(&model),
+            question_lang(query),
+        );
+        mnema_provider::complete_turn(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            &messages,
+            false,
+            choice.chat_timeout(),
+        )
+        .map(|reply| text_answer(reply, passages.len()))
+    } else {
+        mnema_rag::answer(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            query,
+            &passages,
+            state.voice_as(choice, query),
+            choice.chat_timeout(),
+        )
+    };
+    let generated = match generated {
         Ok(generated) => generated,
-        Err(e) => {
-            let why = NoAnswer::from_chat(&e);
-            if why.about_the_network() {
-                state.forget_provider_status();
-            }
-            return Ok(AskAnswer::CitationsOnly {
-                citations: hits,
-                why,
-                text,
-                content,
-            });
-        }
+        Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
     };
     match generated {
         None => Ok(AskAnswer::Refused {
@@ -1554,34 +1593,229 @@ fn answer_question(state: &State<'_, AppState>, query: &str) -> Result<AskAnswer
             content,
         }),
         Some(a) => {
-            let citations = a
-                .cited
-                .iter()
-                .map(|&n| {
-                    // resolve_anchors guarantees 1 <= n <= passages.len() ==
-                    // hits.len(), so hits[n - 1] is always in range (spec §6).
-                    let h = &hits[n - 1];
-                    AskCitation {
-                        anchor: n,
-                        chunk_id: h.chunk_id,
-                        text: h.text.clone(),
-                        relative_path: h.relative_path.clone(),
-                        section_title: h.section_title.clone(),
-                        coordinate: h.coordinate.clone(),
-                        document_id: h.document_id.clone(),
-                        ord: h.ord,
-                        root_id: h.root_id,
-                    }
-                })
-                .collect();
-            Ok(AskAnswer::Generated {
-                answer: a.text,
-                citations,
-                text,
-                content,
-            })
+            let answer = generated_answer(a, &hits, Via::Search, text, content);
+            remember_turn(state, remember, query, &answer, Some(hits));
+            Ok(answer)
         }
     }
+}
+
+/// A question after the first of a session: the model sees the conversation
+/// and may call `search` itself. Anchors resolve against the latest search,
+/// whether this turn made it or an earlier one did.
+fn follow_up(
+    state: &State<'_, AppState>,
+    query: &str,
+    arms: Arms,
+    choice: crate::provider::ProviderChoice,
+    generation: u64,
+    turns: &[crate::dialogue::SessionTurn],
+) -> Result<AskAnswer, Error> {
+    let (mut hits, mut text, mut content) = match turns.iter().rfind(|t| t.hits.is_some()) {
+        Some(t) => {
+            let (text, content) = match &t.answer {
+                AskAnswer::Generated { text, content, .. }
+                | AskAnswer::CitationsOnly { text, content, .. }
+                | AskAnswer::Refused { text, content, .. } => (text.clone(), content.clone()),
+            };
+            (t.hits.clone().unwrap_or_default(), text, content)
+        }
+        None => (Vec::new(), TextArmReport::Off, ContentArmReport::Off),
+    };
+    let (model, endpoint) = match chat_readiness(state, choice)? {
+        ChatReadiness::Ready { model, endpoint } => (model, endpoint),
+        other => {
+            let why = match other {
+                ChatReadiness::Unavailable(why) => {
+                    state.forget_provider_status();
+                    why
+                }
+                _ => NoAnswer::NotAsked,
+            };
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why,
+                text,
+                content,
+            });
+        }
+    };
+    let past: Vec<mnema_rag::Turn> = turns
+        .iter()
+        .map(|t| mnema_rag::Turn {
+            question: t.query.clone(),
+            answer: match &t.answer {
+                AskAnswer::Generated { answer, .. } => answer.clone(),
+                _ => String::new(),
+            },
+            sources: t
+                .hits
+                .as_ref()
+                .map(|h| h.iter().map(passage_from_hit).collect()),
+        })
+        .collect();
+    let mut messages = mnema_rag::build_dialogue(
+        &past,
+        query,
+        None,
+        &mnema_rag::profile(&model),
+        question_lang(query),
+    );
+    let chat = |messages: &[mnema_provider::Message], offer_search| {
+        mnema_provider::complete_turn(
+            &endpoint.base,
+            &endpoint.token,
+            &model,
+            messages,
+            offer_search,
+            choice.chat_timeout(),
+        )
+    };
+    let mut via = Via::Conversation;
+    let mut found = None;
+    let mut reply = match chat(&messages, true) {
+        Ok(reply) => reply,
+        Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
+    };
+    if let mnema_provider::Reply::Search(call) = &reply {
+        let (new_hits, new_text, new_content, unreachable) =
+            retrieve(state, &call.query, arms, ASK_TOP_K, choice)?;
+        if let Some(why) = unreachable {
+            state.forget_provider_status();
+            return Ok(AskAnswer::CitationsOnly {
+                citations: hits,
+                why,
+                text,
+                content,
+            });
+        }
+        let passages: Vec<mnema_rag::Passage> = new_hits.iter().map(passage_from_hit).collect();
+        mnema_rag::with_search_result(&mut messages, call, &passages);
+        // An empty search leaves the earlier one the latest.
+        if !new_hits.is_empty() {
+            hits = new_hits.clone();
+            text = new_text;
+            content = new_content;
+            via = Via::Search;
+            found = Some(new_hits);
+        }
+        reply = match chat(&messages, false) {
+            Ok(reply) => reply,
+            Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
+        };
+    }
+    Ok(match text_answer(reply, hits.len()) {
+        None => AskAnswer::Refused {
+            kind: RefusalKind::EmptyCompletion,
+            text,
+            content,
+        },
+        Some(a) => {
+            let answer = generated_answer(a, &hits, via, text, content);
+            remember_turn(state, Some(generation), query, &answer, found);
+            answer
+        }
+    })
+}
+
+fn question_lang(query: &str) -> mnema_rag::Lang {
+    mnema_rag::detect(query, None, sys_locale::get_locale().as_deref())
+}
+
+/// The model's prose with its anchors resolved against `n` passages; `None`
+/// for a blank reply (a search call where text was expected counts as one).
+fn text_answer(reply: mnema_provider::Reply, n: usize) -> Option<mnema_rag::Answer> {
+    let raw = match reply {
+        mnema_provider::Reply::Text(raw) => raw,
+        mnema_provider::Reply::Search(_) => String::new(),
+    };
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let (text, cited) = mnema_rag::resolve_anchors(&raw, n);
+    Some(mnema_rag::Answer { text, cited })
+}
+
+/// The passages kept and the reason, for a chat call that failed (D171).
+fn chat_failed(
+    state: &State<'_, AppState>,
+    e: &mnema_provider::Error,
+    hits: Vec<Hit>,
+    text: TextArmReport,
+    content: ContentArmReport,
+) -> AskAnswer {
+    let why = NoAnswer::from_chat(e);
+    if why.about_the_network() {
+        state.forget_provider_status();
+    }
+    AskAnswer::CitationsOnly {
+        citations: hits,
+        why,
+        text,
+        content,
+    }
+}
+
+fn generated_answer(
+    a: mnema_rag::Answer,
+    hits: &[Hit],
+    via: Via,
+    text: TextArmReport,
+    content: ContentArmReport,
+) -> AskAnswer {
+    let citations = a
+        .cited
+        .iter()
+        .map(|&n| {
+            // resolve_anchors guarantees 1 <= n <= hits.len() (spec §6).
+            let h = &hits[n - 1];
+            AskCitation {
+                anchor: n,
+                chunk_id: h.chunk_id,
+                text: h.text.clone(),
+                relative_path: h.relative_path.clone(),
+                section_title: h.section_title.clone(),
+                coordinate: h.coordinate.clone(),
+                document_id: h.document_id.clone(),
+                ord: h.ord,
+                root_id: h.root_id,
+            }
+        })
+        .collect();
+    AskAnswer::Generated {
+        answer: a.text,
+        citations,
+        via,
+        text,
+        content,
+    }
+}
+
+/// Adds the answered turn to the session, if there is one and it is still the
+/// session the question started from; the answer is given either way.
+fn remember_turn(
+    state: &State<'_, AppState>,
+    generation: Option<u64>,
+    query: &str,
+    answer: &AskAnswer,
+    hits: Option<Vec<Hit>>,
+) {
+    if let Some(generation) = generation {
+        state.dialogue.push_if(
+            generation,
+            crate::dialogue::SessionTurn {
+                query: query.to_string(),
+                answer: answer.clone(),
+                hits,
+            },
+        );
+    }
+}
+
+/// «New chat»: the next question starts a session of its own.
+#[tauri::command]
+pub fn new_chat(state: State<'_, AppState>) {
+    state.dialogue.clear();
 }
 
 /// Keeps a question that got an answer, so the launcher's history can reopen
@@ -1829,6 +2063,43 @@ pub fn cancel_job(state: State<'_, AppState>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_source_of_an_answer_has_a_wire_name_and_an_old_record_was_a_search() {
+        use serde_json::json;
+        let generated = |via: Via| {
+            serde_json::to_value(AskAnswer::Generated {
+                answer: "a".into(),
+                citations: vec![],
+                via,
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            })
+            .unwrap()
+        };
+        assert_eq!(generated(Via::Search)["via"], json!("search"));
+        assert_eq!(generated(Via::Conversation)["via"], json!("conversation"));
+        let mut old = generated(Via::Conversation);
+        old.as_object_mut().unwrap().remove("via");
+        match serde_json::from_value::<AskAnswer>(old).unwrap() {
+            AskAnswer::Generated { via, .. } => assert_eq!(via, Via::Search),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_model_without_tools_is_named_and_is_not_about_the_network() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(NoAnswer::NoToolUse).unwrap(),
+            json!({ "kind": "noToolUse" })
+        );
+        assert_eq!(
+            NoAnswer::from_chat(&mnema_provider::Error::NoToolEndpoint),
+            NoAnswer::NoToolUse
+        );
+        assert!(!NoAnswer::NoToolUse.about_the_network());
+    }
+
     use super::*;
 
     /// Every discriminant the window sees has its camel-case spelling pinned
@@ -1975,6 +2246,7 @@ mod tests {
         let generated = AskAnswer::Generated {
             answer: "a".into(),
             citations: vec![],
+            via: Via::Search,
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };
