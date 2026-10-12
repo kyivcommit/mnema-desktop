@@ -69,6 +69,7 @@ function initialState(scenario: string) {
     theme: 'system' as ThemeChoice,
     locale: 'auto' as LocaleChoice,
     nextRootId: 100,
+    chatTools: true,
   };
 }
 
@@ -267,6 +268,8 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
     },
+    chat_tools_enabled: () => s.chatTools,
+    set_chat_tools: (a) => (s.chatTools = a.on as boolean),
     provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
       : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
       : { kind: 'ok' },

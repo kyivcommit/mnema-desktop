@@ -19,6 +19,7 @@ use mnema_desktop::models::{
     KeyStoreFailure, UnreadableCause, forget_key, key_present, model_settings, provider_models,
     set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
+use mnema_desktop::prefs::{chat_tools, set_chat_tools};
 use mnema_desktop::scan_job;
 use mnema_desktop::scan_state::{
     EmbedOutcome, EndedIn, Entry, Phase, ScanReport, ScanSnapshot, ScanState, SkipWhy, Terminal,
@@ -2870,4 +2871,78 @@ fn choosing_a_model_makes_the_next_status_ask_again() {
         fx.provider_request().is_some(),
         "set_embedding_model left the cache standing"
     );
+}
+
+/// One model that takes tools and one that does not, both writing text.
+const TWO_CHATTERS: &str = r#"{"data":[
+  {"id":"vendor/with-tools","name":"With","context_length":8194,
+   "pricing":{"prompt":"0.00000001"},"supported_parameters":["tools","temperature"],
+   "architecture":{"output_modalities":["text"]}},
+  {"id":"vendor/without","name":"Without","context_length":8194,
+   "pricing":{"prompt":"0.00000001"},"supported_parameters":["temperature"],
+   "architecture":{"output_modalities":["text"]}}
+]}"#;
+
+fn refusal_of(c: &mnema_provider::Catalogue, id: &str) -> Option<mnema_provider::Refusal> {
+    c.entries
+        .iter()
+        .find(|e| e.id == id)
+        .expect("listed")
+        .refusal
+        .clone()
+}
+
+#[test]
+fn with_tools_on_the_chat_list_refuses_models_without_them() {
+    let fx = Fixture::with_provider_listing(TWO_CHATTERS);
+
+    let c = provider_models(fx.state(), "chat".into()).expect("listed");
+
+    assert_eq!(
+        refusal_of(&c, "vendor/without"),
+        Some(mnema_provider::Refusal::NoToolUse)
+    );
+    assert_eq!(
+        refusal_of(&c, "vendor/with-tools"),
+        None,
+        "the model with tools stays"
+    );
+}
+
+#[test]
+fn with_tools_off_nothing_is_refused_for_tools() {
+    let fx = Fixture::with_provider_listing(TWO_CHATTERS);
+    assert!(!set_chat_tools(fx.state(), false).expect("stored"));
+    assert!(
+        !chat_tools(fx.state().data_dir()),
+        "read back after storing"
+    );
+
+    let c = provider_models(fx.state(), "chat".into()).expect("listed");
+
+    assert_eq!(refusal_of(&c, "vendor/without"), None);
+}
+
+#[test]
+fn the_embedding_list_ignores_the_tools_switch() {
+    let fx = Fixture::with_provider_listing(TWO_EMBEDDERS);
+
+    let c = provider_models(fx.state(), "embedding".into()).expect("listed");
+
+    assert!(
+        c.entries
+            .iter()
+            .all(|e| e.refusal != Some(mnema_provider::Refusal::NoToolUse)),
+        "an embedder was refused for tools"
+    );
+    assert_eq!(
+        refusal_of(&c, "baai/bge-m3"),
+        None,
+        "the switch is on by default"
+    );
+}
+
+#[test]
+fn the_default_chat_model_is_gpt_6_luna() {
+    assert_eq!(DEFAULT_MODELS.chat, "openai/gpt-6-luna");
 }

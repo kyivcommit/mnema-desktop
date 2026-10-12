@@ -54,6 +54,8 @@ vi.mock('../lib/ipc', () => ({
   forgetKey: vi.fn(),
   setChatModel: vi.fn(),
   setEmbeddingModel: vi.fn(),
+  chatTools: vi.fn(() => Promise.resolve(true)),
+  setChatTools: vi.fn(() => Promise.resolve(true)),
   maskPreview: vi.fn(),
   addMask: vi.fn(),
   removeMask: vi.fn(),

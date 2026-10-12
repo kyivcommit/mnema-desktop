@@ -22,6 +22,8 @@ const forgetKey = vi.fn();
 const providerModels = vi.fn();
 const setChatModel = vi.fn();
 const setEmbeddingModel = vi.fn();
+const chatTools = vi.fn();
+const setChatTools = vi.fn();
 const startScanJob = vi.fn();
 const cancelJob = vi.fn();
 const jobStatus = vi.fn();
@@ -37,6 +39,8 @@ vi.mock('../lib/ipc', () => ({
   providerModels: (...a: unknown[]) => providerModels(...a),
   setChatModel: (...a: unknown[]) => setChatModel(...a),
   setEmbeddingModel: (...a: unknown[]) => setEmbeddingModel(...a),
+  chatTools: (...a: unknown[]) => chatTools(...a),
+  setChatTools: (...a: unknown[]) => setChatTools(...a),
   // The section starts its recovery pass through the shared controller
   // (`jobs.ts`), which imports these from the same module — a mock that leaves
   // them out hands the controller `undefined` and every call becomes a
@@ -110,6 +114,9 @@ beforeEach(() => {
   providerModels.mockReset();
   setChatModel.mockReset();
   setEmbeddingModel.mockReset();
+  chatTools.mockReset();
+  setChatTools.mockReset();
+  chatTools.mockResolvedValue(true);
   startScanJob.mockReset();
   listenScanProgress.mockReset();
   unlisten.mockReset();
@@ -1726,6 +1733,7 @@ function sampleRefusal(kind: string): ModelRefusal {
     case 'noTextOutput': return { kind: 'noTextOutput' };
     case 'batchOnly': return { kind: 'batchOnly' };
     case 'router': return { kind: 'router' };
+    case 'noToolUse': return { kind: 'noToolUse' };
     default:
       throw new Error(
         `catalogue.rs now defines a Refusal variant ("${kind}") this test does not know how to ` +
@@ -1782,6 +1790,7 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     noTextOutput: (count) => `${count} hidden: the model outputs no text`,
     batchOnly: (count) => `${count} hidden: batch variants (results within 24 hours), which this application does not use`,
     router: (count) => `${count} hidden: routers — the provider picks the model and the price at request time`,
+    noToolUse: (count) => `${count} hidden: no tool support`,
   },
   uk: {
     inputTooSmall: (count) => `Приховано ${count}: ліміт входу менший за 2048 токенів`,
@@ -1791,6 +1800,7 @@ const HIDDEN_REASON_SENTENCES: Record<'en' | 'uk', Record<string, (count: number
     noTextOutput: (count) => `Приховано ${count}: модель не видає текст`,
     batchOnly: (count) => `Приховано ${count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує`,
     router: (count) => `Приховано ${count}: маршрутизатори — модель і ціну обирає постачальник під час запиту`,
+    noToolUse: (count) => `Приховано ${count}: не підтримує інструменти`,
   },
 };
 
@@ -3365,4 +3375,39 @@ test('rejected_command_returns_the_select_and_reselecting_asks_again', async () 
 
   await pickModel('emb-2');
   expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
+});
+
+test('the tool-support checkbox sits on the chat tab only, labelled in both languages', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
+  setLocale('en');
+  await renderWith(settings({ key: { kind: 'present' } }));
+  expect(screen.queryByTestId('chat-tools')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+
+  const box = (await screen.findByTestId('chat-tools')) as HTMLInputElement;
+  expect(box.type).toBe('checkbox');
+  await waitFor(() => expect(box.checked).toBe(true));
+  expect(screen.getByLabelText('Tool support')).toBe(box);
+  cleanup();
+  await renderWith(settings({ key: { kind: 'present' } }));
+  setLocale('uk');
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  expect(await screen.findByLabelText('Підтримка інструментів')).toBeTruthy();
+});
+
+test('toggling tool support stores it and re-reads the chat catalogue', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
+  setChatTools.mockResolvedValue(false);
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  const box = (await screen.findByTestId('chat-tools')) as HTMLInputElement;
+  await waitFor(() => expect(box.checked).toBe(true));
+  providerModels.mockClear();
+
+  await fireEvent.click(box);
+
+  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false));
+  await waitFor(() => expect(providerModels).toHaveBeenCalledWith('chat'));
+  await waitFor(() => expect(box.checked).toBe(false));
 });

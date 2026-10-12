@@ -259,6 +259,9 @@ pub enum Refusal {
     /// Measured on the live list the same day: exactly these five ids, and
     /// no other, state a negative price.
     Router,
+    /// The model states no `tools` parameter and the person turned on
+    /// «Tool support» (the application sets this, never the provider's list).
+    NoToolUse,
 }
 
 /// What `models_from_json` hands back: the models it could read, and how many

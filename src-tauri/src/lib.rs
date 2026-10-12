@@ -108,6 +108,8 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::set_hotkey,
         prefs::set_autostart,
         prefs::set_cold_after,
+        prefs::chat_tools_enabled,
+        prefs::set_chat_tools,
         open_settings,
         launcher_layout::set_launcher_layout,
         launcher_layout::launcher_answered,

@@ -404,7 +404,8 @@ export type ModelRefusal =
   | { kind: 'noStatedOutputModalities' }
   | { kind: 'noTextOutput' }
   | { kind: 'batchOnly' }
-  | { kind: 'router' };
+  | { kind: 'router' }
+  | { kind: 'noToolUse' };
 
 export type ModelEntry = {
   id: string;
@@ -929,6 +930,11 @@ export const setAutostart = (enabled: boolean) =>
 // fractional number (the command would fail to deserialise it). Answers the
 // stored value.
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
+
+// The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
+// the chat list to models that take tools. `setChatTools` answers the stored value.
+export const chatTools = () => invoke<boolean>('chat_tools_enabled');
+export const setChatTools = (on: boolean) => invoke<boolean>('set_chat_tools', { on });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is

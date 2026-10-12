@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use mnema_provider::{Catalogue, Role};
+use mnema_provider::{Catalogue, Refusal, Role};
 
 use crate::error::Error;
 use crate::state::AppState;
@@ -83,7 +83,7 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
 /// because the catalogue endpoint is public (see [`provider_models`]).
 pub const DEFAULT_MODELS: DefaultModels = DefaultModels {
     embedding: "baai/bge-m3",
-    chat: "openai/gpt-5.6-luna",
+    chat: "openai/gpt-6-luna",
 };
 
 /// The type behind [`DEFAULT_MODELS`]. A struct rather than two loose consts so
@@ -327,11 +327,18 @@ fn role_from(name: &str) -> Result<Role, Error> {
 /// numbers are still here.
 #[tauri::command(async)]
 pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catalogue, Error> {
-    Ok(mnema_provider::list_models(
-        state.openrouter_base(),
-        None,
-        role_from(&role)?,
-    )?)
+    let role = role_from(&role)?;
+    let mut catalogue = mnema_provider::list_models(state.openrouter_base(), None, role)?;
+    if role == Role::Chat && crate::prefs::chat_tools(state.data_dir()) {
+        for e in catalogue
+            .entries
+            .iter_mut()
+            .filter(|e| !e.tools && e.refusal.is_none())
+        {
+            e.refusal = Some(Refusal::NoToolUse);
+        }
+    }
+    Ok(catalogue)
 }
 
 /// Checks the model, then records it. The dimension written to the index is the
@@ -1785,6 +1792,7 @@ mod tests {
                 Refusal::NoTextOutput => json!({"kind": "noTextOutput"}),
                 Refusal::BatchOnly => json!({"kind": "batchOnly"}),
                 Refusal::Router => json!({"kind": "router"}),
+                Refusal::NoToolUse => json!({"kind": "noToolUse"}),
             }
         };
         for r in [
@@ -1800,6 +1808,7 @@ mod tests {
             Refusal::NoTextOutput,
             Refusal::BatchOnly,
             Refusal::Router,
+            Refusal::NoToolUse,
         ] {
             assert_eq!(
                 serde_json::to_value(&r).unwrap(),
