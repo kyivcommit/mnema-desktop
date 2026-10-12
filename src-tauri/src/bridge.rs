@@ -1845,6 +1845,7 @@ fn remember_turn(
                 query: query.to_string(),
                 answer: answer.clone(),
                 hits,
+                stored: None,
             },
         )
     })
@@ -1889,7 +1890,7 @@ fn record_answer(
             .into_iter()
             .map(|t| StoredTurn {
                 query: t.query,
-                answer: t.answer,
+                answer: t.stored.unwrap_or(t.answer),
             })
             .collect(),
         None => vec![StoredTurn {
@@ -1939,7 +1940,7 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let (answer, hits) = match (&t.answer, Some(i) == last_generated) {
+            let (answer, hits, stored) = match (&t.answer, Some(i) == last_generated) {
                 (
                     AskAnswer::Generated {
                         answer,
@@ -1998,14 +1999,16 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
                             content: content.clone(),
                         },
                         Some(hits),
+                        Some(t.answer.clone()),
                     )
                 }
-                (answer, _) => (answer.clone(), None),
+                (answer, _) => (answer.clone(), None, None),
             };
             crate::dialogue::SessionTurn {
                 query: t.query.clone(),
                 answer,
                 hits,
+                stored,
             }
         })
         .collect()

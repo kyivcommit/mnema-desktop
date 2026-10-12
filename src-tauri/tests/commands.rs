@@ -13594,6 +13594,7 @@ fn going_cold_drops_the_session() {
                 content: bridge::ContentArmReport::Off,
             },
             hits: None,
+            stored: None,
         }]);
         app.state::<HiddenAt>().mark();
         let marked = app.state::<HiddenAt>().get().unwrap();
@@ -13767,6 +13768,16 @@ fn opened_sources_are_the_cited_passages_renumbered() {
         !request.contains("A<c>3</c>") && !request.contains("<c>7</c>"),
         "{request}"
     );
+    // The row keeps the earlier answer exactly as it was stored, anchors and all.
+    let rows = history_rows(&webview);
+    let row = rows
+        .iter()
+        .find(|r| r["query"] == "seeded question")
+        .expect("the row");
+    let reopened = open_row(&webview, row["id"].as_i64().unwrap());
+    let turns = reopened["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2, "{reopened}");
+    assert_eq!(turns[0]["answer"], stored, "{reopened}");
 }
 
 #[test]

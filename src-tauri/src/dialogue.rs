@@ -13,6 +13,9 @@ pub struct SessionTurn {
     pub query: String,
     pub answer: AskAnswer,
     pub hits: Option<Vec<Hit>>,
+    /// The answer as the history row holds it, when `answer` is a copy made for
+    /// the model's context (an opened row renumbers its anchors); `None` otherwise.
+    pub stored: Option<AskAnswer>,
 }
 
 #[derive(Default)]
@@ -72,6 +75,7 @@ mod tests {
                 content: ContentArmReport::NoKey,
             },
             hits: None,
+            stored: None,
         }
     }
 
