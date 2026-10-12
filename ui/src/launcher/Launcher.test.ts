@@ -1077,7 +1077,7 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean } = {}) {
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; newChatReject?: boolean } = {}) {
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
@@ -1086,6 +1086,8 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
     if (cmd === 'chat_tools_enabled') return Promise.resolve(opts.chatTools ?? false);
+    if (cmd === 'provider_choice' && opts.provider) return Promise.resolve(opts.provider);
+    if (cmd === 'new_chat' && opts.newChatReject) return Promise.reject('boom');
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
     if (cmd === 'history_entry') {
       if (opts.openedReject) return Promise.reject('offline');
@@ -1438,6 +1440,43 @@ test('New chat calls new_chat, empties the centre and leaves the search line alo
   await submit('third');
   await screen.findByTestId('preview-3');
   expect(echoes()).toEqual(['third']);
+});
+
+test('under Mnema with the switch on the launcher shows one turn and no New chat', async () => {
+  mockRecents({ chatTools: true, provider: 'mnema', asks: [generated, generatedOther] });
+  render(Launcher);
+  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('provider_choice')).toHaveLength(1));
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('preview-2');
+  expect(echoes()).toEqual(['second']);
+  expect(screen.queryByTestId('new-chat')).toBeNull();
+});
+
+test('New chat keeps the panels: the left one stays, the centre and right ones are empty', async () => {
+  await askTwice(true);
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(echoes()).toEqual([]));
+  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
+  expect(screen.getByTestId('card-results-empty')).toBeTruthy();
+  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+});
+
+test('a failed new_chat keeps the screen as it was', async () => {
+  mockRecents({ chatTools: true, newChatReject: true, asks: [generated] });
+  render(Launcher);
+  await screen.findByTestId('new-chat');
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
+  await waitFor(() => expect(err).toHaveBeenCalled());
+  expect(echoes()).toEqual(['first']);
+  expect(screen.getByTestId('preview-3')).toBeTruthy();
+  err.mockRestore();
 });
 
 test('New chat is disabled while an ask is in flight', async () => {

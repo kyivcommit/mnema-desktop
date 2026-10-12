@@ -89,7 +89,8 @@
   // below. A switch that
   // unmounted the tree would refetch it and shut every folder on the way back
   // on — C1 again, reached through a button.
-  const showTree = $derived(launcherState.kind !== 'idle');
+  // A hot launcher may be idle (after «New chat»): the left panel stays, the rest is empty.
+  const showTree = $derived(launcherState.kind !== 'idle' || heat === 'hot');
 
   // Every turn drawn in the centre, oldest first, each keyed by its own answer
   // so a turn already on screen is never remounted (and never loses its

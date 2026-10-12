@@ -60,6 +60,8 @@
     setLauncherLayout(showLeft, showRight).catch((e) => console.error('set_launcher_layout failed', e));
   });
 
+  // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
+  const dialogue = $derived(chatOn && statusProvider !== 'mnema');
   const newChatLabel = $derived.by(() => { void $locale; return t('new_chat'); });
 
   const appWindow = getCurrentWebviewWindow();
@@ -85,18 +87,16 @@
 
   async function startNewChat() {
     if (launcherState.kind === 'inFlight') return;
+    // The backend first: a screen that says "new" while the session goes on would lie.
+    try { await newChat(); } catch (e) { console.error('new_chat failed', e); return; }
     screenGen += 1; // an open that is still reading does not draw over the empty screen
-    // Idle is a cold launcher (a hot one is never idle), so this is the cold reset
-    // less the search line: the next answer warms it again.
     coldGen += 1;
-    heat = 'cold';
-    left = right = false;
+    // Only the conversation clears; heat and the panels stay as the person left them.
     turns = [];
     launcherState = { kind: 'idle' };
     previous = null;
     historyId = null;
     echo = '';
-    try { await newChat(); } catch (e) { console.error('new_chat failed', e); }
   }
 
   onMount(() => {
@@ -146,7 +146,7 @@
     // A rejected line keeps the echo: the answer it belongs to stays drawn.
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     echo = '';
-    if (!chatOn) turns = []; // one turn at a time: the answer on screen is replaced
+    if (!dialogue) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
     const gen = coldGen;
     try {
@@ -283,7 +283,7 @@
     <div class="searchbar" data-tauri-drag-region="deep">
       <div class="sb-row">
         <SearchLine bind:query state={launcherState} onSubmit={runSearch} />
-        {#if chatOn}
+        {#if dialogue}
           <button type="button" class="new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>{newChatLabel}</button>
         {/if}
       </div>

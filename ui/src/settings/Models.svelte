@@ -273,6 +273,7 @@
     keyGroupEl?.querySelector<HTMLElement>('input, button')?.focus();
   }
 
+  const chatToolsLabel = $derived.by(() => { void $locale; return t('models_chat_tools'); });
   const providerLabel = $derived.by(() => { void $locale; return t('models_provider_label'); });
   // The one guard on this screen no test can tell from its absence: the
   // provider name is the same string in both locales — a brand, not a
@@ -363,11 +364,14 @@
   }
 
   let toolsOn = $state(true);
-  async function toggleTools() {
+  async function toggleTools(e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
     try {
       toolsOn = await setChatTools(!toolsOn);
-    } catch {
-      return; // the switch did not change; the checkbox keeps showing the stored value
+    } catch (err) {
+      console.error('set_chat_tools failed', err);
+      box.checked = toolsOn; // unchanged state does not re-render: put the native box back
+      return;
     }
     await loadCatalogue('chat');
   }
@@ -1208,7 +1212,7 @@
 </div>
 
 <div class="tabpanel">
-{#if activeTab === 'chat'}<label><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {t('models_chat_tools')}</label>{/if}{#if activeCatalogueError}
+{#if activeTab === 'chat'}<label><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
   {#if unreadableSentence}<p data-testid="model-catalogue-unreadable">{unreadableSentence}</p>{/if}

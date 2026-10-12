@@ -144,10 +144,19 @@ afterEach(() => setLocale('en'));
 // table described as «лише рядок пошуку» — only the search line. Every other
 // state keeps the tree, so this test is the single negative the rule stands on.
 test('idle shows no cards at all (state A is the bare line)', () => {
-  render(Cards, { ...HOT, state: { kind: 'idle' }, query: '' });
+  render(Cards, { heat: 'cold', left: true, right: true, state: { kind: 'idle' }, query: '' });
   expect(screen.queryByTestId('card-tree')).toBeNull();
   expect(screen.queryByTestId('card-centre')).toBeNull();
   expect(screen.queryByTestId('card-source')).toBeNull();
+});
+
+// After «New chat» a hot launcher is idle: the left panel stays, the rest is empty.
+test('a hot idle launcher keeps the tree and has empty centre and source panels', () => {
+  render(Cards, { ...HOT, state: { kind: 'idle' }, query: '' });
+  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  expect(screen.getByTestId('card-results-empty')).toBeTruthy();
+  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+  expect(screen.queryByTestId('card-centre')).toBeNull();
 });
 
 test('generated shows tree, centre and the source of the first card', () => {

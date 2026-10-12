@@ -3396,6 +3396,33 @@ test('the tool-support checkbox sits on the chat tab only, labelled in both lang
   expect(await screen.findByLabelText('Підтримка інструментів')).toBeTruthy();
 });
 
+test('the tool-support label follows a live language switch', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
+  setLocale('en');
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await screen.findByLabelText('Tool support');
+  await switchTo('uk');
+  expect(screen.getByLabelText('Підтримка інструментів')).toBeTruthy();
+});
+
+test('a failed set_chat_tools puts the checkbox back to the stored value', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
+  setChatTools.mockRejectedValue('boom');
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  const box = (await screen.findByTestId('chat-tools')) as HTMLInputElement;
+  await waitFor(() => expect(box.checked).toBe(true));
+
+  await fireEvent.click(box);
+
+  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false));
+  await waitFor(() => expect(box.checked).toBe(true));
+  expect(err).toHaveBeenCalled();
+  err.mockRestore();
+});
+
 test('toggling tool support stores it and re-reads the chat catalogue', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
   setChatTools.mockResolvedValue(false);
