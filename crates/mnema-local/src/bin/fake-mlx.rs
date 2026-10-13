@@ -167,6 +167,9 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
             _ => (404, r#"{"error":"not found"}"#.to_string()),
         }
     };
+    // Log completion before replying: the client may start its next request as
+    // soon as it receives these bytes.
+    log(&format!("end {method} {sent}"));
     let head = format!(
         "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         answer.len()
@@ -175,6 +178,5 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
     let _ = s.write_all(head.as_bytes());
     let _ = s.write_all(answer.as_bytes());
     let _ = s.flush();
-    log(&format!("end {method} {sent}"));
     status
 }
