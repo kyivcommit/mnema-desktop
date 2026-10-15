@@ -973,7 +973,9 @@ test('RoleCatalogue is exactly what models.rs defines, field for field', () => {
 test('RoleStatuses and Missing are exactly what provider_status.rs defines', () => {
   const s: RoleStatuses = { embed: { kind: 'ok' }, chat: { kind: 'ok' } };
   expect(Object.keys(s).sort()).toEqual(rustStructFields(STATUS_RS, 'RoleStatuses').map(camelOfSnake).sort());
-  const missing: Record<Extract<ProviderStatus, { kind: 'notConfigured' }>['missing'], true> = {
+  // `chatModel` is the launcher's own state, never on the wire: named here so a
+  // second UI-only value cannot slip past this comparison.
+  const missing: Record<Exclude<Extract<ProviderStatus, { kind: 'notConfigured' }>['missing'], 'chatModel'>, true> = {
     key: true, embeddingModel: true, localModels: true, role: true,
   };
   expect(Object.keys(missing).sort()).toEqual(rustEnumVariants(STATUS_RS, 'Missing').map(camelOf).sort());
