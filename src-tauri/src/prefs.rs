@@ -197,7 +197,8 @@ fn stored_choice(
 /// value is returned as stored, even if its provider no longer serves the
 /// role. When neither key exists, the old single `provider` key (absent =
 /// OpenRouter) is migrated: each role takes it if `configured` serves it, else
-/// none; the new keys are written and `provider` removed in one locked write.
+/// null; both keys are written (`null` = none) and `provider` removed in one
+/// locked write. A key present as `null` or garbage reads as `None`.
 pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate::provider::Roles {
     use crate::provider::{Role, Roles};
     let read = |obj: &serde_json::Map<String, serde_json::Value>| Roles {
@@ -214,10 +215,6 @@ pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate:
         embed: pick(Role::Embed),
         chat: pick(Role::Chat),
     };
-    let had_old = all.contains_key(crate::provider::PREFS_KEY);
-    if migrated.embed.is_none() && migrated.chat.is_none() && !had_old {
-        return migrated;
-    }
     let mut result = migrated;
     // Best effort: an unwritable directory leaves the old key, and the next
     // read migrates again to the same answer.
@@ -227,29 +224,25 @@ pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate:
             result = read(obj);
             return;
         }
+        // Both keys, `null` for a role nobody serves: a present key is what
+        // tells a later read the file is already migrated.
         for (key, v) in [(EMBED_KEY, migrated.embed), (CHAT_KEY, migrated.chat)] {
-            if let Some(v) = v {
-                obj.insert(key.into(), serde_json::to_value(v).unwrap());
-            }
+            obj.insert(key.into(), serde_json::to_value(v).unwrap());
         }
         obj.remove(crate::provider::PREFS_KEY);
     });
     result
 }
 
-/// Sets one role's provider; `None` removes the key.
+/// Sets one role's provider; `None` stores JSON `null` (not a removal, which
+/// would let the next read mistake the file for an unmigrated one).
 pub fn write_role(
     data_dir: &Path,
     role: crate::provider::Role,
     p: Option<crate::provider::ProviderChoice>,
 ) -> std::io::Result<()> {
-    update(data_dir, |obj| match p {
-        Some(p) => {
-            obj.insert(role_key(role).into(), serde_json::to_value(p).unwrap());
-        }
-        None => {
-            obj.remove(role_key(role));
-        }
+    update(data_dir, |obj| {
+        obj.insert(role_key(role).into(), serde_json::to_value(p).unwrap());
     })
 }
 
@@ -1511,12 +1504,10 @@ mod tests {
                     assert_eq!(got, Roles { embed: e, chat: ch }, "{ctx}");
                     let file = read_all(dir.path());
                     assert!(!file.contains_key(crate::provider::PREFS_KEY), "{ctx}");
-                    assert_eq!(file.contains_key("embed_provider"), e.is_some(), "{ctx}");
-                    assert_eq!(file.contains_key("chat_provider"), ch.is_some(), "{ctx}");
-                    // Once a key is written, a second read returns the same.
-                    if e.is_some() || ch.is_some() {
-                        assert_eq!(roles(dir.path(), c), got, "{ctx}");
-                    }
+                    assert_eq!(file.get("embed_provider"), Some(&json!(e)), "{ctx}");
+                    assert_eq!(file.get("chat_provider"), Some(&json!(ch)), "{ctx}");
+                    // Both keys are written, so a second read never re-migrates.
+                    assert_eq!(roles(dir.path(), c), got, "{ctx}");
                 }
             }
         }
@@ -1544,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn write_role_none_removes_the_key() {
+    fn write_role_none_writes_null() {
         use crate::provider::{ProviderChoice::Mnema, Role};
         let dir = tempfile::tempdir().unwrap();
         write_role(dir.path(), Role::Chat, Some(Mnema)).unwrap();
@@ -1555,8 +1546,66 @@ mod tests {
         );
         write_role(dir.path(), Role::Chat, None).unwrap();
         let file = read_all(dir.path());
-        assert!(!file.contains_key("chat_provider"));
+        assert_eq!(file.get("chat_provider"), Some(&json!(null)));
         assert_eq!(file.get("hotkey"), Some(&json!("X")));
+    }
+
+    #[test]
+    fn a_null_role_is_not_migrated() {
+        use crate::provider::Configured;
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), crate::provider::PREFS_KEY, json!("mnema")).unwrap();
+        write_key(dir.path(), "embed_provider", json!(null)).unwrap();
+        write_key(dir.path(), "chat_provider", json!(null)).unwrap();
+        let all = Configured {
+            open_router: true,
+            mnema_embed: true,
+            mnema_chat: true,
+        };
+        let got = roles(dir.path(), all);
+        assert_eq!((got.embed, got.chat), (None, None));
+        // The reader leaves the old key alone.
+        assert_eq!(read_all(dir.path()).get("provider"), Some(&json!("mnema")));
+    }
+
+    #[test]
+    fn migration_with_nothing_served_writes_two_nulls() {
+        use crate::provider::Configured;
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), crate::provider::PREFS_KEY, json!("mnema")).unwrap();
+        let none = Configured {
+            open_router: true,
+            mnema_embed: false,
+            mnema_chat: false,
+        };
+        assert_eq!(roles(dir.path(), none).embed, None);
+        let file = read_all(dir.path());
+        assert_eq!(file.get("embed_provider"), Some(&json!(null)));
+        assert_eq!(file.get("chat_provider"), Some(&json!(null)));
+        assert!(!file.contains_key("provider"));
+        // Nothing re-migrates it to OpenRouter later.
+        let all = Configured {
+            open_router: true,
+            mnema_embed: true,
+            mnema_chat: true,
+        };
+        let got = roles(dir.path(), all);
+        assert_eq!((got.embed, got.chat), (None, None));
+    }
+
+    #[test]
+    fn a_garbage_role_reads_as_none() {
+        use crate::provider::{Configured, ProviderChoice::OpenRouter};
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), "embed_provider", json!("bogus")).unwrap();
+        write_key(dir.path(), "chat_provider", json!("openRouter")).unwrap();
+        let all = Configured {
+            open_router: true,
+            mnema_embed: true,
+            mnema_chat: true,
+        };
+        let got = roles(dir.path(), all);
+        assert_eq!((got.embed, got.chat), (None, Some(OpenRouter)));
     }
 
     #[test]
