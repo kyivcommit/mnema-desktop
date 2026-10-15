@@ -199,7 +199,10 @@ fn stored_choice(
 /// OpenRouter) is migrated: each role takes it if `configured` serves it, else
 /// null; both keys are written (`null` = none) and `provider` removed in one
 /// locked write. A key present as `null` or garbage reads as `None`.
-pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate::provider::Roles {
+pub fn roles(
+    data_dir: &Path,
+    configured: impl FnOnce() -> crate::provider::Configured,
+) -> crate::provider::Roles {
     use crate::provider::{Role, Roles};
     let read = |obj: &serde_json::Map<String, serde_json::Value>| Roles {
         embed: stored_choice(obj, EMBED_KEY),
@@ -210,6 +213,7 @@ pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate:
         return read(&all);
     }
     let old = stored_choice(&all, crate::provider::PREFS_KEY).unwrap_or_default();
+    let configured = configured();
     let pick = |r| configured.serves(old, r).then_some(old);
     let migrated = Roles {
         embed: pick(Role::Embed),
@@ -1499,7 +1503,7 @@ mod tests {
                         OpenRouter => (pick(open_router), pick(open_router)),
                         Mnema => (pick(mnema_embed), pick(mnema_chat)),
                     };
-                    let got = roles(dir.path(), c);
+                    let got = roles(dir.path(), || c);
                     let ctx = format!("{old:?} {c:?}");
                     assert_eq!(got, Roles { embed: e, chat: ch }, "{ctx}");
                     let file = read_all(dir.path());
@@ -1507,7 +1511,7 @@ mod tests {
                     assert_eq!(file.get("embed_provider"), Some(&json!(e)), "{ctx}");
                     assert_eq!(file.get("chat_provider"), Some(&json!(ch)), "{ctx}");
                     // Both keys are written, so a second read never re-migrates.
-                    assert_eq!(roles(dir.path(), c), got, "{ctx}");
+                    assert_eq!(roles(dir.path(), || c), got, "{ctx}");
                 }
             }
         }
@@ -1527,7 +1531,7 @@ mod tests {
             mnema_embed: false,
             mnema_chat: true,
         };
-        let got = roles(dir.path(), c);
+        let got = roles(dir.path(), || c);
         // Stored as stored, even though openRouter no longer serves; chat is not guessed.
         assert_eq!((got.embed, got.chat), (Some(OpenRouter), None));
         assert_eq!(read_all(dir.path()).get("provider"), Some(&json!("mnema")));
@@ -1562,7 +1566,7 @@ mod tests {
             mnema_embed: true,
             mnema_chat: true,
         };
-        let got = roles(dir.path(), all);
+        let got = roles(dir.path(), || all);
         assert_eq!((got.embed, got.chat), (None, None));
         // The reader leaves the old key alone.
         assert_eq!(read_all(dir.path()).get("provider"), Some(&json!("mnema")));
@@ -1578,7 +1582,7 @@ mod tests {
             mnema_embed: false,
             mnema_chat: false,
         };
-        assert_eq!(roles(dir.path(), none).embed, None);
+        assert_eq!(roles(dir.path(), || none).embed, None);
         let file = read_all(dir.path());
         assert_eq!(file.get("embed_provider"), Some(&json!(null)));
         assert_eq!(file.get("chat_provider"), Some(&json!(null)));
@@ -1589,7 +1593,7 @@ mod tests {
             mnema_embed: true,
             mnema_chat: true,
         };
-        let got = roles(dir.path(), all);
+        let got = roles(dir.path(), || all);
         assert_eq!((got.embed, got.chat), (None, None));
     }
 
@@ -1604,8 +1608,16 @@ mod tests {
             mnema_embed: true,
             mnema_chat: true,
         };
-        let got = roles(dir.path(), all);
+        let got = roles(dir.path(), || all);
         assert_eq!((got.embed, got.chat), (None, Some(OpenRouter)));
+    }
+
+    #[test]
+    fn roles_asks_what_is_configured_only_to_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_role(dir.path(), crate::provider::Role::Chat, None).unwrap();
+        let got = roles(dir.path(), || panic!("a migrated file must not ask"));
+        assert_eq!(got.chat, None);
     }
 
     #[test]

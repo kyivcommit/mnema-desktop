@@ -448,27 +448,32 @@ impl Provider {
     /// The choice as the preferences file states it right now.
     pub fn choice(&self) -> ProviderChoice {
         // Reading the roles migrates the single key away, so this reads them
-        // too (until Task 3 moves the callers).
-        match self.roles().chat {
-            Some(ProviderChoice::Mnema) if !self.local.available() => ProviderChoice::OpenRouter,
-            c => c.unwrap_or_default(),
+        // too (until Task 3 moves the callers). Either role on Mnema keeps a
+        // local-only user local.
+        let r = self.roles();
+        let local = r.embed == Some(ProviderChoice::Mnema) || r.chat == Some(ProviderChoice::Mnema);
+        if local && self.local.available() {
+            ProviderChoice::Mnema
+        } else {
+            ProviderChoice::OpenRouter
         }
     }
 
     /// The provider of each role, as the preferences file states it, with the
     /// migration from the single key read against what is set up right now.
     pub fn roles(&self) -> Roles {
-        // An unreadable store is not "no key": it must not migrate a role away.
-        let open_router = mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some());
-        let up = self.local.available();
-        crate::prefs::roles(
-            &self.data_dir,
+        // Built only when a migration needs it: no keychain read otherwise.
+        crate::prefs::roles(&self.data_dir, || {
+            // An unreadable store is not "no key": it must not migrate a role away.
+            let open_router =
+                mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some());
+            let up = self.local.available();
             Configured {
                 open_router,
                 mnema_embed: up && self.local.ready(ModelId::Embed),
                 mnema_chat: up && self.local.ready(ModelId::Chat),
-            },
-        )
+            }
+        })
     }
 
     /// The models of the roles on Mnema that are downloaded.
@@ -794,16 +799,12 @@ pub fn on_cold(state: &crate::state::AppState) {
     let local = state.local();
     local.cold.store(true, Ordering::SeqCst);
     local.want.store(false, Ordering::SeqCst);
-    let roles = state.roles();
-    if roles.embed != Some(ProviderChoice::Mnema) && roles.chat != Some(ProviderChoice::Mnema) {
-        return;
-    }
     if let Some(sidecar) = local.started() {
         local.forget_loaded();
         // Best effort: a process that will not answer holds no memory worth
         // waiting for, and the next show asks again.
         // bge-m3 stays while a scan runs on Mnema: it is what the scan embeds with.
-        let keep_embed = scan_running(state) && roles.embed == Some(ProviderChoice::Mnema);
+        let keep_embed = scan_running(state) && state.roles().embed == Some(ProviderChoice::Mnema);
         let _ = sidecar.unload(keep_embed.then_some(ModelId::Chat));
     }
 }
@@ -814,16 +815,21 @@ pub fn on_show(state: &crate::state::AppState) -> std::thread::JoinHandle<()> {
     let provider = state.provider();
     provider.local.cold.store(false, Ordering::SeqCst);
     provider.local.shown.fetch_add(1, Ordering::SeqCst);
-    provider.local.want.store(true, Ordering::SeqCst);
     let which = provider.mnema_models();
+    // An empty set sets nothing and loads nothing: with no role on Mnema no
+    // `endpoint` reaches the process, so `want` alone does no harm.
+    if !which.is_empty() {
+        *provider
+            .local
+            .wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = which.clone();
+    }
+    // After `wanted`: a caller that sees `want` must see the set it loads.
+    provider.local.want.store(true, Ordering::SeqCst);
     if which.is_empty() {
         return std::thread::spawn(|| {});
     }
-    *provider
-        .local
-        .wanted
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = which;
     std::thread::spawn(move || {
         // `want` is set, so this starts the process and loads it.
         let _ = provider.local.endpoint();
@@ -1402,6 +1408,75 @@ mod lifecycle {
             "{}",
             logged(&log)
         );
+    }
+
+    #[test]
+    fn going_cold_during_a_scan_with_embed_on_openrouter_unloads_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        state.endpoint().expect("the process starts");
+        let _scan = scan_slot(&state);
+        on_cold(&state);
+        let text = logged(&log);
+        assert!(
+            text.lines().any(|l| l == "body /mnema/unload "),
+            "the scan embeds elsewhere, so nothing is kept:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_scan_end_unload_follows_the_embed_role() {
+        // Embed on Mnema, chat elsewhere: bge-m3 goes when the cold scan ends.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        state.endpoint().expect("the process starts");
+        let scan = scan_slot(&state);
+        on_cold(&state);
+        drop(scan);
+        on_scan_end(&state);
+        assert!(
+            logged(&log).lines().any(|l| l == EMBED_GONE),
+            "{}",
+            logged(&log)
+        );
+
+        // Chat on Mnema, embed elsewhere: bge-m3 was never this process's.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        state.endpoint().expect("the process starts");
+        let scan = scan_slot(&state);
+        on_cold(&state);
+        drop(scan);
+        on_scan_end(&state);
+        assert!(
+            !logged(&log).lines().any(|l| l == EMBED_GONE),
+            "{}",
+            logged(&log)
+        );
+    }
+
+    #[test]
+    fn either_role_on_mnema_keeps_the_choice_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = app(dir.path(), ProviderChoice::OpenRouter, &[]);
+        crate::prefs::write_role(dir.path(), Role::Embed, Some(ProviderChoice::Mnema)).unwrap();
+        crate::prefs::write_role(dir.path(), Role::Chat, None).unwrap();
+        assert_eq!(state.provider_choice(), ProviderChoice::Mnema);
     }
 
     #[test]
