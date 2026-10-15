@@ -787,6 +787,11 @@ fn model_missing(state: &crate::state::AppState, role: Role) -> bool {
 /// Chat: `p`'s default model, then the role. The model write is best effort:
 /// Mnema's chat never reads it, and a shut index is filled at the next boot.
 fn fill_chat(state: &crate::state::AppState, p: ProviderChoice) {
+    // Gemma takes no tools: with the switch on it is no valid default, and the
+    // role is left as it is (never moved to the cloud either).
+    if p == ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir()) {
+        return;
+    }
     let model = match p {
         ProviderChoice::OpenRouter => crate::models::DEFAULT_MODELS.chat,
         ProviderChoice::Mnema => LOCAL_CHAT_MODEL,

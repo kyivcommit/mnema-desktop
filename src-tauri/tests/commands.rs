@@ -12805,6 +12805,8 @@ fn mnema_cannot_serve_a_foreign_space() {
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
     write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     mnema_desktop::provider::on_configured(&state, Mnema, None);
 
@@ -12853,12 +12855,36 @@ fn a_finished_download_fills_its_models_empty_role() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
     assert!(done.is_ok(), "premise: the download finished: {done:?}");
 
     assert_eq!(state.roles().chat, Some(Mnema));
     assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
+}
+
+/// With the tools switch on (the default) Gemma is no valid default: an empty
+/// chat role stays empty after its download, and nothing moves to the cloud.
+#[test]
+fn a_gemma_download_with_tools_on_leaves_an_empty_chat_role_empty() {
+    use mnema_desktop::provider::{LocalModel, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, None);
 }
 
 /// A download that finishes while a scan holds the slot is not lost: the
@@ -12873,6 +12899,8 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
     state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
     let scan = state
         .claim_job(

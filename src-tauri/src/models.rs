@@ -854,8 +854,12 @@ pub fn choose_chat_model(
 /// current model when the public catalogue says it lacks `tools`; Mnema's
 /// Gemma (no tools) moves to OpenRouter's default when OpenRouter is set up,
 /// else the role is emptied. A catalogue that cannot be read changes nothing.
-/// Turning it off never touches the model. Made under the job slot like every
-/// role write; a busy slot refuses before anything is stored.
+/// Turning it off never touches the model.
+///
+/// The catalogue is read BEFORE the job slot is claimed (the slot is not held
+/// across the network), and the slot is claimed only when a write is needed: a
+/// switch that needs none succeeds while a scan runs. A busy slot refuses
+/// before anything is stored; a later failure rolls the switch back.
 pub fn choose_chat_tools(state: &AppState, on: bool) -> Result<bool, Error> {
     let key = |on: bool| {
         crate::prefs::write_key(state.data_dir(), "chat_tools", serde_json::Value::from(on))
@@ -864,12 +868,9 @@ pub fn choose_chat_tools(state: &AppState, on: bool) -> Result<bool, Error> {
         key(false)?;
         return Ok(crate::prefs::chat_tools(state.data_dir()));
     }
-    let _slot = crate::provider::adoption_slot(state)?;
-    key(true)?;
-    let before = state.roles();
     let or = Some(ProviderChoice::OpenRouter);
     // `Some(role)` = write that role (with OpenRouter's default model).
-    let write = match before.chat {
+    let write = match state.roles().chat {
         Some(ProviderChoice::Mnema) => Some(
             state
                 .provider()
@@ -880,14 +881,27 @@ pub fn choose_chat_tools(state: &AppState, on: bool) -> Result<bool, Error> {
         Some(ProviderChoice::OpenRouter) => chat_model_lacks_tools(state).then_some(or),
         None => None,
     };
-    if let Some(role) = write {
+    let Some(role) = write else {
+        key(true)?;
+        return Ok(crate::prefs::chat_tools(state.data_dir()));
+    };
+    let _slot = crate::provider::adoption_slot(state)?;
+    // Re-read under the slot: the role may have moved while the catalogue was read.
+    let before = state.roles();
+    key(true)?;
+    let moved = (|| -> Result<(), Error> {
         if role.is_some() {
             state
                 .with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, DEFAULT_MODELS.chat))?;
         }
         crate::prefs::write_role(state.data_dir(), crate::provider::Role::Chat, role)?;
-        crate::provider::after_role_change(state, before);
+        Ok(())
+    })();
+    if let Err(e) = moved {
+        let _ = key(false);
+        return Err(e);
     }
+    crate::provider::after_role_change(state, before);
     Ok(crate::prefs::chat_tools(state.data_dir()))
 }
 

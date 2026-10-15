@@ -3390,7 +3390,11 @@ fn tools_on_empties_a_mnema_chat_role_without_open_router() {
     set_chat_tools(fx.state(), true).unwrap();
 
     assert_eq!(roles(&fx).1, None);
-    assert_ne!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
+    assert_eq!(
+        chat_model_of(&fx).as_deref(),
+        Some(mnema_desktop::provider::LOCAL_CHAT_MODEL),
+        "the stored model is untouched"
+    );
 }
 
 #[test]
@@ -3419,6 +3423,73 @@ fn tools_off_never_changes_the_model_or_the_role() {
     );
 
     assert!(!set_chat_tools(fx.state(), false).unwrap());
+
+    assert_eq!(roles(&fx).1, Some(ProviderChoice::Mnema));
+    assert_eq!(
+        chat_model_of(&fx).as_deref(),
+        Some(mnema_desktop::provider::LOCAL_CHAT_MODEL)
+    );
+}
+
+#[test]
+fn tools_on_with_a_no_tools_model_while_a_scan_holds_the_slot_fails_and_stays_off() {
+    let fx = chat_on(TWO_CHATTERS, ProviderChoice::OpenRouter, "vendor/without");
+    let scan = fx
+        .state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    let refused = set_chat_tools(fx.state(), true);
+
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(!chat_tools(fx.state().data_dir()), "the switch stayed off");
+    assert_eq!(chat_model_of(&fx).as_deref(), Some("vendor/without"));
+    drop(scan);
+}
+
+#[test]
+fn tools_on_that_needs_no_write_succeeds_while_a_scan_holds_the_slot() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::OpenRouter,
+        "vendor/with-tools",
+    );
+    let _scan = fx
+        .state()
+        .claim_job(
+            Phase::Embedding {
+                counts: Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    assert!(set_chat_tools(fx.state(), true).expect("no slot needed"));
+    assert!(chat_tools(fx.state().data_dir()));
+}
+
+/// A boot never moves a chat role off Mnema, tools on or not: that is the
+/// person's own act (turning the switch on), never an automatic one.
+#[test]
+fn a_boot_leaves_a_mnema_chat_role_alone_with_tools_on() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::Mnema,
+        mnema_desktop::provider::LOCAL_CHAT_MODEL,
+    );
+    mnema_desktop::prefs::write_key(
+        fx.state().data_dir(),
+        "chat_tools",
+        serde_json::Value::from(true),
+    )
+    .unwrap();
+
+    mnema_desktop::models::choose_the_default_models_for_a_stored_key(fx.state().inner());
 
     assert_eq!(roles(&fx).1, Some(ProviderChoice::Mnema));
     assert_eq!(
