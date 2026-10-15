@@ -694,8 +694,8 @@ pub(crate) fn adoption_slot(
 
 /// `p` just became configured (a key stored, a local model downloaded): every
 /// EMPTY role `p` serves gets a model, and a role already on `p` whose model is
-/// missing gets one too. A chosen role is never touched. Best effort and
-/// silent: a busy slot or a failed write just leaves the role empty.
+/// missing gets one too. A chosen role is never touched. Best effort: a failed
+/// write leaves the role empty; a busy slot defers it to [`on_slot_change`].
 ///
 /// `which` limits Mnema to the role of the model that arrived — Mnema is
 /// configured per model, so downloading bge-m3 says nothing new about chat.
@@ -714,6 +714,12 @@ pub(crate) fn fill_roles(
     which: Option<ModelId>,
 ) {
     let Ok(_slot) = adoption_slot(state) else {
+        // A scan holds the slot: applied when it is released.
+        state.queue_fill(Fill {
+            p,
+            empty_too,
+            which,
+        });
         return;
     };
     let before = state.roles();
@@ -737,6 +743,22 @@ pub(crate) fn fill_roles(
         }
     }
     after_role_change(state, before);
+}
+
+/// A [`fill_roles`] call a busy slot deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fill {
+    p: ProviderChoice,
+    empty_too: bool,
+    which: Option<ModelId>,
+}
+
+/// The job slot changed hands (the job observer): apply the substitutions a
+/// busy slot deferred. One that still finds the slot taken queues itself again.
+pub fn on_slot_change(state: &crate::state::AppState) {
+    for f in state.take_fills() {
+        fill_roles(state, f.p, f.empty_too, f.which);
+    }
 }
 
 /// The role is on a provider but the index has no model for it.

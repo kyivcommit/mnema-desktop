@@ -12861,6 +12861,43 @@ fn a_finished_download_fills_its_models_empty_role() {
     assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
 }
 
+/// A download that finishes while a scan holds the slot is not lost: the
+/// empty role stays empty during the scan and is filled when the slot is
+/// released, through the job observer production installs.
+#[test]
+fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    let handle = app.handle().clone();
+    state.set_job_observer(Box::new(move || {
+        mnema_desktop::provider::on_slot_change(&handle.state::<AppState>());
+    }));
+    let scan = state
+        .claim_job(
+            mnema_desktop::scan_state::Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+    assert_eq!(state.roles().chat, None, "the scan holds the slot");
+
+    drop(scan);
+    assert_eq!(
+        state.roles().chat,
+        Some(Mnema),
+        "the deferred substitution is applied when the slot is released"
+    );
+}
+
 /// Mnema is configured per model: bge-m3 arriving says nothing new about
 /// chat, so an empty chat role stays empty though Gemma was already there.
 #[test]

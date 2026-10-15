@@ -170,6 +170,9 @@ pub struct AppState {
     /// The language of the last question asked under Mnema, for the next
     /// question that does not show its own (`mnema_rag::detect`'s `previous`).
     last_lang: Mutex<Option<mnema_rag::Lang>>,
+    /// Substitutions a busy job slot refused; [`crate::provider::on_slot_change`]
+    /// applies them once the slot is free.
+    pending_fills: Mutex<Vec<crate::provider::Fill>>,
     /// The launcher's conversation; memory only (see [`crate::dialogue`]).
     pub dialogue: crate::dialogue::Session,
 }
@@ -233,6 +236,7 @@ impl AppState {
                 PathBuf::new(),
             ))),
             last_lang: Mutex::new(None),
+            pending_fills: Mutex::new(Vec::new()),
             dialogue: crate::dialogue::Session::default(),
         }
     }
@@ -451,6 +455,27 @@ impl AppState {
             credential_ref: self.credential_ref.clone(),
             local: self.local(),
         }
+    }
+
+    /// Records a substitution to apply when the job slot is released; one copy
+    /// of each.
+    pub(crate) fn queue_fill(&self, fill: crate::provider::Fill) {
+        let mut q = self
+            .pending_fills
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !q.contains(&fill) {
+            q.push(fill);
+        }
+    }
+
+    pub(crate) fn take_fills(&self) -> Vec<crate::provider::Fill> {
+        std::mem::take(
+            &mut *self
+                .pending_fills
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Which providers are set up for which role right now.

@@ -963,6 +963,7 @@ pub fn run() -> anyhow::Result<()> {
                     let inner = handle.clone();
                     let scan = handle.state::<state::AppState>().scan_state();
                     let _ = handle.emit(SCAN_PROGRESS_EVENT, &scan);
+                    provider::on_slot_change(&handle.state::<state::AppState>());
                     let _ = handle.run_on_main_thread(move || {
                         tray::refresh_tray(&inner);
                     });
