@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getContext, onMount, tick } from 'svelte';
+  import { getContext, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
@@ -389,6 +389,9 @@
       box.checked = toolsOn; // unchanged state does not re-render: put the native box back
       return;
     }
+    // The switch may have moved the chat role to its default (the backend does
+    // it in the same command): read that before the list is.
+    await refresh().catch(() => {});
     await loadCatalogue('chat');
   }
 
@@ -938,10 +941,48 @@
       return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
     }
     if (pickerValue !== null) return null;
-    return { value: model, label: t('models_selection_absent', { id: model }) };
+    // A chosen model the picker cannot offer (retired, or refused) is not
+    // announced by id: a retired one is replaced by the provider's default
+    // below, and until then the role reads as not chosen.
+    return { value: '', label: t(activeCatalogue ? 'models_selection_not_chosen' : 'models_selection_unknown') };
   });
 
   const pickerPlaceholder = $derived(nothingConfigured ? setupFirst : (selectPlaceholder ? selectPlaceholder.label : ''));
+
+  // A chosen model that a successfully loaded catalogue no longer lists is
+  // replaced by its provider's default, once per (role, provider, model): the
+  // chat role is written; the embedding role goes through the same choice as a
+  // press (no vectors anywhere: written at once with `keep`; vectors: the
+  // existing count-based confirmation, nothing sent until it is answered).
+  // Nothing happens when the default itself is not offered, so a bad default
+  // cannot loop; a refused-but-listed model is not "absent".
+  const DEFAULT_MODEL: Record<Tab, Record<ProviderChoice, string>> = {
+    chat: { openRouter: 'openai/gpt-6-luna', mnema: 'gemma-4-e2b-it' },
+    embedding: { openRouter: 'baai/bge-m3', mnema: 'baai/bge-m3' },
+  };
+  const replacedAbsent = new Set<string>();
+  $effect(() => {
+    const tab = activeTab;
+    const cat = activeCatalogue;
+    const model = visibleActiveModel;
+    const provider = visibleProviderFor(tab);
+    if (!cat || !settings || settings.index.kind !== 'read' || changeBusy) return;
+    if (model === null || provider === null || outcomeFor(tab) !== null) return;
+    const served = provider === 'mnema'
+      ? (tab === 'chat' ? settings.configured.mnemaChat : settings.configured.mnemaEmbed)
+      : settings.configured.openRouter;
+    if (!served) return;
+    const lists = (id: string) => cat.entries.some((e) => e.id === id && e.provider === provider);
+    if (lists(model)) return;
+    const fallback = DEFAULT_MODEL[tab][provider];
+    const key = `${tab}\t${provider}\t${model}`;
+    if (replacedAbsent.has(key) || !cat.entries.some((e) => e.id === fallback && e.provider === provider && !isRefused(e))) return;
+    replacedAbsent.add(key);
+    untrack(() => {
+      if (tab === 'chat') void chooseChatModel(fallback, provider);
+      else chooseEmbeddingModel(fallback, provider);
+    });
+  });
 
   async function commitEmbedding(model: string, provider: ProviderChoice, existingVectors: ExistingVectors) {
     pendingEmbedding = null;

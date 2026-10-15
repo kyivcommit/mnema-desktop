@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import { expect, test, vi, afterEach } from 'vitest';
@@ -161,4 +164,13 @@ test('options_carry_their_id', async () => {
   const { button } = setup();
   await fireEvent.click(button);
   expect(screen.getAllByRole('option').map((o) => o.getAttribute('data-id'))).toEqual(['a', 'b', 'c']);
+});
+
+test('the_placeholder_truncates_like_the_label_and_the_button_clips', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Picker.svelte'), 'utf8');
+  const rule = (sel: string) => src.match(new RegExp(`${sel.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))![1];
+  for (const decl of ['min-width: 0', 'overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap']) {
+    expect(rule('.picker-placeholder'), decl).toContain(decl);
+  }
+  expect(rule('.picker-button')).toContain('overflow: hidden');
 });

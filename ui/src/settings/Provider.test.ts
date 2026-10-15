@@ -248,3 +248,16 @@ test('Mnema is offered only when available', async () => {
   await fireEvent.click(picker());
   expect(screen.getAllByRole('option')).toHaveLength(2);
 });
+
+test('the dot follows the name, in the closed button and in the list', async () => {
+  await mountRows(ABSENT);
+  await waitFor(() => picker());
+  const after = (host: Element) => {
+    const label = host.querySelector('.picker-label')!;
+    const dot = host.querySelector('.mdot')!;
+    return !!(label.compareDocumentPosition(dot) & Node.DOCUMENT_POSITION_FOLLOWING);
+  };
+  expect(after(picker())).toBe(true);
+  await fireEvent.click(picker());
+  for (const o of screen.getAllByRole('option')) expect(after(o)).toBe(true);
+});

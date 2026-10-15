@@ -1343,14 +1343,11 @@ test('refused_models_are_not_options: the floor in the hidden line is read from 
   );
 });
 
-// A confirmed model the catalogue still lists, but now refuses: it is
-// indistinguishable, on the select, from a model the provider retired
-// outright — it shows through the existing absent-id placeholder path
-// (`a confirmed model absent from the catalogue gets its own placeholder
-// option` below is the retired-model half of this claim) — and the
-// hidden-reason line still counts it, because it really is one of the
-// entries this build refused.
-test('a_refused_confirmed_model_shows_as_absent', async () => {
+// A confirmed model the catalogue still lists, but now refuses: the select
+// cannot offer it, so it reads as not chosen (never replaced: it is listed,
+// not absent) — and the hidden-reason line still counts it, because it really
+// is one of the entries this build refused.
+test('a_refused_confirmed_model_reads_as_not_chosen', async () => {
   mockCatalogues({
     embedding: catalogueOf([
       entry('confirmed-model', { name: 'Confirmed', refusal: { kind: 'noStatedLimit' } }),
@@ -1367,9 +1364,9 @@ test('a_refused_confirmed_model_shows_as_absent', async () => {
   }));
   await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
 
-  expect(selectedModel()).toBe('confirmed-model');
-  expect(optionsFor('confirmed-model').length).toBe(0); // the placeholder on the button, not an option
-  expect(combobox().textContent).toContain('confirmed-model');
+  expect(optionsFor('confirmed-model').length).toBe(0);
+  expect(combobox().textContent).toContain('No model chosen yet.');
+  expect(combobox().textContent).not.toContain('confirmed-model');
 
   expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
     '1 hidden: the provider states no input limit',
@@ -3289,12 +3286,10 @@ test('unknown_model_is_not_the_first_option', async () => {
   expect(selectedModel()).not.toBe('emb-1');
 });
 
-// A confirmed id the active catalogue does NOT list — a provider that
-// retired a model this index still points at. It gets its OWN disabled
-// option, carrying that id, rather than collapsing into either the blank
-// "nothing chosen" placeholder or (worse) one of the entries this build
-// still happens to offer.
-test('a confirmed model absent from the catalogue gets its own placeholder option, not the first entry', async () => {
+// A confirmed id the active catalogue does NOT list, and no default to move to
+// (the default is not listed either): no id is announced, no entry absorbs the
+// selection, and nothing is written.
+test('a confirmed model absent from the catalogue is not announced and not replaced by the first entry', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
   await renderWith(settings({
     key: { kind: 'present' },
@@ -3306,10 +3301,11 @@ test('a confirmed model absent from the catalogue gets its own placeholder optio
   }));
   await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
 
-  expect(selectedModel()).toBe('retired-model');
-  expect(combobox().textContent).toContain('retired-model');
-  // Neither catalogue entry silently absorbed the selection.
+  expect(combobox().textContent).toContain('No model chosen yet.');
+  expect(combobox().textContent).not.toContain('retired-model');
   expect(listOptions().some((o) => o.getAttribute('aria-selected') === 'true')).toBe(false);
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+  expect(screen.queryByTestId('model-embedding-confirm')).toBeNull();
 });
 
 // The per-role dot (review P2-1): its own predicate, not a shared boolean.
@@ -3701,4 +3697,87 @@ test('an_empty_role_with_a_model_set_does_not_claim_the_provider_dropped_it', as
   }));
   await waitFor(() => expect(combobox().textContent).toContain('No model chosen'));
   expect(combobox().textContent).not.toContain('no longer lists');
+});
+
+// --- A model the provider no longer lists is replaced by the default --------
+
+const CHAT_DEFAULT = 'openai/gpt-6-luna';
+const chatGone = (over: Record<string, unknown> = {}) => settings({
+  key: { kind: 'present' }, index: readIndex({ chatModel: 'retired-chat', ...over }),
+});
+async function openChat() {
+  await fireEvent.click(await screen.findByTestId('model-tab-chat'));
+}
+
+test('an_absent_chat_model_is_replaced_by_the_default_once', async () => {
+  mockCatalogues({ chat: catalogueOf([entry(CHAT_DEFAULT), entry('other')]) });
+  setChatModel.mockResolvedValue(undefined);
+  await renderWith(chatGone()); // the re-read keeps answering the retired model
+  await openChat();
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith(CHAT_DEFAULT, 'openRouter'));
+  for (let i = 0; i < 6; i += 1) await tick();
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBeGreaterThan(1)); // the re-read happened
+  expect(setChatModel).toHaveBeenCalledTimes(1);
+});
+
+test('an_absent_chat_model_is_left_alone_when_the_default_is_absent_too', async () => {
+  mockCatalogues({ chat: catalogueOf([entry('other')]) });
+  await renderWith(chatGone());
+  await openChat();
+  await waitFor(() => expect(optionsFor('other').length).toBe(1));
+  for (let i = 0; i < 4; i += 1) await tick();
+  expect(setChatModel).not.toHaveBeenCalled();
+  expect(combobox().textContent).toContain('No model chosen yet.');
+});
+
+test('a_listed_but_refused_chat_model_is_not_replaced', async () => {
+  mockCatalogues({ chat: catalogueOf([
+    entry(CHAT_DEFAULT), entry('retired-chat', { refusal: { kind: 'noToolUse' } }),
+  ]) });
+  await renderWith(chatGone());
+  await openChat();
+  await waitFor(() => expect(optionsFor(CHAT_DEFAULT).length).toBe(1));
+  for (let i = 0; i < 4; i += 1) await tick();
+  expect(setChatModel).not.toHaveBeenCalled();
+});
+
+test('an_absent_embedding_model_with_no_vectors_takes_the_default_at_once', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('baai/bge-m3'), entry('emb-2')]) });
+  setEmbeddingModel.mockResolvedValue({ retired: [] });
+  await renderWith(settings({ key: { kind: 'present' }, index: readIndex({ embeddingModel: 'retired-emb' }) }));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('baai/bge-m3', 'openRouter', 'keep'));
+  expect(setEmbeddingModel).toHaveBeenCalledTimes(1);
+});
+
+test('an_absent_embedding_model_with_vectors_asks_first_and_sends_nothing', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('baai/bge-m3'), entry('emb-2')]) });
+  await renderWith(settings({
+    key: { kind: 'present' },
+    index: readIndex({ embeddingModel: 'retired-emb', embeddedChunks: 7, embeddedChunksEverywhere: 7 }),
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-embedding-confirm')).toBeTruthy());
+  expect(screen.getByTestId('model-embedding-estimate').textContent).toContain('7');
+  for (let i = 0; i < 4; i += 1) await tick();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+  setEmbeddingModel.mockResolvedValue({ retired: [] });
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('baai/bge-m3', 'openRouter', 'discard'));
+});
+
+test('the_provider_no_longer_offers_text_is_gone_from_every_locale', () => {
+  const catalog = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../i18n/catalog.ts'), 'utf8');
+  expect(catalog).not.toContain('models_selection_absent');
+  expect(catalog).not.toContain('більше не пропонує');
+  expect(catalog).not.toContain('no longer lists');
+});
+
+test('turning_the_tools_switch_on_re_reads_the_roles_before_the_list', async () => {
+  mockCatalogues({ chat: catalogueOf([entry(CHAT_DEFAULT)]) });
+  setChatTools.mockResolvedValue(true);
+  chatTools.mockResolvedValue(false);
+  await renderWith(chatGone({ chatModel: CHAT_DEFAULT }));
+  await openChat();
+  const reads = modelSettings.mock.calls.length;
+  await fireEvent.click(await screen.findByRole('checkbox'));
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBeGreaterThan(reads));
 });

@@ -156,9 +156,9 @@
   .picker-button {
     width: 100%; height: 37px; padding: 0 13px; text-align: left;
     border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface);
-    font: inherit; font-size: 13.5px; color: var(--ink);
+    font: inherit; font-size: 13.5px; color: var(--ink); overflow: hidden;
   }
-  .picker-placeholder { color: var(--ink-faint); }
+  .picker-placeholder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-faint); }
   .picker-aside { margin-left: auto; color: var(--ink-soft); font-size: 12px; }
   .picker-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .picker-pop {

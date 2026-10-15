@@ -13,7 +13,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_tab_embedding' | 'models_tab_chat'
   | 'models_status_ready' | 'models_status_not_ready' | 'models_role_empty' | 'models_setup_first'
   | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
-  | 'models_selection_absent' | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
+  | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
   | 'models_sort_name' | 'models_sort_price' | 'models_info_label'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
@@ -267,14 +267,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_setup_first: 'Спершу налаштуйте провайдера',
     // Task 4 — the native model select. A label over the control (the same
     // pattern `models_provider_label`/`models_key_label` already use), and
-    // the placeholder option's own text for the three states a confirmed
+    // the placeholder option's own text for the two states a confirmed
     // model id cannot stand for on its own: a read that said nothing is
-    // chosen, a build that currently cannot say either way, and a confirmed
-    // id the active catalogue no longer lists.
+    // chosen, and a build that currently cannot say either way.
     models_selection_label: 'Модель:',
     models_selection_not_chosen: 'Модель ще не обрано.',
     models_selection_unknown: 'Поточна модель невідома.',
-    models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
     // The picker's option text: the price per million tokens beside the
     // name, as the provider stated it (owner, 2026-09-16). Input only when
     // the output price is nought or not stated — an embedding model.
@@ -1175,7 +1173,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_selection_label: 'Model:',
     models_selection_not_chosen: 'No model chosen yet.',
     models_selection_unknown: 'The current model is unknown.',
-    models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
     models_option_priced: '{name} — {input}',
     models_option_priced_both: '{name} — {input} / {output}',
     models_price_note: 'Prices are per 1M tokens: input / output, as the provider states them.',

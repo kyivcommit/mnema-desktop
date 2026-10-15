@@ -157,12 +157,9 @@
   <span id={LABEL_ID}>{label}</span>
   <Picker options={options} value={choice} onchange={(id) => (choice = id as ProviderChoice)}
     placeholder={openRouterLabel} disabled={!available} labelledby={LABEL_ID}>
-    {#snippet marker(o)}
-      {@const on = o.id === 'mnema' ? configured.mnemaEmbed || configured.mnemaChat : configured.openRouter}
-      <span class="mdot" data-configured={on ? 'true' : 'false'}><span class="mdot-mark" aria-hidden="true"></span></span>
-    {/snippet}
     {#snippet markerAfter(o)}
-      {@const on = o.id === 'mnema' ? configured.mnemaEmbed || configured.mnemaChat : configured.openRouter}<span class="sr-only">, {on ? configuredLabel : notConfiguredLabel}</span>
+      {@const on = o.id === 'mnema' ? configured.mnemaEmbed || configured.mnemaChat : configured.openRouter}
+      <span class="mdot" data-configured={on ? 'true' : 'false'}><span class="mdot-mark" aria-hidden="true"></span></span><span class="sr-only">, {on ? configuredLabel : notConfiguredLabel}</span>
     {/snippet}
   </Picker>
 </div>
