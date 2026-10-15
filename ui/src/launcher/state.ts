@@ -44,7 +44,8 @@ export type LauncherState =
 // with no chosen model still cannot embed a query, so a provider alone is not enough. Fail SAFE:
 // `typeof … === 'string'` is true only for a real model name, so a null model — or a wire field
 // renamed away to `undefined` — reads as no-model and the role stays NOT ready, never wrongly ready.
-// One predicate for both roles: the settings tab dots, the status line and the launcher read it.
+// One predicate for both roles: the settings tab dots and status line call it, and so does the
+// launcher's cloud (Launcher.svelte), which is `ok` only when the backend probe is ok AND this holds.
 // Whether the role's provider can serve it right now, apart from the index.
 export function roleServed(s: ModelSettings, role: 'embed' | 'chat'): boolean {
   const provider = s.roles[role];

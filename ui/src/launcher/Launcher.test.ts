@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { READINESS_FIXTURES } from '../lib/fixtures';
+import { roleReady } from './state';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
@@ -45,10 +47,15 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // `data-pending="0"` `source-failed` card under a correct header. A future test
 // that waits on `card-source` and asserts anything other than the excerpt would
 // pass against it. Mock the command rather than trusting the crash.
-const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false } };
+const READY_INDEX = { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'emb', chatModel: 'chat', searchTextArm: true, searchContentArm: false };
+// Both roles on OpenRouter with a key and a chosen model each: the cloud may say `ok`.
+const SETTINGS_READY = {
+  key: { kind: 'present' }, index: READY_INDEX, roles: { embed: 'openRouter', chat: 'openRouter' },
+  configured: { openRouter: true, mnemaEmbed: false, mnemaChat: false },
+};
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -67,7 +74,7 @@ const listTreeCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_tree'
 function mockAsks(...replies: unknown[]) {
   let next = 0;
   invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -190,7 +197,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   // off `undefined` and vitest reports an unhandled `TypeError` while every test
   // still passes.
   invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -227,7 +234,7 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
 function mockAsksThenReject(first: unknown) {
   let n = 0;
   invoke.mockImplementation((cmd: string) => {
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -853,7 +860,7 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
   let resolveAsk!: (v: unknown) => void;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -875,7 +882,7 @@ test('an ask in flight when launcher-cold arrives is dropped when it resolves', 
   let resolveAsk!: (v: unknown) => void;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -900,7 +907,7 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
   let rejectAsk!: (v: unknown) => void;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((_, r) => { rejectAsk = r; });
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
@@ -1024,7 +1031,7 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
     mockBackend(undefined);
     const base = invoke.getMockImplementation()!;
     invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
-      cmd === 'model_settings' ? Promise.resolve({ ...NO_PROVIDER, roles: { embed: choice, chat: choice } }) : base(cmd, ...a));
+      cmd === 'model_settings' ? Promise.resolve({ ...SETTINGS_READY, roles: { embed: choice, chat: choice }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: true } }) : base(cmd, ...a));
     render(Launcher);
     const b = await screen.findByTestId('provider-cloud');
     expect(b.getAttribute('aria-label'), choice).toContain(has);
@@ -1081,7 +1088,7 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
-    if (cmd === 'model_settings') return Promise.resolve({ ...NO_PROVIDER, roles: { embed: opts.provider ?? 'openRouter', chat: opts.provider ?? 'openRouter' } });
+    if (cmd === 'model_settings') return Promise.resolve({ ...SETTINGS_READY, roles: { embed: opts.provider ?? 'openRouter', chat: opts.provider ?? 'openRouter' } });
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
@@ -1636,4 +1643,30 @@ test('New chat waits for a continue that is still on its way to the backend', as
   expect(callsOf('new_chat')).toHaveLength(0);
   done(true);
   await waitFor(() => expect(callsOf('new_chat')).toHaveLength(1));
+});
+
+// The cloud is ok only when the backend's probe is ok AND `roleReady` holds, the
+// rule the settings tab dots read (Models.test.ts has the other half).
+test('the_tab_dot_and_launcher_agree', async () => {
+  for (const f of READINESS_FIXTURES) {
+    expect(roleReady(f.settings, 'embed'), f.name).toBe(f.embedReady);
+    expect(roleReady(f.settings, 'chat'), f.name).toBe(f.chatReady);
+    mockBackend(undefined);
+    const base = invoke.getMockImplementation()!; // the probe says ok for both roles
+    invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+      cmd === 'model_settings' ? Promise.resolve(f.settings) : base(cmd, ...a));
+    render(Launcher);
+    const want = f.embedReady && f.chatReady ? 'ok' : 'notConfigured';
+    await waitFor(() => expect(cloud().getAttribute('data-status'), f.name).toBe(want));
+    cleanup();
+  }
+});
+
+test('a failed settings read leaves the cloud not ready, whatever the probe said', async () => {
+  mockBackend(undefined);
+  const base = invoke.getMockImplementation()!;
+  invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+    cmd === 'model_settings' ? Promise.reject(new Error('down')) : base(cmd, ...a));
+  render(Launcher);
+  await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('notConfigured'));
 });

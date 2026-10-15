@@ -13,7 +13,8 @@
   import type { ScanSnapshot } from '../lib/ipc';
   // Reused rather than re-derived: `roleReady` is the one per-role readiness
   // rule ("the role's provider can serve it + a chosen model, fail-safe on
-  // null/undefined") the launcher reads too. A second copy of this boolean is the "two truths,
+  // null/undefined"); the launcher's cloud reads it too, next to the backend's
+  // probe. A second copy of this boolean is the "two truths,
   // one message" class this project has paid for 22 times in one cycle — one
   // of the two would eventually read a fixed set of fields differently.
   import { roleReady, roleServed } from '../launcher/state';
@@ -859,7 +860,7 @@
     // some other space is non-empty, which is the count this branch has just
     // read as zero, so the value that would refuse is the value that cannot
     // refuse here.
-    if (!indexRead || estimatedEmbeddings === 0) {
+    if (!indexRead || atRisk(model) === 0) {
       void commitEmbedding(model, provider, 'keep');
       return;
     }
@@ -919,6 +920,8 @@
   const selectPlaceholder = $derived.by(() => {
     void $locale;
     const model = visibleActiveModel;
+    // An empty role has no provider to have stopped listing anything.
+    if (visibleProviderFor(activeTab) === null && settings?.index.kind === 'read') return { value: '', label: t('models_role_empty') };
     if (model === null) {
       const status = statusFor(activeTab);
       return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
@@ -998,7 +1001,13 @@
   // exactly the spaces it forgets. `models.rs` says so on the field itself,
   // and `the_settings_tell_the_active_space_apart_from_the_whole_index` is
   // where the two numbers are held apart.
-  const estimatedEmbeddings = $derived(indexRead ? indexRead.embeddedChunksEverywhere : 0);
+  // Choosing the model the index is already on (the other provider's listing of
+  // one space: bge-m3 on OpenRouter and Mnema share it) keeps the active space,
+  // so only the OTHER spaces' vectors are at risk.
+  const atRisk = (model: string) => !indexRead ? 0
+    : model === visibleEmbeddingModel ? indexRead.embeddedChunksEverywhere - indexRead.embeddedChunks
+      : indexRead.embeddedChunksEverywhere;
+  const estimatedEmbeddings = $derived(pendingEmbedding ? atRisk(pendingEmbedding.model) : indexRead ? indexRead.embeddedChunksEverywhere : 0);
 
   // Semantic search is dark: the index points at a vector space, it holds
   // documents, and that space holds nothing for them.

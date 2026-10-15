@@ -1,8 +1,7 @@
-import { ROLE_FIELDS } from '../lib/fixtures';
+import { ROLE_FIELDS, READINESS_FIXTURES } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
-import { providerReady, roleReady } from '../launcher/state';
 import { createJobController } from './jobs';
 import { tick, flushSync } from 'svelte';
 import { get } from 'svelte/store';
@@ -3630,32 +3629,48 @@ test('an_empty_role_has_its_own_status_and_a_red_dot', async () => {
   expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe('false');
 });
 
-// One predicate, two readers: each tab's dot is `roleReady` of the same settings.
+// One predicate, two readers: each tab's dot is `roleReady` of the same settings the
+// launcher's cloud reads (Launcher.test.ts has the other half over the same fixtures).
 test('the_tab_dot_and_launcher_agree', async () => {
-  const chatIdx = readIndex({ embeddingModel: 'm', chatModel: 'c' });
-  const fixtures: ModelSettings[] = [
-    settings({ key: { kind: 'present' }, index: chatIdx }),
-    settings({ key: { kind: 'absent' }, index: chatIdx }),
-    settings({ key: { kind: 'present' }, index: readIndex() }),
-    settings({ key: { kind: 'absent' }, index: chatIdx, roles: { embed: 'mnema', chat: 'mnema' }, configured: { openRouter: false, mnemaEmbed: true, mnemaChat: false } }),
-    settings({ key: { kind: 'present' }, index: chatIdx, roles: { embed: null, chat: 'openRouter' } }),
-  ];
-  for (const f of fixtures) {
-    await renderWith(f);
-    expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe(String(providerReady(f)));
-    expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured')).toBe(String(roleReady(f, 'chat')));
+  for (const f of READINESS_FIXTURES) {
+    await renderWith(f.settings);
+    expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured'), f.name).toBe(String(f.embedReady));
+    expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured'), f.name).toBe(String(f.chatReady));
     cleanup();
   }
 });
 
-test('the_same_model_under_the_other_provider_is_a_choice_not_a_no_op', async () => {
-  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('baai/bge-m3', { name: 'BAAI: bge-m3' })]) });
-  await renderWith(settings({
-    key: { kind: 'present' }, index: readIndex({ embeddingModel: 'baai/bge-m3', embeddedChunks: 7, embeddedChunksEverywhere: 7 }),
-    configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
-  }));
+const BGE = () => catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('baai/bge-m3', { name: 'BAAI: bge-m3' })]);
+const bgeSettings = (active: number, everywhere: number) => settings({
+  key: { kind: 'present' }, index: readIndex({ embeddingModel: 'baai/bge-m3', embeddedChunks: active, embeddedChunksEverywhere: everywhere }),
+  configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
+});
+
+test('switching_bge_m3_between_providers_asks_nothing', async () => {
+  mockCatalogues({ embedding: BGE() });
+  setEmbeddingModel.mockResolvedValue({ retired: [] });
+  await renderWith(bgeSettings(7, 7)); // one space holds every vector
   await waitFor(() => expect(listOptions().length).toBe(2));
   await pickModel('baai/bge-m3', 'mnema (local)');
-  expect(screen.getByTestId('model-embedding-confirm')).toBeTruthy(); // asks, as for any change of space
+  expect(screen.queryByTestId('model-embedding-confirm')).toBeNull();
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('baai/bge-m3', 'mnema', 'keep'));
+});
+
+test('switching_bge_m3_with_an_old_space_asks_only_about_the_old_vectors', async () => {
+  mockCatalogues({ embedding: BGE() });
+  await renderWith(bgeSettings(7, 10)); // 3 vectors sit in an abandoned space
+  await waitFor(() => expect(listOptions().length).toBe(2));
+  await pickModel('baai/bge-m3', 'mnema (local)');
+  expect(screen.getByTestId('model-embedding-estimate').textContent).toContain('3');
+  expect(screen.getByTestId('model-embedding-estimate').textContent).not.toContain('10');
   expect(setEmbeddingModel).not.toHaveBeenCalled();
+});
+
+test('an_empty_role_with_a_model_set_does_not_claim_the_provider_dropped_it', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('x')]) });
+  await renderWith(settings({
+    key: { kind: 'present' }, roles: { embed: null, chat: 'openRouter' }, index: readIndex({ embeddingModel: 'old-model' }),
+  }));
+  await waitFor(() => expect(combobox().textContent).toContain('No model chosen'));
+  expect(combobox().textContent).not.toContain('no longer lists');
 });
