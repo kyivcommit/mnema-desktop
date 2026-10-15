@@ -3319,3 +3319,110 @@ fn a_chat_choice_on_open_router_without_a_key_is_refused() {
     assert!(matches!(refused, Err(Error::NoKey)), "{refused:?}");
     assert_eq!(roles(&fx), (None, None));
 }
+
+// --- The tools switch moves a chat model that cannot take tools -------------
+
+fn chat_model_of(fx: &Fixture) -> Option<String> {
+    fx.state()
+        .with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))
+        .unwrap()
+}
+
+/// A fixture whose chat role is on `provider` with `model`, a key stored.
+fn chat_on(listing: &str, provider: ProviderChoice, model: &str) -> Fixture {
+    let fx = Fixture::with_provider_listing(listing);
+    fx.open_index();
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
+    fx.state()
+        .with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, model))
+        .unwrap();
+    write_roles(&fx, Some(ProviderChoice::OpenRouter), Some(provider));
+    set_chat_tools(fx.state(), false).unwrap();
+    fx
+}
+
+#[test]
+fn tools_on_gives_an_open_router_model_without_tools_the_default() {
+    let fx = chat_on(TWO_CHATTERS, ProviderChoice::OpenRouter, "vendor/without");
+
+    assert!(set_chat_tools(fx.state(), true).unwrap());
+
+    assert_eq!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
+    assert_eq!(roles(&fx).1, Some(ProviderChoice::OpenRouter));
+}
+
+#[test]
+fn tools_on_keeps_an_open_router_model_that_has_tools() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::OpenRouter,
+        "vendor/with-tools",
+    );
+
+    set_chat_tools(fx.state(), true).unwrap();
+
+    assert_eq!(chat_model_of(&fx).as_deref(), Some("vendor/with-tools"));
+}
+
+#[test]
+fn tools_on_moves_a_mnema_chat_role_to_open_router_when_it_is_set_up() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::Mnema,
+        mnema_desktop::provider::LOCAL_CHAT_MODEL,
+    );
+
+    set_chat_tools(fx.state(), true).unwrap();
+
+    assert_eq!(roles(&fx).1, Some(ProviderChoice::OpenRouter));
+    assert_eq!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
+}
+
+#[test]
+fn tools_on_empties_a_mnema_chat_role_without_open_router() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::Mnema,
+        mnema_desktop::provider::LOCAL_CHAT_MODEL,
+    );
+    mnema_secrets::forget(fx.credential_ref()).unwrap();
+
+    set_chat_tools(fx.state(), true).unwrap();
+
+    assert_eq!(roles(&fx).1, None);
+    assert_ne!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
+}
+
+#[test]
+fn tools_on_with_an_unreadable_catalogue_changes_nothing() {
+    let fx = chat_on(
+        "this is not a catalogue",
+        ProviderChoice::OpenRouter,
+        "vendor/without",
+    );
+
+    assert!(
+        set_chat_tools(fx.state(), true).unwrap(),
+        "the switch holds"
+    );
+
+    assert_eq!(chat_model_of(&fx).as_deref(), Some("vendor/without"));
+    assert_eq!(roles(&fx).1, Some(ProviderChoice::OpenRouter));
+}
+
+#[test]
+fn tools_off_never_changes_the_model_or_the_role() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::Mnema,
+        mnema_desktop::provider::LOCAL_CHAT_MODEL,
+    );
+
+    assert!(!set_chat_tools(fx.state(), false).unwrap());
+
+    assert_eq!(roles(&fx).1, Some(ProviderChoice::Mnema));
+    assert_eq!(
+        chat_model_of(&fx).as_deref(),
+        Some(mnema_desktop::provider::LOCAL_CHAT_MODEL)
+    );
+}

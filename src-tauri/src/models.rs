@@ -249,9 +249,10 @@ fn role_from(name: &str) -> Result<Role, Error> {
 #[tauri::command(async)]
 pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<RoleCatalogue, Error> {
     let role = role_from(&role)?;
-    merged_catalogue(state.configured_providers(), role, || {
+    let tools_on = role == Role::Chat && crate::prefs::chat_tools(state.data_dir());
+    merged_catalogue(state.configured_providers(), role, tools_on, || {
         let mut catalogue = mnema_provider::list_models(state.openrouter_base(), None, role)?;
-        if role == Role::Chat && crate::prefs::chat_tools(state.data_dir()) {
+        if tools_on {
             for e in catalogue
                 .entries
                 .iter_mut()
@@ -304,10 +305,12 @@ fn mnema_entry(role: Role) -> Option<mnema_provider::ModelEntry> {
 
 /// Mnema's entry first, then OpenRouter's list, each only for a provider that
 /// is set up for the role. `open_router` is not asked (no network) when it is
-/// not configured.
+/// not configured. `tools_on` (the chat tools switch) refuses Mnema's chat
+/// model like any OpenRouter model without tools: Gemma takes none.
 fn merged_catalogue(
     configured: crate::provider::Configured,
     role: Role,
+    tools_on: bool,
     open_router: impl FnOnce() -> Result<Catalogue, Error>,
 ) -> Result<RoleCatalogue, Error> {
     use crate::provider::Role as Served;
@@ -322,9 +325,14 @@ fn merged_catalogue(
         unreadable_records: Vec::new(),
     };
     if served.is_some_and(|r| configured.serves(ProviderChoice::Mnema, r)) {
-        out.entries.extend(mnema_entry(role).map(|entry| RoleModel {
-            provider: ProviderChoice::Mnema,
-            entry,
+        out.entries.extend(mnema_entry(role).map(|mut entry| {
+            if tools_on && role == Role::Chat {
+                entry.refusal = Some(Refusal::NoToolUse);
+            }
+            RoleModel {
+                provider: ProviderChoice::Mnema,
+                entry,
+            }
         }));
     }
     if configured.open_router {
@@ -837,6 +845,60 @@ pub fn choose_chat_model(
     )?;
     crate::provider::after_role_change(state, before);
     Ok(())
+}
+
+/// The tools switch, and what it implies for a chat model without tools.
+///
+/// Turned on, a chat role whose model cannot take tools takes its provider's
+/// default instead of keeping a model the list now refuses: OpenRouter's
+/// current model when the public catalogue says it lacks `tools`; Mnema's
+/// Gemma (no tools) moves to OpenRouter's default when OpenRouter is set up,
+/// else the role is emptied. A catalogue that cannot be read changes nothing.
+/// Turning it off never touches the model. Made under the job slot like every
+/// role write; a busy slot refuses before anything is stored.
+pub fn choose_chat_tools(state: &AppState, on: bool) -> Result<bool, Error> {
+    let key = |on: bool| {
+        crate::prefs::write_key(state.data_dir(), "chat_tools", serde_json::Value::from(on))
+    };
+    if !on {
+        key(false)?;
+        return Ok(crate::prefs::chat_tools(state.data_dir()));
+    }
+    let _slot = crate::provider::adoption_slot(state)?;
+    key(true)?;
+    let before = state.roles();
+    let or = Some(ProviderChoice::OpenRouter);
+    // `Some(role)` = write that role (with OpenRouter's default model).
+    let write = match before.chat {
+        Some(ProviderChoice::Mnema) => Some(
+            state
+                .provider()
+                .configured()
+                .serves(ProviderChoice::OpenRouter, crate::provider::Role::Chat)
+                .then_some(ProviderChoice::OpenRouter),
+        ),
+        Some(ProviderChoice::OpenRouter) => chat_model_lacks_tools(state).then_some(or),
+        None => None,
+    };
+    if let Some(role) = write {
+        if role.is_some() {
+            state
+                .with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, DEFAULT_MODELS.chat))?;
+        }
+        crate::prefs::write_role(state.data_dir(), crate::provider::Role::Chat, role)?;
+        crate::provider::after_role_change(state, before);
+    }
+    Ok(crate::prefs::chat_tools(state.data_dir()))
+}
+
+/// The stored chat model is listed by OpenRouter's public catalogue without
+/// tools. An unreadable catalogue, an unlisted model or no model: `false`.
+fn chat_model_lacks_tools(state: &AppState) -> bool {
+    let Ok(Some(model)) = state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL)) else {
+        return false;
+    };
+    mnema_provider::list_models(state.openrouter_base(), None, Role::Chat)
+        .is_ok_and(|c| c.entries.iter().any(|e| e.id == model && !e.tools))
 }
 
 /// Everything the settings screen draws: the key, and the index.
@@ -1572,7 +1634,8 @@ mod tests {
     #[test]
     fn no_configured_provider_lists_nothing() {
         for role in [Role::Embedding, Role::Chat, Role::Rerank] {
-            let c = merged_catalogue(configured(false, false, false), role, never_asked).unwrap();
+            let c = merged_catalogue(configured(false, false, false), role, false, never_asked)
+                .unwrap();
             assert!(c.entries.is_empty(), "{role:?}: {:?}", c.entries);
         }
     }
@@ -1580,18 +1643,29 @@ mod tests {
     #[test]
     fn a_keyless_open_router_lists_nothing() {
         // Mnema serves chat only here: the embedding list is empty, not OpenRouter's.
-        let c =
-            merged_catalogue(configured(false, false, true), Role::Embedding, never_asked).unwrap();
+        let c = merged_catalogue(
+            configured(false, false, true),
+            Role::Embedding,
+            false,
+            never_asked,
+        )
+        .unwrap();
         assert!(c.entries.is_empty());
         // And the chat list is Mnema's alone.
-        let c = merged_catalogue(configured(false, false, true), Role::Chat, never_asked).unwrap();
+        let c = merged_catalogue(
+            configured(false, false, true),
+            Role::Chat,
+            false,
+            never_asked,
+        )
+        .unwrap();
         assert_eq!(c.entries.len(), 1);
         assert_eq!(c.entries[0].provider, ProviderChoice::Mnema);
     }
 
     #[test]
-    fn mnema_entry_comes_first_and_is_never_tool_filtered() {
-        let c = merged_catalogue(configured(true, true, true), Role::Chat, || {
+    fn mnema_entry_comes_first_and_is_refused_for_tools_only_when_the_switch_is_on() {
+        let c = merged_catalogue(configured(true, true, true), Role::Chat, false, || {
             or_list(&["vendor/a", "vendor/b"])
         })
         .unwrap();
@@ -1609,10 +1683,20 @@ mod tests {
             ]
         );
         let m = &c.entries[0].entry;
-        assert_eq!((m.tools, m.refusal.clone()), (false, None));
+        assert_eq!((m.tools, m.refusal.clone()), (false, None), "switch off");
         assert_eq!(m.name, "Google: Gemma 4 E2B");
+        let on = merged_catalogue(configured(true, true, true), Role::Chat, true, || {
+            or_list(&["vendor/a"])
+        })
+        .unwrap();
+        assert_eq!(
+            on.entries[0].entry.refusal,
+            Some(Refusal::NoToolUse),
+            "switch on"
+        );
+        assert_eq!(on.entries[1].entry.refusal, None, "OpenRouter's has tools");
         assert_eq!(m.price, mnema_provider::Price::Known { amount: 0.0 });
-        let e = merged_catalogue(configured(true, true, true), Role::Embedding, || {
+        let e = merged_catalogue(configured(true, true, true), Role::Embedding, true, || {
             or_list(&["vendor/a"])
         })
         .unwrap();
@@ -1622,7 +1706,7 @@ mod tests {
 
     #[test]
     fn a_role_lists_only_the_mnema_model_that_is_ready_for_it() {
-        let c = merged_catalogue(configured(true, true, false), Role::Chat, || {
+        let c = merged_catalogue(configured(true, true, false), Role::Chat, false, || {
             or_list(&["x"])
         })
         .unwrap();

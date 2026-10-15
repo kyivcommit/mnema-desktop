@@ -740,11 +740,11 @@ pub fn chat_tools_enabled(state: tauri::State<'_, AppState>) -> bool {
     chat_tools(state.data_dir())
 }
 
-/// Stores the tool-support switch and answers with the stored value.
+/// Stores the tool-support switch and answers with the stored value; see
+/// [`crate::models::choose_chat_tools`] for what turning it on does to the model.
 #[tauri::command(async)]
 pub fn set_chat_tools(state: tauri::State<'_, AppState>, on: bool) -> Result<bool, Error> {
-    write_key(state.data_dir(), "chat_tools", serde_json::Value::from(on))?;
-    Ok(chat_tools(state.data_dir()))
+    crate::models::choose_chat_tools(&state, on)
 }
 
 /// Sets the idle threshold after which the launcher forgets its last answer,
