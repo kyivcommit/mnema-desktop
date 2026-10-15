@@ -137,7 +137,8 @@ pub struct Local {
     /// test makes the load misbehave in a way the fake cannot.
     load: fn(&Sidecar, &[ModelId]) -> Result<(), mnema_local::Error>,
     /// The models a load asks for: those of the roles on Mnema ([`on_show`]
-    /// sets it); both until then.
+    /// and every role change set it); both until then. A load asks only for
+    /// the ones that are downloaded.
     wanted: Mutex<Vec<ModelId>>,
 }
 
@@ -260,15 +261,25 @@ impl Local {
             let began = match st.running {
                 Some(began) => began,
                 None => {
+                    // Only what is downloaded: the process fails a whole load
+                    // that names a model whose files are gone.
+                    let which: Vec<ModelId> = self
+                        .wanted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .iter()
+                        .copied()
+                        .filter(|id| self.ready(*id))
+                        .collect();
+                    // An empty load asks for both; nothing to load is no load
+                    // (the process loads on demand).
+                    if which.is_empty() {
+                        return Ok(());
+                    }
                     let attempt = st.attempt + 1;
                     let began = Instant::now();
                     let (loads, sidecar, load) =
                         (Arc::clone(&self.loads), Arc::clone(sidecar), self.load);
-                    let which = self
-                        .wanted
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .clone();
                     // The end is recorded by a guard, so a load that panics
                     // still ends: otherwise every caller with no limit would
                     // wait on it for ever, and no load could start again.
@@ -857,6 +868,15 @@ pub(crate) fn after_role_change(state: &crate::state::AppState, before: Roles) {
     let after = state.roles();
     let local = state.local();
     let mnema = Some(ProviderChoice::Mnema);
+    let which: Vec<ModelId> = [(after.embed, ModelId::Embed), (after.chat, ModelId::Chat)]
+        .into_iter()
+        .filter(|(p, _)| *p == mnema)
+        .map(|(_, id)| id)
+        .collect();
+    // Empty keeps the last set, as at a show: nothing on Mnema loads nothing.
+    if !which.is_empty() {
+        *local.wanted.lock().unwrap_or_else(PoisonError::into_inner) = which;
+    }
     if after.embed != mnema && after.chat != mnema {
         local.stop();
         return;
@@ -1303,6 +1323,42 @@ mod lifecycle {
                 .any(|l| l == r#"body /mnema/load {"models":["embed"]}"#),
             "{text}"
         );
+    }
+
+    /// `wanted` still at its default (both) while Gemma is not downloaded: the
+    /// load asks for bge-m3 alone, or the process fails every load.
+    #[test]
+    fn a_stale_wanted_set_loads_only_downloaded_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(dir.path(), ProviderChoice::Mnema, ProviderChoice::Mnema);
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        state.local().want.store(true, Ordering::SeqCst);
+        let got = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
+        let text = logged(&log);
+        assert!(got.is_ok(), "the embed endpoint loads: {got:?}\n{text}");
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["embed"]}"#),
+            "{text}"
+        );
+    }
+
+    /// A role change sets the load set to the roles on Mnema, so a chat role
+    /// moved to OpenRouter no longer loads Gemma.
+    #[test]
+    fn a_role_change_resets_the_load_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(dir.path(), ProviderChoice::Mnema, ProviderChoice::Mnema);
+        let before = state.roles();
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        after_role_change(&state, before);
+        assert_eq!(*state.local().wanted.lock().unwrap(), vec![ModelId::Embed]);
     }
 
     #[test]

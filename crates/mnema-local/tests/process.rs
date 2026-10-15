@@ -196,7 +196,14 @@ fn a_process_dying_mid_request_fails_at_once() {
 fn load_and_unload_reach_the_root_routes_with_the_right_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("fake.log");
-    let s = start(&[("FAKE_MLX_LOG", log.to_str().unwrap())]);
+    // Directories that exist: a load naming a model whose files are missing fails.
+    let s = Sidecar::start_with_env(
+        Path::new(FAKE),
+        dir.path(),
+        dir.path(),
+        &[("FAKE_MLX_LOG", log.to_str().unwrap())],
+    )
+    .unwrap();
     // The real server answers 204 (empty body) to both; any 2xx is success.
     let loaded = s.load(&[]);
     assert!(loaded.is_ok(), "load: {loaded:?}");
