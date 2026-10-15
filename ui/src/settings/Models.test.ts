@@ -1365,8 +1365,8 @@ test('a_refused_confirmed_model_reads_as_not_chosen', async () => {
   await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
 
   expect(optionsFor('confirmed-model').length).toBe(0);
-  expect(combobox().textContent).toContain('No model chosen yet.');
-  expect(combobox().textContent).not.toContain('confirmed-model');
+  // Named with its reason, never "not chosen": the role does have this model.
+  expect(combobox().textContent).toBe('Confirmed — 1 hidden: the provider states no input limit');
 
   expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
     '1 hidden: the provider states no input limit',
@@ -3730,15 +3730,51 @@ test('an_absent_chat_model_is_left_alone_when_the_default_is_absent_too', async 
   expect(combobox().textContent).toContain('No model chosen yet.');
 });
 
-test('a_listed_but_refused_chat_model_is_not_replaced', async () => {
+test('a_refused_chosen_chat_model_is_replaced_by_the_default', async () => {
   mockCatalogues({ chat: catalogueOf([
     entry(CHAT_DEFAULT), entry('retired-chat', { refusal: { kind: 'noToolUse' } }),
   ]) });
+  setChatModel.mockResolvedValue(undefined);
+  await renderWith(chatGone());
+  await openChat();
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith(CHAT_DEFAULT, 'openRouter'));
+});
+
+test('a_refused_mnema_chat_model_is_named_with_its_reason_and_never_moved', async () => {
+  mockCatalogues({ chat: catalogueOf([
+    mnemaEntry('gemma-4-e2b-it', { name: 'Google: Gemma 4 E2B', refusal: { kind: 'noToolUse' } }),
+    entry(CHAT_DEFAULT),
+  ]) });
+  await renderWith(settings({
+    key: { kind: 'present' }, roles: { embed: 'openRouter', chat: 'mnema' },
+    configured: { openRouter: true, mnemaEmbed: false, mnemaChat: true },
+    index: readIndex({ chatModel: 'gemma-4-e2b-it' }),
+  }));
+  await openChat();
+  await waitFor(() => expect(combobox().textContent).toBe('Google: Gemma 4 E2B — 1 hidden: no tool support'));
+  for (let i = 0; i < 4; i += 1) await tick();
+  expect(setChatModel).not.toHaveBeenCalled();
+});
+
+test('an_unreadable_record_stops_any_replacement', async () => {
+  mockCatalogues({ chat: catalogueOf([entry(CHAT_DEFAULT)], 1) });
   await renderWith(chatGone());
   await openChat();
   await waitFor(() => expect(optionsFor(CHAT_DEFAULT).length).toBe(1));
   for (let i = 0; i < 4; i += 1) await tick();
   expect(setChatModel).not.toHaveBeenCalled();
+});
+
+test('a_refused_tools_switch_shows_its_error_and_stays_off', async () => {
+  mockCatalogues({ chat: catalogueOf([entry(CHAT_DEFAULT)]) });
+  chatTools.mockResolvedValue(false);
+  setChatTools.mockRejectedValue(new Error('another job holds the slot'));
+  await renderWith(chatGone({ chatModel: CHAT_DEFAULT }));
+  await openChat();
+  const box = (await screen.findByRole('checkbox')) as HTMLInputElement;
+  await fireEvent.click(box);
+  await waitFor(() => expect(screen.getByTestId('model-action-error').textContent).toBe('another job holds the slot'));
+  expect(box.checked).toBe(false);
 });
 
 test('an_absent_embedding_model_with_no_vectors_takes_the_default_at_once', async () => {

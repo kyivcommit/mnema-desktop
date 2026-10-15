@@ -382,10 +382,12 @@
   let toolsOn = $state(true);
   async function toggleTools(e: Event) {
     const box = e.currentTarget as HTMLInputElement;
+    actionError = null;
     try {
       toolsOn = await setChatTools(!toolsOn);
     } catch (err) {
       console.error('set_chat_tools failed', err);
+      actionError = err instanceof Error ? err.message : String(err);
       box.checked = toolsOn; // unchanged state does not re-render: put the native box back
       return;
     }
@@ -941,9 +943,15 @@
       return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
     }
     if (pickerValue !== null) return null;
-    // A chosen model the picker cannot offer (retired, or refused) is not
-    // announced by id: a retired one is replaced by the provider's default
-    // below, and until then the role reads as not chosen.
+    // A chosen model the picker cannot offer. Refused: it is named, with the
+    // reason. Retired: not announced; the default replaces it below, and until
+    // then the role reads as not chosen.
+    const refused = activeCatalogue?.entries.find(
+      (e) => e.id === model && e.provider === visibleProviderFor(activeTab) && isRefused(e),
+    );
+    if (refused && isRefused(refused)) {
+      return { value: '', label: `${refused.name} — ${hiddenReasonLabel(refused.refusal, 1)}` };
+    }
     return { value: '', label: t(activeCatalogue ? 'models_selection_not_chosen' : 'models_selection_unknown') };
   });
 
@@ -955,7 +963,8 @@
   // press (no vectors anywhere: written at once with `keep`; vectors: the
   // existing count-based confirmation, nothing sent until it is answered).
   // Nothing happens when the default itself is not offered, so a bad default
-  // cannot loop; a refused-but-listed model is not "absent".
+  // cannot loop. A refused chosen model counts as absent (the picker cannot
+  // offer it); a catalogue with unreadable records replaces nothing.
   const DEFAULT_MODEL: Record<Tab, Record<ProviderChoice, string>> = {
     chat: { openRouter: 'openai/gpt-6-luna', mnema: 'gemma-4-e2b-it' },
     embedding: { openRouter: 'baai/bge-m3', mnema: 'baai/bge-m3' },
@@ -967,12 +976,15 @@
     const model = visibleActiveModel;
     const provider = visibleProviderFor(tab);
     if (!cat || !settings || settings.index.kind !== 'read' || changeBusy) return;
+    // A record this build could not read may be the very model chosen: nothing
+    // is known to be absent, so nothing is replaced.
+    if (cat.unreadable > 0) return;
     if (model === null || provider === null || outcomeFor(tab) !== null) return;
     const served = provider === 'mnema'
       ? (tab === 'chat' ? settings.configured.mnemaChat : settings.configured.mnemaEmbed)
       : settings.configured.openRouter;
     if (!served) return;
-    const lists = (id: string) => cat.entries.some((e) => e.id === id && e.provider === provider);
+    const lists = (id: string) => cat.entries.some((e) => e.id === id && e.provider === provider && !isRefused(e));
     if (lists(model)) return;
     const fallback = DEFAULT_MODEL[tab][provider];
     const key = `${tab}\t${provider}\t${model}`;
