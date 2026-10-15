@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
@@ -51,6 +52,7 @@ function settings(embeddingModel: string | null, everywhere: number): ModelSetti
       lastIndexedAt: null, scanIncomplete: false, searchTextArm: true, searchContentArm: true,
     },
     platform: 'mac',
+    ...ROLE_FIELDS,
   };
 }
 

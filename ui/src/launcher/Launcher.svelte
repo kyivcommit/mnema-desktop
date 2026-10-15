@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
+  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, modelSettings, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
   import { checkQuery, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
@@ -75,8 +75,15 @@
   let providerGen = 0;
   function refreshProvider() {
     const gen = ++providerGen;
-    Promise.all([providerStatus(), providerChoice().catch((): ProviderChoice => 'openRouter')])
-      .then(([s, c]) => { if (gen === providerGen) { status = s; statusProvider = c ?? 'openRouter'; } })
+    Promise.all([providerStatus(), modelSettings().then((m) => m.roles).catch(() => null)])
+      .then(([s, roles]) => {
+        if (gen !== providerGen) return;
+        // Answers need the chat role and search the embed role: the cloud shows
+        // the first of the two that is not ok.
+        const role: keyof RoleStatuses = s.chat.kind !== 'ok' || s.embed.kind === 'ok' ? 'chat' : 'embed';
+        status = s[role];
+        statusProvider = roles?.[role] ?? 'openRouter';
+      })
       .catch((e) => console.error('provider_status failed', e));
   }
 

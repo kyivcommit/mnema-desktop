@@ -1641,6 +1641,9 @@ mod tests {
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["provider"], "mnema");
         assert_eq!(v["id"], crate::provider::LOCAL_EMBED_MODEL);
+        // The flattened shape the window reads (`RoleModel` in ipc.ts).
+        assert!(v["price"]["kind"].is_string(), "{v}");
+        assert!(v["inputLimit"]["kind"].is_string(), "{v}");
     }
 
     /// Every role the provider has is reachable from the window — checked by the

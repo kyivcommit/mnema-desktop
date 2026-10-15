@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
@@ -150,6 +151,7 @@ function settings(overrides: Partial<ModelSettings> = {}): ModelSettings {
     // for the wrong reason, and no test could tell which half was read.
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     platform: 'linux',
+    ...ROLE_FIELDS,
     ...overrides,
   };
 }
@@ -1431,7 +1433,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   await waitFor(() => expect(modelSelect().value).toBe('gpt-a'));
 
   await pickModel('gpt-b');
-  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b', 'openRouter'));
   // set_chat_model has not resolved yet — the pick alone must not repaint.
   expect(modelSelect().value).toBe('gpt-a');
 
@@ -1454,7 +1456,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   await waitFor(() => expect(optionsFor('gpt-b').length).toBe(1));
 
   await pickModel('gpt-b');
-  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b', 'openRouter'));
   await waitFor(() => expect(queue.length).toBe(2)); // mount's call, then the choice's own refresh
 
   // The fresh call — issued by the choice — settles first, with the new model.
@@ -1521,7 +1523,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
   await waitFor(() => expect(optionsFor('gpt-b').length).toBe(1));
 
   await pickModel('gpt-b');
-  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b'));
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b', 'openRouter'));
   // The choice's own refresh runs AFTER set_chat_model resolves, sequentially
   // — it has not been issued yet, so only the mount's call exists so far.
   expect(queue.length).toBe(1);
@@ -2219,7 +2221,7 @@ test('Discard sends its own value, and nothing supplies one by default', async (
   await pickModel('emb-2');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
 
-  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'discard');
+  expect(setEmbeddingModel).toHaveBeenLastCalledWith('emb-2', 'openRouter', 'discard');
 });
 
 // The other side of Ruling A: with nothing to lose there is nothing to ask
@@ -2236,7 +2238,7 @@ test('an index holding nothing anywhere asks nothing and sends the value that re
   await pickModel('emb-2');
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
-  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'openRouter', 'keep'));
 });
 
 // The two counts differ here on purpose, the other way round from the estimate
@@ -2689,7 +2691,7 @@ test('ReadFailed offers choosing a model again as the recovering act, and presse
   // No estimate can be stated about an index that will not answer, so nothing
   // is asked — and `keep` is the value that refuses rather than destroys.
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
-  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'openRouter', 'keep'));
 });
 
 test('a healthy index is offered no recovering act, and its presses ask first', async () => {
@@ -3224,7 +3226,7 @@ test('unreadable_recovery_uses_keep', async () => {
   await pickModel('emb-2');
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
-  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'keep'));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'openRouter', 'keep'));
   await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
 });
 

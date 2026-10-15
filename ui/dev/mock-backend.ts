@@ -17,7 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 import { LAUNCHER_COLD_EVENT } from '../src/lib/ipc';
 import { excerptSpanA, generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
+  AppPrefs, AskAnswer, Catalogue, RoleCatalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
   ScanState, ThemeChoice, TreeListing,
 } from '../src/lib/ipc';
 
@@ -77,7 +77,7 @@ function initialState(scenario: string) {
 // always carries priced models, refused ones and a router, and the window
 // draws the ⓘ and its notes only when it does (`Models.svelte`'s `hasNotes`).
 // A clean list here hid that button once already.
-const catalogue = (role: ModelRole): Catalogue => {
+const catalogue = (role: ModelRole): RoleCatalogue => {
   const usd = (perMillion: number) => ({ kind: 'known' as const, amount: perMillion / 1e6 });
   const ok = (id: string, price: number, out = 0): Catalogue['entries'][number] => ({
     id, name: id.split('/')[1], inputLimit: { kind: 'known', tokens: 8192 },
@@ -100,7 +100,7 @@ const catalogue = (role: ModelRole): Catalogue => {
         refused('openrouter/auto', { kind: 'router' }),
         refused('openai/dall-e-3', { kind: 'noTextOutput' }),
       ];
-  return { entries, unreadable: 0, unreadableRecords: [] };
+  return { entries: entries.map((e) => ({ ...e, provider: 'openRouter' as const })), unreadable: 0, unreadableRecords: [] };
 };
 
 export function installMockBackend(win: 'settings' | 'launcher') {
@@ -110,7 +110,12 @@ export function installMockBackend(win: 'settings' | 'launcher') {
   const provider = query.get('provider') ?? 'ok';
   const s = initialState(scenario);
   const bump = () => { s.scan = { ...s.scan, revision: s.scan.revision + 1 }; };
-  const settings = () => ({ key: s.key, index: s.index, platform: 'mac' as const });
+  // Both roles follow the one mock provider choice (Provider.svelte still drives it).
+  const settings = () => ({
+    key: s.key, index: s.index, platform: 'mac' as const,
+    roles: { embed: choice, chat: choice },
+    configured: { openRouter: s.key.kind === 'present', mnemaEmbed: local.embed?.kind === 'ready', mnemaChat: local.chat?.kind === 'ready' },
+  });
 
   // ponytail: a scan is three timer ticks, not the real phase machine; enough
   // to draw the progress strip, add phases here when a task needs them.
@@ -271,9 +276,12 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},
     set_chat_tools: (a) => (s.chatTools = a.on as boolean),
-    provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
-      : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
-      : { kind: 'ok' },
+    provider_status: () => {
+      const one = provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
+        : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
+        : { kind: 'ok' };
+      return { embed: one, chat: one };
+    },
     open_settings: (a) => {
       win === 'launcher' && open('/dev/settings.html' + location.search, '_blank');
       // The bench's event bus is page-local, so the section reaches only this

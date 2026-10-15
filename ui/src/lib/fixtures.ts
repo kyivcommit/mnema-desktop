@@ -1,5 +1,5 @@
 import type {
-  AskAnswer, AskCitation, Hit, HistoryEntry, SourceAround, SourceBlock, TreeListing,
+  AskAnswer, AskCitation, Hit, HistoryEntry, ModelSettings, SourceAround, SourceBlock, TreeListing,
 } from './ipc';
 
 // Anchors 3 and 7, NOT 1 and 2: `anchor` is the model's own ordinal into
@@ -428,4 +428,11 @@ export const excerptInAnotherBlock: Excerpt = {
   hasMoreBefore: false,
   hasMoreAfter: true,
   freshness: { kind: 'current' },
+};
+
+// The two `ModelSettings` fields added with provider-per-role, for test
+// fixtures that do not care about them: both roles on OpenRouter, key only.
+export const ROLE_FIELDS: Pick<ModelSettings, 'roles' | 'configured'> = {
+  roles: { embed: 'openRouter', chat: 'openRouter' },
+  configured: { openRouter: true, mnemaEmbed: false, mnemaChat: false },
 };

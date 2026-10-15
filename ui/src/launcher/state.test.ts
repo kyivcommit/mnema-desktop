@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
 import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, heatAfter, firstCard, turnsAfter } from './state';
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
@@ -59,19 +60,19 @@ const unreadableIndex: ModelSettings['index'] = { kind: 'unreadable', cause: 'no
 const platform: ModelSettings['platform'] = 'linux';
 
 test('providerReady: a present key and a chosen model → true', () => {
-  expect(providerReady({ key: presentKey, index: readWithModel, platform })).toBe(true);
+  expect(providerReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS })).toBe(true);
 });
 
 test('providerReady: a present key with no chosen model → false (the live-smoke config)', () => {
-  expect(providerReady({ key: presentKey, index: readNoModel, platform })).toBe(false);
+  expect(providerReady({ key: presentKey, index: readNoModel, platform, ...ROLE_FIELDS })).toBe(false);
 });
 
 test('providerReady: a present key with an unreadable index → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndex, platform })).toBe(false);
+  expect(providerReady({ key: presentKey, index: unreadableIndex, platform, ...ROLE_FIELDS })).toBe(false);
 });
 
 test('providerReady: an absent key, even with a chosen model → false', () => {
-  expect(providerReady({ key: absentKey, index: readWithModel, platform })).toBe(false);
+  expect(providerReady({ key: absentKey, index: readWithModel, platform, ...ROLE_FIELDS })).toBe(false);
 });
 
 // Review P2-8: `index.kind === 'read'` was defended by nothing. Replacing it
@@ -88,7 +89,7 @@ const unreadableIndexCarryingAModel = {
 } as unknown as IndexSettings;
 
 test('providerReady: a present key and a model name on an index that is not read → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform })).toBe(false);
+  expect(providerReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS })).toBe(false);
 });
 
 // Cold -> hot happens on an answer that has something to show, and only then.

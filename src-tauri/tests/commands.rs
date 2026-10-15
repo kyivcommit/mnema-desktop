@@ -1512,6 +1512,14 @@ fn search_reports_the_inspected_pool_not_the_embedded_count() {
 fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // OpenRouter chosen for embedding, no key stored: the "no key" case proper.
+    // A fresh install's empty role is "no embedding model chosen" instead.
+    mnema_desktop::prefs::write_role(
+        app.state::<AppState>().data_dir(),
+        mnema_desktop::provider::Role::Embed,
+        Some(mnema_desktop::provider::ProviderChoice::OpenRouter),
+    )
+    .unwrap();
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
@@ -11199,6 +11207,14 @@ fn reading_positions(snapshots: &[ScanState]) -> Vec<u64> {
 fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // OpenRouter chosen for embedding, no key stored: the "no key" case proper.
+    // A fresh install's empty role is "no embedding model chosen" instead.
+    mnema_desktop::prefs::write_role(
+        app.state::<AppState>().data_dir(),
+        mnema_desktop::provider::Role::Embed,
+        Some(mnema_desktop::provider::ProviderChoice::OpenRouter),
+    )
+    .unwrap();
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
@@ -14271,7 +14287,8 @@ fn an_empty_embed_role_searches_text_only() {
 
     let found = call(&fx.webview, "search", json!({ "query": "synthetic topic" })).unwrap();
     assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
-    assert_eq!(found["content"]["kind"], json!("noKey"), "{found}");
+    // "No embedding model chosen", not "no key": a key is stored.
+    assert_eq!(found["content"]["kind"], json!("noModel"), "{found}");
     let after = std::fs::read_to_string(&log).unwrap();
     assert!(
         !after[before.len()..].contains("embeddings"),

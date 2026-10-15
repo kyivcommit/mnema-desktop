@@ -1175,6 +1175,7 @@ fn retrieve(
     limit: i64,
     embed: Option<crate::provider::ProviderChoice>,
 ) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport, Option<NoAnswer>), Error> {
+    let mut role_empty = false;
     let (provider, content_failure, local_failure) = if arms.content {
         match state.question_endpoint_for(embed, mnema_local::ModelId::Embed) {
             // `query_base`: under Mnema the question's embedding takes the
@@ -1188,8 +1189,13 @@ fn retrieve(
                 None,
                 None,
             ),
-            // No embed role is as plain as no key: the text arm alone.
-            Err(Error::NoKey | Error::ProviderNotReady | Error::RoleEmpty) => (None, None, None),
+            Err(Error::NoKey | Error::ProviderNotReady) => (None, None, None),
+            // A reset embed role: the text arm alone, reported as "no embedding
+            // model chosen" rather than as a missing key.
+            Err(Error::RoleEmpty) => {
+                role_empty = true;
+                (None, None, None)
+            }
             // The local process failing is also why chat cannot run: `ask`
             // reads it from here rather than starting the process again.
             Err(e @ (Error::Local(_) | Error::LocalLoading)) => {
@@ -1201,8 +1207,11 @@ fn retrieve(
         (None, None, None)
     };
 
-    let (content_query, content_override, unreachable) =
+    let (content_query, mut content_override, unreachable) =
         resolve_content_query(state, &provider, query, arms.content, content_failure)?;
+    if role_empty {
+        content_override = Some(ContentArmReport::NoModel);
+    }
 
     state.with_index(|db| {
         db.read_snapshot(|db| {

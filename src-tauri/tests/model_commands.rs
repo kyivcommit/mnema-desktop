@@ -1566,6 +1566,7 @@ fn the_job_slot_is_claimed_before_the_key_is_read_for_an_embed_only_entry() {
 fn embedding_without_a_key_is_refused_rather_than_panicking() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
+    write_roles(&fx, Some(ProviderChoice::OpenRouter), None);
 
     let settled = scan_with(fx.handle(), Entry::EmbedOnly);
     let report = report_of(&settled);

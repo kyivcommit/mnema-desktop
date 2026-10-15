@@ -21,6 +21,11 @@ import type {
   ScanState,
   HistoryEntry,
   HistoryOpen,
+  Roles,
+  Configured,
+  RoleModel,
+  RoleStatuses,
+  ProviderStatus,
   SourceAround,
   StoredExclusion,
   SubfolderListing,
@@ -933,4 +938,53 @@ test('HistoryOpen is exactly what bridge.rs defines, variant for variant', () =>
   expect(Object.keys(byKind).sort()).toEqual(
     rustEnumVariants(BRIDGE_RS, 'HistoryOpen').map(camelOf).sort(),
   );
+});
+
+// Provider per role: the wire shapes are read from the Rust sources.
+const PROVIDER_RS = readFileSync(join(HERE, '../../../src-tauri/src/provider.rs'), 'utf8');
+const MODELS_RS = readFileSync(join(HERE, '../../../src-tauri/src/models.rs'), 'utf8');
+const STATUS_RS = readFileSync(join(HERE, '../../../src-tauri/src/provider_status.rs'), 'utf8');
+
+test('Roles and Configured are exactly what provider.rs defines, field for field', () => {
+  const roles: Roles = { embed: null, chat: null };
+  const configured: Configured = { openRouter: false, mnemaEmbed: false, mnemaChat: false };
+  expect(Object.keys(roles).sort()).toEqual(rustStructFields(PROVIDER_RS, 'Roles').map(camelOfSnake).sort());
+  expect(Object.keys(configured).sort()).toEqual(
+    rustStructFields(PROVIDER_RS, 'Configured').map(camelOfSnake).sort(),
+  );
+});
+
+test('RoleModel is the flattened entry plus the provider, as models.rs serialises it', () => {
+  // `rustStructFields` cannot read a `#[serde(flatten)]` field, so the shape is pinned on the source text.
+  expect(MODELS_RS).toMatch(/pub struct RoleModel \{\s*pub provider: ProviderChoice,\s*#\[serde\(flatten\)\]\s*pub entry: mnema_provider::ModelEntry,/);
+  const entry: ipc.ModelEntry = {
+    id: '', name: '', inputLimit: { kind: 'notUnderstood', raw: '' }, price: { kind: 'unreadable', raw: '' },
+    outputPrice: { kind: 'unreadable', raw: '' }, refusal: null, tools: true,
+  };
+  const m: RoleModel = { ...entry, provider: 'mnema' };
+  expect(m.provider).toBe('mnema');
+});
+
+test('RoleCatalogue is exactly what models.rs defines, field for field', () => {
+  const c: ipc.RoleCatalogue = { entries: [], unreadable: 0, unreadableRecords: [] };
+  expect(Object.keys(c).sort()).toEqual(rustStructFields(MODELS_RS, 'RoleCatalogue').map(camelOfSnake).sort());
+});
+
+test('RoleStatuses and Missing are exactly what provider_status.rs defines', () => {
+  const s: RoleStatuses = { embed: { kind: 'ok' }, chat: { kind: 'ok' } };
+  expect(Object.keys(s).sort()).toEqual(rustStructFields(STATUS_RS, 'RoleStatuses').map(camelOfSnake).sort());
+  const missing: Record<Extract<ProviderStatus, { kind: 'notConfigured' }>['missing'], true> = {
+    key: true, embeddingModel: true, localModels: true, role: true,
+  };
+  expect(Object.keys(missing).sort()).toEqual(rustEnumVariants(STATUS_RS, 'Missing').map(camelOf).sort());
+});
+
+test('set_chat_model and set_embedding_model carry the role\'s provider', async () => {
+  invoke.mockResolvedValue(undefined);
+  await ipc.setChatModel('m', 'mnema');
+  expect(invoke).toHaveBeenLastCalledWith('set_chat_model', { model: 'm', provider: 'mnema' });
+  await ipc.setEmbeddingModel('e', 'openRouter', 'keep');
+  expect(invoke).toHaveBeenLastCalledWith('set_embedding_model', {
+    model: 'e', provider: 'openRouter', existingVectors: 'keep',
+  });
 });

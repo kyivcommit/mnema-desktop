@@ -413,7 +413,7 @@
     // trusting its own result and that bump, no read already in flight can
     // land in the gap and be mistaken for the newer word.
     try {
-      await setChatModel(model);
+      await setChatModel(model, settings?.roles.chat ?? 'openRouter');
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       // Review, PR44 P2-1: this role's own outcome, never the shared one —
@@ -900,7 +900,7 @@
     // Review, PR44 P2-1: this role's own field only — `chatWriteOutcome` is a
     // different role's state and must survive an embedding write untouched.
     try {
-      const adopted = await setEmbeddingModel(model, existingVectors);
+      const adopted = await setEmbeddingModel(model, settings?.roles.embed ?? 'openRouter', existingVectors);
       retiredReport = adopted.retired;
       jobRunning = false;
       embeddingWriteOutcome = { kind: 'acknowledged', model };

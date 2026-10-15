@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, afterEach, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -23,6 +24,7 @@ const SETTINGS: ModelSettings = {
     embeddingModel: null, searchTextArm: true, searchContentArm: false,
   },
   platform: 'linux',
+  ...ROLE_FIELDS,
 };
 
 // Task 7: `Application` mounts into the 'application' panel and reads
@@ -816,7 +818,7 @@ test('a model adoption leaving running re-reads, and the queue it created is off
 
 type IndexReadT = Extract<ModelSettings['index'], { kind: 'read' }>;
 function readFixture(over: Partial<IndexReadT> = {}): ModelSettings {
-  return { key: { kind: 'absent' }, index: { ...(SETTINGS.index as IndexReadT), ...over }, platform: 'linux' };
+  return { key: { kind: 'absent' }, index: { ...(SETTINGS.index as IndexReadT), ...over }, platform: 'linux', ...ROLE_FIELDS };
 }
 
 const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
@@ -1498,6 +1500,7 @@ test('mutation_outcome_survives_a_section_switch', async () => {
       embeddingModel: 'emb-1', searchTextArm: true, searchContentArm: true,
     },
     platform: 'linux',
+    ...ROLE_FIELDS,
   };
   modelSettings.mockResolvedValue(onModel);
   providerModels.mockImplementation((role: string) => Promise.resolve(

@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { flushSync, tick } from 'svelte';
@@ -63,6 +64,7 @@ const READY_SETTINGS: ModelSettings = {
     scanIncomplete: false, searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
+  ...ROLE_FIELDS,
 };
 
 type IndexReadT = Extract<ModelSettings['index'], { kind: 'read' }>;
@@ -209,6 +211,7 @@ function reply(extra: Replies = {}) {
       autostart: { kind: 'disabled' },
       version: '0.0.0',
       platform: 'linux',
+      ...ROLE_FIELDS,
     },
     set_hotkey: undefined,
     set_autostart: undefined,
@@ -953,7 +956,7 @@ test('a report naming no resumption defers to the section, with the index read a
 });
 
 test('a report naming no resumption defers to the section even when the index could not be read at all', async () => {
-  reply({ model_settings: { key: READY_SETTINGS.key, index: { kind: 'unreadable', cause: 'notOpen', reason: 'x' }, platform: 'linux' } });
+  reply({ model_settings: { key: READY_SETTINGS.key, index: { kind: 'unreadable', cause: 'notOpen', reason: 'x' }, platform: 'linux', ...ROLE_FIELDS } });
   await openWindow();
   await emit(ended({ resume: null }));
   expect(screen.queryByTestId('indexing-continue')).toBeNull();

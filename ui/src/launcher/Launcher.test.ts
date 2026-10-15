@@ -49,7 +49,7 @@ const NO_PROVIDER = { key: { kind: 'absent' }, index: { kind: 'read', embeddedCh
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -68,7 +68,7 @@ function mockAsks(...replies: unknown[]) {
   let next = 0;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -191,7 +191,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
   // still passes.
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -228,7 +228,7 @@ function mockAsksThenReject(first: unknown) {
   let n = 0;
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -854,7 +854,7 @@ test('an answer dropped after launcher-cold does not restart the idle clock', as
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -876,7 +876,7 @@ test('an ask in flight when launcher-cold arrives is dropped when it resolves', 
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((r) => { resolveAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
@@ -901,7 +901,7 @@ test('an ask rejected after launcher-cold leaves the cold idle state alone', asy
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'ask') return new Promise((_, r) => { rejectAsk = r; });
     if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     return Promise.resolve();
@@ -1018,13 +1018,13 @@ test('turning the right panel off in the hot state tells Rust', async () => {
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });
 
-// The Toolbar takes the provider from `provider_choice`, read with the status.
+// The Toolbar takes the provider from the chat role in `model_settings`, read with the status.
 test('under Mnema the status button names Mnema, under OpenRouter it does not', async () => {
   for (const [choice, has, hasNot] of [['mnema', 'Mnema', 'OpenRouter'], ['openRouter', 'OpenRouter', 'Mnema']]) {
     mockBackend(undefined);
     const base = invoke.getMockImplementation()!;
     invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
-      cmd === 'provider_choice' ? Promise.resolve(choice) : base(cmd, ...a));
+      cmd === 'model_settings' ? Promise.resolve({ ...NO_PROVIDER, roles: { embed: choice, chat: choice } }) : base(cmd, ...a));
     render(Launcher);
     const b = await screen.findByTestId('provider-cloud');
     expect(b.getAttribute('aria-label'), choice).toContain(has);
@@ -1081,12 +1081,11 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
-    if (cmd === 'model_settings') return Promise.resolve(NO_PROVIDER);
-    if (cmd === 'provider_status') return providerReply();
+    if (cmd === 'model_settings') return Promise.resolve({ ...NO_PROVIDER, roles: { embed: opts.provider ?? 'openRouter', chat: opts.provider ?? 'openRouter' } });
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
     if (cmd === 'chat_tools_enabled') return Promise.resolve(opts.chatTools ?? false);
-    if (cmd === 'provider_choice' && opts.provider) return Promise.resolve(opts.provider);
     if (cmd === 'new_chat' && opts.newChatReject) return Promise.reject('boom');
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
     if (cmd === 'history_entry') {
@@ -1447,7 +1446,7 @@ test('under Mnema with the switch on the launcher shows one turn and no New chat
   mockRecents({ chatTools: true, provider: 'mnema', asks: [generated, generatedOther] });
   render(Launcher);
   await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
-  await waitFor(() => expect(callsOf('provider_choice')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('provider_status')).toHaveLength(1));
   await submit('first');
   await screen.findByTestId('preview-3');
   await submit('second');
