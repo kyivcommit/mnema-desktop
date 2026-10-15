@@ -3203,20 +3203,22 @@ fn a_mnema_embedding_choice_never_probes_open_router() {
     fx.open_index();
     let dir = fx.state().data_dir().to_path_buf();
     fx.state().install_local(support::ready_local(&dir, &[]));
+    // A key in the store, so a build that probes OpenRouter can reach it.
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
 
     let adopted = set_embedding_model(
         fx.state(),
         OTHER_MODEL.into(),
         ProviderChoice::Mnema,
         ExistingVectors::Keep,
-    )
-    .expect("adopted");
+    );
 
     assert_eq!(
         fx.provider_request(),
         None,
         "a request left the machine for a local choice"
     );
+    let adopted = adopted.expect("adopted");
     assert_eq!((adopted.model.as_str(), adopted.dim), ("baai/bge-m3", 1024));
     assert_eq!(roles(&fx).0, Some(ProviderChoice::Mnema));
 }
