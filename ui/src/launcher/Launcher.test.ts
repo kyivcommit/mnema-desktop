@@ -8,7 +8,7 @@ import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders, excerptSpanA } from '../lib/fixtures';
 import { DRAG_GRAB_WINDOW_MS } from './state';
-import { setLocale } from '../i18n';
+import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const hide = vi.fn();
@@ -1660,6 +1660,17 @@ test('the_tab_dot_and_launcher_agree', async () => {
     await waitFor(() => expect(cloud().getAttribute('data-status'), f.name).toBe(want));
     cleanup();
   }
+});
+
+// A served chat role with no chat model names the chat model, not the embedding one.
+test('a chat role with no chat model says the chat model is missing', async () => {
+  const f = READINESS_FIXTURES.find((x) => x.name === 'OpenRouter chat with a key, no chat model')!;
+  mockBackend(undefined);
+  const base = invoke.getMockImplementation()!;
+  invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+    cmd === 'model_settings' ? Promise.resolve(f.settings) : base(cmd, ...a));
+  render(Launcher);
+  await waitFor(() => expect(cloud().getAttribute('aria-label')).toBe(t('provider_missing_chat_model')));
 });
 
 test('a failed settings read leaves the cloud not ready, whatever the probe said', async () => {

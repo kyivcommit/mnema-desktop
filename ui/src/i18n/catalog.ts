@@ -35,7 +35,7 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
-  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_role'
+  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -359,6 +359,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
+    provider_missing_chat_model: 'Не обрано модель чату — відкрити налаштування моделей',
     provider_missing_role: 'Не обрано провайдера для ролі — відкрити налаштування моделей',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (локально)',
@@ -1228,6 +1229,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
+    provider_missing_chat_model: 'No chat model chosen — open the model settings',
     provider_missing_role: 'No provider chosen for the role — open the model settings',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (local)',

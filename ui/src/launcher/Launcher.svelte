@@ -87,7 +87,7 @@
           if (probe.kind !== 'ok' || (settings && roleReady(settings, role))) return probe;
           const missing = !settings || !roles?.[role] ? 'role'
             : !roleServed(settings, role) ? (roles[role] === 'openRouter' ? 'key' : 'localModels')
-              : 'embeddingModel';
+              : role === 'chat' ? 'chatModel' : 'embeddingModel';
           return { kind: 'notConfigured', missing };
         };
         const s: RoleStatuses = { embed: effective('embed'), chat: effective('chat') };

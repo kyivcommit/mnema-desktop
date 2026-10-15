@@ -1006,7 +1006,9 @@ export const setLocaleChoice = (choice: LocaleChoice) =>
 // local facts on every call; `unreachable` and `ok` come from the provider and
 // are cached by the core for a minute. `reason` is the core's own sentence.
 export type ProviderStatus =
-  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' | 'localModels' | 'role' }
+  // `chatModel` is the launcher's own (a served chat role with no model); the
+  // backend never sends it.
+  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' | 'chatModel' | 'localModels' | 'role' }
   | { kind: 'unreachable'; reason: string }
   | { kind: 'ok' };
 // One status per role (provider_status.rs `RoleStatuses`): answers need `chat`,
