@@ -14094,7 +14094,8 @@ fn a_mixed_question_uses_two_endpoints() {
 #[test]
 fn an_empty_chat_role_answers_with_citations_only() {
     use mnema_desktop::provider::ProviderChoice::Mnema;
-    let server = MockServer::new(vec![]);
+    // A reply OpenRouter would give, so a fallback to it shows as an answer.
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
     let dir = tempfile::tempdir().unwrap();
     let (fx, log) = mixed_app(dir.path(), &server, 1);
     set_roles(&fx.app.state::<AppState>(), Some(Mnema), None);
