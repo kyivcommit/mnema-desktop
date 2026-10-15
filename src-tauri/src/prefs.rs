@@ -174,6 +174,85 @@ pub fn provider_choice(data_dir: &Path, mnema_available: bool) -> crate::provide
     stored
 }
 
+const EMBED_KEY: &str = "embed_provider";
+const CHAT_KEY: &str = "chat_provider";
+
+fn role_key(role: crate::provider::Role) -> &'static str {
+    match role {
+        crate::provider::Role::Embed => EMBED_KEY,
+        crate::provider::Role::Chat => CHAT_KEY,
+    }
+}
+
+fn stored_choice(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<crate::provider::ProviderChoice> {
+    obj.get(key)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+/// The provider each role uses (`embed_provider`, `chat_provider`). A stored
+/// value is returned as stored, even if its provider no longer serves the
+/// role. When neither key exists, the old single `provider` key (absent =
+/// OpenRouter) is migrated: each role takes it if `configured` serves it, else
+/// none; the new keys are written and `provider` removed in one locked write.
+pub fn roles(data_dir: &Path, configured: crate::provider::Configured) -> crate::provider::Roles {
+    use crate::provider::{Role, Roles};
+    let read = |obj: &serde_json::Map<String, serde_json::Value>| Roles {
+        embed: stored_choice(obj, EMBED_KEY),
+        chat: stored_choice(obj, CHAT_KEY),
+    };
+    let all = read_all(data_dir);
+    if all.contains_key(EMBED_KEY) || all.contains_key(CHAT_KEY) {
+        return read(&all);
+    }
+    let old = stored_choice(&all, crate::provider::PREFS_KEY).unwrap_or_default();
+    let pick = |r| configured.serves(old, r).then_some(old);
+    let migrated = Roles {
+        embed: pick(Role::Embed),
+        chat: pick(Role::Chat),
+    };
+    let had_old = all.contains_key(crate::provider::PREFS_KEY);
+    if migrated.embed.is_none() && migrated.chat.is_none() && !had_old {
+        return migrated;
+    }
+    let mut result = migrated;
+    // Best effort: an unwritable directory leaves the old key, and the next
+    // read migrates again to the same answer.
+    let _ = update(data_dir, |obj| {
+        // Re-decided under the lock: another thread may have migrated first.
+        if obj.contains_key(EMBED_KEY) || obj.contains_key(CHAT_KEY) {
+            result = read(obj);
+            return;
+        }
+        for (key, v) in [(EMBED_KEY, migrated.embed), (CHAT_KEY, migrated.chat)] {
+            if let Some(v) = v {
+                obj.insert(key.into(), serde_json::to_value(v).unwrap());
+            }
+        }
+        obj.remove(crate::provider::PREFS_KEY);
+    });
+    result
+}
+
+/// Sets one role's provider; `None` removes the key.
+pub fn write_role(
+    data_dir: &Path,
+    role: crate::provider::Role,
+    p: Option<crate::provider::ProviderChoice>,
+) -> std::io::Result<()> {
+    update(data_dir, |obj| match p {
+        Some(p) => {
+            obj.insert(role_key(role).into(), serde_json::to_value(p).unwrap());
+        }
+        None => {
+            obj.remove(role_key(role));
+        }
+    })
+}
+
 /// Minutes the launcher may stay hidden before its next show is cold
 /// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
 pub fn cold_after_minutes(data_dir: &Path) -> u32 {
@@ -211,6 +290,17 @@ pub fn cold_after_minutes(data_dir: &Path) -> u32 {
 /// `a_file_of_invalid_utf8_is_backed_up_rather_than_overwritten` is the only
 /// test that can tell them apart.
 pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
+    update(data_dir, |obj| {
+        obj.insert(key.to_string(), value);
+    })
+}
+
+/// The body of [`write_key`] with the edit as a closure, so a multi-key change
+/// (the roles migration) lands in one locked read → write → rename.
+fn update(
+    data_dir: &Path,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> std::io::Result<()> {
     // Poisoning is absorbed rather than propagated: a writer that panicked
     // must not turn every later write into a panic. Nothing this lock protects
     // is left inconsistent by a panic — it guards no shared value, and what
@@ -237,7 +327,7 @@ pub fn write_key(data_dir: &Path, key: &str, value: serde_json::Value) -> std::i
     // After the read, before the write: the one point at which a test can hold
     // the critical section open and watch a second writer fail to enter it.
     test_hook(data_dir);
-    obj.insert(key.to_string(), value);
+    edit(&mut obj);
     let body = serde_json::to_vec_pretty(&serde_json::Value::Object(obj))?;
     // Atomic: write a sibling temp file, then rename over the target. POSIX
     // rename() is atomic, so a reader never observes a partially-written file.
@@ -1383,6 +1473,90 @@ mod tests {
             Some(&json!("Ctrl+Space")),
             "a failed write must not change what was persisted"
         );
+    }
+
+    #[test]
+    fn migration_maps_the_old_key_per_role() {
+        use crate::provider::{
+            Configured,
+            ProviderChoice::{self, Mnema, OpenRouter},
+            Roles,
+        };
+        for old in [None, Some("openRouter"), Some("mnema")] {
+            for open_router in [true, false] {
+                for (mnema_embed, mnema_chat) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
+                    let dir = tempfile::tempdir().unwrap();
+                    if let Some(o) = old {
+                        write_key(dir.path(), crate::provider::PREFS_KEY, json!(o)).unwrap();
+                    }
+                    let c = Configured {
+                        open_router,
+                        mnema_embed,
+                        mnema_chat,
+                    };
+                    let p: ProviderChoice = if old == Some("mnema") {
+                        Mnema
+                    } else {
+                        OpenRouter
+                    };
+                    let pick = |ok: bool| ok.then_some(p);
+                    let (e, ch) = match p {
+                        OpenRouter => (pick(open_router), pick(open_router)),
+                        Mnema => (pick(mnema_embed), pick(mnema_chat)),
+                    };
+                    let got = roles(dir.path(), c);
+                    let ctx = format!("{old:?} {c:?}");
+                    assert_eq!(got, Roles { embed: e, chat: ch }, "{ctx}");
+                    let file = read_all(dir.path());
+                    assert!(!file.contains_key(crate::provider::PREFS_KEY), "{ctx}");
+                    assert_eq!(file.contains_key("embed_provider"), e.is_some(), "{ctx}");
+                    assert_eq!(file.contains_key("chat_provider"), ch.is_some(), "{ctx}");
+                    // Once a key is written, a second read returns the same.
+                    if e.is_some() || ch.is_some() {
+                        assert_eq!(roles(dir.path(), c), got, "{ctx}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_keys_win_over_the_old() {
+        use crate::provider::{
+            Configured,
+            ProviderChoice::{Mnema, OpenRouter},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), crate::provider::PREFS_KEY, json!("mnema")).unwrap();
+        write_key(dir.path(), "embed_provider", json!("openRouter")).unwrap();
+        let c = Configured {
+            open_router: false,
+            mnema_embed: false,
+            mnema_chat: true,
+        };
+        let got = roles(dir.path(), c);
+        // Stored as stored, even though openRouter no longer serves; chat is not guessed.
+        assert_eq!((got.embed, got.chat), (Some(OpenRouter), None));
+        assert_eq!(read_all(dir.path()).get("provider"), Some(&json!("mnema")));
+        let _ = Mnema;
+    }
+
+    #[test]
+    fn write_role_none_removes_the_key() {
+        use crate::provider::{ProviderChoice::Mnema, Role};
+        let dir = tempfile::tempdir().unwrap();
+        write_role(dir.path(), Role::Chat, Some(Mnema)).unwrap();
+        write_key(dir.path(), "hotkey", json!("X")).unwrap();
+        assert_eq!(
+            read_all(dir.path()).get("chat_provider"),
+            Some(&json!("mnema"))
+        );
+        write_role(dir.path(), Role::Chat, None).unwrap();
+        let file = read_all(dir.path());
+        assert!(!file.contains_key("chat_provider"));
+        assert_eq!(file.get("hotkey"), Some(&json!("X")));
     }
 
     #[test]

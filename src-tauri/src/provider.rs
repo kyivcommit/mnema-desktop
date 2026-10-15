@@ -27,6 +27,43 @@ pub enum ProviderChoice {
 
 pub const PREFS_KEY: &str = "provider";
 
+/// What a provider is used for. Each role picks its own provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Embed,
+    Chat,
+}
+
+/// The provider chosen for each role; `None` = nothing configured for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Roles {
+    pub embed: Option<ProviderChoice>,
+    pub chat: Option<ProviderChoice>,
+}
+
+/// Which providers are set up and able to serve which role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Configured {
+    pub open_router: bool,
+    pub mnema_embed: bool,
+    pub mnema_chat: bool,
+}
+
+impl Configured {
+    pub fn serves(&self, p: ProviderChoice, r: Role) -> bool {
+        match (p, r) {
+            (ProviderChoice::OpenRouter, _) => self.open_router,
+            (ProviderChoice::Mnema, Role::Embed) => self.mnema_embed,
+            (ProviderChoice::Mnema, Role::Chat) => self.mnema_chat,
+        }
+    }
+
+    pub fn any(&self, p: ProviderChoice) -> bool {
+        self.serves(p, Role::Embed) || self.serves(p, Role::Chat)
+    }
+}
+
 /// How long a local answer may take. A weak Mac writes slower than the cloud's
 /// `INTERACTIVE_TIMEOUT` allows.
 pub const LOCAL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
