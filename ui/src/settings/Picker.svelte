@@ -5,11 +5,13 @@
 
   type Option = { id: string; label: string; aside?: string; group?: string; disabled?: boolean };
   let {
-    options, value, onchange, searchable = false, placeholder, disabled = false, labelledby, marker,
+    options, value, onchange, searchable = false, placeholder, disabled = false, labelledby, marker, markerAfter,
   }: {
     options: Option[]; value: string | null; onchange: (id: string) => void;
     searchable?: boolean; placeholder: string; disabled?: boolean; labelledby: string;
     marker?: Snippet<[Option]>;
+    // Rendered after the name, so a spoken state reads "name, state".
+    markerAfter?: Snippet<[Option]>;
   } = $props();
 
   const uid = `picker-${Math.random().toString(36).slice(2, 8)}`;
@@ -102,6 +104,7 @@
       {#if marker}{@render marker(selected)}{/if}
       <span class="picker-label">{selected.label}</span>
       {#if selected.aside}<span class="picker-aside">{selected.aside}</span>{/if}
+      {#if markerAfter}{@render markerAfter(selected)}{/if}
     {:else}
       <span class="picker-placeholder">{placeholder}</span>
     {/if}
@@ -137,11 +140,12 @@
     <div
       role="option" id={domId(o.id)} class="picker-option" class:active={o.id === active}
       aria-selected={o.id === value} aria-disabled={o.disabled || undefined}
-      tabindex="-1" onclick={() => choose(o)} onkeydown={() => {}}
+      data-id={o.id} tabindex="-1" onclick={() => choose(o)} onkeydown={() => {}}
     >
       {#if marker}{@render marker(o)}{/if}
       <span class="picker-label">{o.label}</span>
       {#if o.aside}<span class="picker-aside">{o.aside}</span>{/if}
+      {#if markerAfter}{@render markerAfter(o)}{/if}
     </div>
   {/each}
 {/snippet}
@@ -158,7 +162,10 @@
   .picker-aside { margin-left: auto; color: var(--ink-soft); font-size: 12px; }
   .picker-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .picker-pop {
-    position: absolute; z-index: 10; left: 0; right: 0; margin-top: 4px; max-height: 320px; overflow-y: auto;
+    position: absolute; z-index: 10; left: 0; min-width: 100%; width: max-content; max-width: min(520px, 90vw);
+    margin-top: 4px; max-height: 320px; overflow-y: auto;
+    /* the sticky search box must not cover an option scrolled into view */
+    scroll-padding-top: 40px;
     border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow);
   }
   .picker-search { position: sticky; top: 0; box-sizing: border-box; width: 100%; padding: 8px 13px; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); font: inherit; color: var(--ink); }

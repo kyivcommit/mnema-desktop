@@ -121,7 +121,6 @@
 
   let error = $state<string | null>(null);
 
-
   const label = $derived.by(() => { void $locale; return t('models_provider_label'); });
   const openRouterLabel = $derived.by(() => { void $locale; return t('provider_openrouter'); });
   const mnemaLabel = $derived.by(() => { void $locale; return t('provider_mnema'); });
@@ -156,7 +155,10 @@
     placeholder={openRouterLabel} disabled={!available} labelledby={LABEL_ID}>
     {#snippet marker(o)}
       {@const on = o.id === 'mnema' ? configured.mnemaEmbed || configured.mnemaChat : configured.openRouter}
-      <span class="mdot" data-configured={on ? 'true' : 'false'}><span class="mdot-mark" aria-hidden="true"></span><span class="sr-only">{on ? configuredLabel : notConfiguredLabel}, </span></span>
+      <span class="mdot" data-configured={on ? 'true' : 'false'}><span class="mdot-mark" aria-hidden="true"></span></span>
+    {/snippet}
+    {#snippet markerAfter(o)}
+      {@const on = o.id === 'mnema' ? configured.mnemaEmbed || configured.mnemaChat : configured.openRouter}<span class="sr-only">, {on ? configuredLabel : notConfiguredLabel}</span>
     {/snippet}
   </Picker>
 </div>

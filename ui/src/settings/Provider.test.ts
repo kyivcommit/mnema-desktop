@@ -212,7 +212,7 @@ test('the dot has a spoken state too', async () => {
   await mount();
   await fireEvent.click(picker());
   const o = screen.getAllByRole('option').find((x) => x.textContent?.includes('OpenRouter'))!;
-  expect(o.textContent).toContain('Налаштовано');
+  expect(o.textContent).toMatch(/^\s*OpenRouter\s*, Налаштовано$/); // name first, state after it
   expect(screen.getAllByRole('option').find((x) => x.textContent?.includes('Mnema'))!.textContent).toContain('Не налаштовано');
 });
 

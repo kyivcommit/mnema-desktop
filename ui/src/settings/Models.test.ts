@@ -2,8 +2,9 @@ import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
+import { providerReady, roleReady } from '../launcher/state';
 import { createJobController } from './jobs';
-import { tick } from 'svelte';
+import { tick, flushSync } from 'svelte';
 import { get } from 'svelte/store';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -11,9 +12,12 @@ import { fileURLToPath } from 'node:url';
 import { setLocale } from '../i18n';
 import { camelOf, rustEnumVariants } from '../lib/rust-enum';
 import type {
-  ModelSettings, Catalogue, ModelEntry, ModelRefusal, RecordId, UnreadableRecord, ModelRole,
+  ModelSettings, Catalogue, RoleCatalogue, RoleModel, ModelEntry, ModelRefusal, RecordId, UnreadableRecord, ModelRole,
   ScanState,
 } from '../lib/ipc';
+
+// jsdom has no layout: the picker scrolls its active option into view.
+Element.prototype.scrollIntoView = vi.fn();
 
 // Mocked in the shape Arms.test.ts:5-6 already uses — the typed wrappers, not
 // the raw `invoke`.
@@ -905,9 +909,9 @@ test('a rejected Save keeps no trace of the entered key either', async () => {
 // invisible to every other fixture in this file.
 // ---------------------------------------------------------------------------
 
-function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
+function entry(id: string, overrides: Partial<RoleModel> = {}): RoleModel {
   return {
-    id, name: id,
+    id, name: id, provider: 'openRouter',
     inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' },
     refusal: null, tools: false,
     ...overrides,
@@ -920,7 +924,7 @@ function entry(id: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
 // in the same step. A fixture that builds it tests a screen no provider can
 // cause. Omitting the records now synthesises the right number of them; giving
 // them explicitly and disagreeing with the count is refused outright.
-function catalogueOf(entries: ModelEntry[], unreadable = 0, unreadableRecords?: UnreadableRecord[]): Catalogue {
+function catalogueOf(entries: RoleModel[], unreadable = 0, unreadableRecords?: UnreadableRecord[]): RoleCatalogue {
   if (unreadableRecords === undefined) {
     const synthesised: UnreadableRecord[] = Array.from(
       { length: unreadable },
@@ -948,19 +952,40 @@ function mockCatalogues(byRole: Partial<Record<ModelRole, Catalogue>>) {
 // testid because an `<option>` carries none — the same reason the old list
 // gave each row a testid keyed by `entry.id` is why these helpers key on the
 // select's own `value` attribute instead.
-function modelSelect(): HTMLSelectElement {
-  return screen.getByTestId('model-selection') as HTMLSelectElement;
+function modelSelect(): HTMLElement {
+  return screen.getByTestId('model-selection');
 }
-function optionsFor(value: string): HTMLOptionElement[] {
-  return [...modelSelect().querySelectorAll(`option[value="${value}"]`)] as HTMLOptionElement[];
+const combobox = () => within(modelSelect()).getByRole('combobox') as HTMLButtonElement;
+// The model the screen shows as current (the wrapper's own account of it).
+const selectedModel = () => modelSelect().dataset.model;
+const modelDisabled = () => combobox().disabled;
+// An option's model id: its picker id is `<index>\t<model id>`.
+const modelIdOf = (el: Element) => (el.getAttribute('data-id') ?? '').split('\t').slice(1).join('\t');
+const labelOf = (el: Element) => el.querySelector('.picker-label')!.textContent;
+const asideOf = (el: Element) => el.querySelector('.picker-aside')?.textContent ?? null;
+// Every option of the list in order. Opens the popup and LEAVES it open: these
+// run inside `waitFor`, which re-runs its callback on every DOM mutation, so a
+// helper that opened and closed the list on each call would feed itself.
+function listOptions(): HTMLElement[] {
+  const btn = combobox();
+  if (btn.getAttribute('aria-expanded') !== 'true') { btn.click(); flushSync(); }
+  return [...modelSelect().querySelectorAll<HTMLElement>('[role="option"]')];
 }
-function optionFor(value: string): HTMLOptionElement {
+const optionValues = () => listOptions().map(modelIdOf);
+function optionsFor(value: string): HTMLElement[] {
+  return listOptions().filter((o) => modelIdOf(o) === value);
+}
+function optionFor(value: string): HTMLElement {
   const [opt] = optionsFor(value);
-  if (!opt) throw new Error(`no <option value="${value}"> in the select`);
+  if (!opt) throw new Error(`no option for model "${value}" in the picker`);
   return opt;
 }
-async function pickModel(value: string) {
-  await fireEvent.change(modelSelect(), { target: { value } });
+async function pickModel(value: string, aside?: string) {
+  if (combobox().getAttribute('aria-expanded') !== 'true') await fireEvent.click(combobox());
+  const opt = [...modelSelect().querySelectorAll('[role="option"]')]
+    .find((o) => modelIdOf(o) === value && (aside === undefined || asideOf(o) === aside));
+  if (!opt) throw new Error(`no option for model "${value}" to pick`);
+  await fireEvent.click(opt);
 }
 
 test('two named tabs; switching changes the select`s own options, both asserted positively', async () => {
@@ -986,7 +1011,7 @@ test('two named tabs; switching changes the select`s own options, both asserted 
   // `aria-pressed`. `{entry.name}` → `{entry.id}` survived the whole suite —
   // the named class from the last PR, a card showing an identifier where a
   // person came for content. The option reads as the model's name.
-  expect(optionFor('emb-1').textContent).toBe('Embedding One');
+  expect(labelOf(optionFor('emb-1'))).toBe('Embedding One');
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
 
@@ -996,7 +1021,7 @@ test('two named tabs; switching changes the select`s own options, both asserted 
   expect(optionsFor('emb-1').length).toBe(0);
   // The chat catalogue is a different tab's own read — it needs its own
   // assertion.
-  expect(optionFor('chat-1').textContent).toBe('Chat One');
+  expect(labelOf(optionFor('chat-1'))).toBe('Chat One');
 });
 
 test('the same model id in both catalogues does not leak a selection across tabs', async () => {
@@ -1012,14 +1037,14 @@ test('the same model id in both catalogues does not leak a selection across tabs
     },
   }));
 
-  await waitFor(() => expect(modelSelect().value).toBe('shared-model'));
+  await waitFor(() => expect(selectedModel()).toBe('shared-model'));
 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
   await waitFor(() => expect(optionsFor('other-model').length).toBe(1));
   // A per-role selection kept in one shared variable would show
   // `shared-model` chosen on the chat tab too, because it is the same string
   // the embedding tab just showed current. It must not.
-  expect(modelSelect().value).toBe('other-model');
+  expect(selectedModel()).toBe('other-model');
 });
 
 // 🔴 PR 25 review, P2-4. The list was keyed by `entry.id`, and the parser
@@ -1047,7 +1072,7 @@ test('two provider records sharing one id render two options and leave the secti
   // The list itself: two options, and they are the two records rather than
   // one record drawn twice — the names differ, and both are on screen.
   await waitFor(() => expect(optionsFor('vendor/twin').length).toBe(2));
-  expect(optionsFor('vendor/twin').map((o) => o.textContent)).toEqual(['First listing', 'Second listing']);
+  expect(optionsFor('vendor/twin').map(labelOf)).toEqual(['First listing', 'Second listing']);
 
   // And the rest of the section is still there. This is the half the option
   // count cannot say: `each_key_duplicate` is thrown during render, so what
@@ -1056,7 +1081,7 @@ test('two provider records sharing one id render two options and leave the secti
   // a broken page.
   expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
   expect(screen.getByTestId('model-status-dot').textContent).toBe(
-    'Not connected yet — add a key and choose an embedding model to enable content search.',
+    'Not connected yet — set up the provider and choose a model.',
   );
 });
 
@@ -1093,10 +1118,10 @@ test('an option carries the stated price per million tokens beside the name', as
   });
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('chat-like').length).toBe(1));
-  expect(optionFor('chat-like').textContent).toBe('Both Prices — $1.25 / $10');
-  expect(optionFor('emb').textContent).toBe('Input Only — $0.02');
-  expect(optionFor('free').textContent).toBe('Gratis (free)');
-  expect(optionFor('mute').textContent).toBe('Unpriced');
+  expect(labelOf(optionFor('chat-like'))).toBe('Both Prices — $1.25 / $10');
+  expect(labelOf(optionFor('emb'))).toBe('Input Only — $0.02');
+  expect(labelOf(optionFor('free'))).toBe('Gratis (free)');
+  expect(labelOf(optionFor('mute'))).toBe('Unpriced');
   expect(screen.getByTestId('model-price-note').textContent)
     .toBe('Prices are per 1M tokens: input / output, as the provider states them.');
   // Behind the ⓘ (owner, 2026-09-16): the note lives in the popover the
@@ -1137,7 +1162,7 @@ test('the sort toggle swaps the picker between name order and price order', asyn
   vi.stubGlobal('localStorage', storage);
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('a').length).toBe(1));
-  const order = () => [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
+  const order = optionValues;
 
   expect(screen.getByTestId('model-sort').textContent).toBe('By name');
   expect(order()).toEqual(['a', 'b', 'c', 'd']);
@@ -1166,8 +1191,7 @@ test('the sort order chosen last time is the one the picker opens in', async () 
     await renderWith(settings());
     await waitFor(() => expect(optionsFor('a').length).toBe(1));
     expect(screen.getByTestId('model-sort').textContent).toBe('By price');
-    const order = [...modelSelect().querySelectorAll('option')].map((o) => o.value).filter(Boolean);
-    expect(order).toEqual(['b', 'a']);
+    expect(optionValues()).toEqual(['b', 'a']);
   } finally {
     vi.unstubAllGlobals();
   }
@@ -1202,11 +1226,11 @@ test('refused_models_are_not_options', async () => {
   await renderWith(settings());
   await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
 
-  // Exactly the two accepted entries plus the placeholder — nothing refused
-  // stands in as an option, disabled or otherwise.
-  const options = [...modelSelect().querySelectorAll('option')];
-  expect(options.length).toBe(3);
-  expect(options.filter((o) => o.disabled && o.value !== '').length).toBe(0);
+  // Exactly the two accepted entries — nothing refused stands in as an
+  // option, disabled or otherwise.
+  const options = listOptions();
+  expect(options.length).toBe(2);
+  expect(options.filter((o) => o.getAttribute('aria-disabled') === 'true').length).toBe(0);
   expect(optionsFor('bad-1').length).toBe(0);
   expect(optionsFor('bad-2').length).toBe(0);
   expect(optionsFor('bad-3').length).toBe(0);
@@ -1262,11 +1286,11 @@ test('an all-refused catalogue still shows the select, placeholder only, and eve
   // this build refuses all of them, and those are different claims.
   expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
 
-  // The select still renders — nothing but the placeholder, since every
-  // entry offered is refused.
-  const options = [...modelSelect().querySelectorAll('option')];
-  expect(options.length).toBe(1);
-  expect(options[0].value).toBe('');
+  // The picker still renders — no options at all and the placeholder on the
+  // button, since every entry offered is refused.
+  expect(listOptions().length).toBe(0);
+  expect(combobox().textContent).toContain('No model chosen yet.');
+  expect(combobox().disabled).toBe(false);
 
   const reasons = screen.getAllByTestId('model-hidden-reason').map((el) => el.textContent);
   expect(reasons).toEqual([
@@ -1316,11 +1340,9 @@ test('a_refused_confirmed_model_shows_as_absent', async () => {
   }));
   await waitFor(() => expect(optionsFor('acc-1').length).toBe(1));
 
-  expect(modelSelect().value).toBe('confirmed-model');
-  expect(optionsFor('confirmed-model').length).toBe(1); // the placeholder, not a normal option too
-  const placeholder = optionFor('confirmed-model');
-  expect(placeholder.disabled).toBe(true);
-  expect(placeholder.textContent).toContain('confirmed-model');
+  expect(selectedModel()).toBe('confirmed-model');
+  expect(optionsFor('confirmed-model').length).toBe(0); // the placeholder on the button, not an option
+  expect(combobox().textContent).toContain('confirmed-model');
 
   expect(screen.getByTestId('model-hidden-reason').textContent).toBe(
     '1 hidden: the provider states no input limit',
@@ -1340,7 +1362,7 @@ test('the status dot is ready when provider, key and a chosen embedding model ar
   }));
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('true');
-  expect(dot.textContent).toBe('Connected — OpenRouter, a key and a chosen embedding model are all set.');
+  expect(dot.textContent).toBe('Connected — OpenRouter, a model is chosen.');
 });
 
 test('the status dot is not ready when the index cannot be read', async () => {
@@ -1350,7 +1372,7 @@ test('the status dot is not ready when the index cannot be read', async () => {
   }));
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('false');
-  expect(dot.textContent).toBe('Not connected yet — add a key and choose an embedding model to enable content search.');
+  expect(dot.textContent).toBe('Not connected yet — set up the provider and choose a model.');
 });
 
 test('the status dot is not ready when there is no key', async () => {
@@ -1429,12 +1451,12 @@ test('the shown selection does not change until set_chat_model AND its re-read b
 
   renderModels();
   await fireEvent.click(await screen.findByTestId('model-tab-chat'));
-  await waitFor(() => expect(modelSelect().value).toBe('gpt-a'));
+  await waitFor(() => expect(selectedModel()).toBe('gpt-a'));
 
   await pickModel('gpt-b');
   await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gpt-b', 'openRouter'));
   // set_chat_model has not resolved yet — the pick alone must not repaint.
-  expect(modelSelect().value).toBe('gpt-a');
+  expect(selectedModel()).toBe('gpt-a');
 
   modelSettings.mockResolvedValueOnce(settings({
     key: { kind: 'present' },
@@ -1442,7 +1464,7 @@ test('the shown selection does not change until set_chat_model AND its re-read b
   }));
   setChatModelCall.resolve();
 
-  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
+  await waitFor(() => expect(selectedModel()).toBe('gpt-b'));
 });
 
 test('an older in-flight model_settings does not repaint the model a set_chat_model round just chose', async () => {
@@ -1463,7 +1485,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
     key: { kind: 'present' },
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
-  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
+  await waitFor(() => expect(selectedModel()).toBe('gpt-b'));
 
   // The mount's OLDER call settles late, with the old model. It must lose.
   queue[0].resolve(settings({
@@ -1478,7 +1500,7 @@ test('an older in-flight model_settings does not repaint the model a set_chat_mo
   await tick();
   await tick();
   await tick();
-  expect(modelSelect().value).toBe('gpt-b');
+  expect(selectedModel()).toBe('gpt-b');
 });
 
 // Reviewer's probe (Critical 1): `reportLoadFailure` carried no `settingsSeq`
@@ -1533,7 +1555,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
     key: { kind: 'present' },
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-a', searchTextArm: true, searchContentArm: true },
   }));
-  await waitFor(() => expect(modelSelect().value).toBe('gpt-a'));
+  await waitFor(() => expect(selectedModel()).toBe('gpt-a'));
 
   // set_chat_model resolves next; its own refresh issues call #1.
   setChatModelCall.resolve();
@@ -1543,7 +1565,7 @@ test('a model_settings reply landing while set_chat_model is still pending does 
     index: { kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 0, embeddingModel: 'text-embedding-3-small', chatModel: 'gpt-b', searchTextArm: true, searchContentArm: true },
   }));
 
-  await waitFor(() => expect(modelSelect().value).toBe('gpt-b'));
+  await waitFor(() => expect(selectedModel()).toBe('gpt-b'));
 });
 
 // ---------------------------------------------------------------------------
@@ -1656,7 +1678,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
     .toBe('the provider will not serve this model to this key');
   // The refused choice is not shown as taken: the selection still follows the
   // backend's state, which never changed.
-  expect(modelSelect().value).toBe('gpt-a');
+  expect(selectedModel()).toBe('gpt-a');
 });
 
 // P2-9: the dot's fail-safe on a state this window does not know. On a
@@ -1674,7 +1696,7 @@ test('a mount whose model_settings rejects leaves the dot NOT connected, not con
   const dot = screen.getByTestId('model-status-dot');
   expect(dot.getAttribute('data-active')).toBe('false');
   expect(dot.textContent)
-    .toBe('Not connected yet — add a key and choose an embedding model to enable content search.');
+    .toBe('Not connected yet — set up the provider and choose a model.');
 });
 
 // P2-10: zero entries beside `unreadable > 0`. The screen said "2 records
@@ -2025,7 +2047,7 @@ test('a language switch after mount reaches the ready status dot sentence', asyn
   await switchTo('uk');
   const after = container.textContent ?? '';
   expect(after).toContain('Підключено — OpenRouter');
-  expect(after).not.toContain('Connected — OpenRouter, a key');
+  expect(after).not.toContain('Connected — OpenRouter, a model');
 });
 
 test('a language switch after mount reaches the empty-catalogue sentence', async () => {
@@ -2096,7 +2118,7 @@ const CONFIRM_TITLE = 'Change the embedding model?';
 const CONFIRM_LOSS =
   'These embeddings cannot be carried over: the change discards them. Search by meaning will be ' +
   'unavailable until the index is embedded again; search by words will still answer.';
-const READY = 'Connected — OpenRouter, a key and a chosen embedding model are all set.';
+const READY = 'Connected — OpenRouter, a model is chosen.';
 const REEMBED_ENDED =
   'The embedding pass has ended, and search by meaning is still unavailable. It can be started again.';
 const CHANGE_FAILED =
@@ -2156,7 +2178,7 @@ test('choosing the model the index is ALREADY on asks nothing and calls nothing'
   expect(setEmbeddingModel).not.toHaveBeenCalled();
   // And the select still shows which model the index is on, so "nothing
   // happened" is not the same as "the pick unmarked it".
-  expect(modelSelect().value).toBe('emb-1');
+  expect(selectedModel()).toBe('emb-1');
 });
 
 // The two counts are DIFFERENT here on purpose. `embeddedChunks` counts the
@@ -2546,7 +2568,7 @@ test('an index with documents and no model chosen says it is not connected, not 
 
   expect(screen.queryByTestId('model-embedding-degraded-note')).toBeNull();
   expect(screen.getByTestId('model-status-dot').textContent).toBe(
-    'Not connected yet — add a key and choose an embedding model to enable content search.',
+    'Not connected yet — set up the provider and choose a model.',
   );
 });
 
@@ -2973,11 +2995,11 @@ test('failed_adoption_does_not_restore_cached_model', async () => {
   }));
   mockCatalogues({ embedding: catalogueOf([entry('emb-1'), entry('emb-2')]) });
   renderModels();
-  const select = await screen.findByTestId('model-selection');
-  await fireEvent.change(select, { target: { value: 'emb-2' } });
+  await screen.findByTestId('model-selection');
+  await pickModel('emb-2');
   await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
   await waitFor(() => expect(screen.getByTestId('model-index-failure')).toBeTruthy());
-  expect((screen.getByTestId('model-selection') as HTMLSelectElement).value).toBe('');
+  expect(screen.getByTestId('model-selection').dataset.model).toBe('');
   expect(screen.getByTestId('model-embedding-error').textContent).toContain('Embeddings were removed');
   expect(screen.queryByText(/PRIVATE-DIAGNOSTIC/)).toBeNull();
 });
@@ -3008,7 +3030,7 @@ test('a rejected adoption whose own re-read also fails does not restore any cach
   // Neither model — the one the (now stale) read named, nor the one just
   // picked — is shown as current: the write's own `unknown` outcome is what
   // a failed recovery re-read leaves standing.
-  expect((screen.getByTestId('model-selection') as HTMLSelectElement).value).toBe('');
+  expect(screen.getByTestId('model-selection').dataset.model).toBe('');
 });
 
 // The other half of the same rule: a command that SUCCEEDS must not be
@@ -3031,7 +3053,7 @@ test('successful_write_with_failed_refresh_keeps_acknowledged_model', async () =
 
   // The command succeeded — shown immediately, without waiting for (or being
   // undone by) the read that follows it.
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  await waitFor(() => expect(selectedModel()).toBe('emb-2'));
   expect(screen.queryByTestId('model-embedding-failed')).toBeNull();
   expect(screen.queryByTestId('model-embedding-error')).toBeNull();
   // The read's own failure is still reported — through the ordinary
@@ -3079,15 +3101,15 @@ test('PR44 review: chat write must preserve acknowledged embedding after failed 
   renderModels();
   await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
   await pickModel('emb-2');
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(selectedModel()).toBe('emb-2'));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
   await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
   await pickModel('chat-1');
-  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(selectedModel()).toBe('chat-1'));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
   await fireEvent.click(screen.getByTestId('model-tab-embedding'));
-  expect(modelSelect().value).toBe('emb-2');
+  expect(selectedModel()).toBe('emb-2');
 });
 
 // The same defect, its `unknown` half: a REJECTED embedding adoption leaves
@@ -3104,14 +3126,14 @@ test('PR44 review: unknown embedding must not become cached selection after chat
   renderModels();
   await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
   await pickModel('emb-2');
-  await waitFor(() => expect(modelSelect().value).toBe(''));
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(selectedModel()).toBe(''));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
   await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
   await pickModel('chat-1');
-  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
+  await waitFor(() => expect(selectedModel()).toBe('chat-1'));
   await fireEvent.click(screen.getByTestId('model-tab-embedding'));
-  expect(modelSelect().value).toBe('');
+  expect(selectedModel()).toBe('');
 });
 
 // The mirror the review names but does not itself carry: the SAME defect
@@ -3129,15 +3151,15 @@ test('PR44 review mirror: embedding write must preserve acknowledged chat model 
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
   await waitFor(() => expect(optionsFor('chat-1')).toHaveLength(1));
   await pickModel('chat-1');
-  await waitFor(() => expect(modelSelect().value).toBe('chat-1'));
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(selectedModel()).toBe('chat-1'));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
   await fireEvent.click(screen.getByTestId('model-tab-embedding'));
   await waitFor(() => expect(optionsFor('emb-2')).toHaveLength(1));
   await pickModel('emb-2');
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(selectedModel()).toBe('emb-2'));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
-  expect(modelSelect().value).toBe('chat-1');
+  expect(selectedModel()).toBe('chat-1');
 });
 
 // Review round 1, Important 1. The same "acknowledged B, its own re-read
@@ -3161,7 +3183,7 @@ test('picking the model a stale settings read still names, while the select show
 
   await pickModel('emb-2');
   await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2')); // acknowledged, shown at once
+  await waitFor(() => expect(selectedModel()).toBe('emb-2')); // acknowledged, shown at once
 
   // Picking `emb-1` now: it equals the stale `settings` read (still 'emb-1',
   // since the confirming re-read rejected), but NOT what the select shows.
@@ -3187,7 +3209,7 @@ test('picking the model the select already shows is a real no-op, and does not e
 
   await pickModel('emb-2');
   await fireEvent.click(await screen.findByTestId('model-embedding-discard'));
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  await waitFor(() => expect(selectedModel()).toBe('emb-2'));
   const retiredText = screen.getByTestId('model-embedding-retired').textContent;
 
   await pickModel('emb-2'); // the very model already shown — a real no-op
@@ -3212,7 +3234,7 @@ test('unreadable_recovery_uses_keep', async () => {
     index: { kind: 'unreadable', cause: 'readFailed', reason: 'r' },
   }));
   await waitFor(() => expect(optionsFor('emb-2').length).toBe(1));
-  expect(modelSelect().value).toBe('');
+  expect(selectedModel()).toBe('');
 
   // The recovery re-read this adoption triggers finally answers — the index
   // is open again, on the model just chosen.
@@ -3224,7 +3246,7 @@ test('unreadable_recovery_uses_keep', async () => {
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
   await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('emb-2', 'openRouter', 'keep'));
-  await waitFor(() => expect(modelSelect().value).toBe('emb-2'));
+  await waitFor(() => expect(selectedModel()).toBe('emb-2'));
 });
 
 // A native `<select>` with no option explicitly selected defaults to the
@@ -3236,8 +3258,8 @@ test('unknown_model_is_not_the_first_option', async () => {
   await renderWith(settings()); // base fixture: index read, embeddingModel: null
   await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
 
-  expect(modelSelect().value).toBe('');
-  expect(modelSelect().value).not.toBe('emb-1');
+  expect(selectedModel()).toBe('');
+  expect(selectedModel()).not.toBe('emb-1');
 });
 
 // A confirmed id the active catalogue does NOT list — a provider that
@@ -3257,12 +3279,10 @@ test('a confirmed model absent from the catalogue gets its own placeholder optio
   }));
   await waitFor(() => expect(optionsFor('emb-1').length).toBe(1));
 
-  expect(modelSelect().value).toBe('retired-model');
-  const placeholder = optionFor('retired-model');
-  expect(placeholder.disabled).toBe(true);
-  expect(placeholder.textContent).toContain('retired-model');
+  expect(selectedModel()).toBe('retired-model');
+  expect(combobox().textContent).toContain('retired-model');
   // Neither catalogue entry silently absorbed the selection.
-  expect(optionFor('emb-1').selected).toBe(false);
+  expect(listOptions().some((o) => o.getAttribute('aria-selected') === 'true')).toBe(false);
 });
 
 // The per-role dot (review P2-1): its own predicate, not a shared boolean.
@@ -3334,12 +3354,12 @@ test('cancel_returns_the_select_to_the_current_model', async () => {
 
   await pickModel('emb-2');
   expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
-  expect(modelSelect().value).toBe('emb-1');
+  expect(selectedModel()).toBe('emb-1');
 
   await fireEvent.click(screen.getByTestId('model-embedding-cancel'));
 
   expect(screen.queryByTestId('model-embedding-confirm-title')).toBeNull();
-  expect(modelSelect().value).toBe('emb-1');
+  expect(selectedModel()).toBe('emb-1');
 
   // Picking the SAME candidate again after Cancel must still ask — a DOM
   // left stuck on 'emb-2' would fire no `change` at all for this second
@@ -3365,12 +3385,12 @@ test('rejected_command_returns_the_select_and_reselecting_asks_again', async () 
   // The rejection did not move the model — the re-read still says emb-1 —
   // and the DOM was put back the instant the pick fired, not only once the
   // rejection was known.
-  expect(modelSelect().value).toBe('emb-1');
+  expect(selectedModel()).toBe('emb-1');
   // The round is not fully settled until `changeBusy` clears (its own
   // `job_status` check still runs after the error is already on screen);
   // picking again before then would be blocked by the busy guard rather than
   // by anything this test is about.
-  await waitFor(() => expect(modelSelect().disabled).toBe(false));
+  await waitFor(() => expect(modelDisabled()).toBe(false));
 
   await pickModel('emb-2');
   expect(screen.getByTestId('model-embedding-confirm-title')).toBeTruthy();
@@ -3470,4 +3490,172 @@ test('the key group is not drawn while the card shows another provider', async (
   });
   await waitFor(() => expect(seen).toEqual([true]));
   expect(screen.queryByTestId('model-key-group')).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Task 9 — the per-role picker: provider labels, groups, and the provider the
+// choice carries.
+// ---------------------------------------------------------------------------
+
+const NOBODY = { roles: { embed: null, chat: null }, configured: { openRouter: false, mnemaEmbed: false, mnemaChat: false } } as const;
+const mnemaEntry = (id: string, over: Partial<RoleModel> = {}) => entry(id, { provider: 'mnema', ...over });
+const readIndex = (over: Record<string, unknown> = {}): ModelSettings['index'] => ({
+  kind: 'read', failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null,
+  embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, embeddingModel: null, chatModel: null,
+  searchTextArm: true, searchContentArm: false, ...over,
+} as ModelSettings['index']);
+
+test('both_lists_empty_without_a_provider', async () => {
+  setLocale('uk');
+  await renderWith(settings({ ...NOBODY }));
+  setLocale('uk');
+  for (const tab of ['model-tab-embedding', 'model-tab-chat']) {
+    await fireEvent.click(await screen.findByTestId(tab));
+    await waitFor(() => expect(combobox().disabled).toBe(true));
+    expect(combobox().textContent).toContain('Спершу налаштуйте провайдера');
+    expect(screen.queryByTestId('model-catalogue-empty')).toBeNull();
+  }
+});
+
+test('entries_carry_the_provider_aside', async () => {
+  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('or/emb', { name: 'Some: Embedder' })]) });
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await waitFor(() => expect(listOptions().length).toBe(2));
+  const byId = (id: string) => optionFor(id);
+  expect(asideOf(byId('baai/bge-m3'))).toBe('mnema (local)');
+  expect(asideOf(byId('or/emb'))).toBe('openrouter');
+  expect(labelOf(byId('baai/bge-m3'))).toBe('BAAI: bge-m3'); // no price on a local model
+});
+
+test('mnema_group_comes_first', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('a', { name: 'Aardvark' }), mnemaEntry('z', { name: 'Zebra' }), entry('b', { name: 'Bee' })]) });
+  vi.stubGlobal('localStorage', memoryStorage()); // name order, whatever an earlier test stored
+  try {
+    await renderWith(settings({ key: { kind: 'present' } }));
+    await waitFor(() => expect(optionValues()).toEqual(['z', 'a', 'b']));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  expect([...modelSelect().querySelectorAll('.picker-group')].map((g) => g.textContent)).toEqual(['Mnema (local)', 'OpenRouter']);
+});
+
+test('price_sort_stays_inside_a_group', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([
+      entry('cheap', { name: 'Cheap', price: { kind: 'known', amount: 0.000001 } }),
+      mnemaEntry('local', { name: 'Local' }), // unpriced: would sort last by price
+      entry('dear', { name: 'Dear', price: { kind: 'known', amount: 0.00001 } }),
+    ]),
+  });
+  vi.stubGlobal('localStorage', memoryStorage({ 'models.sortBy': 'price' }));
+  try {
+    await renderWith(settings({ key: { kind: 'present' } }));
+    await waitFor(() => expect(screen.getByTestId('model-sort').textContent).toBe('By price'));
+    await waitFor(() => expect(optionValues()).toEqual(['local', 'cheap', 'dear']));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test('the_selection_follows_the_role_provider_not_just_the_model_id', async () => {
+  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('baai/bge-m3', { name: 'BAAI: bge-m3' })]) });
+  const withIndex = (embed: 'openRouter' | 'mnema') => settings({
+    key: { kind: 'present' }, index: readIndex({ embeddingModel: 'baai/bge-m3' }),
+    roles: { embed, chat: 'openRouter' }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
+  });
+  await renderWith(withIndex('openRouter'));
+  await waitFor(() => expect(combobox().textContent).toContain('openrouter'));
+  expect(combobox().textContent).not.toContain('mnema (local)');
+  cleanup();
+  await renderWith(withIndex('mnema'));
+  await waitFor(() => expect(combobox().textContent).toContain('mnema (local)'));
+});
+
+test('choosing_a_mnema_model_sends_the_provider', async () => {
+  mockCatalogues({
+    embedding: catalogueOf([mnemaEntry('baai/bge-m3'), entry('or/emb')]),
+    chat: catalogueOf([mnemaEntry('gemma-local'), entry('or/chat')]),
+  });
+  setChatModel.mockResolvedValue(undefined);
+  setEmbeddingModel.mockResolvedValue({ retired: [] });
+  const s = settings({
+    key: { kind: 'present' }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: true },
+  });
+  await renderWith(s);
+  await waitFor(() => expect(listOptions().length).toBe(2));
+  // An index with no vectors anywhere asks nothing: the value that refuses goes out.
+  await pickModel('baai/bge-m3');
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('baai/bge-m3', 'mnema', 'keep'));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  await waitFor(() => expect(optionsFor('gemma-local').length).toBe(1));
+  await pickModel('gemma-local');
+  await waitFor(() => expect(setChatModel).toHaveBeenCalledWith('gemma-local', 'mnema'));
+});
+
+// The data-loss path: the same count-based confirmation guards a Mnema choice.
+test('choosing_the_mnema_embedding_model_over_another_space_asks_first', async () => {
+  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('emb-1')]) });
+  setEmbeddingModel.mockResolvedValue({ retired: [] });
+  await renderWith(settings({
+    key: { kind: 'present' }, index: readIndex({ embeddingModel: 'emb-1', embeddedChunks: 7, embeddedChunksEverywhere: 7 }),
+    configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
+  }));
+  await waitFor(() => expect(listOptions().length).toBe(2));
+
+  await pickModel('baai/bge-m3');
+  expect(screen.getByTestId('model-embedding-confirm')).toBeTruthy();
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+
+  await fireEvent.click(screen.getByTestId('model-embedding-cancel'));
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
+
+  await pickModel('baai/bge-m3');
+  await fireEvent.click(screen.getByTestId('model-embedding-discard'));
+  await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledWith('baai/bge-m3', 'mnema', 'discard'));
+});
+
+test('the_status_line_names_the_role_provider', async () => {
+  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3')]) });
+  await renderWith(settings({
+    index: readIndex({ embeddingModel: 'baai/bge-m3' }), roles: { embed: 'mnema', chat: null },
+    configured: { openRouter: false, mnemaEmbed: true, mnemaChat: false },
+  }));
+  await waitFor(() => expect(screen.getByTestId('model-status-dot').textContent).toBe('Connected — Mnema (local), a model is chosen.'));
+});
+
+test('an_empty_role_has_its_own_status_and_a_red_dot', async () => {
+  await renderWith(settings({ key: { kind: 'present' }, roles: { embed: null, chat: 'openRouter' } }));
+  expect(screen.getByTestId('model-status-dot').textContent).toBe('No model chosen');
+  expect(screen.getByTestId('model-status-dot').getAttribute('data-active')).toBe('false');
+  expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe('false');
+});
+
+// One predicate, two readers: each tab's dot is `roleReady` of the same settings.
+test('the_tab_dot_and_launcher_agree', async () => {
+  const chatIdx = readIndex({ embeddingModel: 'm', chatModel: 'c' });
+  const fixtures: ModelSettings[] = [
+    settings({ key: { kind: 'present' }, index: chatIdx }),
+    settings({ key: { kind: 'absent' }, index: chatIdx }),
+    settings({ key: { kind: 'present' }, index: readIndex() }),
+    settings({ key: { kind: 'absent' }, index: chatIdx, roles: { embed: 'mnema', chat: 'mnema' }, configured: { openRouter: false, mnemaEmbed: true, mnemaChat: false } }),
+    settings({ key: { kind: 'present' }, index: chatIdx, roles: { embed: null, chat: 'openRouter' } }),
+  ];
+  for (const f of fixtures) {
+    await renderWith(f);
+    expect(screen.getByTestId('model-dot-embedding').getAttribute('data-configured')).toBe(String(providerReady(f)));
+    expect(screen.getByTestId('model-dot-chat').getAttribute('data-configured')).toBe(String(roleReady(f, 'chat')));
+    cleanup();
+  }
+});
+
+test('the_same_model_under_the_other_provider_is_a_choice_not_a_no_op', async () => {
+  mockCatalogues({ embedding: catalogueOf([mnemaEntry('baai/bge-m3', { name: 'BAAI: bge-m3' }), entry('baai/bge-m3', { name: 'BAAI: bge-m3' })]) });
+  await renderWith(settings({
+    key: { kind: 'present' }, index: readIndex({ embeddingModel: 'baai/bge-m3', embeddedChunks: 7, embeddedChunksEverywhere: 7 }),
+    configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
+  }));
+  await waitFor(() => expect(listOptions().length).toBe(2));
+  await pickModel('baai/bge-m3', 'mnema (local)');
+  expect(screen.getByTestId('model-embedding-confirm')).toBeTruthy(); // asks, as for any change of space
+  expect(setEmbeddingModel).not.toHaveBeenCalled();
 });

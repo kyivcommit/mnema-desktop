@@ -145,3 +145,20 @@ test('enter_with_no_match_does_nothing_and_activedescendant_stays_visible', asyn
   await fireEvent.keyDown(input, { key: 'Enter' });
   expect(onchange).not.toHaveBeenCalled();
 });
+
+test('markerAfter_follows_the_name_in_the_option_text', async () => {
+  const markerAfter = createRawSnippet((o: () => { id: string }) => ({
+    render: () => `<span>, state-${o().id}</span>`,
+  }));
+  const { button } = setup({ markerAfter, value: 'a' });
+  expect(button.textContent).toMatch(/Alpha.*, state-a/);
+  await fireEvent.click(button);
+  const opt = screen.getAllByRole('option').find((x) => x.textContent?.includes('Gamma'))!;
+  expect(opt.textContent).toMatch(/Gamma.*, state-c/);
+});
+
+test('options_carry_their_id', async () => {
+  const { button } = setup();
+  await fireEvent.click(button);
+  expect(screen.getAllByRole('option').map((o) => o.getAttribute('data-id'))).toEqual(['a', 'b', 'c']);
+});

@@ -400,10 +400,10 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // pressed tab can share the panel's border — one more space before
   // "Embedding", the wrapper's own indentation, and no new word.
   expect(panel()?.textContent).toBe(
-    ' Models Provider: Not configured, OpenRouter      Key: An OpenRouter key lets this application reach the models.'
+    ' Models Provider:  OpenRouter  , Not configured     Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.  Save     '
     + ' Embedding, Not configured Chat, Not configured   The provider does not currently list any models for this role.'
-    + ' Not connected yet — add a key and choose an embedding model to enable content search.'
+    + ' Not connected yet — set up the provider and choose a model.'
     + '      ',
   );
 
@@ -1519,11 +1519,14 @@ test('mutation_outcome_survives_a_section_switch', async () => {
   let rejectAdopt!: (e: unknown) => void;
   setEmbeddingModel.mockImplementation(() => new Promise((_res, rej) => { rejectAdopt = rej; }));
 
+  Element.prototype.scrollIntoView = vi.fn(); // jsdom has no layout
   render(Settings); // opens on Models by default
-  const select = () => screen.getByTestId('model-selection') as HTMLSelectElement;
-  await waitFor(() => expect(select().value).toBe('emb-1'));
+  const select = () => screen.getByTestId('model-selection');
+  const picker = () => within(select()).getByRole('combobox') as HTMLButtonElement;
+  await waitFor(() => expect(select().dataset.model).toBe('emb-1'));
 
-  await fireEvent.change(select(), { target: { value: 'emb-2' } });
+  await fireEvent.click(picker());
+  await fireEvent.click(screen.getAllByRole('option').find((o) => o.getAttribute('data-id')?.endsWith('\temb-2'))!);
   await screen.findByTestId('model-embedding-confirm-title');
   await fireEvent.click(screen.getByTestId('model-embedding-discard'));
   await waitFor(() => expect(setEmbeddingModel).toHaveBeenCalledTimes(1));
@@ -1538,8 +1541,9 @@ test('mutation_outcome_survives_a_section_switch', async () => {
   // component itself — and a second write genuinely cannot start: the busy
   // check inside the handler, not only the `disabled` attribute a real
   // person would meet, refuses a script-dispatched pick too.
-  expect(select().disabled).toBe(true);
-  await fireEvent.change(select(), { target: { value: 'emb-1' } });
+  expect(picker().disabled).toBe(true);
+  await fireEvent.click(picker());
+  expect(picker().getAttribute('aria-expanded')).toBe('false'); // cannot even be opened
   expect(setEmbeddingModel).toHaveBeenCalledTimes(1);
 
   // The command is refused, and the re-read that follows it comes back
@@ -1550,6 +1554,7 @@ test('mutation_outcome_survives_a_section_switch', async () => {
     key: { kind: 'present' },
     index: { kind: 'unreadable', cause: 'readFailed', reason: 'PRIVATE-DIAGNOSTIC' },
     platform: 'linux',
+    ...ROLE_FIELDS,
   });
   rejectAdopt(new Error(SENTENCE));
 

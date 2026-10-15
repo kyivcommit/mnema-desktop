@@ -1,6 +1,6 @@
 import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, heatAfter, firstCard, turnsAfter } from './state';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, roleReady, heatAfter, firstCard, turnsAfter } from './state';
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
@@ -134,4 +134,25 @@ test('turnsAfter leaves the turns alone for a refusal and for a failed citations
   expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toBe(t1);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'offline' } } as AskAnswer)).toBe(t1);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'noToolUse' } } as AskAnswer)).toBe(t1);
+});
+
+// Per-role providers: readiness follows the provider the ROLE has, not the key.
+const noKeyNoRoles = { key: absentKey, index: readWithModel, platform, roles: { embed: 'mnema' as const, chat: 'mnema' as const },
+  configured: { openRouter: false, mnemaEmbed: true, mnemaChat: false } };
+
+test('providerReady: a Mnema embed role needs no key, only its local model', () => {
+  expect(providerReady(noKeyNoRoles)).toBe(true);
+  expect(providerReady({ ...noKeyNoRoles, configured: { ...noKeyNoRoles.configured, mnemaEmbed: false } })).toBe(false);
+});
+
+test('providerReady: an empty embed role is not ready, whatever the key says', () => {
+  expect(providerReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS, roles: { embed: null, chat: 'openRouter' } })).toBe(false);
+});
+
+test('roleReady: the chat role reads its own provider and its own chosen model', () => {
+  const chatIndex = { ...readWithModel, chatModel: 'some/chat' } as ModelSettings['index'];
+  expect(roleReady({ ...noKeyNoRoles, index: chatIndex, configured: { ...noKeyNoRoles.configured, mnemaChat: true } }, 'chat')).toBe(true);
+  expect(roleReady({ ...noKeyNoRoles, index: chatIndex }, 'chat')).toBe(false); // mnemaChat not downloaded
+  expect(roleReady({ ...noKeyNoRoles, index: readWithModel, configured: { ...noKeyNoRoles.configured, mnemaChat: true } }, 'chat')).toBe(false); // no chat model chosen
+  expect(roleReady({ key: presentKey, index: chatIndex, platform, ...ROLE_FIELDS, roles: { embed: 'openRouter', chat: null } }, 'chat')).toBe(false);
 });
