@@ -177,6 +177,10 @@ fn stored_choice(
 /// OpenRouter) is migrated: each role takes it if `configured` serves it, else
 /// null; both keys are written (`null` = none) and `provider` removed in one
 /// locked write. A key present as `null` or garbage reads as `None`.
+///
+/// The migration is written only over a file that is absent or a JSON object:
+/// a corrupt or unreadable one answers the migrated roles and is left exactly
+/// as it is — a read must not move or replace the file.
 pub fn roles(
     data_dir: &Path,
     configured: impl FnOnce() -> crate::provider::Configured,
@@ -186,7 +190,16 @@ pub fn roles(
         embed: stored_choice(obj, EMBED_KEY),
         chat: stored_choice(obj, CHAT_KEY),
     };
-    let all = read_all(data_dir);
+    let (all, writable) = match std::fs::read(paths::prefs_path(data_dir)) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(obj) => (obj, true),
+            Err(_) => (serde_json::Map::new(), false),
+        },
+        Err(e) => (
+            serde_json::Map::new(),
+            e.kind() == std::io::ErrorKind::NotFound,
+        ),
+    };
     if all.contains_key(EMBED_KEY) || all.contains_key(CHAT_KEY) {
         return read(&all);
     }
@@ -197,6 +210,9 @@ pub fn roles(
         embed: pick(Role::Embed),
         chat: pick(Role::Chat),
     };
+    if !writable {
+        return migrated;
+    }
     let mut result = migrated;
     // Best effort: an unwritable directory leaves the old key, and the next
     // read migrates again to the same answer.
@@ -1588,6 +1604,42 @@ mod tests {
         };
         let got = roles(dir.path(), || all);
         assert_eq!((got.embed, got.chat), (None, Some(OpenRouter)));
+    }
+
+    fn every_role() -> crate::provider::Configured {
+        crate::provider::Configured {
+            open_router: true,
+            mnema_embed: true,
+            mnema_chat: true,
+        }
+    }
+
+    #[test]
+    fn reading_roles_from_a_corrupt_file_leaves_it_alone() {
+        use crate::provider::ProviderChoice::OpenRouter;
+        let dir = tempfile::tempdir().unwrap();
+        let path = paths::prefs_path(dir.path());
+        std::fs::write(&path, b"{ not json").unwrap();
+        let got = roles(dir.path(), every_role);
+        assert_eq!((got.embed, got.chat), (Some(OpenRouter), Some(OpenRouter)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+        assert!(!path.with_extension("json.corrupt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_roles_from_an_unreadable_file_leaves_it_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_key(dir.path(), "hotkey", json!("X")).unwrap();
+        let path = paths::prefs_path(dir.path());
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _ = roles(dir.path(), every_role);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(mode, 0o000, "the unreadable file was replaced");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
