@@ -361,8 +361,9 @@ fn merged_catalogue(
 /// wording could have told them apart, because the fact was not in the message.
 /// It is not inferred here either — see [`AdoptedModel::created`].
 ///
-/// The store is asked **once**, by [`AppState::endpoint`] (`provider::endpoint`
-/// is where `Error::NoKey` is told apart from `Error::Secrets`). Asking it again for a `key_present`
+/// The store is asked **once**, by [`AppState::open_router_endpoint`]
+/// (`Provider::open_router` is where `Error::NoKey` is told apart from
+/// `Error::Secrets`). Asking it again for a `key_present`
 /// would be a second measurement that can disagree with the one this command
 /// actually used: a concurrent `forget_key` would report the key as absent on a
 /// call that has just succeeded with it. The window does not need the answer in

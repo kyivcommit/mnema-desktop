@@ -59,9 +59,6 @@ export function roleReady(s: ModelSettings, role: 'embed' | 'chat'): boolean {
   return typeof (role === 'embed' ? s.index.embeddingModel : s.index.chatModel) === 'string';
 }
 
-// Search by meaning.
-export const providerReady = (s: ModelSettings): boolean => roleReady(s, 'embed');
-
 export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
   switch (a.kind) {
     case 'generated': return { kind: 'generated', query, answer: a };

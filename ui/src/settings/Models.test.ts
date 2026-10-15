@@ -1710,7 +1710,7 @@ test('a rejected set_chat_model shows the backends sentence and leaves the selec
 
 // P2-9: the dot's fail-safe on a state this window does not know. On a
 // rejected mount `settings` stays null forever — nothing on this screen can
-// retry it — and the mutant `!settings || providerReady(settings)` makes the
+// retry it — and the mutant `!settings || roleReady(settings, 'embed')` makes the
 // dot claim everything is connected for as long as that window stays open. A
 // green dot that means less than provider ∧ key ∧ model is a promise the
 // product cannot keep.
@@ -2519,7 +2519,7 @@ test('the connected dot does not have the last word over a search that has gone 
   const { container } = await reembedding(onModel(0, 0));
 
   const text = container.textContent ?? '';
-  // Both are on screen — the dot is not hidden, and the ruling on `providerReady`
+  // Both are on screen — the dot is not hidden, and the ruling on `roleReady`
   // is untouched.
   expect(text).toContain(READY);
   expect(text).toContain(DEGRADED);

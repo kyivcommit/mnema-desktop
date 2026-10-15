@@ -424,7 +424,7 @@ impl AppState {
     }
 
     /// OpenRouter's address. Every model request goes through
-    /// [`AppState::endpoint`]; only the two calls that are about OpenRouter
+    /// [`AppState::endpoint_for`]; only the two calls that are about OpenRouter
     /// itself — checking its key, listing its catalogue — name it directly.
     pub fn openrouter_base(&self) -> &str {
         &self.provider_base
@@ -447,7 +447,7 @@ impl AppState {
         )
     }
 
-    /// Everything [`AppState::endpoint`] reads, owned — what a job carries.
+    /// Everything [`AppState::endpoint_for`] reads, owned — what a job carries.
     pub fn provider(&self) -> crate::provider::Provider {
         crate::provider::Provider {
             data_dir: self.data_dir.clone(),

@@ -2443,19 +2443,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    /// 🔴 A store that will not answer is not a store with no key in it.
-    ///
-    /// The pair, on one fixture and one code path: `Ok(None)` is a person who
-    /// has not entered a key, and `Err` is a store that could not be asked —
-    /// commonly a locked keychain, which may well be holding the key already.
-    /// The first tells them to enter one; the second tells them to unlock
-    /// something. Folded together, somebody with a locked keychain is invited to
-    /// type in a key they have already entered.
-    ///
-    /// Both halves end the JOB the same way — `Completed`, no resumption — and
-    /// that is deliberate rather than an oversight: neither is changed by
-    /// running the same scan again, and both leave the reading exactly as it
-    /// was.
     /// An emptied embed role is "no embedding model chosen", not an empty key
     /// store: the person's next step is the model picker.
     #[test]
@@ -2479,6 +2466,19 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    /// 🔴 A store that will not answer is not a store with no key in it.
+    ///
+    /// The pair, on one fixture and one code path: `Ok(None)` is a person who
+    /// has not entered a key, and `Err` is a store that could not be asked —
+    /// commonly a locked keychain, which may well be holding the key already.
+    /// The first tells them to enter one; the second tells them to unlock
+    /// something. Folded together, somebody with a locked keychain is invited to
+    /// type in a key they have already entered.
+    ///
+    /// Both halves end the JOB the same way — `Completed`, no resumption — and
+    /// that is deliberate rather than an oversight: neither is changed by
+    /// running the same scan again, and both leave the reading exactly as it
+    /// was.
     #[test]
     fn a_store_that_will_not_answer_is_reported_as_unavailable_not_as_no_key() {
         let turn = take_scan_turn();

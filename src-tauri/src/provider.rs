@@ -1,7 +1,8 @@
-//! Which provider answers — OpenRouter or the local Mnema process — behind ONE
-//! endpoint. Every call that leaves for a model asks [`endpoint`] (through
-//! `AppState::endpoint` or a job's captured [`Provider`]), so the two can never
-//! be chosen differently at two sites.
+//! Which provider answers each role — OpenRouter or the local Mnema process.
+//! Every call that leaves for a model asks [`Provider::endpoint_for`] with its
+//! role's provider (through `AppState::endpoint_for` or a job's captured
+//! [`Provider`]), so one role's provider is never chosen differently at two
+//! sites.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -107,7 +108,7 @@ impl ProviderChoice {
 }
 
 /// The local models and the process that serves them. Started lazily, on the
-/// first [`endpoint`] that finds both models `Ready`.
+/// first use by a role on Mnema whose model is `Ready`.
 pub struct Local {
     pub store: Store,
     binary: PathBuf,
@@ -389,7 +390,7 @@ impl Local {
         &self.cancel[id as usize]
     }
 
-    /// Stops the process (if any): the next [`endpoint`] starts a fresh one
+    /// Stops the process (if any): the next [`Provider::endpoint_for`] starts a fresh one
     /// over whatever files are there by then.
     pub(crate) fn stop(&self) {
         let old = self
@@ -441,7 +442,7 @@ impl Drop for LoadEnd {
     }
 }
 
-/// Everything [`endpoint`] reads, owned, so a job thread can carry it without
+/// Everything [`Provider::endpoint_for`] reads, owned, so a job thread can carry it without
 /// `AppState`.
 #[derive(Clone)]
 pub struct Provider {

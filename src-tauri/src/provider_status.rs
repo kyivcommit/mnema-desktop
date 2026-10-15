@@ -28,7 +28,7 @@ const TTL: Duration = Duration::from_secs(60);
 pub enum Missing {
     Key,
     EmbeddingModel,
-    /// Mnema is chosen and its two models are not both downloaded.
+    /// Mnema is chosen for the role and the role's model is not downloaded.
     LocalModels,
     /// No provider is chosen for the role.
     Role,

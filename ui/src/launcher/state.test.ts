@@ -1,6 +1,6 @@
 import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, providerReady, roleReady, heatAfter, firstCard, turnsAfter } from './state';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, heatAfter, firstCard, turnsAfter } from './state';
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
@@ -54,25 +54,25 @@ const readNoModel: ModelSettings['index'] = {
   searchContentArm: false,
 };
 const unreadableIndex: ModelSettings['index'] = { kind: 'unreadable', cause: 'notOpen', reason: '' };
-// `providerReady` reads only `key` and `index` — `platform` is irrelevant to
+// `roleReady` reads only `key` and `index` — `platform` is irrelevant to
 // it, so one fixed value stands for all four cases here (PR 7 Task 4 widened
 // `ModelSettings` with this field).
 const platform: ModelSettings['platform'] = 'linux';
 
-test('providerReady: a present key and a chosen model → true', () => {
-  expect(providerReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS })).toBe(true);
+test('roleReady(embed): a present key and a chosen model → true', () => {
+  expect(roleReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(true);
 });
 
-test('providerReady: a present key with no chosen model → false (the live-smoke config)', () => {
-  expect(providerReady({ key: presentKey, index: readNoModel, platform, ...ROLE_FIELDS })).toBe(false);
+test('roleReady(embed): a present key with no chosen model → false (the live-smoke config)', () => {
+  expect(roleReady({ key: presentKey, index: readNoModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
-test('providerReady: a present key with an unreadable index → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndex, platform, ...ROLE_FIELDS })).toBe(false);
+test('roleReady(embed): a present key with an unreadable index → false', () => {
+  expect(roleReady({ key: presentKey, index: unreadableIndex, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
-test('providerReady: an absent key, even with a chosen model → false', () => {
-  expect(providerReady({ key: absentKey, index: readWithModel, platform, ...ROLE_FIELDS })).toBe(false);
+test('roleReady(embed): an absent key, even with a chosen model → false', () => {
+  expect(roleReady({ key: absentKey, index: readWithModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
 // Review P2-8: `index.kind === 'read'` was defended by nothing. Replacing it
@@ -88,8 +88,8 @@ const unreadableIndexCarryingAModel = {
   kind: 'unreadable', cause: 'notOpen', reason: 'r', embeddingModel: 'text-embedding-3-small',
 } as unknown as IndexSettings;
 
-test('providerReady: a present key and a model name on an index that is not read → false', () => {
-  expect(providerReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS })).toBe(false);
+test('roleReady(embed): a present key and a model name on an index that is not read → false', () => {
+  expect(roleReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
 // Cold -> hot happens on an answer that has something to show, and only then.
@@ -140,13 +140,13 @@ test('turnsAfter leaves the turns alone for a refusal and for a failed citations
 const noKeyNoRoles = { key: absentKey, index: readWithModel, platform, roles: { embed: 'mnema' as const, chat: 'mnema' as const },
   configured: { openRouter: false, mnemaEmbed: true, mnemaChat: false } };
 
-test('providerReady: a Mnema embed role needs no key, only its local model', () => {
-  expect(providerReady(noKeyNoRoles)).toBe(true);
-  expect(providerReady({ ...noKeyNoRoles, configured: { ...noKeyNoRoles.configured, mnemaEmbed: false } })).toBe(false);
+test('roleReady(embed): a Mnema embed role needs no key, only its local model', () => {
+  expect(roleReady(noKeyNoRoles, 'embed')).toBe(true);
+  expect(roleReady({ ...noKeyNoRoles, configured: { ...noKeyNoRoles.configured, mnemaEmbed: false } }, 'embed')).toBe(false);
 });
 
-test('providerReady: an empty embed role is not ready, whatever the key says', () => {
-  expect(providerReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS, roles: { embed: null, chat: 'openRouter' } })).toBe(false);
+test('roleReady(embed): an empty embed role is not ready, whatever the key says', () => {
+  expect(roleReady({ key: presentKey, index: readWithModel, platform, ...ROLE_FIELDS, roles: { embed: null, chat: 'openRouter' } }, 'embed')).toBe(false);
 });
 
 test('roleReady: the chat role reads its own provider and its own chosen model', () => {

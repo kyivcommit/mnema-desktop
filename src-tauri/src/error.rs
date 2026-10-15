@@ -361,7 +361,7 @@ pub enum Error {
     /// Mnema is chosen for a role and that role's model is not downloaded. The local
     /// counterpart of [`Error::NoKey`]: a normal state with a download behind
     /// it, not a failure.
-    #[error("the local models are not downloaded yet")]
+    #[error("the local model for this role is not downloaded yet")]
     ProviderNotReady,
     /// No provider is chosen for the role a request serves. Never answered by
     /// sending the request to another provider instead.
