@@ -94,14 +94,17 @@ pub(crate) struct ScanDeps {
 /// is the one place D-g says it must not be called from.
 /// [`ScanDeps::production`] captures a [`crate::provider::Provider`] instead.
 /// What the production key read makes of the provider's answer: only "nobody
-/// entered a key" is the ordinary empty answer. Mnema without its models
+/// entered a key" (or chose a provider for embedding) is the ordinary empty
+/// answer. Mnema without its models
 /// (`ProviderNotReady`) stays an error so the scan can say *that*, not "no key".
 pub(crate) fn key_answer(
     answer: Result<crate::provider::Endpoint, Error>,
 ) -> Result<Option<crate::provider::Endpoint>, Error> {
     match answer {
         Ok(endpoint) => Ok(Some(endpoint)),
-        Err(Error::NoKey) => Ok(None),
+        // No provider chosen for embedding is as plain: nothing is configured
+        // to embed with.
+        Err(Error::NoKey | Error::RoleEmpty) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -129,18 +132,24 @@ impl ScanDeps {
     /// puts the key read so that a keychain dialog is waited for under the
     /// `Embedding` phase rather than in front of the claim.
     ///
-    /// The provider CHOICE is read inside both closures, on the job thread,
-    /// after the claim — never here. `set_provider_choice` needs the slot, so
-    /// from the claim on the choice cannot move under this run; read before the
-    /// claim it could, and the run would embed through the provider the person
-    /// had just left.
+    /// The embed role's provider is read inside both closures, on the job
+    /// thread, after the claim — never here. `set_provider_choice` needs the
+    /// slot, so from the claim on the role cannot move under this run; read
+    /// before the claim it could, and the run would embed through the provider
+    /// the person had just left.
     pub(crate) fn production(state: &AppState) -> Self {
         let provider = state.provider();
         let for_embed = provider.clone();
         Self {
-            key: std::sync::Arc::new(move || key_answer(provider.endpoint())),
+            key: std::sync::Arc::new(move || {
+                key_answer(
+                    provider.endpoint_for(provider.roles().embed, mnema_local::ModelId::Embed),
+                )
+            }),
             embed: std::sync::Arc::new(move |db, base, key, cancel, on_progress| {
-                let choice = for_embed.choice();
+                // Only sizes the batches: the run reached here with the embed
+                // role's endpoint, so the role is chosen.
+                let choice = for_embed.roles().embed.unwrap_or_default();
                 mnema_embed::run_with(
                     db,
                     base,
@@ -2384,6 +2393,7 @@ mod tests {
     #[test]
     fn the_production_key_read_keeps_no_key_and_no_local_models_apart() {
         assert!(matches!(key_answer(Err(Error::NoKey)), Ok(None)));
+        assert!(matches!(key_answer(Err(Error::RoleEmpty)), Ok(None)));
         assert!(matches!(
             key_answer(Err(Error::ProviderNotReady)),
             Err(Error::ProviderNotReady)

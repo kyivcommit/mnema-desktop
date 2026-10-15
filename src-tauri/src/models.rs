@@ -170,7 +170,7 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState) {
     ) else {
         return;
     };
-    let Ok(endpoint) = state.endpoint() else {
+    let Ok(endpoint) = state.open_router_endpoint() else {
         return;
     };
     let Ok(check) = mnema_provider::check_embedding_model(
@@ -424,7 +424,7 @@ pub fn set_embedding_model(
     model: String,
     existing_vectors: ExistingVectors,
 ) -> Result<AdoptedModel, Error> {
-    let endpoint = state.endpoint()?;
+    let endpoint = state.open_router_endpoint()?;
     // ⚠️ **This command takes the job slot, although it is not a job**, and the
     // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
     // once, at the start, and holds that space id for the whole run — so a model

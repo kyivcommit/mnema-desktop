@@ -52,11 +52,8 @@ pub fn fresh(cached_at: Instant, now: Instant) -> bool {
 /// A credential store that will not answer is NOT "no key entered": the
 /// person may well have one, and sending them to re-enter it is wrong
 /// (`KeyState::Unreadable`). It is `Unreachable`, and never cached.
-fn local_facts(
-    state: &AppState,
-    choice: crate::provider::ProviderChoice,
-) -> Result<crate::provider::Endpoint, ProviderStatus> {
-    let endpoint = match state.endpoint_as(choice) {
+fn local_facts(state: &AppState) -> Result<crate::provider::Endpoint, ProviderStatus> {
+    let endpoint = match state.open_router_endpoint() {
         Ok(endpoint) => endpoint,
         Err(Error::NoKey) => return Err(not_configured(Missing::Key)),
         Err(e) => {
@@ -71,14 +68,21 @@ fn local_facts(
     }
 }
 
-/// Under Mnema: both models downloaded and, if the process is already
+/// Under Mnema: the models of the roles on it downloaded and, if the process is already
 /// running, still answering. Asked of the files and the running process only —
 /// a poll never starts the process (that is a question's or a scan's to do).
 /// Nothing leaves the machine, so nothing is cached and `/credits` is never
 /// asked.
-fn local_status(state: &AppState) -> ProviderStatus {
+fn local_status(state: &AppState, roles: crate::provider::Roles) -> ProviderStatus {
+    use crate::provider::ProviderChoice::Mnema;
     let local = state.local();
-    if !local.models_ready() {
+    let missing = [
+        (roles.embed, mnema_local::ModelId::Embed),
+        (roles.chat, mnema_local::ModelId::Chat),
+    ]
+    .into_iter()
+    .any(|(p, id)| p == Some(Mnema) && !local.ready(id));
+    if missing {
         return not_configured(Missing::LocalModels);
     }
     match local.running() {
@@ -100,13 +104,16 @@ pub fn provider_status(state: State<'_, AppState>) -> ProviderStatus {
 
 /// The command's body, reachable without a `State`.
 pub(crate) fn status(state: &AppState) -> ProviderStatus {
-    let choice = state.provider_choice();
-    if choice == crate::provider::ProviderChoice::Mnema {
-        return local_status(state);
+    // shortcut: one status for both roles — Mnema if either role is on it;
+    // Task 5 gives each role its own.
+    let roles = state.roles();
+    let mnema = Some(crate::provider::ProviderChoice::Mnema);
+    if roles.embed == mnema || roles.chat == mnema {
+        return local_status(state, roles);
     }
     // Before the first read of anything the answer depends on.
     let epoch = state.provider_status_gen();
-    let endpoint = match local_facts(state, choice) {
+    let endpoint = match local_facts(state) {
         Ok(endpoint) => endpoint,
         Err(status) => return status,
     };

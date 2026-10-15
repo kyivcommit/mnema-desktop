@@ -1083,7 +1083,8 @@ fn passage_from_hit(hit: &Hit) -> mnema_rag::Passage {
 /// key }` destructures the value and every other variant opens the
 /// citations-only branch.
 enum ChatReadiness {
-    /// `META_CHAT_MODEL` absent, empty, or whitespace only.
+    /// No provider chosen for chat, or `META_CHAT_MODEL` absent, empty, or
+    /// whitespace only.
     NoModel,
     /// A model is set but no key has been entered (v1 OpenRouter needs one).
     NoKey,
@@ -1098,6 +1099,7 @@ enum ChatReadiness {
     Ready {
         model: String,
         endpoint: crate::provider::Endpoint,
+        provider: crate::provider::ProviderChoice,
     },
 }
 
@@ -1106,8 +1108,11 @@ enum ChatReadiness {
 /// so a missing key answers with citations rather than failing.
 fn chat_readiness(
     state: &State<'_, AppState>,
-    choice: crate::provider::ProviderChoice,
+    chat: Option<crate::provider::ProviderChoice>,
 ) -> Result<ChatReadiness, Error> {
+    let Some(choice) = chat else {
+        return Ok(ChatReadiness::NoModel);
+    };
     let model = match choice {
         crate::provider::ProviderChoice::Mnema => {
             Some(crate::provider::LOCAL_CHAT_MODEL.to_string())
@@ -1119,8 +1124,12 @@ fn chat_readiness(
     let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
         return Ok(ChatReadiness::NoModel);
     };
-    match state.question_endpoint_as(choice) {
-        Ok(endpoint) => Ok(ChatReadiness::Ready { model, endpoint }),
+    match state.question_endpoint_for(chat, mnema_local::ModelId::Chat) {
+        Ok(endpoint) => Ok(ChatReadiness::Ready {
+            model,
+            endpoint,
+            provider: choice,
+        }),
         // The local models not downloaded is the local "no key": citations
         // only, nothing failed.
         Err(Error::NoKey | Error::ProviderNotReady) => Ok(ChatReadiness::NoKey),
@@ -1164,10 +1173,10 @@ fn retrieve(
     query: &str,
     arms: Arms,
     limit: i64,
-    choice: crate::provider::ProviderChoice,
+    embed: Option<crate::provider::ProviderChoice>,
 ) -> Result<(Vec<Hit>, TextArmReport, ContentArmReport, Option<NoAnswer>), Error> {
     let (provider, content_failure, local_failure) = if arms.content {
-        match state.question_endpoint_as(choice) {
+        match state.question_endpoint_for(embed, mnema_local::ModelId::Embed) {
             // `query_base`: under Mnema the question's embedding takes the
             // process's priority route, ahead of a scan's batches; under
             // OpenRouter it is the same base as everything else.
@@ -1179,7 +1188,8 @@ fn retrieve(
                 None,
                 None,
             ),
-            Err(Error::NoKey | Error::ProviderNotReady) => (None, None, None),
+            // No embed role is as plain as no key: the text arm alone.
+            Err(Error::NoKey | Error::ProviderNotReady | Error::RoleEmpty) => (None, None, None),
             // The local process failing is also why chat cannot run: `ask`
             // reads it from here rather than starting the process again.
             Err(e @ (Error::Local(_) | Error::LocalLoading)) => {
@@ -1253,8 +1263,8 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         return Err(Error::QueryBlank);
     }
     let arms = read_arms(&state)?;
-    let choice = state.provider_choice();
-    let (hits, text, content, _) = retrieve(&state, &query, arms, SEARCH_LIMIT, choice)?;
+    let embed = state.roles().embed;
+    let (hits, text, content, _) = retrieve(&state, &query, arms, SEARCH_LIMIT, embed)?;
     Ok(SearchAnswer {
         hits,
         text,
@@ -1488,13 +1498,13 @@ fn answer_question(
     }
 
     let arms = read_arms(state)?;
-    // Read once: retrieval, readiness, voice and timeout all answer for the
-    // same provider.
-    let choice = state.provider_choice();
-    // The conversation is off under Mnema (the local model has no tool call)
-    // and with the switch off; either way each question stands alone, and a
-    // session left from before is dropped.
-    let dialogue = dialogue_enabled(state, choice);
+    // Read once: retrieval answers for the embed role's provider; readiness,
+    // voice, timeout and the conversation for the chat role's.
+    let roles = state.roles();
+    // The conversation is off with chat under Mnema (the local model has no
+    // tool call) and with the switch off; either way each question stands
+    // alone, and a session left from before is dropped.
+    let dialogue = dialogue_enabled(state, roles.chat);
     if !dialogue {
         state.dialogue.clear();
     }
@@ -1506,22 +1516,27 @@ fn answer_question(
             .iter()
             .any(|t| matches!(t.answer, AskAnswer::Generated { .. }))
     {
-        return follow_up(state, query, arms, choice, generation, &turns, taken);
+        return follow_up(state, query, arms, roles, generation, &turns, taken);
     }
     let remember = dialogue.then_some(generation);
-    let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, choice)?;
+    let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
 
-    // Under Mnema the chat model is fixed, so readiness would only ask for the
-    // process again — and a process retrieval already saw fail would be
-    // started a second time in the same ask.
+    // With both roles on Mnema retrieval and chat share one process: readiness
+    // would only ask for it again, and a process retrieval already saw fail
+    // would be started a second time in the same ask.
+    let one_provider = roles.embed == roles.chat;
     let readiness = match &unreachable {
-        Some(why) if choice == crate::provider::ProviderChoice::Mnema => {
+        Some(why) if one_provider && roles.chat == Some(crate::provider::ProviderChoice::Mnema) => {
             ChatReadiness::Unavailable(why.clone())
         }
-        _ => chat_readiness(state, choice)?,
+        _ => chat_readiness(state, roles.chat)?,
     };
-    let (model, endpoint) = match readiness {
-        ChatReadiness::Ready { model, endpoint } => (model, endpoint),
+    let (model, endpoint, chat) = match readiness {
+        ChatReadiness::Ready {
+            model,
+            endpoint,
+            provider,
+        } => (model, endpoint, provider),
         ChatReadiness::Unavailable(why) => {
             state.forget_provider_status();
             return Ok(AskAnswer::CitationsOnly {
@@ -1546,11 +1561,12 @@ fn answer_question(
     };
 
     // The query's embedding already failed on the way to the provider, and
-    // the chat call goes to the same base: asking it would only wait out the
-    // same failure a second time (D171). Ahead of the no-candidates refusal,
-    // because with the content arm down "nothing matched" is not established —
-    // the person must read why, not that the archive has nothing.
-    if let Some(why) = unreachable {
+    // with one provider for both roles the chat call goes to the same base:
+    // asking it would only wait out the same failure a second time (D171).
+    // Ahead of the no-candidates refusal, because with the content arm down
+    // "nothing matched" is not established — the person must read why, not
+    // that the archive has nothing.
+    if let Some(why) = unreachable.filter(|_| one_provider) {
         state.forget_provider_status();
         return Ok(AskAnswer::CitationsOnly {
             citations: hits,
@@ -1586,7 +1602,7 @@ fn answer_question(
             &model,
             &messages,
             false,
-            choice.chat_timeout(),
+            chat.chat_timeout(),
         )
         .map(|reply| text_answer(reply, passages.len()))
     } else {
@@ -1596,8 +1612,8 @@ fn answer_question(
             &model,
             query,
             &passages,
-            state.voice_as(choice, query),
-            choice.chat_timeout(),
+            state.voice_as(chat, query),
+            chat.chat_timeout(),
         )
     };
     let generated = match generated {
@@ -1625,7 +1641,7 @@ fn follow_up(
     state: &State<'_, AppState>,
     query: &str,
     arms: Arms,
-    choice: crate::provider::ProviderChoice,
+    roles: crate::provider::Roles,
     generation: u64,
     turns: &[crate::dialogue::SessionTurn],
     taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
@@ -1641,8 +1657,12 @@ fn follow_up(
         }
         None => (Vec::new(), TextArmReport::Off, ContentArmReport::Off),
     };
-    let (model, endpoint) = match chat_readiness(state, choice)? {
-        ChatReadiness::Ready { model, endpoint } => (model, endpoint),
+    let (model, endpoint, chat) = match chat_readiness(state, roles.chat)? {
+        ChatReadiness::Ready {
+            model,
+            endpoint,
+            provider,
+        } => (model, endpoint, provider),
         other => {
             let why = match other {
                 ChatReadiness::Unavailable(why) => {
@@ -1700,7 +1720,7 @@ fn follow_up(
             &model,
             messages,
             offer_search,
-            choice.chat_timeout(),
+            chat.chat_timeout(),
         )
     };
     let mut via = Via::Conversation;
@@ -1714,7 +1734,7 @@ fn follow_up(
         // oversized one is a search that found nothing, and costs no embedding.
         let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
         let (new_hits, new_text, new_content, unreachable) = if usable {
-            retrieve(state, &call.query, arms, ASK_TOP_K, choice)?
+            retrieve(state, &call.query, arms, ASK_TOP_K, roles.embed)?
         } else {
             (Vec::new(), text.clone(), content.clone(), None)
         };
@@ -1756,10 +1776,15 @@ fn follow_up(
     })
 }
 
-/// Whether questions join a conversation: not under Mnema (the local model
-/// has no tool call), and only with the tool-support switch on.
-fn dialogue_enabled(state: &State<'_, AppState>, choice: crate::provider::ProviderChoice) -> bool {
-    choice != crate::provider::ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir())
+/// Whether questions join a conversation: only with chat on OpenRouter (the
+/// local model has no tool call, and no chat role has no model), and only
+/// with the tool-support switch on.
+fn dialogue_enabled(
+    state: &State<'_, AppState>,
+    chat: Option<crate::provider::ProviderChoice>,
+) -> bool {
+    chat == Some(crate::provider::ProviderChoice::OpenRouter)
+        && crate::prefs::chat_tools(state.data_dir())
 }
 
 fn question_lang(query: &str) -> mnema_rag::Lang {
@@ -2096,7 +2121,7 @@ pub fn continue_history(state: State<'_, AppState>, id: i64) -> Result<bool, Err
     let Ok(turns) = history_turns(&state, id)? else {
         return Ok(false);
     };
-    if !dialogue_enabled(&state, state.provider_choice()) {
+    if !dialogue_enabled(&state, state.roles().chat) {
         return Ok(false);
     }
     state.dialogue.replace(session_from(&turns));

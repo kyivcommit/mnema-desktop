@@ -457,45 +457,39 @@ impl AppState {
         self.provider().roles()
     }
 
-    pub fn provider_choice(&self) -> crate::provider::ProviderChoice {
-        self.provider().choice()
-    }
-
     /// Whether this machine can run the local provider (`Local::available`).
     pub fn mnema_available(&self) -> bool {
         self.local().available()
     }
 
-    /// The one place a model request learns where to go. See
-    /// [`crate::provider::Provider::endpoint`].
-    pub fn endpoint(&self) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().endpoint()
-    }
-
-    pub fn endpoint_as(
+    /// Where a role's requests go. See
+    /// [`crate::provider::Provider::endpoint_for`].
+    pub fn endpoint_for(
         &self,
-        choice: crate::provider::ProviderChoice,
+        p: Option<crate::provider::ProviderChoice>,
+        id: mnema_local::ModelId,
     ) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().endpoint_as(choice)
+        self.provider().endpoint_for(p, id)
     }
 
-    /// [`crate::provider::Provider::question_endpoint_as`]: a question's wait
+    /// [`crate::provider::Provider::question_endpoint_for`]: a question's wait
     /// for the local models is bounded.
-    pub fn question_endpoint_as(
+    pub fn question_endpoint_for(
         &self,
-        choice: crate::provider::ProviderChoice,
+        p: Option<crate::provider::ProviderChoice>,
+        id: mnema_local::ModelId,
     ) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().question_endpoint_as(choice)
+        self.provider().question_endpoint_for(p, id)
     }
 
-    /// How the answer to `question` should be voiced: the server's prompt for
-    /// OpenRouter; for Mnema, the question's language, falling back to the
-    /// previous question's and then the system's.
-    pub fn voice(&self, question: &str) -> mnema_rag::Voice {
-        self.voice_as(self.provider_choice(), question)
+    /// [`crate::provider::Provider::open_router`].
+    pub fn open_router_endpoint(&self) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().open_router()
     }
 
-    /// [`AppState::voice`] for a choice the caller already read.
+    /// How the answer to `question` should be voiced by the chat provider
+    /// `choice`: the server's prompt for OpenRouter; for Mnema, the question's
+    /// language, falling back to the previous question's and then the system's.
     pub fn voice_as(
         &self,
         choice: crate::provider::ProviderChoice,

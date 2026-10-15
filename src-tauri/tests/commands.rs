@@ -11904,6 +11904,9 @@ fn the_scan_job_is_reachable_through_the_ipc() {
 fn a_scan_reads_the_key_from_the_store_this_application_files_it_under() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // Embedding on OpenRouter before and after: the key, not the role, moves.
+    let or = Some(mnema_desktop::provider::ProviderChoice::OpenRouter);
+    set_roles(&app.state::<AppState>(), or, or);
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let folder = dir_holding(&["a1.txt"]);
@@ -12187,7 +12190,10 @@ fn mnema_endpoint_is_the_sidecar() {
     );
     choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
     state.install_local(support::ready_local(dir.path(), &[]));
-    let endpoint = state.endpoint();
+    let endpoint = state.endpoint_for(
+        Some(mnema_desktop::provider::ProviderChoice::Mnema),
+        mnema_local::ModelId::Embed,
+    );
     assert!(
         matches!(&endpoint, Ok(e) if e.base.starts_with("http://127.0.0.1:")
             && e.query_base.starts_with("http://127.0.0.1:")
@@ -12207,7 +12213,12 @@ struct MnemaApp {
 }
 
 fn mnema_app(dir: &std::path::Path, files: usize, env: &[(&str, &str)]) -> MnemaApp {
-    let app = app_with_provider(dir, NO_PROVIDER);
+    mnema_app_on(dir, files, env, NO_PROVIDER)
+}
+
+/// [`mnema_app`] whose OpenRouter base is `base`, for a role left on OpenRouter.
+fn mnema_app_on(dir: &std::path::Path, files: usize, env: &[(&str, &str)], base: &str) -> MnemaApp {
+    let app = app_with_provider(dir, base);
     let state = app.state::<AppState>();
     choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
     state.install_local(support::ready_local(dir, env));
@@ -12289,8 +12300,8 @@ fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
         "a switch while the scan holds the slot must be refused, got {refusal:?}"
     );
     assert_eq!(
-        fx.app.state::<AppState>().provider_choice(),
-        ProviderChoice::Mnema
+        fx.app.state::<AppState>().roles().embed,
+        Some(ProviderChoice::Mnema)
     );
     assert_eq!(
         report_of(&settled).reason,
@@ -12719,7 +12730,8 @@ fn switching_to_mnema_from_another_space_keeps_it() {
         ),
         "a switch that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
     );
-    assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
+    // Untouched: no key and no switch leave the fresh install's empty role.
+    assert_eq!(state.roles().embed, None);
     assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
 
     // ... and confirmed with Discard: the index is on bge-m3.
@@ -12875,7 +12887,10 @@ fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
 
     let state = fx.app.state::<AppState>();
     remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
-    assert!(!state.local().models_ready(), "the model is gone");
+    assert!(
+        !state.local().ready(mnema_local::ModelId::Embed),
+        "the model is gone"
+    );
 }
 
 // ---- Query history: `ask` records, three commands list, reopen and delete. ----
@@ -13912,6 +13927,9 @@ fn a_session_without_a_generated_turn_still_searches_first() {
     let app = app_with_provider(dir.path(), server.base());
     let (webview, _) = dialogue_ready(&app);
     let state = app.state::<AppState>();
+    // Chat on OpenRouter whatever the key does: the key alone is this test's subject.
+    use mnema_desktop::provider::ProviderChoice::OpenRouter;
+    set_roles(&state, Some(OpenRouter), Some(OpenRouter));
 
     mnema_secrets::forget(state.credential_ref()).expect("the key is forgotten");
     let first = ask_q(&webview, FIRST_Q);
@@ -14015,4 +14033,193 @@ fn an_empty_saved_dialogue_is_unreadable_and_keeps_the_session() {
         app.state::<AppState>().dialogue.first_query().as_deref(),
         Some(FIRST_Q)
     );
+}
+
+// ---- Each role asks its own provider ----
+
+fn set_roles(
+    state: &AppState,
+    embed: Option<mnema_desktop::provider::ProviderChoice>,
+    chat: Option<mnema_desktop::provider::ProviderChoice>,
+) {
+    use mnema_desktop::provider::Role;
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Embed, embed).unwrap();
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Chat, chat).unwrap();
+}
+
+/// A Mnema app whose OpenRouter is `server`, with a key stored and a chat
+/// model set, logging the fake's requests to the returned file.
+fn mixed_app(
+    dir: &std::path::Path,
+    server: &MockServer,
+    files: usize,
+) -> (MnemaApp, std::path::PathBuf) {
+    let log = dir.join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app_on(dir, files, &[("FAKE_MLX_LOG", &log_env)], server.base());
+    let state = fx.app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-mixed").unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    (fx, log)
+}
+
+#[test]
+fn a_mixed_question_uses_two_endpoints() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), Some(OpenRouter));
+    scan_to_completion(fx.app.handle());
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+    let request = server.request();
+    assert!(request.contains("/chat/completions"), "{request}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l == "start POST /interactive/v1/embeddings"),
+        "the query was not embedded locally: {text}"
+    );
+    assert!(!text.contains("chat/completions"), "{text}");
+}
+
+#[test]
+fn an_empty_chat_role_answers_with_citations_only() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    let server = MockServer::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), None);
+    scan_to_completion(fx.app.handle());
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"]["kind"], json!("notAsked"), "{answer}");
+    assert!(
+        !answer["citations"].as_array().unwrap().is_empty(),
+        "{answer}"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(!text.contains("chat/completions"), "{text}");
+    assert_eq!(server.request_if_any(), None, "nothing went to OpenRouter");
+}
+
+/// The local-only property: an empty embed role is never OpenRouter's, even
+/// with a key stored for it.
+#[test]
+fn an_empty_embed_role_searches_text_only() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    let server = MockServer::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    scan_to_completion(fx.app.handle());
+    set_roles(&fx.app.state::<AppState>(), None, Some(Mnema));
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&log).unwrap();
+
+    let found = call(&fx.webview, "search", json!({ "query": "synthetic topic" })).unwrap();
+    assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
+    assert_eq!(found["content"]["kind"], json!("noKey"), "{found}");
+    let after = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !after[before.len()..].contains("embeddings"),
+        "the query was embedded: {after}"
+    );
+    assert_eq!(
+        server.request_if_any(),
+        None,
+        "the query went to OpenRouter"
+    );
+}
+
+#[test]
+fn the_scan_embeds_through_the_embed_role() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    const FILES: usize = 20;
+    // Embed on Mnema, chat on OpenRouter: the fake's small batches, OpenRouter untouched.
+    let server = MockServer::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, FILES);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), Some(OpenRouter));
+    scan_to_completion(fx.app.handle());
+    assert_eq!(
+        chunks_and_vectors(&fx.app, fx.space_id),
+        (FILES as i64, FILES as i64)
+    );
+    let (sizes, _) = scan_embed_shape(&log);
+    assert_eq!(sizes.iter().sum::<usize>(), FILES, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= 16), "{sizes:?}");
+    assert_eq!(server.request_if_any(), None, "the scan went to OpenRouter");
+
+    // The other way round: embed on OpenRouter, chat on Mnema.
+    let server = MockServer::new(vec![Reply::ok(&one_vector(1024))]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(OpenRouter), Some(Mnema));
+    scan_to_completion(fx.app.handle());
+    assert_eq!(chunks_and_vectors(&fx.app, fx.space_id), (1, 1));
+    assert!(server.request().contains("/embeddings"));
+    let (sizes, _) = scan_embed_shape(&log);
+    assert!(sizes.is_empty(), "the scan embedded locally: {sizes:?}");
+}
+
+#[test]
+fn dialogue_follows_the_chat_role() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+    // The embed role on Mnema does not turn the conversation off.
+    set_roles(&state, Some(Mnema), Some(OpenRouter));
+
+    assert_eq!(ask_q(&webview, FIRST_Q)["kind"], json!("generated"));
+    let next = ask_q(&webview, "tell me more");
+    assert_eq!(next["via"], json!("conversation"), "{next}");
+
+    // And no chat role is no conversation.
+    let id = only_row(&webview)["id"].as_i64().unwrap();
+    set_roles(&state, Some(OpenRouter), None);
+    assert_eq!(continue_row(&webview, id), json!(false));
+}
+
+/// An embed provider that cannot be reached says nothing about a chat
+/// provider that is another one: the chat is still asked (D171 holds only
+/// within one provider).
+#[test]
+fn an_unreachable_embed_provider_does_not_stop_another_chat_provider() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app_on(dir.path(), 1, &[], NO_PROVIDER);
+    let state = fx.app.state::<AppState>();
+    scan_to_completion(fx.app.handle());
+    mnema_secrets::store(state.credential_ref(), "test-key-unreachable").unwrap();
+    set_roles(&state, Some(OpenRouter), Some(Mnema));
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["content"]["kind"], json!("failed"), "{answer}");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
 }

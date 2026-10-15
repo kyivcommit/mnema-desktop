@@ -199,11 +199,6 @@ impl Local {
         self.store.state(id) == ModelState::Ready
     }
 
-    /// Both models, for the readers that still treat Mnema as one provider.
-    pub fn models_ready(&self) -> bool {
-        self.ready(ModelId::Embed) && self.ready(ModelId::Chat)
-    }
-
     /// [`Local::endpoint_within`] with no limit on the wait for a load: what
     /// everything but a question uses (a scan, the show's own load).
     fn endpoint(&self) -> Result<Endpoint, Error> {
@@ -445,20 +440,6 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// The choice as the preferences file states it right now.
-    pub fn choice(&self) -> ProviderChoice {
-        // Reading the roles migrates the single key away, so this reads them
-        // too (until Task 3 moves the callers). Either role on Mnema keeps a
-        // local-only user local.
-        let r = self.roles();
-        let local = r.embed == Some(ProviderChoice::Mnema) || r.chat == Some(ProviderChoice::Mnema);
-        if local && self.local.available() {
-            ProviderChoice::Mnema
-        } else {
-            ProviderChoice::OpenRouter
-        }
-    }
-
     /// The provider of each role, as the preferences file states it, with the
     /// migration from the single key read against what is set up right now.
     pub fn roles(&self) -> Roles {
@@ -486,63 +467,55 @@ impl Provider {
             .collect()
     }
 
-    /// Where to send model requests, and the secret for them.
+    /// Where to send a role's requests, and the secret for them. `p` is the
+    /// role's provider and `id` its local model.
     ///
-    /// OpenRouter: its base for both `base` and `query_base`, and the stored key
-    /// (`Error::NoKey` when none). Mnema: the local process, or
-    /// `Error::ProviderNotReady` while either model is not downloaded.
-    pub fn endpoint(&self) -> Result<Endpoint, Error> {
-        self.endpoint_as(self.choice())
+    /// No provider: `Error::RoleEmpty`, never OpenRouter in its place, so data
+    /// a person keeps local never leaves the machine. OpenRouter: see
+    /// [`Provider::open_router`]. Mnema: the local process, or
+    /// `Error::ProviderNotReady` while this role's model is not downloaded.
+    pub fn endpoint_for(&self, p: Option<ProviderChoice>, id: ModelId) -> Result<Endpoint, Error> {
+        self.resolve(p, id, None)
     }
 
-    /// [`Provider::endpoint`] for a choice the caller already read — so a
-    /// command that branches on the choice and then asks for the endpoint
-    /// cannot read the preferences file twice and get two answers.
-    pub fn endpoint_as(&self, choice: ProviderChoice) -> Result<Endpoint, Error> {
-        endpoint(
-            choice,
-            &self.openrouter_base,
-            &self.credential_ref,
-            &self.local,
-            None,
-        )
-    }
-
-    /// [`Provider::endpoint_as`] for a question: under Mnema it waits for a
+    /// [`Provider::endpoint_for`] for a question: under Mnema it waits for a
     /// load no longer than [`LOCAL_CHAT_TIMEOUT`], then hears
     /// [`Error::LocalLoading`] and answers with the passages.
-    pub fn question_endpoint_as(&self, choice: ProviderChoice) -> Result<Endpoint, Error> {
-        endpoint(
-            choice,
-            &self.openrouter_base,
-            &self.credential_ref,
-            &self.local,
-            Some(self.local.question_wait),
-        )
+    pub fn question_endpoint_for(
+        &self,
+        p: Option<ProviderChoice>,
+        id: ModelId,
+    ) -> Result<Endpoint, Error> {
+        self.resolve(p, id, Some(self.local.question_wait))
     }
-}
 
-pub fn endpoint(
-    choice: ProviderChoice,
-    openrouter_base: &str,
-    credential_ref: &str,
-    local: &Local,
-    load_wait: Option<Duration>,
-) -> Result<Endpoint, Error> {
-    match choice {
-        ProviderChoice::OpenRouter => {
-            let token = mnema_secrets::load(credential_ref)?.ok_or(Error::NoKey)?;
-            Ok(Endpoint {
-                base: openrouter_base.to_string(),
-                query_base: openrouter_base.to_string(),
-                token,
-            })
-        }
-        ProviderChoice::Mnema => {
-            if !local.models_ready() {
-                return Err(Error::ProviderNotReady);
+    /// OpenRouter whatever the roles say: its base for both `base` and
+    /// `query_base`, and the stored key (`Error::NoKey` when none). For the
+    /// probes of OpenRouter itself (a key check, a model's width).
+    pub fn open_router(&self) -> Result<Endpoint, Error> {
+        let token = mnema_secrets::load(&self.credential_ref)?.ok_or(Error::NoKey)?;
+        Ok(Endpoint {
+            base: self.openrouter_base.clone(),
+            query_base: self.openrouter_base.clone(),
+            token,
+        })
+    }
+
+    fn resolve(
+        &self,
+        p: Option<ProviderChoice>,
+        id: ModelId,
+        load_wait: Option<Duration>,
+    ) -> Result<Endpoint, Error> {
+        match p.ok_or(Error::RoleEmpty)? {
+            ProviderChoice::OpenRouter => self.open_router(),
+            ProviderChoice::Mnema => {
+                // A host that cannot run the process has no model ready to it.
+                if !(self.local.available() && self.local.ready(id)) {
+                    return Err(Error::ProviderNotReady);
+                }
+                self.local.endpoint_within(load_wait)
             }
-            local.endpoint_within(load_wait)
         }
     }
 }
@@ -625,7 +598,8 @@ impl From<mnema_local::Error> for DownloadError {
 
 #[tauri::command]
 pub fn provider_choice(state: tauri::State<'_, crate::state::AppState>) -> ProviderChoice {
-    state.provider_choice()
+    // Until the window reads the roles (Task 4 removes this command).
+    state.roles().chat.unwrap_or(ProviderChoice::OpenRouter)
 }
 
 /// What [`set_provider_choice`] did: the choice now in force, and the spaces a
@@ -715,7 +689,7 @@ pub fn change(
         state.local().stop();
     }
     Ok(ProviderSwitch {
-        choice: state.provider_choice(),
+        choice: state.roles().chat.unwrap_or(ProviderChoice::OpenRouter),
         retired,
     })
 }
@@ -953,7 +927,7 @@ mod tests {
     fn mnema_without_ready_models_asks_for_the_models() {
         let dir = tempfile::tempdir().unwrap();
         let state = state_choosing(dir.path(), ProviderChoice::Mnema);
-        let endpoint = state.endpoint();
+        let endpoint = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
         assert!(
             matches!(endpoint, Err(Error::ProviderNotReady)),
             "{endpoint:?}"
@@ -964,22 +938,6 @@ mod tests {
                 missing: Missing::LocalModels
             }
         );
-    }
-
-    #[test]
-    fn a_host_that_cannot_run_mnema_reads_openrouter_and_offers_no_mnema() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = state_choosing(dir.path(), ProviderChoice::Mnema);
-        state.install_local(
-            Local::new(
-                Store::new(dir.path().join("models"), HUB.to_string()),
-                PathBuf::from("unused"),
-            )
-            .with_available(false),
-        );
-        assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
-        assert_eq!(state.provider().choice(), ProviderChoice::OpenRouter);
-        assert!(!state.mnema_available());
     }
 
     #[test]
@@ -1000,7 +958,7 @@ mod tests {
             mnema_provider::OPENROUTER_BASE.into(),
             reference,
         );
-        let endpoint = state.endpoint();
+        let endpoint = state.endpoint_for(state.roles().chat, ModelId::Chat);
         assert!(
             matches!(&endpoint, Ok(e) if e.base == mnema_provider::OPENROUTER_BASE
                 && e.query_base == mnema_provider::OPENROUTER_BASE
@@ -1182,7 +1140,9 @@ mod lifecycle {
     fn going_cold_unloads_under_mnema() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         on_cold(&state);
         assert_eq!(
             count(&log, "start POST /mnema/unload"),
@@ -1307,7 +1267,9 @@ mod lifecycle {
             &[("FAKE_MLX_LOAD_MS", "600")],
         );
         let loading = on_show(&state);
-        let ep = state.endpoint().expect("the question's endpoint");
+        let ep = state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the question's endpoint");
         let answer = post(&ep, "/v1/chat/completions", "{}");
         loading.join().unwrap();
         let text = logged(&log);
@@ -1344,7 +1306,9 @@ mod lifecycle {
     fn going_cold_during_a_scan_keeps_bge_m3() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         // The slot a scan holds; any job that holds it counts, as for every
         // other "a job is running" question.
         let _scan = state
@@ -1383,7 +1347,9 @@ mod lifecycle {
         // Cold while the scan ran: bge-m3 goes when it ends.
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         drop(scan);
@@ -1397,7 +1363,9 @@ mod lifecycle {
         // Shown again meanwhile: the launcher is not cold, bge-m3 stays.
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         on_show(&state).join().unwrap();
@@ -1419,7 +1387,9 @@ mod lifecycle {
             ProviderChoice::OpenRouter,
             ProviderChoice::Mnema,
         );
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let _scan = scan_slot(&state);
         on_cold(&state);
         let text = logged(&log);
@@ -1439,7 +1409,9 @@ mod lifecycle {
             ProviderChoice::Mnema,
             ProviderChoice::OpenRouter,
         );
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         drop(scan);
@@ -1458,7 +1430,9 @@ mod lifecycle {
             ProviderChoice::OpenRouter,
             ProviderChoice::Mnema,
         );
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         drop(scan);
@@ -1471,12 +1445,38 @@ mod lifecycle {
     }
 
     #[test]
-    fn either_role_on_mnema_keeps_the_choice_local() {
+    fn each_role_asks_only_for_its_own_model() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, _log) = app(dir.path(), ProviderChoice::OpenRouter, &[]);
-        crate::prefs::write_role(dir.path(), Role::Embed, Some(ProviderChoice::Mnema)).unwrap();
-        crate::prefs::write_role(dir.path(), Role::Chat, None).unwrap();
-        assert_eq!(state.provider_choice(), ProviderChoice::Mnema);
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        let mnema = Some(ProviderChoice::Mnema);
+        assert!(matches!(
+            state.endpoint_for(mnema, ModelId::Chat),
+            Err(Error::ProviderNotReady)
+        ));
+        assert!(matches!(
+            state.endpoint_for(None, ModelId::Embed),
+            Err(Error::RoleEmpty)
+        ));
+        assert_eq!(count_prefix(&log, "spawn"), 0);
+        state
+            .endpoint_for(mnema, ModelId::Embed)
+            .expect("the embed model alone is enough for the embed role");
+    }
+
+    #[test]
+    fn a_host_that_cannot_run_mnema_has_no_mnema_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        let (local, _) = local_at(dir.path(), &[]);
+        state.install_local(local.with_available(false));
+        let endpoint = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
+        assert!(
+            matches!(endpoint, Err(Error::ProviderNotReady)),
+            "{endpoint:?}"
+        );
+        assert!(!state.mnema_available());
+        assert_eq!(count_prefix(&log, "spawn"), 0);
     }
 
     #[test]
@@ -1489,10 +1489,14 @@ mod lifecycle {
             &[("FAKE_MLX_DIE_AFTER", "2")],
         );
         on_show(&state).join().unwrap();
-        let ep = state.endpoint().expect("the first process answers");
+        let ep = state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the first process answers");
         post(&ep, "/v1/chat/completions", "{}");
         wait_dead(&state);
-        state.endpoint().expect("the supervisor's restart");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the supervisor's restart");
         let text = logged(&log);
         assert!(eventually(|| count_prefix(&log, "spawn") == 2), "{text}");
         assert_eq!(
@@ -1506,7 +1510,9 @@ mod lifecycle {
     fn leaving_mnema_stops_the_process() {
         let dir = tempfile::tempdir().unwrap();
         let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         assert!(state.local().started().is_some());
         let switched = change(
             &state,
@@ -1531,14 +1537,19 @@ mod lifecycle {
             &[("FAKE_MLX_DIE_AFTER", "1")],
         );
         let die = |state: &AppState| {
-            let ep = state.endpoint().expect("an endpoint");
+            let ep = state
+                .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+                .expect("an endpoint");
             post(&ep, "/v1/models", "");
             wait_dead(state);
         };
         die(&state); // process 1
         die(&state); // its one restart
         assert!(
-            matches!(state.endpoint(), Err(Error::Local(_))),
+            matches!(
+                state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed),
+                Err(Error::Local(_))
+            ),
             "dead twice, and said so"
         );
         // A status poll finds it dead and never spawns.
@@ -1549,7 +1560,7 @@ mod lifecycle {
             logged(&log)
         );
         // The next explicit use starts a fresh one, with a fresh restart budget.
-        let fresh = state.endpoint();
+        let fresh = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
         assert!(fresh.is_ok(), "{fresh:?}");
         assert!(
             eventually(|| count_prefix(&log, "spawn") == 3),
@@ -1564,7 +1575,9 @@ mod lifecycle {
         use tauri::Manager as _;
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let mock = tauri::test::mock_app();
         mock.manage(crate::launcher_layout::HiddenAt::default());
         mock.manage(state);
@@ -1637,7 +1650,9 @@ mod lifecycle {
     fn going_cold_during_a_job_that_is_not_a_scan_unloads_everything() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         // Only a scan thread calls `scan_end`; keeping bge-m3 for this job would
         // keep it resident for good.
         let _adoption = state
