@@ -708,6 +708,8 @@ fn choosing_the_same_model_again_reports_a_space_found_rather_than_created() {
 fn the_free_slots_change_without_touching_the_index() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
+    // A chat role goes only on a configured provider: a key, stored directly.
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
 
     set_chat_model(fx.state(), "vendor/one".into(), ProviderChoice::OpenRouter).expect("set");
     set_chat_model(fx.state(), "vendor/two".into(), ProviderChoice::OpenRouter).expect("set again");
@@ -2145,6 +2147,8 @@ fn the_first_key_chooses_this_products_model_for_every_role_the_index_has_none_f
 fn a_key_entered_over_models_that_are_already_chosen_replaces_neither() {
     let fx = Fixture::with_provider_answering_with_dimension(1024);
     fx.open_index();
+    // The key somebody entered before choosing; `set_key` below replaces it.
+    mnema_secrets::store(fx.credential_ref(), KEY_ALREADY_ENTERED).unwrap();
     set_chat_model(fx.state(), CHOSEN_CHAT.into(), ProviderChoice::OpenRouter)
         .expect("a chat model is chosen");
     // `OTHER_MODEL` and not `MODEL`: `MODEL` **is** this product's default, so an
@@ -3187,9 +3191,10 @@ fn an_unreadable_store_resets_no_role() {
     use ProviderChoice::OpenRouter;
     write_roles(&fx, Some(OpenRouter), Some(OpenRouter));
 
+    let refused = forget_key(fx.state());
     assert!(
-        forget_key(fx.state()).is_err(),
-        "premise: the store did not answer"
+        matches!(refused, Err(Error::Secrets(_))),
+        "premise: the store did not answer: {refused:?}"
     );
 
     assert_eq!(roles(&fx), (Some(OpenRouter), Some(OpenRouter)));
@@ -3238,4 +3243,18 @@ fn a_boot_leaves_an_empty_role_empty() {
 
     assert_eq!(roles(&fx), (None, None));
     assert_eq!(fx.provider_request(), None, "the boot called out");
+}
+
+/// After «Забути» a chat change cannot put the role back on OpenRouter:
+/// there is nothing configured for it to go to.
+#[test]
+fn a_chat_choice_on_open_router_without_a_key_is_refused() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    write_roles(&fx, None, None);
+
+    let refused = set_chat_model(fx.state(), CHOSEN_CHAT.into(), ProviderChoice::OpenRouter);
+
+    assert!(matches!(refused, Err(Error::NoKey)), "{refused:?}");
+    assert_eq!(roles(&fx), (None, None));
 }

@@ -12790,7 +12790,7 @@ fn mnema_cannot_serve_a_foreign_space() {
     state.install_local(support::ready_local(dir.path(), &[]));
     write_roles(&state, None, None);
 
-    mnema_desktop::provider::on_configured(&state, Mnema);
+    mnema_desktop::provider::on_configured(&state, Mnema, None);
 
     assert_eq!(
         state.roles().embed,
@@ -12799,6 +12799,72 @@ fn mnema_cannot_serve_a_foreign_space() {
     );
     assert_eq!(state.roles().chat, Some(Mnema));
     assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
+}
+
+/// A `Local` whose two models are one one-byte file each, downloaded from
+/// `server`; `chat_ready` pre-writes Gemma's file.
+fn downloadable_local(
+    dir: &std::path::Path,
+    server: &MockServer,
+    chat_ready: bool,
+) -> mnema_desktop::provider::Local {
+    use mnema_local::{FileSpec, Manifest, ModelId, ModelSpec, Store};
+    // sha256 of the one byte `x` the mock serves.
+    const SHA_X: &str = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+    let spec = |name: &str| ModelSpec {
+        repo: format!("test/{name}"),
+        commit: "0".into(),
+        files: vec![FileSpec::new("weights", 1, SHA_X)],
+    };
+    let store = Store::new(dir.join("models"), server.base().to_string()).with_manifest(Manifest {
+        embed: spec("embed"),
+        chat: spec("chat"),
+    });
+    if chat_ready {
+        std::fs::create_dir_all(store.dir(ModelId::Chat)).unwrap();
+        std::fs::write(store.dir(ModelId::Chat).join("weights"), b"x").unwrap();
+    }
+    mnema_desktop::provider::Local::new(store, PathBuf::new()).with_available(true)
+}
+
+/// A finished download fills the empty role its model serves.
+#[test]
+fn a_finished_download_fills_its_models_empty_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
+}
+
+/// Mnema is configured per model: bge-m3 arriving says nothing new about
+/// chat, so an empty chat role stays empty though Gemma was already there.
+#[test]
+fn downloading_bge_m3_leaves_an_empty_chat_role_alone() {
+    use mnema_desktop::provider::{LocalModel, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, true));
+    write_roles(&state, None, None);
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Embed);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(
+        state.roles().chat,
+        None,
+        "a bge-m3 download filled the chat role"
+    );
 }
 
 /// «Видалити» bge-m3 empties the embedding role and only it.

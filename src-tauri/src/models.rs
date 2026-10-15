@@ -63,7 +63,7 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     let check = mnema_provider::check_key(state.openrouter_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
     state.forget_provider_status();
-    crate::provider::on_configured(&state, crate::provider::ProviderChoice::OpenRouter);
+    crate::provider::on_configured(&state, crate::provider::ProviderChoice::OpenRouter, None);
     Ok(KeyStatus {
         balance: check.balance,
     })
@@ -124,7 +124,12 @@ pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
     let Ok(Some(_)) = mnema_secrets::load(state.credential_ref()) else {
         return;
     };
-    crate::provider::fill_roles(state, crate::provider::ProviderChoice::OpenRouter, false);
+    crate::provider::fill_roles(
+        state,
+        crate::provider::ProviderChoice::OpenRouter,
+        false,
+        None,
+    );
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding
@@ -358,12 +363,7 @@ pub fn choose_embedding_model(
 ) -> Result<AdoptedModel, Error> {
     let endpoint = match provider {
         ProviderChoice::OpenRouter => Some(state.open_router_endpoint()?),
-        ProviderChoice::Mnema => {
-            if !state.provider().configured_given(false).mnema_embed {
-                return Err(Error::ProviderNotReady);
-            }
-            None
-        }
+        ProviderChoice::Mnema => None,
     };
     // ⚠️ **This command takes the job slot, although it is not a job**, and the
     // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
@@ -404,6 +404,11 @@ pub fn choose_embedding_model(
         },
         false,
     )?;
+    // Under the slot: a `remove` (which takes it too) cannot land between
+    // this check and the role write.
+    if provider == ProviderChoice::Mnema && !state.provider().configured_given(false).mnema_embed {
+        return Err(Error::ProviderNotReady);
+    }
     let (model, dim) = match endpoint {
         Some(endpoint) => {
             let check =
@@ -725,11 +730,21 @@ pub fn choose_chat_model(
     model: String,
     provider: ProviderChoice,
 ) -> Result<(), Error> {
-    if provider == ProviderChoice::Mnema && !state.provider().configured_given(false).mnema_chat {
-        return Err(Error::ProviderNotReady);
-    }
     // Every role write is made under the job slot (see `provider::adoption_slot`).
     let _slot = crate::provider::adoption_slot(state)?;
+    // A role only on a provider that can serve it. Checked under the slot, so
+    // a `remove` cannot land in between; an unreadable store counts as
+    // configured (`Provider::configured`).
+    if !state
+        .provider()
+        .configured()
+        .serves(provider, crate::provider::Role::Chat)
+    {
+        return Err(match provider {
+            ProviderChoice::OpenRouter => Error::NoKey,
+            ProviderChoice::Mnema => Error::ProviderNotReady,
+        });
+    }
     let before = state.roles();
     let model = match provider {
         ProviderChoice::OpenRouter => model,

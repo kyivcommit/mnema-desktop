@@ -639,7 +639,7 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
-    on_configured(&state, ProviderChoice::Mnema);
+    on_configured(&state, ProviderChoice::Mnema, Some(id.into()));
     Ok(())
 }
 
@@ -696,22 +696,33 @@ pub(crate) fn adoption_slot(
 /// EMPTY role `p` serves gets a model, and a role already on `p` whose model is
 /// missing gets one too. A chosen role is never touched. Best effort and
 /// silent: a busy slot or a failed write just leaves the role empty.
-pub fn on_configured(state: &crate::state::AppState, p: ProviderChoice) {
-    fill_roles(state, p, true);
+///
+/// `which` limits Mnema to the role of the model that arrived — Mnema is
+/// configured per model, so downloading bge-m3 says nothing new about chat.
+pub fn on_configured(state: &crate::state::AppState, p: ProviderChoice, which: Option<ModelId>) {
+    fill_roles(state, p, true, which);
 }
 
 /// [`on_configured`]'s substitution. `empty_too: false` fills only roles
 /// already on `p` whose model is missing (a key stored while the index was
 /// shut): a boot never moves an empty role — one emptied by removing a local
 /// model would otherwise go to OpenRouter at every launch.
-pub(crate) fn fill_roles(state: &crate::state::AppState, p: ProviderChoice, empty_too: bool) {
+pub(crate) fn fill_roles(
+    state: &crate::state::AppState,
+    p: ProviderChoice,
+    empty_too: bool,
+    which: Option<ModelId>,
+) {
     let Ok(_slot) = adoption_slot(state) else {
         return;
     };
     let before = state.roles();
     let configured = state.provider().configured();
-    for (role, now) in [(Role::Chat, before.chat), (Role::Embed, before.embed)] {
-        if !configured.serves(p, role) {
+    for (role, id, now) in [
+        (Role::Chat, ModelId::Chat, before.chat),
+        (Role::Embed, ModelId::Embed, before.embed),
+    ] {
+        if !configured.serves(p, role) || which.is_some_and(|w| w != id) {
             continue;
         }
         let fill = match now {
