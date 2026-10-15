@@ -198,7 +198,7 @@ fn load_and_unload_reach_the_root_routes_with_the_right_bodies() {
     let log = dir.path().join("fake.log");
     let s = start(&[("FAKE_MLX_LOG", log.to_str().unwrap())]);
     // The real server answers 204 (empty body) to both; any 2xx is success.
-    let loaded = s.load();
+    let loaded = s.load(&[]);
     assert!(loaded.is_ok(), "load: {loaded:?}");
     let unloaded = s.unload(None);
     assert!(unloaded.is_ok(), "unload: {unloaded:?}");

@@ -156,6 +156,7 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
                 )
             }
             "/mnema/load" => {
+                log(&format!("body {sent} {body}"));
                 std::thread::sleep(Duration::from_millis(env_num("FAKE_MLX_LOAD_MS")));
                 // The real server answers 204 with an empty body here.
                 (204, String::new())

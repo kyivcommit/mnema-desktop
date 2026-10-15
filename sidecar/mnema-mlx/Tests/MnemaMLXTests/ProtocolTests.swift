@@ -235,6 +235,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try loaded(port), ["baai/bge-m3": false, "gemma-4-e2b-it": false])
     }
 
+    func test_load_with_models_loads_only_those() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        XCTAssertEqual(http(port, "/mnema/load", method: "POST", body: #"{"models":["embed"]}"#).status, 204)
+        XCTAssertEqual(try loaded(port), ["baai/bge-m3": true, "gemma-4-e2b-it": false])
+    }
+
     func test_unload_one_model() throws {
         let (p, port) = try startStub()
         defer { p.terminate() }

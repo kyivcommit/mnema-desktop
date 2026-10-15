@@ -217,8 +217,21 @@ impl Sidecar {
         Error::Crashed { stderr_tail: tail }
     }
 
-    pub fn load(&self) -> Result<(), Error> {
-        self.post("/mnema/load", "", Duration::from_secs(600))
+    /// An empty slice loads both models (empty body), as `unload(None)` unloads both.
+    pub fn load(&self, which: &[ModelId]) -> Result<(), Error> {
+        let body = if which.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<&str> = which
+                .iter()
+                .map(|m| match m {
+                    ModelId::Chat => r#""chat""#,
+                    ModelId::Embed => r#""embed""#,
+                })
+                .collect();
+            format!(r#"{{"models":[{}]}}"#, names.join(","))
+        };
+        self.post("/mnema/load", &body, Duration::from_secs(600))
     }
 
     /// `None` unloads both models (empty body).

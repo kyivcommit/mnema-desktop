@@ -201,7 +201,8 @@ public final class Server {
             work.submit(urgent: true) { reply(self.chat(messages)) }
         // Load and unload wait for the running job in the same queue: never free a model in use.
         case "/mnema/load":
-            work.submit(urgent: false) { reply(self.load(["chat", "embed"])) }
+            let names = json["models"] as? [String] ?? ["chat", "embed"]
+            work.submit(urgent: false) { reply(self.load(names)) }
         case "/mnema/unload":
             let names = json["models"] as? [String] ?? ["chat", "embed"]
             work.submit(urgent: false) {

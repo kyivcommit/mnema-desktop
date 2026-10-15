@@ -134,7 +134,10 @@ pub struct Local {
     question_wait: Duration,
     /// What loads the models into the process: [`Sidecar::load`], unless a
     /// test makes the load misbehave in a way the fake cannot.
-    load: fn(&Sidecar) -> Result<(), mnema_local::Error>,
+    load: fn(&Sidecar, &[ModelId]) -> Result<(), mnema_local::Error>,
+    /// The models a load asks for: those of the roles on Mnema ([`on_show`]
+    /// sets it); both until then.
+    wanted: Mutex<Vec<ModelId>>,
 }
 
 impl Local {
@@ -152,11 +155,15 @@ impl Local {
             available: mnema_local::available(),
             question_wait: LOCAL_CHAT_TIMEOUT,
             load: Sidecar::load,
+            wanted: Mutex::new(vec![ModelId::Embed, ModelId::Chat]),
         }
     }
 
     #[cfg(test)]
-    fn with_load(mut self, load: fn(&Sidecar) -> Result<(), mnema_local::Error>) -> Self {
+    fn with_load(
+        mut self,
+        load: fn(&Sidecar, &[ModelId]) -> Result<(), mnema_local::Error>,
+    ) -> Self {
         self.load = load;
         self
     }
@@ -188,10 +195,13 @@ impl Local {
         self
     }
 
+    pub fn ready(&self, id: ModelId) -> bool {
+        self.store.state(id) == ModelState::Ready
+    }
+
+    /// Both models, for the readers that still treat Mnema as one provider.
     pub fn models_ready(&self) -> bool {
-        [ModelId::Embed, ModelId::Chat]
-            .into_iter()
-            .all(|id| self.store.state(id) == ModelState::Ready)
+        self.ready(ModelId::Embed) && self.ready(ModelId::Chat)
     }
 
     /// [`Local::endpoint_within`] with no limit on the wait for a load: what
@@ -258,6 +268,11 @@ impl Local {
                     let began = Instant::now();
                     let (loads, sidecar, load) =
                         (Arc::clone(&self.loads), Arc::clone(sidecar), self.load);
+                    let which = self
+                        .wanted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
                     // The end is recorded by a guard, so a load that panics
                     // still ends: otherwise every caller with no limit would
                     // wait on it for ever, and no load could start again.
@@ -270,7 +285,7 @@ impl Local {
                                 pid,
                                 result: None,
                             };
-                            end.result = Some(load(&sidecar));
+                            end.result = Some(load(&sidecar, &which));
                         })
                         .map_err(|e| {
                             mnema_local::Error::Io(format!("cannot start the model load: {e}"))
@@ -432,7 +447,38 @@ pub struct Provider {
 impl Provider {
     /// The choice as the preferences file states it right now.
     pub fn choice(&self) -> ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir, self.local.available())
+        // Reading the roles migrates the single key away, so this reads them
+        // too (until Task 3 moves the callers).
+        match self.roles().chat {
+            Some(ProviderChoice::Mnema) if !self.local.available() => ProviderChoice::OpenRouter,
+            c => c.unwrap_or_default(),
+        }
+    }
+
+    /// The provider of each role, as the preferences file states it, with the
+    /// migration from the single key read against what is set up right now.
+    pub fn roles(&self) -> Roles {
+        // An unreadable store is not "no key": it must not migrate a role away.
+        let open_router = mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some());
+        let up = self.local.available();
+        crate::prefs::roles(
+            &self.data_dir,
+            Configured {
+                open_router,
+                mnema_embed: up && self.local.ready(ModelId::Embed),
+                mnema_chat: up && self.local.ready(ModelId::Chat),
+            },
+        )
+    }
+
+    /// The models of the roles on Mnema that are downloaded.
+    fn mnema_models(&self) -> Vec<ModelId> {
+        let r = self.roles();
+        [(r.embed, ModelId::Embed), (r.chat, ModelId::Chat)]
+            .into_iter()
+            .filter(|(p, id)| *p == Some(ProviderChoice::Mnema) && self.local.ready(*id))
+            .map(|(_, id)| id)
+            .collect()
     }
 
     /// Where to send model requests, and the secret for them.
@@ -654,11 +700,10 @@ pub fn change(
             }
         }
     }
-    crate::prefs::write_key(
-        state.data_dir(),
-        PREFS_KEY,
-        serde_json::to_value(choice).expect("a unit variant serialises"),
-    )?;
+    // Both roles follow the one switch until the window picks them apart.
+    for role in [Role::Embed, Role::Chat] {
+        crate::prefs::write_role(state.data_dir(), role, Some(choice))?;
+    }
     state.forget_provider_status();
     if choice != ProviderChoice::Mnema {
         // Nothing of the local provider should stay in memory under OpenRouter.
@@ -749,15 +794,17 @@ pub fn on_cold(state: &crate::state::AppState) {
     let local = state.local();
     local.cold.store(true, Ordering::SeqCst);
     local.want.store(false, Ordering::SeqCst);
-    if state.provider_choice() != ProviderChoice::Mnema {
+    let roles = state.roles();
+    if roles.embed != Some(ProviderChoice::Mnema) && roles.chat != Some(ProviderChoice::Mnema) {
         return;
     }
     if let Some(sidecar) = local.started() {
         local.forget_loaded();
         // Best effort: a process that will not answer holds no memory worth
         // waiting for, and the next show asks again.
-        // bge-m3 stays while a scan runs: it is what the scan embeds with.
-        let _ = sidecar.unload(scan_running(state).then_some(ModelId::Chat));
+        // bge-m3 stays while a scan runs on Mnema: it is what the scan embeds with.
+        let keep_embed = scan_running(state) && roles.embed == Some(ProviderChoice::Mnema);
+        let _ = sidecar.unload(keep_embed.then_some(ModelId::Chat));
     }
 }
 
@@ -768,9 +815,15 @@ pub fn on_show(state: &crate::state::AppState) -> std::thread::JoinHandle<()> {
     provider.local.cold.store(false, Ordering::SeqCst);
     provider.local.shown.fetch_add(1, Ordering::SeqCst);
     provider.local.want.store(true, Ordering::SeqCst);
-    if provider.choice() != ProviderChoice::Mnema || !provider.local.models_ready() {
+    let which = provider.mnema_models();
+    if which.is_empty() {
         return std::thread::spawn(|| {});
     }
+    *provider
+        .local
+        .wanted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = which;
     std::thread::spawn(move || {
         // `want` is set, so this starts the process and loads it.
         let _ = provider.local.endpoint();
@@ -824,7 +877,8 @@ impl Provider {
     /// [`on_scan_end`] for a job thread, which carries a `Provider` and not
     /// `AppState`.
     pub fn scan_end(&self) {
-        if self.choice() != ProviderChoice::Mnema || !self.local.cold.load(Ordering::SeqCst) {
+        let r = self.roles();
+        if r.embed != Some(ProviderChoice::Mnema) || !self.local.cold.load(Ordering::SeqCst) {
             return;
         }
         if let Some(sidecar) = self.local.started() {
@@ -844,7 +898,9 @@ mod tests {
     /// whatever host the test runs on: a Linux CI run otherwise reads the
     /// stored choice as OpenRouter.
     fn state_choosing(dir: &std::path::Path, choice: ProviderChoice) -> AppState {
-        crate::prefs::write_key(dir, PREFS_KEY, serde_json::to_value(choice).unwrap()).unwrap();
+        for role in [Role::Embed, Role::Chat] {
+            crate::prefs::write_role(dir, role, Some(choice)).unwrap();
+        }
         let state = AppState::new(
             dir.to_path_buf(),
             "w".into(),
@@ -1032,12 +1088,15 @@ mod lifecycle {
     }
 
     /// Panics on its first call, then loads as the real one does.
-    fn a_load_that_panics_once(sidecar: &Sidecar) -> Result<(), mnema_local::Error> {
+    fn a_load_that_panics_once(
+        sidecar: &Sidecar,
+        which: &[ModelId],
+    ) -> Result<(), mnema_local::Error> {
         static CALLS: AtomicU64 = AtomicU64::new(0);
         if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
             panic!("a load that panics (test)");
         }
-        sidecar.load()
+        sidecar.load(which)
     }
 
     /// A load thread that panics must not leave its load "in flight" for ever:
@@ -1125,6 +1184,63 @@ mod lifecycle {
             "{}",
             logged(&log)
         );
+    }
+
+    fn set_roles(dir: &Path, embed: ProviderChoice, chat: ProviderChoice) {
+        crate::prefs::write_role(dir, Role::Embed, Some(embed)).unwrap();
+        crate::prefs::write_role(dir, Role::Chat, Some(chat)).unwrap();
+    }
+
+    #[test]
+    fn a_chat_only_mnema_role_loads_only_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        on_show(&state).join().unwrap();
+        let text = logged(&log);
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["chat"]}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_embed_only_role_starts_without_gemma_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        on_show(&state).join().unwrap();
+        let text = logged(&log);
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["embed"]}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn no_role_on_mnema_neither_starts_nor_unloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::OpenRouter,
+        );
+        on_show(&state).join().unwrap();
+        on_cold(&state);
+        assert_eq!(logged(&log), "");
+        assert!(state.local().started().is_none());
     }
 
     #[test]

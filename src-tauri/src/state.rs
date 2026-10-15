@@ -453,8 +453,12 @@ impl AppState {
         }
     }
 
+    pub fn roles(&self) -> crate::provider::Roles {
+        self.provider().roles()
+    }
+
     pub fn provider_choice(&self) -> crate::provider::ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir, self.mnema_available())
+        self.provider().choice()
     }
 
     /// Whether this machine can run the local provider (`Local::available`).
