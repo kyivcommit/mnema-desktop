@@ -2199,6 +2199,39 @@ fn a_key_entered_over_models_that_are_already_chosen_replaces_neither() {
     );
 }
 
+/// The path the test above cannot reach: the embedding *role* is empty (key
+/// forgotten) while the *space* is still there. `fill_embed` meets `Ok(Some(_))`
+/// with the role missing, and must only write the role, not repoint the index.
+#[test]
+fn a_key_entered_over_an_embedding_space_whose_role_was_emptied_keeps_the_space() {
+    let fx = Fixture::with_provider_answering_with_dimension(1024);
+    fx.open_index();
+    fx.state()
+        .with_index(|db| {
+            db.adopt_embedding_model(OTHER_MODEL, 1024, fx.credential_ref(), "chunker-under-test")?;
+            Ok(())
+        })
+        .expect("an embedding model is adopted");
+    write_roles(&fx, None, None);
+    let space_before = fx.space_ids();
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(
+        read.embedding_model.as_deref(),
+        Some(OTHER_MODEL),
+        "the index was repointed at the default although its space already had a model"
+    );
+    assert_eq!(fx.space_ids(), space_before, "a space was minted");
+    assert_eq!(
+        roles(&fx).0,
+        Some(ProviderChoice::OpenRouter),
+        "the emptied embedding role was not given back to the provider"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The transition gate: what a confirmed model change costs, measured end to end
 // rather than warned about.

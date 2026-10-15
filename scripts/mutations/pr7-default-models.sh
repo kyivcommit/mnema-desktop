@@ -44,7 +44,7 @@ case_ "an embedding model already chosen must not be replaced" \
   src-tauri/src/provider.rs \
   's{        Ok\(Some\(model\)\) => p == ProviderChoice::OpenRouter \|\| model == LOCAL_EMBED_MODEL,}{        Ok(Some(_)) => adopt_default_embedding(state, p).is_ok(),}' \
   '        Ok(Some(_)) => adopt_default_embedding(state, p).is_ok(),' \
-  mnema-desktop 'a_key_entered_over_models_that_are_already_chosen_replaces_neither' --test model_commands
+  mnema-desktop 'a_key_entered_over_an_embedding_space_whose_role_was_emptied_keeps_the_space' --test model_commands
 
 # And its other direction: with no space the embedding role is never given a
 # model, so a key entered on a fresh index leaves nothing able to embed.
