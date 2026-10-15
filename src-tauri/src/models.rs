@@ -13,6 +13,7 @@ use tauri::State;
 use mnema_provider::{Catalogue, Refusal, Role};
 
 use crate::error::Error;
+use crate::provider::ProviderChoice;
 use crate::state::AppState;
 
 /// The name this product files its one credential under in production. A
@@ -62,7 +63,7 @@ pub fn set_key(state: State<'_, AppState>, key: String) -> Result<KeyStatus, Err
     let check = mnema_provider::check_key(state.openrouter_base(), &key)?;
     mnema_secrets::store(state.credential_ref(), &key)?;
     state.forget_provider_status();
-    choose_the_default_models_for_roles_with_none(&state);
+    crate::provider::on_configured(&state, crate::provider::ProviderChoice::OpenRouter);
     Ok(KeyStatus {
         balance: check.balance,
     })
@@ -95,102 +96,6 @@ pub struct DefaultModels {
     pub chat: &'static str,
 }
 
-/// Applies [`DEFAULT_MODELS`] to the roles this index has no answer for, so that
-/// entering a key is enough to make the product work.
-///
-/// **Only where the role is unset**, and the direction that matters is the
-/// second: a key entered over a configuration somebody already made must leave
-/// it exactly where it was. `a_key_entered_over_models_that_are_already_chosen_replaces_neither`
-/// is the test, and its fixture builds the state — an index with both roles
-/// answered — that the happy-path test cannot.
-///
-/// **It cannot fail [`set_key`]**, which is why it returns nothing. The key has
-/// been checked and stored by the time this runs, and a default that could not
-/// be applied — no index open yet, a provider that would not answer this second
-/// question, a job holding the slot — must not turn a key that works into a
-/// rejected command. It is the same argument [`set_embedding_model`]'s own doc
-/// makes about reading the settings back: the window could not tell "the key
-/// was not stored" from "stored, and something after it did not finish", and no
-/// wording could tell them apart because the fact would not be in the message.
-///
-/// **The embedding role is not a `meta` row.** A chat model is a string; an
-/// embedding model is a vector space with a width, and the width comes from the
-/// provider's own answer and never from anything this build assumed (see
-/// [`set_embedding_model`]). So this role costs a second network call — made
-/// only when the index has no active space at all, which is once in an
-/// installation's life.
-///
-/// **The job slot is claimed for the embedding half**, for the reason written
-/// out inside [`set_embedding_model`]: adoption repoints `meta.active_space`,
-/// and a pass that read that pointer at its start goes on writing into the space
-/// it started with. A slot that is already taken means the default is simply not
-/// applied — it is a default, and the next key or the next explicit choice will
-/// apply it.
-///
-/// ⚠️ **The slot is held across the provider call, so `job_status` reports a job
-/// nobody started for as long as that call takes** — up to the thirty seconds
-/// `mnema_provider`'s global timeout allows. It is reachable: press Save and
-/// then press a model, and the change is refused with a sentence about a running
-/// job, which the window draws as one because it asks `job_status` rather than
-/// reading the sentence. It stands, for two reasons. It is
-/// [`set_embedding_model`]'s existing shape rather than a new one, so closing it
-/// in this copy alone would leave the same window open one function over while
-/// making this side look as though the rule were kept. And the obvious close —
-/// check first, claim second, the ordering the deleted `start_embed_job` used
-/// to state as its own rule — is paid for by sending a request that can never
-/// be used whenever the slot is taken: that rule's fallible step was a local
-/// read, and this one is a network round trip. ⚠️ It is also no longer the
-/// scan job's own rule for the case it replaced `start_embed_job` with:
-/// `scan_job::embed_after`'s `EmbedOnly` entry claims the slot FIRST and
-/// reads the key from the job's own thread after (D-g), the opposite trade,
-/// made because that read can block on a modal authorisation dialog. This
-/// paragraph's citation is history, not a live precedent to match.
-fn choose_the_default_models_for_roles_with_none(state: &AppState) {
-    // Two `let _`, not one: the roles fail separately and neither failing is a
-    // reason to leave the other unset.
-    let _ = state.with_index(|db| {
-        if db.meta_get(mnema_index::META_CHAT_MODEL)?.is_none() {
-            db.meta_set(mnema_index::META_CHAT_MODEL, DEFAULT_MODELS.chat)?;
-        }
-        Ok(())
-    });
-    // `active_space` and not the model name: the name is read *from* the space
-    // (`read_settings`), so "no space" is what "no embedding model" means here,
-    // and asking the question the other way round would read `None` out of an
-    // index that does have one and mint a second space beside it.
-    let unset = matches!(state.with_index(|db| db.active_space()), Ok(None));
-    if !unset {
-        return;
-    }
-    let Ok(_slot) = state.claim_job(
-        crate::scan_state::Phase::Other {
-            job: crate::scan_state::OtherJob::ModelAdoption,
-        },
-        false,
-    ) else {
-        return;
-    };
-    let Ok(endpoint) = state.open_router_endpoint() else {
-        return;
-    };
-    let Ok(check) = mnema_provider::check_embedding_model(
-        &endpoint.base,
-        &endpoint.token,
-        DEFAULT_MODELS.embedding,
-    ) else {
-        return;
-    };
-    let _ = state.with_index(|db| {
-        db.adopt_embedding_model(
-            DEFAULT_MODELS.embedding,
-            check.dim as i64,
-            state.credential_ref(),
-            &mnema_chunk::chunker_hash(),
-        )?;
-        Ok(())
-    });
-}
-
 /// The same defaults, for a key that was already in the store before this index
 /// was open — the one state [`set_key`] could not cover.
 ///
@@ -209,12 +114,17 @@ fn choose_the_default_models_for_roles_with_none(state: &AppState) {
 /// **No key, nothing to do.** The store is asked once, and a store that will not
 /// answer is not a reason to do anything else — this is a default being applied,
 /// not a command being served, and it returns nothing for the reason
-/// [`choose_the_default_models_for_roles_with_none`] returns nothing.
+/// `provider::on_configured` returns nothing.
+///
+/// **Only roles already on OpenRouter**, never an empty one: an empty role at
+/// boot is as likely a reset (a removed local model) as an unfinished key, and
+/// filling it would send a local-only person's questions to the cloud on the
+/// next launch. `provider::fill_roles` is the one substitution path.
 pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
     let Ok(Some(_)) = mnema_secrets::load(state.credential_ref()) else {
         return;
     };
-    choose_the_default_models_for_roles_with_none(state);
+    crate::provider::fill_roles(state, crate::provider::ProviderChoice::OpenRouter, false);
 }
 
 /// Removes the key. What was embedded stays embedded; what stops is embedding
@@ -234,8 +144,14 @@ pub fn choose_the_default_models_for_a_stored_key(state: &AppState) {
 /// [`set_embedding_model`] argues against on the same store.
 #[tauri::command(async)]
 pub fn forget_key(state: State<'_, AppState>) -> Result<KeyRemoval, Error> {
+    // The slot first: the reset below must not land under a scan embedding
+    // through OpenRouter (spec «Скидання ролі»).
+    let _slot = crate::provider::adoption_slot(&state)?;
+    // `?` before the reset: a store that did not answer is not "no key", and
+    // no role moves on it.
     let removal = KeyRemoval::of(mnema_secrets::forget(state.credential_ref())?);
     state.forget_provider_status();
+    crate::provider::on_unconfigured(&state, crate::provider::ProviderChoice::OpenRouter, None)?;
     Ok(removal)
 }
 
@@ -422,9 +338,33 @@ pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catal
 pub fn set_embedding_model(
     state: State<'_, AppState>,
     model: String,
+    provider: ProviderChoice,
     existing_vectors: ExistingVectors,
 ) -> Result<AdoptedModel, Error> {
-    let endpoint = state.open_router_endpoint()?;
+    choose_embedding_model(&state, model, provider, existing_vectors)
+}
+
+/// [`set_embedding_model`]'s body, reachable without a `State`.
+///
+/// **Routed by `provider`**, and only by it: OpenRouter probes the model's
+/// width; Mnema adopts [`crate::provider::LOCAL_EMBED_MODEL`] at its pinned
+/// width with no network — never an OpenRouter-probed model under a Mnema
+/// role, which would put bge-m3 vectors into a foreign space.
+pub fn choose_embedding_model(
+    state: &AppState,
+    model: String,
+    provider: ProviderChoice,
+    existing_vectors: ExistingVectors,
+) -> Result<AdoptedModel, Error> {
+    let endpoint = match provider {
+        ProviderChoice::OpenRouter => Some(state.open_router_endpoint()?),
+        ProviderChoice::Mnema => {
+            if !state.provider().configured_given(false).mnema_embed {
+                return Err(Error::ProviderNotReady);
+            }
+            None
+        }
+    };
     // ⚠️ **This command takes the job slot, although it is not a job**, and the
     // reason is `embed_job.rs`. `mnema_embed::run` reads `meta.active_space`
     // once, at the start, and holds that space id for the whole run — so a model
@@ -464,9 +404,19 @@ pub fn set_embedding_model(
         },
         false,
     )?;
-    let check = mnema_provider::check_embedding_model(&endpoint.base, &endpoint.token, &model)?;
+    let (model, dim) = match endpoint {
+        Some(endpoint) => {
+            let check =
+                mnema_provider::check_embedding_model(&endpoint.base, &endpoint.token, &model)?;
+            (model, check.dim as i64)
+        }
+        None => (
+            crate::provider::LOCAL_EMBED_MODEL.to_string(),
+            crate::provider::LOCAL_EMBED_DIM,
+        ),
+    };
     let hash = mnema_chunk::chunker_hash();
-    let dim = check.dim as i64;
+    let before = state.roles();
     // Two failures that are not the same one. The outer `?` is `with_index`
     // never reaching the closure at all — a poisoned lock, an index nobody
     // opened — where nothing was retired because nothing ran. The inner
@@ -480,14 +430,17 @@ pub fn set_embedding_model(
     // decided. The closure's error type is fixed at `mnema_index::Error` by
     // `with_index`'s signature, so the inner failure has to travel as a value
     // rather than as an `Err`.
-    let inner = state.with_index(|db| {
-        Ok(adopt_retiring_whatever_blocks(
-            db,
-            &model,
-            dim,
-            state.credential_ref(),
-            &hash,
-            existing_vectors,
+    let (space_before, inner) = state.with_index(|db| {
+        Ok((
+            db.active_space()?,
+            adopt_retiring_whatever_blocks(
+                db,
+                &model,
+                dim,
+                state.credential_ref(),
+                &hash,
+                existing_vectors,
+            ),
         ))
     })?;
     // 🔴 **Two exits move the space, not one.** A plain success obviously
@@ -510,15 +463,26 @@ pub fn set_embedding_model(
             return Err(e);
         }
     };
-    slot.forget_restore();
-    state.forget_provider_status();
+    // Mnema keeps a kept report when the space did not move (OpenRouter's
+    // bge-m3 is its space too, so «Продовжити» stays); OpenRouter's rule is
+    // unchanged from before roles: any adoption gives it up.
+    if provider == ProviderChoice::OpenRouter || space_before != Some(adopted.space_id) {
+        slot.forget_restore();
+    }
+    // Written after the adoption succeeded, under the same slot.
+    crate::prefs::write_role(
+        state.data_dir(),
+        crate::provider::Role::Embed,
+        Some(provider),
+    )?;
+    crate::provider::after_role_change(state, before);
     Ok(AdoptedModel {
         model,
         dim,
         space_id: adopted.space_id,
         created: adopted.created,
         retired,
-        index: index_settings(&state),
+        index: index_settings(state),
     })
 }
 
@@ -744,10 +708,40 @@ pub fn set_rerank_model(state: State<'_, AppState>, model: String) -> Result<(),
     Ok(())
 }
 
-/// Same as [`set_rerank_model`].
+/// The chat role's model and provider. Mnema stores its one chat model,
+/// whatever `model` says.
 #[tauri::command(async)]
-pub fn set_chat_model(state: State<'_, AppState>, model: String) -> Result<(), Error> {
+pub fn set_chat_model(
+    state: State<'_, AppState>,
+    model: String,
+    provider: ProviderChoice,
+) -> Result<(), Error> {
+    choose_chat_model(&state, model, provider)
+}
+
+/// [`set_chat_model`]'s body, reachable without a `State`.
+pub fn choose_chat_model(
+    state: &AppState,
+    model: String,
+    provider: ProviderChoice,
+) -> Result<(), Error> {
+    if provider == ProviderChoice::Mnema && !state.provider().configured_given(false).mnema_chat {
+        return Err(Error::ProviderNotReady);
+    }
+    // Every role write is made under the job slot (see `provider::adoption_slot`).
+    let _slot = crate::provider::adoption_slot(state)?;
+    let before = state.roles();
+    let model = match provider {
+        ProviderChoice::OpenRouter => model,
+        ProviderChoice::Mnema => crate::provider::LOCAL_CHAT_MODEL.to_string(),
+    };
     state.with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, &model))?;
+    crate::prefs::write_role(
+        state.data_dir(),
+        crate::provider::Role::Chat,
+        Some(provider),
+    )?;
+    crate::provider::after_role_change(state, before);
     Ok(())
 }
 
@@ -782,6 +776,11 @@ pub struct ModelSettings {
     /// Which credential store this build talks to, so the window can say the one
     /// thing that is true on exactly one of them. See [`Platform`].
     pub platform: Platform,
+    /// Each role's provider; `None` = the role is empty.
+    pub roles: crate::provider::Roles,
+    /// Which providers can serve which role, OpenRouter's from `key` above —
+    /// one measurement, not two.
+    pub configured: crate::provider::Configured,
 }
 
 /// The operating system this build was compiled for, as a fact rather than a
@@ -1427,8 +1426,13 @@ fn key_state(state: &AppState) -> KeyState {
 /// answer. `bridge::job_status` is the same shape for the same reason.
 #[tauri::command(async)]
 pub fn model_settings(state: State<'_, AppState>) -> ModelSettings {
+    let key = key_state(&state);
+    // An unreadable store is not "no key" (`Provider::configured`).
+    let open_router = !matches!(key, KeyState::Absent);
     ModelSettings {
-        key: key_state(&state),
+        configured: state.provider().configured_given(open_router),
+        roles: state.roles(),
+        key,
         index: index_settings(&state),
         platform: Platform::of_this_build(),
     }
@@ -1613,8 +1617,26 @@ mod tests {
                 reason: String::new(),
             },
             platform: Platform::of_this_build(),
+            roles: crate::provider::Roles {
+                embed: None,
+                chat: Some(ProviderChoice::Mnema),
+            },
+            configured: crate::provider::Configured {
+                open_router: true,
+                mnema_embed: false,
+                mnema_chat: true,
+            },
         };
         let sent = serde_json::to_value(&settings).unwrap();
+        // The two fields the window reads the roles from, camelCase.
+        assert_eq!(
+            sent["roles"],
+            serde_json::json!({"embed": null, "chat": "mnema"})
+        );
+        assert_eq!(
+            sent["configured"],
+            serde_json::json!({"openRouter": true, "mnemaEmbed": false, "mnemaChat": true})
+        );
         assert!(
             ["mac", "windows", "linux"].contains(&sent["platform"].as_str().unwrap_or_default()),
             "`platform` did not reach the window as one of the three spellings: {sent}"

@@ -1711,8 +1711,12 @@ const ASK_CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#
 /// is `pub` and the point here is only to reach the `Ready` gate, not to prove
 /// registration (which `search`'s own registration test already covers).
 fn set_chat_model_via(state: &State<'_, AppState>, model: &str) {
-    mnema_desktop::models::set_chat_model(state.clone(), model.into())
-        .expect("the chat model is saved");
+    mnema_desktop::models::set_chat_model(
+        state.clone(),
+        model.into(),
+        mnema_desktop::provider::ProviderChoice::OpenRouter,
+    )
+    .expect("the chat model is saved");
 }
 
 /// The private gate (spec §7.2): with no chat model set, `ask` must answer
@@ -4416,11 +4420,11 @@ fn every_model_command_the_window_calls_is_registered() {
         // not happen rather than as a build that stopped.
         (
             "set_embedding_model",
-            json!({ "model": "baai/bge-m3", "existingVectors": "keep" }),
+            json!({ "model": "baai/bge-m3", "provider": "openRouter", "existingVectors": "keep" }),
         ),
         (
             "set_embedding_model",
-            json!({ "model": "baai/bge-m3", "existingVectors": "discard" }),
+            json!({ "model": "baai/bge-m3", "provider": "openRouter", "existingVectors": "discard" }),
         ),
         (
             "set_rerank_model",
@@ -4428,7 +4432,7 @@ fn every_model_command_the_window_calls_is_registered() {
         ),
         (
             "set_chat_model",
-            json!({ "model": "anthropic/claude-opus-4" }),
+            json!({ "model": "anthropic/claude-opus-4", "provider": "openRouter" }),
         ),
         ("model_settings", json!({})),
     ] {
@@ -4632,7 +4636,7 @@ fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
     let refused = call(
         &webview,
         "set_embedding_model",
-        json!({ "model": "baai/bge-m3" }),
+        json!({ "model": "baai/bge-m3", "provider": "openRouter" }),
     )
     .expect_err("a model change with no answer about the existing vectors was accepted");
     let refused = error_text(&refused);
@@ -12266,7 +12270,7 @@ fn chunks_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (i64, i64
 
 #[test]
 fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
-    use mnema_desktop::provider::{ProviderChoice, change};
+    use mnema_desktop::provider::ProviderChoice;
     let dir = tempfile::tempdir().unwrap();
     let fx = mnema_app(dir.path(), 3, &[]);
     let refusal: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
@@ -12285,10 +12289,10 @@ fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
             );
             let mut slot = seen.lock().unwrap();
             if embedding && slot.is_none() {
-                let answer = change(
+                let answer = mnema_desktop::models::choose_chat_model(
                     state,
+                    "vendor/chat".into(),
                     ProviderChoice::OpenRouter,
-                    mnema_desktop::models::ExistingVectors::Keep,
                 );
                 *slot = Some(format!("{answer:?}"));
             }
@@ -12296,7 +12300,9 @@ fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
     );
     let refusal = refusal.lock().unwrap().clone();
     assert!(
-        refusal.as_deref().is_some_and(|r| r.starts_with("Err(")),
+        refusal
+            .as_deref()
+            .is_some_and(|r| r.starts_with("Err(JobAlreadyRunning")),
         "a switch while the scan holds the slot must be refused, got {refusal:?}"
     );
     assert_eq!(
@@ -12691,13 +12697,14 @@ fn active_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (Option<i
         .unwrap()
 }
 
-/// F1 as the owner ruled it (option B): bge-m3 is shared, so switching onto
-/// Mnema from it moves nothing; from another model with vectors the switch is
-/// refused like any model change, and only a confirmed Discard makes it.
+/// F1 as the owner ruled it (option B): bge-m3 is shared, so moving the
+/// embedding role onto Mnema from it moves nothing; from another model with
+/// vectors the change is refused like any model change, and only a confirmed
+/// Discard makes it.
 #[test]
-fn switching_to_mnema_from_another_space_keeps_it() {
-    use mnema_desktop::models::ExistingVectors;
-    use mnema_desktop::provider::{ProviderChoice, change};
+fn set_embedding_model_on_mnema_from_another_space_is_refused_under_keep() {
+    use mnema_desktop::models::{ExistingVectors, choose_embedding_model};
+    use mnema_desktop::provider::ProviderChoice::Mnema;
 
     // (a) From OpenRouter's bge-m3: same space, same vectors, no confirmation.
     let dir = tempfile::tempdir().unwrap();
@@ -12705,11 +12712,13 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let bge = index_with_one_vector(&app, "baai/bge-m3", 1024);
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
-    let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    let switched =
+        choose_embedding_model(&state, "baai/bge-m3".into(), Mnema, ExistingVectors::Keep);
     assert!(
-        matches!(&switched, Ok(s) if s.choice == ProviderChoice::Mnema && s.retired.is_empty()),
+        matches!(&switched, Ok(s) if s.space_id == bge && s.retired.is_empty()),
         "{switched:?}"
     );
+    assert_eq!(state.roles().embed, Some(Mnema));
     assert_eq!(active_and_vectors(&app, bge), (Some(bge), 1));
 
     // (b) From a 1536 space with vectors: refused, nothing moved.
@@ -12718,7 +12727,8 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
-    let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    let refused =
+        choose_embedding_model(&state, "baai/bge-m3".into(), Mnema, ExistingVectors::Keep);
     // The existing model-change class, which the window's count-based
     // confirmation keys on — not any refusal at all.
     assert!(
@@ -12728,21 +12738,26 @@ fn switching_to_mnema_from_another_space_keeps_it() {
                 mnema_index::Error::SpaceNotEmpty { space_id, embedded_chunks: 1 }
             )) if space_id == small
         ),
-        "a switch that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
+        "a change that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
     );
-    // Untouched: no key and no switch leave the fresh install's empty role.
+    // Refused, the role is not written.
     assert_eq!(state.roles().embed, None);
     assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
 
     // ... and confirmed with Discard: the index is on bge-m3.
-    let confirmed = change(&state, ProviderChoice::Mnema, ExistingVectors::Discard);
+    let confirmed = choose_embedding_model(
+        &state,
+        "baai/bge-m3".into(),
+        Mnema,
+        ExistingVectors::Discard,
+    );
     assert!(
-        matches!(&confirmed, Ok(s) if s.choice == ProviderChoice::Mnema
-            && s.retired.len() == 1
+        matches!(&confirmed, Ok(s) if s.retired.len() == 1
             && s.retired[0].space_id == small
             && s.retired[0].embedded_chunks == 1),
-        "the confirmed switch must say which space and how many vectors went: {confirmed:?}"
+        "the confirmed change must say which space and how many vectors went: {confirmed:?}"
     );
+    assert_eq!(state.roles().embed, Some(Mnema));
     let model = state
         .with_index(|db| {
             let space = db.active_space()?.expect("an active space");
@@ -12750,6 +12765,56 @@ fn switching_to_mnema_from_another_space_keeps_it() {
         })
         .unwrap();
     assert_eq!(model, ("baai/bge-m3".to_string(), 1024));
+}
+
+fn write_roles(
+    state: &AppState,
+    embed: Option<mnema_desktop::provider::ProviderChoice>,
+    chat: Option<mnema_desktop::provider::ProviderChoice>,
+) {
+    use mnema_desktop::provider::Role;
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Embed, embed).unwrap();
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Chat, chat).unwrap();
+}
+
+/// Mnema offers bge-m3 alone: a space of another model leaves the embedding
+/// role empty when the local models arrive, and moves nothing — while chat,
+/// which Mnema can serve, is filled.
+#[test]
+fn mnema_cannot_serve_a_foreign_space() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    write_roles(&state, None, None);
+
+    mnema_desktop::provider::on_configured(&state, Mnema);
+
+    assert_eq!(
+        state.roles().embed,
+        None,
+        "Mnema cannot embed into this space"
+    );
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
+}
+
+/// «Видалити» bge-m3 empties the embedding role and only it.
+#[test]
+fn remove_local_embed_resets_only_the_embed_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, remove};
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    write_roles(&state, Some(Mnema), Some(Mnema));
+
+    remove(&state, LocalModel::Embed).expect("removed");
+
+    assert_eq!(state.roles().embed, None);
+    assert_eq!(state.roles().chat, Some(Mnema));
 }
 
 /// A scan that stopped mid-embedding and offers «Продовжити», put in the slot
@@ -12788,15 +12853,19 @@ fn keep_a_resumable_ending(state: &AppState) -> ScanReport {
 /// switch that moves the space forgets it.
 #[test]
 fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
-    use mnema_desktop::models::ExistingVectors;
-    use mnema_desktop::provider::{ProviderChoice, change};
+    use mnema_desktop::models::{ExistingVectors, choose_embedding_model};
+    use mnema_desktop::provider::ProviderChoice;
+    let to_mnema = |state: &AppState, existing| {
+        state.install_local(support::ready_local(state.data_dir(), &[]));
+        choose_embedding_model(state, "baai/bge-m3".into(), ProviderChoice::Mnema, existing)
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), NO_PROVIDER);
     index_with_one_vector(&app, "baai/bge-m3", 1024);
     let state = app.state::<AppState>();
     let report = keep_a_resumable_ending(&state);
-    change(&state, ProviderChoice::Mnema, ExistingVectors::Keep).expect("same space");
+    to_mnema(&state, ExistingVectors::Keep).expect("same space");
     assert_eq!(
         state.scan_state().snapshot,
         ScanSnapshot::Ended { report },
@@ -12808,7 +12877,7 @@ fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
     index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
     keep_a_resumable_ending(&state);
-    change(&state, ProviderChoice::Mnema, ExistingVectors::Discard).expect("confirmed");
+    to_mnema(&state, ExistingVectors::Discard).expect("confirmed");
     assert_eq!(
         state.scan_state().snapshot,
         ScanSnapshot::Idle,

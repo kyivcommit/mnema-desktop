@@ -133,9 +133,10 @@ impl ScanDeps {
     /// `Embedding` phase rather than in front of the claim.
     ///
     /// The embed role's provider is read inside both closures, on the job
-    /// thread, after the claim — never here. `set_provider_choice` needs the
-    /// slot, so from the claim on the role cannot move under this run; read
-    /// before the claim it could, and the run would embed through the provider
+    /// thread, after the claim — never here. Every role writer needs the
+    /// slot (`provider::adoption_slot`), so from the claim on the role cannot
+    /// move under this run; read before the claim it could, and the run would
+    /// embed through the provider
     /// the person had just left.
     pub(crate) fn production(state: &AppState) -> Self {
         let provider = state.provider();

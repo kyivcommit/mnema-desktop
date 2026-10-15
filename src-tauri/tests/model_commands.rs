@@ -20,6 +20,7 @@ use mnema_desktop::models::{
     set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
 use mnema_desktop::prefs::{chat_tools, set_chat_tools};
+use mnema_desktop::provider::ProviderChoice;
 use mnema_desktop::scan_job;
 use mnema_desktop::scan_state::{
     EmbedOutcome, EndedIn, Entry, Phase, ScanReport, ScanSnapshot, ScanState, SkipWhy, Terminal,
@@ -251,8 +252,13 @@ fn the_key_never_reaches_the_database_file() {
     // catch replaces the model name with the key in exactly that write, so a
     // test that never reaches the write cannot see it, and did not: the case
     // stood green while the guard it names had stopped running.
-    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("nothing is embedded yet, so keeping the vectors cannot refuse");
+    set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("nothing is embedded yet, so keeping the vectors cannot refuse");
 
     // Half one of the positive control. Every assertion below is an assertion
     // of absence, and absence is what a key that was never stored anywhere
@@ -617,8 +623,13 @@ fn the_recorded_dimension_is_the_one_the_provider_answered_with() {
         fx.open_index();
         set_key(fx.state(), KEY.into()).expect("accepted");
 
-        let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-            .expect("chosen");
+        let adopted = set_embedding_model(
+            fx.state(),
+            OTHER_MODEL.into(),
+            ProviderChoice::OpenRouter,
+            ExistingVectors::Keep,
+        )
+        .expect("chosen");
 
         // What the call says it wrote, and then what the database says it holds.
         // Only the second proves a write happened at all; only the first
@@ -665,13 +676,23 @@ fn choosing_the_same_model_again_reports_a_space_found_rather_than_created() {
     let fx = Fixture::with_provider_answering_embedding_checks(1024, 3);
     fx.open_index();
     set_key(fx.state(), KEY.into()).expect("accepted");
-    let first =
-        set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep).expect("chosen");
+    let first = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("chosen");
     assert!(first.created);
 
     // A third embedding check, so the second call has an answer of its own.
-    let second = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("chosen again");
+    let second = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("chosen again");
 
     assert!(
         !second.created,
@@ -688,8 +709,8 @@ fn the_free_slots_change_without_touching_the_index() {
     let fx = Fixture::with_provider_accepting_everything();
     fx.open_index();
 
-    set_chat_model(fx.state(), "vendor/one".into()).expect("set");
-    set_chat_model(fx.state(), "vendor/two".into()).expect("set again");
+    set_chat_model(fx.state(), "vendor/one".into(), ProviderChoice::OpenRouter).expect("set");
+    set_chat_model(fx.state(), "vendor/two".into(), ProviderChoice::OpenRouter).expect("set again");
     set_rerank_model(fx.state(), "vendor/rr".into()).expect("set the other slot");
 
     let settings = model_settings(fx.state());
@@ -824,7 +845,8 @@ fn a_store_that_will_not_answer_does_not_take_the_index_with_it() {
     fx.open_index();
     // Something in the index worth losing. Without it, every assertion below is
     // satisfied by an index that had nothing to report.
-    set_chat_model(fx.state(), "vendor/two".into()).expect("the index is open and writable");
+    set_chat_model(fx.state(), "vendor/two".into(), ProviderChoice::OpenRouter)
+        .expect("the index is open and writable");
 
     let settings = model_settings(fx.state());
 
@@ -874,8 +896,13 @@ fn a_command_that_needs_the_key_says_no_key_rather_than_blaming_the_store() {
         "this test is about a command running without a key; there is one"
     );
 
-    let refusal = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
-        .expect_err("a model needs a key to check");
+    let refusal = set_embedding_model(
+        fx.state(),
+        MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect_err("a model needs a key to check");
 
     assert!(
         matches!(refusal, Error::NoKey),
@@ -925,8 +952,13 @@ fn changing_the_model_without_confirmation_leaves_the_space_alone() {
          they went would be about nothing: {tables_before:?}"
     );
 
-    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect_err("it must refuse, not silently drop");
+    let refusal = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect_err("it must refuse, not silently drop");
 
     assert!(
         matches!(
@@ -1005,8 +1037,13 @@ fn a_successful_adoption_forgets_a_resumable_ending_rather_than_keeping_its_stal
             None,
         );
 
-    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("the space is empty, so `Keep` has nothing to refuse"); // check 2 of 2
+    set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("the space is empty, so `Keep` has nothing to refuse"); // check 2 of 2
 
     assert_eq!(
         fx.state().scan_state().snapshot,
@@ -1045,8 +1082,13 @@ fn a_failed_adoption_still_restores_a_resumable_ending() {
             None,
         );
 
-    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect_err("the space already holds embedded chunks");
+    let refusal = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect_err("the space already holds embedded chunks");
     assert!(
         matches!(
             refusal,
@@ -1079,8 +1121,13 @@ fn a_confirmed_model_change_retires_the_old_space_and_its_tables() {
     fx.adopt_default_model();
     let old = fx.embed_chunks_in_the_active_space(EMBEDDED);
 
-    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
-        .expect("a confirmed change");
+    let adopted = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Discard,
+    )
+    .expect("a confirmed change");
 
     assert_ne!(
         Some(old),
@@ -1171,8 +1218,13 @@ fn a_confirmed_change_to_the_model_the_index_is_already_on_retires_nothing() {
     let space = fx.embed_chunks_in_the_active_space(EMBEDDED);
     let tables_before = fx.tables_of_space(space);
 
-    let adopted = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Discard)
-        .expect("re-adopting the recorded model is not a move and is allowed");
+    let adopted = set_embedding_model(
+        fx.state(),
+        MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Discard,
+    )
+    .expect("re-adopting the recorded model is not a move and is allowed");
 
     // Ordered so the first assertion to fire is the one about loss. Asking
     // `embedded_chunks_in` about a space that has been dropped raises
@@ -1301,12 +1353,27 @@ fn trying_a_second_model_leaves_a_space_behind_and_it_never_goes_away() {
 
     // Three presses on the settings screen, all allowed: nothing is embedded
     // yet, so nothing blocks a switch in either direction.
-    let first = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
-        .expect("the first model");
-    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("a second model, while nothing is embedded");
-    let back = set_embedding_model(fx.state(), MODEL.into(), ExistingVectors::Keep)
-        .expect("and back to the first");
+    let first = set_embedding_model(
+        fx.state(),
+        MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("the first model");
+    set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("a second model, while nothing is embedded");
+    let back = set_embedding_model(
+        fx.state(),
+        MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("and back to the first");
     assert_eq!(
         back.space_id, first.space_id,
         "going back found the space the first press minted"
@@ -1329,8 +1396,13 @@ fn trying_a_second_model_leaves_a_space_behind_and_it_never_goes_away() {
     // And the state is exactly the one the whole task exists for: a further
     // change is refused, so without a reachable confirmation there is no way to
     // change the model at all from here.
-    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect_err("a third model, now that something is embedded");
+    let refusal = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect_err("a third model, now that something is embedded");
     assert!(
         matches!(
             refusal,
@@ -1814,7 +1886,12 @@ fn a_model_change_is_refused_while_a_job_holds_the_slot() {
     let (probe, _probe_events) = job_channel();
     bridge::start_probe_job(fx.state(), probe).expect("the probe job starts");
 
-    let outcome = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep);
+    let outcome = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    );
 
     // **The state before the variant**, and in that order deliberately: an
     // `expect_err` first would panic on a change that succeeded and this test
@@ -1951,7 +2028,12 @@ fn a_run_leaves_no_vectors_in_a_space_nothing_points_at() {
         "the run is not holding the slot, so the refusal below would be about nothing"
     );
 
-    let outcome = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep);
+    let outcome = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    );
 
     wait_for_the_slot(&fx);
     let report = report_of(&fx.state().scan_state());
@@ -2063,7 +2145,8 @@ fn the_first_key_chooses_this_products_model_for_every_role_the_index_has_none_f
 fn a_key_entered_over_models_that_are_already_chosen_replaces_neither() {
     let fx = Fixture::with_provider_answering_with_dimension(1024);
     fx.open_index();
-    set_chat_model(fx.state(), CHOSEN_CHAT.into()).expect("a chat model is chosen");
+    set_chat_model(fx.state(), CHOSEN_CHAT.into(), ProviderChoice::OpenRouter)
+        .expect("a chat model is chosen");
     // `OTHER_MODEL` and not `MODEL`: `MODEL` **is** this product's default, so an
     // index already on it is a state a build that overwrites unconditionally
     // leaves looking exactly the same — same model, same space, same count. The
@@ -2232,8 +2315,13 @@ fn discarding_the_vectors_takes_semantic_search_with_them_until_the_index_is_ref
         "the window was shown something other than the document that was seeded"
     );
 
-    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
-        .expect("the confirmed change is accepted");
+    let adopted = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Discard,
+    )
+    .expect("the confirmed change is accepted");
     assert_eq!(
         adopted
             .retired
@@ -2326,8 +2414,13 @@ fn a_change_that_retires_nothing_is_the_same_fixture_taking_the_other_path() {
         "this control is about an EMPTY active space, and this one is not empty"
     );
 
-    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("a change that strands nothing is not refused");
+    let adopted = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("a change that strands nothing is not refused");
 
     assert_eq!(
         adopted.retired,
@@ -2412,8 +2505,13 @@ fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed()
         })
         .expect("the squatting table is created");
 
-    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
-        .expect_err("the adoption was supposed to fail on the name already taken");
+    let refusal = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Discard,
+    )
+    .expect_err("the adoption was supposed to fail on the name already taken");
 
     // The state first, because a rejection that arrived after the drop committed
     // has already done its damage and this test's subject is what it left behind.
@@ -2489,8 +2587,13 @@ fn an_adoption_that_fails_after_the_retirement_says_what_was_already_destroyed()
     // `Keep`, because `Keep` is what the window sends in this state — an index
     // that will not answer states no estimate, so it asks nothing and sends the
     // value that refuses rather than destroys.
-    let adopted = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep)
-        .expect("the recovering act the window offers was refused by the index");
+    let adopted = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("the recovering act the window offers was refused by the index");
 
     assert!(
         adopted.created,
@@ -2562,8 +2665,13 @@ fn an_adoption_that_retired_a_space_and_then_failed_forgets_the_resumable_ending
             None,
         );
 
-    let refusal = set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Discard)
-        .expect_err("the squatting table makes the retry fail");
+    let refusal = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Discard,
+    )
+    .expect_err("the squatting table makes the retry fail");
     assert!(
         matches!(refusal, Error::RetiredThenFailed { .. }),
         "the wrong refusal proves nothing about a space having moved: {refusal:?}"
@@ -2864,7 +2972,13 @@ fn choosing_a_model_makes_the_next_status_ask_again() {
     ]);
     assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
     assert!(fx.provider_request().is_some());
-    set_embedding_model(fx.state(), OTHER_MODEL.into(), ExistingVectors::Keep).expect("chosen");
+    set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::OpenRouter,
+        ExistingVectors::Keep,
+    )
+    .expect("chosen");
     while fx.provider_request().is_some() {}
     assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
     assert!(
@@ -2945,4 +3059,181 @@ fn the_embedding_list_ignores_the_tools_switch() {
 #[test]
 fn the_default_chat_model_is_gpt_6_luna() {
     assert_eq!(DEFAULT_MODELS.chat, "openai/gpt-6-luna");
+}
+
+// --- Provider per role: reset and substitution (Task 4) ---------------------
+
+use mnema_desktop::provider::{Role as ProviderRole, Roles};
+
+fn write_roles(fx: &Fixture, embed: Option<ProviderChoice>, chat: Option<ProviderChoice>) {
+    let dir = fx.state().data_dir().to_path_buf();
+    mnema_desktop::prefs::write_role(&dir, ProviderRole::Embed, embed).unwrap();
+    mnema_desktop::prefs::write_role(&dir, ProviderRole::Chat, chat).unwrap();
+}
+
+fn roles(fx: &Fixture) -> (Option<ProviderChoice>, Option<ProviderChoice>) {
+    let Roles { embed, chat } = fx.state().roles();
+    (embed, chat)
+}
+
+/// A fresh install reads both roles as empty (and writes them so), and the
+/// first key fills both — the state Task 1's nulls left for this task.
+#[test]
+fn fresh_install_then_key_fills_both_roles() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    assert!(
+        !fx.state().data_dir().join("prefs.json").exists(),
+        "premise: a fresh install"
+    );
+    assert_eq!(roles(&fx), (None, None), "no key: nothing to migrate to");
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    use ProviderChoice::OpenRouter;
+    assert_eq!(roles(&fx), (Some(OpenRouter), Some(OpenRouter)));
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(read.chat_model.as_deref(), Some(DEFAULT_MODELS.chat));
+    assert_eq!(read.embedding_model.as_deref(), Some("baai/bge-m3"));
+    assert_eq!(settings.roles.embed, Some(OpenRouter));
+    assert!(settings.configured.open_router);
+}
+
+/// The exception in «Підстановка»: a space of another model with vectors gives
+/// the emptied embedding role THAT model, never the default — which would have
+/// needed vectors deleted.
+#[test]
+fn substitution_keeps_the_space_model_not_the_default() {
+    // A spare embedding check: a build that adopts the default is stopped by
+    // the index's refusal, not by the mock running dry.
+    let fx = Fixture::with_provider_answering_embedding_checks(1024, 1);
+    fx.open_index();
+    fx.state()
+        .with_index(|db| {
+            db.adopt_embedding_model(OTHER_MODEL, 1024, fx.credential_ref(), "chunker-under-test")?;
+            Ok(())
+        })
+        .unwrap();
+    let space = fx.embed_chunks_in_the_active_space(3);
+    write_roles(&fx, None, None);
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    assert_eq!(roles(&fx).0, Some(ProviderChoice::OpenRouter));
+    assert_eq!(fx.active_space(), Some(space), "the space moved");
+    assert_eq!(fx.embedded_chunks_in(space), 3, "vectors went");
+    let settings = model_settings(fx.state());
+    assert_eq!(
+        read_index(&settings.index).embedding_model.as_deref(),
+        Some(OTHER_MODEL)
+    );
+}
+
+/// A chosen role is never substituted, whatever provider it is on.
+#[test]
+fn substitution_leaves_a_filled_role_alone() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    fx.state()
+        .with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, CHOSEN_CHAT))
+        .unwrap();
+    write_roles(
+        &fx,
+        Some(ProviderChoice::Mnema),
+        Some(ProviderChoice::Mnema),
+    );
+
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+
+    use ProviderChoice::Mnema;
+    assert_eq!(roles(&fx), (Some(Mnema), Some(Mnema)));
+    let settings = model_settings(fx.state());
+    let read = read_index(&settings.index);
+    assert_eq!(read.chat_model.as_deref(), Some(CHOSEN_CHAT));
+    assert_eq!(fx.space_ids(), Vec::<i64>::new(), "a space was minted");
+}
+
+/// «Забути» empties the roles on OpenRouter and only those, and only the
+/// choice: the chat model and the space stay.
+#[test]
+fn forget_key_resets_only_open_router_roles() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    set_key(fx.state(), KEY.into()).expect("the key is accepted");
+    let space = fx.active_space();
+    write_roles(
+        &fx,
+        Some(ProviderChoice::OpenRouter),
+        Some(ProviderChoice::Mnema),
+    );
+
+    forget_key(fx.state()).expect("forgotten");
+
+    assert_eq!(roles(&fx), (None, Some(ProviderChoice::Mnema)));
+    assert_eq!(fx.active_space(), space, "the reset moved the space");
+    let settings = model_settings(fx.state());
+    assert_eq!(
+        read_index(&settings.index).chat_model.as_deref(),
+        Some(DEFAULT_MODELS.chat),
+        "the reset erased the chat model"
+    );
+}
+
+/// A store that will not answer is not "no key": no role moves.
+#[test]
+fn an_unreadable_store_resets_no_role() {
+    let fx = Fixture::with_a_credential_store_that_will_not_answer();
+    use ProviderChoice::OpenRouter;
+    write_roles(&fx, Some(OpenRouter), Some(OpenRouter));
+
+    assert!(
+        forget_key(fx.state()).is_err(),
+        "premise: the store did not answer"
+    );
+
+    assert_eq!(roles(&fx), (Some(OpenRouter), Some(OpenRouter)));
+}
+
+/// A Mnema choice adopts the local model at its pinned width with no request
+/// to OpenRouter — whatever model the caller named.
+#[test]
+fn a_mnema_embedding_choice_never_probes_open_router() {
+    let fx = Fixture::with_provider_accepting_everything();
+    fx.open_index();
+    let dir = fx.state().data_dir().to_path_buf();
+    fx.state().install_local(support::ready_local(&dir, &[]));
+
+    let adopted = set_embedding_model(
+        fx.state(),
+        OTHER_MODEL.into(),
+        ProviderChoice::Mnema,
+        ExistingVectors::Keep,
+    )
+    .expect("adopted");
+
+    assert_eq!(
+        fx.provider_request(),
+        None,
+        "a request left the machine for a local choice"
+    );
+    assert_eq!((adopted.model.as_str(), adopted.dim), ("baai/bge-m3", 1024));
+    assert_eq!(roles(&fx).0, Some(ProviderChoice::Mnema));
+}
+
+/// A boot never fills an EMPTY role: an empty chat role is what removing the
+/// local Gemma leaves, and a stored key must not send that person's questions
+/// to OpenRouter on the next launch.
+#[test]
+fn a_boot_leaves_an_empty_role_empty() {
+    let fx = Fixture::with_provider_accepting_everything();
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
+    write_roles(&fx, None, None);
+
+    mnema_desktop::boot_index(fx.handle())
+        .join()
+        .expect("the boot's default pass panicked");
+
+    assert_eq!(roles(&fx), (None, None));
+    assert_eq!(fx.provider_request(), None, "the boot called out");
 }

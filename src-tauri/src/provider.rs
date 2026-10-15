@@ -43,7 +43,8 @@ pub struct Roles {
 }
 
 /// Which providers are set up and able to serve which role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Configured {
     pub open_router: bool,
     pub mnema_embed: bool,
@@ -444,17 +445,25 @@ impl Provider {
     /// migration from the single key read against what is set up right now.
     pub fn roles(&self) -> Roles {
         // Built only when a migration needs it: no keychain read otherwise.
-        crate::prefs::roles(&self.data_dir, || {
-            // An unreadable store is not "no key": it must not migrate a role away.
-            let open_router =
-                mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some());
-            let up = self.local.available();
-            Configured {
-                open_router,
-                mnema_embed: up && self.local.ready(ModelId::Embed),
-                mnema_chat: up && self.local.ready(ModelId::Chat),
-            }
-        })
+        crate::prefs::roles(&self.data_dir, || self.configured())
+    }
+
+    /// Which providers can serve which role right now. Reads the keychain.
+    pub fn configured(&self) -> Configured {
+        // An unreadable store is not "no key": it must not move a role away.
+        self.configured_given(
+            mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some()),
+        )
+    }
+
+    /// [`Provider::configured`] with OpenRouter's answer already measured.
+    pub fn configured_given(&self, open_router: bool) -> Configured {
+        let up = self.local.available();
+        Configured {
+            open_router,
+            mnema_embed: up && self.local.ready(ModelId::Embed),
+            mnema_chat: up && self.local.ready(ModelId::Chat),
+        }
     }
 
     /// The models of the roles on Mnema that are downloaded.
@@ -597,104 +606,6 @@ impl From<mnema_local::Error> for DownloadError {
 }
 
 #[tauri::command]
-pub fn provider_choice(state: tauri::State<'_, crate::state::AppState>) -> ProviderChoice {
-    // Until the window reads the roles (Task 4 removes this command).
-    state.roles().chat.unwrap_or(ProviderChoice::OpenRouter)
-}
-
-/// What [`set_provider_choice`] did: the choice now in force, and the spaces a
-/// confirmed `Discard` destroyed on the way (empty otherwise) — the same fact
-/// `set_embedding_model` puts on the wire as `AdoptedModel::retired`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderSwitch {
-    pub choice: ProviderChoice,
-    pub retired: Vec<crate::models::RetiredSpace>,
-}
-
-#[tauri::command(async)]
-pub fn set_provider_choice(
-    state: tauri::State<'_, crate::state::AppState>,
-    choice: ProviderChoice,
-    existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderSwitch, Error> {
-    change(&state, choice, existing_vectors)
-}
-
-/// [`set_provider_choice`]'s body, reachable without a `State`.
-pub fn change(
-    state: &crate::state::AppState,
-    choice: ProviderChoice,
-    existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderSwitch, Error> {
-    let mut retired = Vec::new();
-    // The job slot, for the reason `models::set_embedding_model` takes it: a
-    // scan resolves its endpoint once, on its own thread, after its claim
-    // (`scan_job::ScanDeps::production`). Refused while one runs, the choice
-    // cannot move under a run that is already embedding through the other
-    // provider; claimed, no run can start until the choice is written.
-    let mut slot = state.claim_job(
-        crate::scan_state::Phase::Other {
-            job: crate::scan_state::OtherJob::ModelAdoption,
-        },
-        false,
-    )?;
-    if choice == ProviderChoice::Mnema {
-        // The local process embeds with bge-m3 alone. From OpenRouter's
-        // bge-m3 this finds the same space and moves nothing; from any other
-        // model with vectors it is refused under `Keep` — the ordinary model
-        // change's own refusal, which the window answers with its count-based
-        // confirmation — and retires the old space under `Discard` (owner's
-        // ruling on F1, option B). Refused, the choice is not written.
-        let (before, adopted) = state.with_index(|db| {
-            let before = db.active_space()?;
-            Ok((
-                before,
-                crate::models::adopt_retiring_whatever_blocks(
-                    db,
-                    LOCAL_EMBED_MODEL,
-                    LOCAL_EMBED_DIM,
-                    state.credential_ref(),
-                    &mnema_chunk::chunker_hash(),
-                    existing_vectors,
-                ),
-            ))
-        })?;
-        // `set_embedding_model`'s rule: a kept resumable report counts against
-        // the active space, so an exit that moved it gives the report up. Only
-        // one that moved it: from OpenRouter's bge-m3 the space stays, and so
-        // does «Продовжити» with its partial-reading warning.
-        match adopted {
-            Ok((space, gone)) => {
-                if before != Some(space.space_id) {
-                    slot.forget_restore();
-                }
-                retired = gone;
-            }
-            Err(e) => {
-                if matches!(e, Error::RetiredThenFailed { .. }) {
-                    slot.forget_restore();
-                }
-                return Err(e);
-            }
-        }
-    }
-    // Both roles follow the one switch until the window picks them apart.
-    for role in [Role::Embed, Role::Chat] {
-        crate::prefs::write_role(state.data_dir(), role, Some(choice))?;
-    }
-    state.forget_provider_status();
-    if choice != ProviderChoice::Mnema {
-        // Nothing of the local provider should stay in memory under OpenRouter.
-        state.local().stop();
-    }
-    Ok(ProviderSwitch {
-        choice: state.roles().chat.unwrap_or(ProviderChoice::OpenRouter),
-        retired,
-    })
-}
-
-#[tauri::command]
 pub fn mnema_available(state: tauri::State<'_, crate::state::AppState>) -> bool {
     state.mnema_available()
 }
@@ -728,6 +639,7 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
+    on_configured(&state, ProviderChoice::Mnema);
     Ok(())
 }
 
@@ -752,20 +664,181 @@ pub fn remove_model(
 
 /// [`remove_model`]'s body, reachable without a `State`.
 pub fn remove(state: &crate::state::AppState, id: LocalModel) -> Result<(), Error> {
-    // The job slot, as `change` takes it: a scan embedding through the process
-    // would otherwise end Failed with "connection refused" for a removal the
-    // person made. Drawn as a model change (`ModelAdoption`) — it is one; the
-    // kept resumable ending is restored on release, the space does not move.
-    let _slot = state.claim_job(
-        crate::scan_state::Phase::Other {
-            job: crate::scan_state::OtherJob::ModelAdoption,
-        },
-        false,
-    )?;
+    // The job slot, as every role writer takes it: a scan embedding through
+    // the process would otherwise end Failed with "connection refused" for a
+    // removal the person made. Drawn as a model change (`ModelAdoption`) — it
+    // is one; the kept resumable ending is restored on release, the space does
+    // not move.
+    let _slot = adoption_slot(state)?;
+    // The role first: a removal that then fails leaves a choice to make again,
+    // never a role on a model that is gone.
+    on_unconfigured(state, ProviderChoice::Mnema, Some(id.into()))?;
     let local = state.local();
     local.stop();
     local.store.remove(id.into())?;
     Ok(())
+}
+
+/// The slot every role write is made under: the scan re-reads the embed role
+/// inside its run and relies on it staying put.
+pub(crate) fn adoption_slot(
+    state: &crate::state::AppState,
+) -> Result<crate::state::JobSlot, Error> {
+    state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    )
+}
+
+/// `p` just became configured (a key stored, a local model downloaded): every
+/// EMPTY role `p` serves gets a model, and a role already on `p` whose model is
+/// missing gets one too. A chosen role is never touched. Best effort and
+/// silent: a busy slot or a failed write just leaves the role empty.
+pub fn on_configured(state: &crate::state::AppState, p: ProviderChoice) {
+    fill_roles(state, p, true);
+}
+
+/// [`on_configured`]'s substitution. `empty_too: false` fills only roles
+/// already on `p` whose model is missing (a key stored while the index was
+/// shut): a boot never moves an empty role — one emptied by removing a local
+/// model would otherwise go to OpenRouter at every launch.
+pub(crate) fn fill_roles(state: &crate::state::AppState, p: ProviderChoice, empty_too: bool) {
+    let Ok(_slot) = adoption_slot(state) else {
+        return;
+    };
+    let before = state.roles();
+    let configured = state.provider().configured();
+    for (role, now) in [(Role::Chat, before.chat), (Role::Embed, before.embed)] {
+        if !configured.serves(p, role) {
+            continue;
+        }
+        let fill = match now {
+            None => empty_too,
+            Some(q) => q == p && model_missing(state, role),
+        };
+        if fill {
+            match role {
+                Role::Chat => fill_chat(state, p),
+                Role::Embed => fill_embed(state, p),
+            }
+        }
+    }
+    after_role_change(state, before);
+}
+
+/// The role is on a provider but the index has no model for it.
+fn model_missing(state: &crate::state::AppState, role: Role) -> bool {
+    match role {
+        Role::Chat => matches!(
+            state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL)),
+            Ok(None)
+        ),
+        Role::Embed => matches!(state.with_index(|db| db.active_space()), Ok(None)),
+    }
+}
+
+/// Chat: `p`'s default model, then the role. The model write is best effort:
+/// Mnema's chat never reads it, and a shut index is filled at the next boot.
+fn fill_chat(state: &crate::state::AppState, p: ProviderChoice) {
+    let model = match p {
+        ProviderChoice::OpenRouter => crate::models::DEFAULT_MODELS.chat,
+        ProviderChoice::Mnema => LOCAL_CHAT_MODEL,
+    };
+    let _ = state.with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, model));
+    let _ = crate::prefs::write_role(state.data_dir(), Role::Chat, Some(p));
+}
+
+/// Embedding: the active space's model if `p` offers it, else nothing; no
+/// space — `p`'s default, adopted without retiring anything. Never `Discard`:
+/// an automatic act deletes no vectors.
+fn fill_embed(state: &crate::state::AppState, p: ProviderChoice) {
+    let space = state.with_index(|db| match db.active_space()? {
+        Some(id) => Ok(Some(db.space_model(id)?.0)),
+        None => Ok(None),
+    });
+    let ok = match space {
+        // Every space was built from an OpenRouter model or from bge-m3, which
+        // OpenRouter offers too; Mnema offers bge-m3 alone.
+        Ok(Some(model)) => p == ProviderChoice::OpenRouter || model == LOCAL_EMBED_MODEL,
+        Ok(None) => adopt_default_embedding(state, p).is_ok(),
+        // A shut index: OpenRouter's model is filled at the next boot; Mnema's
+        // cannot be checked against a space nobody can read.
+        Err(_) => p == ProviderChoice::OpenRouter,
+    };
+    if ok {
+        let _ = crate::prefs::write_role(state.data_dir(), Role::Embed, Some(p));
+    }
+}
+
+/// Adopts `p`'s default embedding model into an index with no active space.
+/// OpenRouter's width is the provider's answer; Mnema's is the pinned file's.
+fn adopt_default_embedding(state: &crate::state::AppState, p: ProviderChoice) -> Result<(), Error> {
+    let (model, dim) = match p {
+        ProviderChoice::OpenRouter => {
+            let endpoint = state.open_router_endpoint()?;
+            let model = crate::models::DEFAULT_MODELS.embedding;
+            let check =
+                mnema_provider::check_embedding_model(&endpoint.base, &endpoint.token, model)?;
+            (model, check.dim as i64)
+        }
+        ProviderChoice::Mnema => (LOCAL_EMBED_MODEL, LOCAL_EMBED_DIM),
+    };
+    state.with_index(|db| {
+        db.adopt_embedding_model(
+            model,
+            dim,
+            state.credential_ref(),
+            &mnema_chunk::chunker_hash(),
+        )
+    })?;
+    Ok(())
+}
+
+/// `p` stopped being configured: every role on it is emptied (`which` limits
+/// Mnema to that model's role). Only the choice: the space, its vectors and
+/// the chat model stay. The caller holds the job slot.
+pub fn on_unconfigured(
+    state: &crate::state::AppState,
+    p: ProviderChoice,
+    which: Option<ModelId>,
+) -> Result<(), Error> {
+    let before = state.roles();
+    for (role, id, now) in [
+        (Role::Embed, ModelId::Embed, before.embed),
+        (Role::Chat, ModelId::Chat, before.chat),
+    ] {
+        if now == Some(p) && which.is_none_or(|w| w == id) {
+            crate::prefs::write_role(state.data_dir(), role, None)?;
+        }
+    }
+    after_role_change(state, before);
+    Ok(())
+}
+
+/// After a role write: no role left on Mnema stops the process; a role that
+/// left Mnema has its model unloaded from a process that keeps running.
+pub(crate) fn after_role_change(state: &crate::state::AppState, before: Roles) {
+    state.forget_provider_status();
+    let after = state.roles();
+    let local = state.local();
+    let mnema = Some(ProviderChoice::Mnema);
+    if after.embed != mnema && after.chat != mnema {
+        local.stop();
+        return;
+    }
+    if let Some(sidecar) = local.started() {
+        for (was, now, id) in [
+            (before.embed, after.embed, ModelId::Embed),
+            (before.chat, after.chat, ModelId::Chat),
+        ] {
+            if was == mnema && now != mnema {
+                // Best effort: a process that will not answer holds nothing.
+                let _ = sidecar.unload(Some(id));
+            }
+        }
+    }
 }
 
 /// The launcher went cold (hidden long enough): give the memory back.
@@ -1506,24 +1579,46 @@ mod lifecycle {
         );
     }
 
-    #[test]
-    fn leaving_mnema_stops_the_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+    /// [`app`] with both roles on Mnema, an open index, and the process up.
+    fn started_on_mnema(dir: &Path) -> (AppState, PathBuf) {
+        let (state, log) = app(dir, ProviderChoice::Mnema, &[]);
+        set_roles(dir, ProviderChoice::Mnema, ProviderChoice::Mnema);
+        state.open_index().expect("an index");
         state
             .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
             .expect("the process starts");
-        assert!(state.local().started().is_some());
-        let switched = change(
-            &state,
-            ProviderChoice::OpenRouter,
-            crate::models::ExistingVectors::Keep,
-        )
-        .expect("switching to OpenRouter");
-        assert_eq!(switched.choice, ProviderChoice::OpenRouter);
+        (state, log)
+    }
+
+    #[test]
+    fn moving_chat_off_mnema_unloads_gemma() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = started_on_mnema(dir.path());
+        crate::models::choose_chat_model(&state, "vendor/chat".into(), ProviderChoice::OpenRouter)
+            .expect("chat moves to OpenRouter");
+        assert_eq!(
+            count(&log, r#"body /mnema/unload {"models":["chat"]}"#),
+            1,
+            "{}",
+            logged(&log)
+        );
+        assert!(
+            state.local().started().is_some(),
+            "embedding is still on Mnema: the process stays"
+        );
+    }
+
+    #[test]
+    fn no_mnema_role_stops_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = started_on_mnema(dir.path());
+        crate::prefs::write_role(dir.path(), Role::Embed, Some(ProviderChoice::OpenRouter))
+            .unwrap();
+        crate::models::choose_chat_model(&state, "vendor/chat".into(), ProviderChoice::OpenRouter)
+            .expect("chat moves to OpenRouter");
         assert!(
             state.local().started().is_none(),
-            "no process is left running under OpenRouter"
+            "no process is left running with no role on Mnema"
         );
     }
 
