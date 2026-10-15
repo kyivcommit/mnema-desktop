@@ -12873,10 +12873,7 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
-    let handle = app.handle().clone();
-    state.set_job_observer(Box::new(move || {
-        mnema_desktop::provider::on_slot_change(&handle.state::<AppState>());
-    }));
+    state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
     let scan = state
         .claim_job(
             mnema_desktop::scan_state::Phase::Embedding {
