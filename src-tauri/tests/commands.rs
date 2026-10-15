@@ -13708,6 +13708,8 @@ fn turning_the_switch_off_mid_session_drops_the_session() {
     let server = MockServer::new(vec![
         Reply::ok(&chat_text("It resonates <c>1</c>.")),
         Reply::ok(&chat_text("A journal <c>1</c>.")),
+        // Turning the switch on reads the public catalogue for the chat model.
+        Reply::ok(r#"{"data":[]}"#),
         Reply::ok(&chat_text("Resonance again <c>1</c>.")),
     ]);
     let dir = tempfile::tempdir().unwrap();
@@ -13722,6 +13724,7 @@ fn turning_the_switch_off_mid_session_drops_the_session() {
     assert_eq!(third["via"], json!("search"), "{third}");
     server.request();
     server.request();
+    server.request(); // the catalogue read
     let r = server.request();
     assert!(
         !r.contains("\"tools\""),
