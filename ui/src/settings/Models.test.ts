@@ -1054,7 +1054,6 @@ test('two provider records sharing one id render two options and leave the secti
   // it costs is everything AROUND the list — read here as the visible text a
   // person came to this window for, not as a testid that could be present on
   // a broken page.
-  expect(screen.getByTestId('model-key-label').textContent).toBe('Key:');
   expect(screen.getByRole('button', { name: 'Change' })).toBeTruthy();
   expect(screen.getByTestId('model-status-dot').textContent).toBe(
     'Not connected yet — add a key and choose an embedding model to enable content search.',
@@ -2888,9 +2887,9 @@ test('a language switch after mount reaches the recovering-act sentence', async 
 // ---------------------------------------------------------------------------
 const visible = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
-for (const [loc, provider, keyRow] of [
-  ['en', 'Provider: OpenRouter', 'Key: A key is saved.'],
-  ['uk', 'Провайдер: OpenRouter', 'Ключ: Ключ збережено.'],
+for (const [loc, provider] of [
+  ['en', 'Provider: OpenRouter'],
+  ['uk', 'Провайдер: OpenRouter'],
 ] as const) {
   test(`the label and its value read as two things, not one phrase (${loc})`, async () => {
     const { container } = await renderInLocale(loc, settings({ key: { kind: 'present' } }));
@@ -2899,14 +2898,12 @@ for (const [loc, provider, keyRow] of [
     // Positive: the separator is on the screen, in this locale, between each
     // label and the value it introduces.
     expect(text).toContain(provider);
-    expect(text).toContain(keyRow);
     // And the other direction, which is the defect stated literally: the label
     // and its value with nothing but a space between them. This is the half
     // that dies when the colon is taken back out of the catalogue — the
     // positive half above would survive a separator moved anywhere else on the
     // line.
     expect(text).not.toContain(provider.replace(': ', ' '));
-    expect(text).not.toContain(keyRow.replace(': ', ' '));
   });
 }
 
@@ -3439,4 +3436,38 @@ test('toggling tool support stores it and re-reads the chat catalogue', async ()
   await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false));
   await waitFor(() => expect(providerModels).toHaveBeenCalledWith('chat'));
   await waitFor(() => expect(box.checked).toBe(false));
+});
+
+// The provider picker: the key group belongs to the OpenRouter card alone, and a
+// saved key needs no «Key:» heading to be understood.
+test('a saved key has no key label', async () => {
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await screen.findByText('A key is saved.');
+  expect(screen.queryByText('Key:')).toBeNull();
+  expect(screen.queryByTestId('model-key-label')).toBeNull();
+});
+
+test('a missing key shows the label and input', async () => {
+  await renderWith(settings({ key: { kind: 'absent' } }));
+  expect(await screen.findByLabelText('Key:')).toBeTruthy();
+});
+
+test('an unreadable key store keeps its label and failure, not an empty card', async () => {
+  await renderWith(settings({ key: { kind: 'unreadable', cause: 'locked', reason: 'x' } }));
+  expect(await screen.findByTestId('model-key-failure')).toBeTruthy();
+  expect(screen.getByTestId('model-key-label').textContent).toBe('Key:');
+});
+
+test('the key group is not drawn while the card shows another provider', async () => {
+  setLocale('en');
+  modelSettings.mockResolvedValue(settings({ key: { kind: 'present' } }));
+  const jobs = createJobController();
+  jobs.mount();
+  const seen: boolean[] = [];
+  render(Models, {
+    props: { jobs },
+    context: new Map([['provider-card', { view: 'mnema', keyPresent: (p: boolean) => seen.push(p) }]]),
+  });
+  await waitFor(() => expect(seen).toEqual([true]));
+  expect(screen.queryByTestId('model-key-group')).toBeNull();
 });

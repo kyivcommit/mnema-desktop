@@ -110,7 +110,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
   const provider = query.get('provider') ?? 'ok';
   const s = initialState(scenario);
   const bump = () => { s.scan = { ...s.scan, revision: s.scan.revision + 1 }; };
-  // Both roles follow the one mock provider choice (Provider.svelte still drives it).
+  // Both roles follow the one mock provider choice (the settings Provider picker only chooses a card).
   const settings = () => ({
     key: s.key, index: s.index, platform: 'mac' as const,
     roles: { embed: choice, chat: choice },
@@ -149,7 +149,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
   }
 
   // Mnema (local): ?local=nospace makes every download answer "no space".
-  let choice: 'openRouter' | 'mnema' = 'openRouter';
+  const choice: 'openRouter' | 'mnema' = 'openRouter';
   const local: Record<string, { kind: string; done?: number; total?: number }> = {
     embed: { kind: 'absent' }, chat: { kind: 'absent' },
   };
@@ -170,8 +170,6 @@ export function installMockBackend(win: 'settings' | 'launcher') {
 
   const handlers: Record<string, (a: Args) => unknown> = {
     mnema_available: () => true,
-    provider_choice: () => choice,
-    set_provider_choice: (a) => { choice = a.choice as typeof choice; return { choice, retired: [] }; },
     local_models: () => Object.entries(local).map(([id, state]) => ({ id, state })),
     download_model: (a) => downloadMock(a.id as string),
     cancel_download: (a) => { cancelled.add(a.id as string); },

@@ -21,6 +21,10 @@
 
   // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
   const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
+  // Present under `Provider`: which provider's card is showing, and a way to
+  // tell it whether a key is saved (its dot). Absent, the key group always shows.
+  const providerCard = getContext<{ view: string; keyPresent(present: boolean): void } | undefined>('provider-card');
+  $effect(() => { if (settings) providerCard?.keyPresent(settings.key.kind === 'present'); });
 
   // The controller, as a PROP — the same rule `Folders` and `Scanning` already
   // follow, and this section was the one left out. It matters here for two
@@ -1083,13 +1087,14 @@
        defect report nobody reading this window can act on. The previous order
        put that defect report between the provider row and the key rows, and
        left the single actionable instruction at the bottom, unlabelled. -->
+  {#if !providerCard || providerCard.view === 'openRouter'}
   <div class="group" data-testid="model-key-group" bind:this={keyGroupEl}>
     <!-- One occurrence of the word, not two: when the editable field is on
          screen the group's subject heading IS that field's label, so
          `getByLabelText('Key')` still resolves to exactly one control. -->
     {#if showInput}
       <label class="fl" for="model-key-input" data-testid="model-key-label">{keyLabel}</label>
-    {:else}
+    {:else if settings.key.kind !== 'present'}
       <span class="fl" data-testid="model-key-label">{keyLabel}</span>
     {/if}
     <!-- The sentence about the key's state, directly under its own subject. -->
@@ -1160,6 +1165,7 @@
     {/if}
     {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
   </div>
+  {/if}
 {/if}
 <!-- Outside `{#if settings}` on purpose: a mount that rejects never sets
      `settings`, and an error paragraph inside that block could not be shown in

@@ -1031,11 +1031,7 @@ export type DownloadError =
   | { kind: 'noSpace'; needed: number; free: number }
   | { kind: 'cancelled' }
   | { kind: 'failed'; message: string };
-export type ProviderSwitch = { choice: ProviderChoice; retired: RetiredSpace[] };
 
-export const providerChoice = () => invoke<ProviderChoice>('provider_choice');
-export const setProviderChoice = (choice: ProviderChoice, existingVectors: ExistingVectors) =>
-  invoke<ProviderSwitch>('set_provider_choice', { choice, existingVectors });
 export const mnemaAvailable = () => invoke<boolean>('mnema_available');
 export const localModels = () => invoke<LocalModelRow[]>('local_models');
 export const downloadModel = (id: LocalModelId) => invoke<void>('download_model', { id });

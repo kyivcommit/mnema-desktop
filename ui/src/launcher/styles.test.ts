@@ -25,7 +25,6 @@ beforeEach(() => {
         embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
     });
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
-    if (cmd === 'provider_choice') return Promise.resolve('openRouter');
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
     if (cmd === 'ask') return Promise.resolve(generated);

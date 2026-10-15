@@ -9,8 +9,6 @@ import type {
 } from '../lib/ipc';
 
 const mnemaAvailable = vi.fn();
-const providerChoice = vi.fn();
-const setProviderChoice = vi.fn();
 const localModels = vi.fn();
 const downloadModel = vi.fn();
 const cancelDownload = vi.fn();
@@ -21,8 +19,6 @@ const unlisten = vi.fn();
 let deliver: ((p: LocalModelProgress) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   mnemaAvailable: (...a: unknown[]) => mnemaAvailable(...a),
-  providerChoice: (...a: unknown[]) => providerChoice(...a),
-  setProviderChoice: (...a: unknown[]) => setProviderChoice(...a),
   localModels: (...a: unknown[]) => localModels(...a),
   downloadModel: (...a: unknown[]) => downloadModel(...a),
   cancelDownload: (...a: unknown[]) => cancelDownload(...a),
@@ -43,7 +39,7 @@ const rows = (embed: LocalModelRow['state'], chat: LocalModelRow['state']): Loca
 ];
 const READY = { kind: 'ready' } as const;
 
-function settings(embeddingModel: string | null, everywhere: number): ModelSettings {
+function settings(embeddingModel: string | null, everywhere: number, over: Partial<ModelSettings> = {}): ModelSettings {
   return {
     key: { kind: 'absent' },
     index: {
@@ -53,6 +49,7 @@ function settings(embeddingModel: string | null, everywhere: number): ModelSetti
     },
     platform: 'mac',
     ...ROLE_FIELDS,
+    ...over,
   };
 }
 
@@ -69,60 +66,35 @@ async function mount(over: {
   available?: boolean; choice?: ProviderChoice; rows?: LocalModelRow[]; settings?: ModelSettings;
 } = {}) {
   mnemaAvailable.mockResolvedValue(over.available ?? true);
-  providerChoice.mockResolvedValue(over.choice ?? 'openRouter');
   localModels.mockResolvedValue(over.rows ?? ABSENT);
-  modelSettings.mockResolvedValue(over.settings ?? settings('baai/bge-m3', 0));
+  modelSettings.mockResolvedValue(over.settings ?? settings('baai/bge-m3', 0, over.choice ? { roles: { embed: over.choice, chat: over.choice } } : {}));
   const view = render(Provider, { children: keyField });
   await settle();
   return view;
 }
 
+Element.prototype.scrollIntoView = vi.fn();
 const MNEMA = 'Mnema (локально)';
-const dropdown = () => screen.getByRole('combobox', { name: 'Провайдер:' }) as HTMLSelectElement;
-const optionNames = () => within(dropdown()).getAllByRole('option').map((o) => o.textContent);
-const pick = (v: string) => fireEvent.change(dropdown(), { target: { value: v } });
+const picker = () => screen.getByRole('combobox', { name: 'Провайдер:' });
+async function pick(name: string) {
+  await fireEvent.click(picker());
+  await fireEvent.click(screen.getByRole('option', { name: new RegExp(name) }));
+}
+const dotOf = (name: string) => {
+  const o = screen.getAllByRole('option').find((x) => x.textContent?.includes(name))!;
+  return o.querySelector('[data-configured]')!.getAttribute('data-configured');
+};
 
 beforeEach(() => {
-  for (const f of [mnemaAvailable, providerChoice, setProviderChoice, localModels, downloadModel,
+  for (const f of [mnemaAvailable, localModels, downloadModel,
     cancelDownload, removeModel, modelSettings, unlisten]) f.mockReset();
   deliver = null;
-  setProviderChoice.mockImplementation(async (choice: ProviderChoice) => ({ choice, retired: [] }));
   downloadModel.mockResolvedValue(undefined);
   cancelDownload.mockResolvedValue(undefined);
   removeModel.mockResolvedValue(undefined);
   setLocale('uk');
 });
 afterEach(() => { cleanup(); setLocale('en'); });
-
-test('the provider is chosen in the Provider dropdown', async () => {
-  await mount({ available: false });
-  // Unavailable: the dropdown offers OpenRouter only.
-  expect(optionNames()).toEqual(['OpenRouter']);
-  cleanup();
-  await mount({ available: true });
-  expect(screen.queryByRole('radio', { name: MNEMA })).toBeNull();
-  expect(optionNames()).toEqual(['OpenRouter', MNEMA]);
-  expect(dropdown().value).toBe('openRouter');
-  await pick('mnema');
-  await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep'));
-  expect(await screen.findByRole('group', { name: 'Модель відповідей' })).toBeTruthy();
-  expect(dropdown().value).toBe('mnema');
-});
-
-test('choosing mnema hides the key field', async () => {
-  await mount();
-  // Both directions: under OpenRouter the key field is there and the hint is not.
-  expect(screen.getByLabelText('Ключ:')).toBeTruthy();
-  expect(screen.queryByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeNull();
-  await pick('mnema');
-  await waitFor(() => expect(screen.queryByLabelText('Ключ:')).toBeNull());
-  expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep');
-  expect(screen.getByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeTruthy();
-  // And back: the key field returns with the choice.
-  await pick('openRouter');
-  await waitFor(() => expect(screen.getByLabelText('Ключ:')).toBeTruthy());
-  expect(setProviderChoice).toHaveBeenLastCalledWith('openRouter', 'keep');
-});
 
 // A mounted component with Mnema already chosen: the rows are what is under test.
 const mountRows = (r: LocalModelRow[]) => mount({ choice: 'mnema', rows: r });
@@ -186,50 +158,6 @@ test('no space shows needed and free', async () => {
   await waitFor(() => expect(chatRow().textContent).not.toContain('Потрібно'));
 });
 
-test('green dot only when both ready', async () => {
-  const dot = { name: 'Моделі Mnema завантажені' };
-  await mountRows(rows(READY, { kind: 'absent' }));
-  await screen.findByRole('group', { name: 'Модель відповідей' });
-  expect(screen.queryByRole('status', dot)).toBeNull();
-  cleanup();
-  await mountRows(rows({ kind: 'absent' }, READY));
-  await screen.findByRole('group', { name: 'Модель відповідей' });
-  expect(screen.queryByRole('status', dot)).toBeNull();
-  cleanup();
-  await mountRows(rows(READY, READY));
-  expect(await screen.findByRole('status', dot)).toBeTruthy();
-});
-
-test('switching between bge-m3 providers asks no reindex', async () => {
-  await mount({ settings: settings('baai/bge-m3', 120) });
-  await pick('mnema');
-  await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'keep'));
-  expect(screen.queryByText('Змінити модель ембедингу?')).toBeNull();
-});
-
-test('switching from another embedding model asks first, and discards only on yes', async () => {
-  await mount({ settings: settings('openai/text-embedding-3-small', 42) });
-  await pick('mnema');
-  expect(await screen.findByText('Змінити модель ембедингу?')).toBeTruthy();
-  // The existing count-based sentence, and the existing sentence about the loss.
-  expect(screen.getByText(/42 ембединги в усіх векторних просторах/)).toBeTruthy();
-  expect(screen.getByText(/зміна їх відкидає/)).toBeTruthy();
-  // Nothing has been written, and the provider has not moved.
-  expect(setProviderChoice).not.toHaveBeenCalled();
-  // No is no.
-  await fireEvent.click(screen.getByRole('button', { name: 'Не змінювати модель' }));
-  expect(screen.queryByText('Змінити модель ембедингу?')).toBeNull();
-  expect(setProviderChoice).not.toHaveBeenCalled();
-  expect(screen.getByLabelText('Ключ:')).toBeTruthy();
-  // Yes retires the old space, and says how much went.
-  setProviderChoice.mockResolvedValueOnce({ choice: 'mnema', retired: [{ spaceId: 1, embeddedChunks: 42 }] });
-  await pick('mnema');
-  await fireEvent.click(await screen.findByRole('button', { name: 'Відкинути ембединги' }));
-  await waitFor(() => expect(setProviderChoice).toHaveBeenCalledWith('mnema', 'discard'));
-  expect(await screen.findByText('Зміна відкинула 42 ембединги.')).toBeTruthy();
-  expect(screen.queryByLabelText('Ключ:')).toBeNull();
-});
-
 test('cancelling one of two downloads names only that model', async () => {
   await mountRows(ABSENT);
   downloadModel.mockImplementation(() => new Promise(() => {}));
@@ -268,15 +196,55 @@ test('a cancel the backend refuses to take is not an unhandled rejection', async
   expect(await screen.findByRole('alert')).toBeTruthy();
 });
 
-// Review of 36436d7, Minor 3: `available` and `choice` arrive asynchronously and
-// the Mnema option exists only once `available` is true, so the select's value
-// for a saved Mnema choice is a state worth building.
-test('a saved Mnema choice shows in the dropdown', async () => {
-  await mount({ choice: 'mnema' });
-  expect(dropdown().value).toBe('mnema');
-  expect(within(dropdown()).getByRole('option', { name: MNEMA })).toHaveProperty('selected', true);
-  // And the other direction: a saved OpenRouter choice does not.
+test('the dot follows configured', async () => {
+  await mount({ settings: settings('baai/bge-m3', 0, { configured: { openRouter: true, mnemaEmbed: false, mnemaChat: false } }) });
+  await fireEvent.click(picker());
+  expect(dotOf('OpenRouter')).toBe('true');
+  expect(dotOf('Mnema')).toBe('false');
   cleanup();
-  await mount({ choice: 'openRouter' });
-  expect(dropdown().value).toBe('openRouter');
+  await mount({ settings: settings('baai/bge-m3', 0, { configured: { openRouter: false, mnemaEmbed: false, mnemaChat: true } }) });
+  await fireEvent.click(picker());
+  expect(dotOf('OpenRouter')).toBe('false');
+  expect(dotOf('Mnema')).toBe('true');
+});
+
+test('the dot has a spoken state too', async () => {
+  await mount();
+  await fireEvent.click(picker());
+  const o = screen.getAllByRole('option').find((x) => x.textContent?.includes('OpenRouter'))!;
+  expect(o.textContent).toContain('Налаштовано');
+  expect(screen.getAllByRole('option').find((x) => x.textContent?.includes('Mnema'))!.textContent).toContain('Не налаштовано');
+});
+
+test('mnema rows render inside the card', async () => {
+  await mount();
+  expect(screen.queryByRole('group', { name: 'Модель відповідей' })).toBeNull();
+  await pick('Mnema');
+  const card = await screen.findByTestId('provider-card');
+  expect(within(card).getByRole('group', { name: 'Модель пошуку' })).toBeTruthy();
+  expect(within(card).getByRole('group', { name: 'Модель відповідей' })).toBeTruthy();
+  expect(within(card).getByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeTruthy();
+});
+
+test('choosing a provider writes nothing', async () => {
+  await mount();
+  await pick('Mnema');
+  await pick('OpenRouter');
+  for (const f of [downloadModel, cancelDownload, removeModel]) expect(f).not.toHaveBeenCalled();
+  expect(modelSettings).toHaveBeenCalledTimes(1);
+});
+
+test('the card starts on the chat role provider', async () => {
+  await mount({ choice: 'mnema' });
+  expect(await screen.findByTestId('provider-card')).toBeTruthy();
+  expect(picker().textContent).toContain('Mnema');
+});
+
+test('Mnema is offered only when available', async () => {
+  await mount({ available: false });
+  expect((picker() as HTMLButtonElement).disabled).toBe(true);
+  cleanup();
+  await mount({ available: true });
+  await fireEvent.click(picker());
+  expect(screen.getAllByRole('option')).toHaveLength(2);
 });

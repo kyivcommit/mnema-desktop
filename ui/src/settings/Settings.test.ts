@@ -105,10 +105,8 @@ vi.mock('../lib/ipc', () => ({
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.
   mnemaAvailable: () => Promise.resolve(false),
-  providerChoice: () => Promise.resolve('openRouter'),
   localModels: () => Promise.resolve([]),
   listenLocalModelProgress: () => Promise.resolve(() => {}),
-  setProviderChoice: vi.fn(),
   downloadModel: vi.fn(),
   cancelDownload: vi.fn(),
   removeModel: vi.fn(),
@@ -402,7 +400,7 @@ test('a person reading the screen sees a real window, not a bare nav', async () 
   // pressed tab can share the panel's border — one more space before
   // "Embedding", the wrapper's own indentation, and no new word.
   expect(panel()?.textContent).toBe(
-    ' Models Provider: OpenRouter Key: An OpenRouter key lets this application reach the models.'
+    ' Models Provider: Not configured, OpenRouter      Key: An OpenRouter key lets this application reach the models.'
     + ' Create one in your OpenRouter account and paste it here.  Save     '
     + ' Embedding, Not configured Chat, Not configured   The provider does not currently list any models for this role.'
     + ' Not connected yet — add a key and choose an embedding model to enable content search.'
