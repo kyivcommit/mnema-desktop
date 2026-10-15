@@ -12968,7 +12968,10 @@ fn the_status_poll_under_mnema_starts_no_process() {
     state.open_index().unwrap();
     let webview = main_webview(&app);
     let status = call(&webview, "provider_status", json!({})).expect("status");
-    assert_eq!(status, json!({ "kind": "ok" }));
+    assert_eq!(
+        status,
+        json!({ "embed": { "kind": "ok" }, "chat": { "kind": "ok" } })
+    );
     let spawns = std::fs::read_to_string(&log)
         .unwrap_or_default()
         .lines()

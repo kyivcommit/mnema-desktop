@@ -1018,8 +1018,13 @@ mod tests {
         );
         assert_eq!(
             crate::provider_status::status(&state),
-            ProviderStatus::NotConfigured {
-                missing: Missing::LocalModels
+            crate::provider_status::RoleStatuses {
+                embed: ProviderStatus::NotConfigured {
+                    missing: Missing::LocalModels
+                },
+                chat: ProviderStatus::NotConfigured {
+                    missing: Missing::LocalModels
+                },
             }
         );
     }

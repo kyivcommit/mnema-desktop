@@ -453,6 +453,11 @@ impl AppState {
         }
     }
 
+    /// Which providers are set up for which role right now.
+    pub fn configured_providers(&self) -> crate::provider::Configured {
+        self.provider().configured()
+    }
+
     pub fn roles(&self) -> crate::provider::Roles {
         self.provider().roles()
     }

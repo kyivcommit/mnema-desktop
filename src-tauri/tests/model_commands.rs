@@ -569,6 +569,7 @@ fn nothing_that_crosses_to_the_window_repeats_the_key() {
 #[test]
 fn the_list_of_embedding_models_marks_what_cannot_be_chosen() {
     let fx = Fixture::with_provider_listing(TWO_EMBEDDERS);
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
 
     let catalogue = provider_models(fx.state(), "embedding".into()).expect("listed");
 
@@ -580,14 +581,14 @@ fn the_list_of_embedding_models_marks_what_cannot_be_chosen() {
     let refused: Vec<_> = catalogue
         .entries
         .iter()
-        .filter(|e| e.refusal.is_some())
+        .filter(|e| e.entry.refusal.is_some())
         .collect();
     assert_eq!(
         refused.len(),
         1,
         "the 512-token model is listed and marked, not dropped"
     );
-    assert_eq!(refused[0].id, "thenlper/gte-base");
+    assert_eq!(refused[0].entry.id, "thenlper/gte-base");
 }
 
 #[test]
@@ -2835,12 +2836,24 @@ fn configured(run: Vec<Reply>) -> Fixture {
     fx
 }
 
+/// Puts both roles on OpenRouter as stored, whatever is set up: the tests that
+/// store a key by hand skip the migration that would otherwise decide.
+fn roles_on_open_router(fx: &Fixture, chat: bool) {
+    use mnema_desktop::provider::{ProviderChoice, Role};
+    let state = fx.state();
+    let dir = state.data_dir();
+    mnema_desktop::prefs::write_role(dir, Role::Embed, Some(ProviderChoice::OpenRouter)).unwrap();
+    let c = chat.then_some(ProviderChoice::OpenRouter);
+    mnema_desktop::prefs::write_role(dir, Role::Chat, c).unwrap();
+}
+
 #[test]
 fn no_key_is_not_configured_and_asks_nobody() {
     let fx = Fixture::with_provider_rejecting_the_key();
     fx.open_index();
+    roles_on_open_router(&fx, true);
     assert_eq!(
-        provider_status(fx.state()),
+        provider_status(fx.state()).embed,
         ProviderStatus::NotConfigured {
             missing: Missing::Key
         }
@@ -2852,9 +2865,11 @@ fn no_key_is_not_configured_and_asks_nobody() {
 fn a_key_with_an_unread_index_misses_the_embedding_model() {
     let fx = Fixture::with_provider_rejecting_the_key();
     mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
+    // Chat stays empty: it needs no index, so on OpenRouter it would probe.
+    roles_on_open_router(&fx, false);
     // The index was never opened: `with_index` fails.
     assert_eq!(
-        provider_status(fx.state()),
+        provider_status(fx.state()).embed,
         ProviderStatus::NotConfigured {
             missing: Missing::EmbeddingModel
         }
@@ -2862,7 +2877,7 @@ fn a_key_with_an_unread_index_misses_the_embedding_model() {
     // Opened, but no model chosen.
     fx.open_index();
     assert_eq!(
-        provider_status(fx.state()),
+        provider_status(fx.state()).embed,
         ProviderStatus::NotConfigured {
             missing: Missing::EmbeddingModel
         }
@@ -2873,7 +2888,7 @@ fn a_key_with_an_unread_index_misses_the_embedding_model() {
 #[test]
 fn a_working_key_and_model_is_ok() {
     let fx = configured(vec![Reply::ok(CREDITS_BODY)]);
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
 }
 
 #[test]
@@ -2882,7 +2897,7 @@ fn a_refusing_provider_is_unreachable_and_the_reason_does_not_carry_the_key() {
         401,
         &format!(r#"{{"error":{{"message":"bad {KEY}"}}}}"#),
     )]);
-    match provider_status(fx.state()) {
+    match provider_status(fx.state()).embed {
         ProviderStatus::Unreachable { reason } => {
             // Positive control: the provider's body does reach the reason, so
             // the absence of the key below is redaction and not silence.
@@ -2902,9 +2917,9 @@ fn a_refusing_provider_is_unreachable_and_the_reason_does_not_carry_the_key() {
 #[test]
 fn the_second_call_within_a_minute_asks_nobody() {
     let fx = configured(vec![Reply::ok(CREDITS_BODY)]);
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(fx.provider_request().is_some(), "the first call asks");
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(
         fx.provider_request().is_none(),
         "the second call must come from the cache"
@@ -2914,20 +2929,24 @@ fn the_second_call_within_a_minute_asks_nobody() {
 #[test]
 fn forgetting_the_key_and_entering_it_again_asks_again() {
     let fx = configured(vec![Reply::ok(CREDITS_BODY), Reply::ok(CREDITS_BODY)]);
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(fx.provider_request().is_some());
 
     forget_key(fx.state()).unwrap();
+    // The roles on OpenRouter went with the key: empty, not "no key".
     assert_eq!(
-        provider_status(fx.state()),
+        provider_status(fx.state()).embed,
         ProviderStatus::NotConfigured {
-            missing: Missing::Key
+            missing: Missing::Role
         }
     );
     // The key comes back through the store, not `set_key`, which would itself
     // clear the cache and hide what `forget_key` did.
     mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    // `forget_key` emptied the roles that were on OpenRouter; choosing again is
+    // the person's act, done here directly.
+    roles_on_open_router(&fx, true);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(
         fx.provider_request().is_some(),
         "the cache outlived forget_key"
@@ -2939,7 +2958,7 @@ fn a_store_that_will_not_answer_is_unreachable_not_a_missing_key_and_is_not_cach
     let fx = Fixture::with_a_credential_store_that_will_not_answer();
     fx.open_index();
     for _ in 0..2 {
-        match provider_status(fx.state()) {
+        match provider_status(fx.state()).embed {
             ProviderStatus::Unreachable { reason } => assert!(!reason.is_empty()),
             other => panic!("an unreadable store must not read as no key: {other:?}"),
         }
@@ -2954,12 +2973,12 @@ fn entering_a_key_again_makes_the_next_status_ask_again() {
         Reply::ok(CREDITS_BODY), // set_key's own check
         Reply::ok(CREDITS_BODY), // the status after it
     ]);
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(fx.provider_request().is_some());
     set_key(fx.state(), KEY.into()).expect("accepted");
     // Whatever set_key itself asked, then drop the queue so the next request is ours.
     while fx.provider_request().is_some() {}
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(
         fx.provider_request().is_some(),
         "set_key left the cache standing"
@@ -2974,7 +2993,7 @@ fn choosing_a_model_makes_the_next_status_ask_again() {
         Reply::ok(&vectors),
         Reply::ok(CREDITS_BODY),
     ]);
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(fx.provider_request().is_some());
     set_embedding_model(
         fx.state(),
@@ -2984,11 +3003,45 @@ fn choosing_a_model_makes_the_next_status_ask_again() {
     )
     .expect("chosen");
     while fx.provider_request().is_some() {}
-    assert_eq!(provider_status(fx.state()), ProviderStatus::Ok);
+    assert_eq!(provider_status(fx.state()).embed, ProviderStatus::Ok);
     assert!(
         fx.provider_request().is_some(),
         "set_embedding_model left the cache standing"
     );
+}
+
+#[test]
+fn status_is_per_role() {
+    let fx = configured(vec![Reply::ok(CREDITS_BODY)]);
+    // The chat role has no provider: it says so, whatever the embedding role is on.
+    mnema_desktop::prefs::write_role(
+        fx.state().data_dir(),
+        mnema_desktop::provider::Role::Chat,
+        None,
+    )
+    .unwrap();
+    let both = provider_status(fx.state());
+    assert_eq!(both.embed, ProviderStatus::Ok);
+    assert_eq!(
+        both.chat,
+        ProviderStatus::NotConfigured {
+            missing: Missing::Role
+        }
+    );
+}
+
+#[test]
+fn two_open_router_roles_share_one_probe() {
+    // A refusal is not cached, so only sharing within the call keeps it to one.
+    let fx = configured(vec![Reply::status(401, r#"{"error":{"message":"no"}}"#)]);
+    let both = provider_status(fx.state());
+    assert!(
+        matches!(both.embed, ProviderStatus::Unreachable { .. }),
+        "{both:?}"
+    );
+    assert_eq!(both.embed, both.chat);
+    assert!(fx.provider_request().is_some(), "the probe");
+    assert!(fx.provider_request().is_none(), "a second probe was made");
 }
 
 /// One model that takes tools and one that does not, both writing text.
@@ -3001,11 +3054,15 @@ const TWO_CHATTERS: &str = r#"{"data":[
    "architecture":{"output_modalities":["text"]}}
 ]}"#;
 
-fn refusal_of(c: &mnema_provider::Catalogue, id: &str) -> Option<mnema_provider::Refusal> {
+fn refusal_of(
+    c: &mnema_desktop::models::RoleCatalogue,
+    id: &str,
+) -> Option<mnema_provider::Refusal> {
     c.entries
         .iter()
-        .find(|e| e.id == id)
+        .find(|e| e.entry.id == id)
         .expect("listed")
+        .entry
         .refusal
         .clone()
 }
@@ -3013,6 +3070,7 @@ fn refusal_of(c: &mnema_provider::Catalogue, id: &str) -> Option<mnema_provider:
 #[test]
 fn with_tools_on_the_chat_list_refuses_models_without_them() {
     let fx = Fixture::with_provider_listing(TWO_CHATTERS);
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
 
     let c = provider_models(fx.state(), "chat".into()).expect("listed");
 
@@ -3030,6 +3088,7 @@ fn with_tools_on_the_chat_list_refuses_models_without_them() {
 #[test]
 fn with_tools_off_nothing_is_refused_for_tools() {
     let fx = Fixture::with_provider_listing(TWO_CHATTERS);
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
     assert!(!set_chat_tools(fx.state(), false).expect("stored"));
     assert!(
         !chat_tools(fx.state().data_dir()),
@@ -3044,13 +3103,14 @@ fn with_tools_off_nothing_is_refused_for_tools() {
 #[test]
 fn the_embedding_list_ignores_the_tools_switch() {
     let fx = Fixture::with_provider_listing(TWO_EMBEDDERS);
+    mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
 
     let c = provider_models(fx.state(), "embedding".into()).expect("listed");
 
     assert!(
         c.entries
             .iter()
-            .all(|e| e.refusal != Some(mnema_provider::Refusal::NoToolUse)),
+            .all(|e| e.entry.refusal != Some(mnema_provider::Refusal::NoToolUse)),
         "an embedder was refused for tools"
     );
     assert_eq!(

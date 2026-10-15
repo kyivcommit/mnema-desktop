@@ -247,19 +247,97 @@ fn role_from(name: &str) -> Result<Role, Error> {
 /// provider has none" from "something upstream ate them" only while both
 /// numbers are still here.
 #[tauri::command(async)]
-pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<Catalogue, Error> {
+pub fn provider_models(state: State<'_, AppState>, role: String) -> Result<RoleCatalogue, Error> {
     let role = role_from(&role)?;
-    let mut catalogue = mnema_provider::list_models(state.openrouter_base(), None, role)?;
-    if role == Role::Chat && crate::prefs::chat_tools(state.data_dir()) {
-        for e in catalogue
-            .entries
-            .iter_mut()
-            .filter(|e| !e.tools && e.refusal.is_none())
-        {
-            e.refusal = Some(Refusal::NoToolUse);
+    merged_catalogue(state.configured_providers(), role, || {
+        let mut catalogue = mnema_provider::list_models(state.openrouter_base(), None, role)?;
+        if role == Role::Chat && crate::prefs::chat_tools(state.data_dir()) {
+            for e in catalogue
+                .entries
+                .iter_mut()
+                .filter(|e| !e.tools && e.refusal.is_none())
+            {
+                e.refusal = Some(Refusal::NoToolUse);
+            }
         }
+        Ok(catalogue)
+    })
+}
+
+/// One model of a role's merged list, with the provider that serves it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleModel {
+    pub provider: ProviderChoice,
+    #[serde(flatten)]
+    pub entry: mnema_provider::ModelEntry,
+}
+
+/// [`Catalogue`] with every entry carrying its provider.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleCatalogue {
+    pub entries: Vec<RoleModel>,
+    pub unreadable: usize,
+    pub unreadable_records: Vec<mnema_provider::UnreadableRecord>,
+}
+
+/// The one model Mnema serves for a role, when it is set up for it. Built
+/// locally: nothing is asked of any network. Rerank has no local model.
+fn mnema_entry(role: Role) -> Option<mnema_provider::ModelEntry> {
+    use mnema_provider::{InputLimit, ModelEntry, Price};
+    let (id, name) = match role {
+        Role::Embedding => (crate::provider::LOCAL_EMBED_MODEL, "BAAI: bge-m3"),
+        Role::Chat => (crate::provider::LOCAL_CHAT_MODEL, "Google: Gemma 4 E2B"),
+        Role::Rerank => return None,
+    };
+    Some(ModelEntry {
+        id: id.into(),
+        name: name.into(),
+        input_limit: InputLimit::NotStated,
+        price: Price::Known { amount: 0.0 },
+        output_price: Price::Known { amount: 0.0 },
+        refusal: None,
+        tools: false,
+    })
+}
+
+/// Mnema's entry first, then OpenRouter's list, each only for a provider that
+/// is set up for the role. `open_router` is not asked (no network) when it is
+/// not configured.
+fn merged_catalogue(
+    configured: crate::provider::Configured,
+    role: Role,
+    open_router: impl FnOnce() -> Result<Catalogue, Error>,
+) -> Result<RoleCatalogue, Error> {
+    use crate::provider::Role as Served;
+    let served = match role {
+        Role::Embedding => Some(Served::Embed),
+        Role::Chat => Some(Served::Chat),
+        Role::Rerank => None,
+    };
+    let mut out = RoleCatalogue {
+        entries: Vec::new(),
+        unreadable: 0,
+        unreadable_records: Vec::new(),
+    };
+    if served.is_some_and(|r| configured.serves(ProviderChoice::Mnema, r)) {
+        out.entries.extend(mnema_entry(role).map(|entry| RoleModel {
+            provider: ProviderChoice::Mnema,
+            entry,
+        }));
     }
-    Ok(catalogue)
+    if configured.open_router {
+        let c = open_router()?;
+        out.unreadable = c.unreadable;
+        out.unreadable_records = c.unreadable_records;
+        out.entries
+            .extend(c.entries.into_iter().map(|entry| RoleModel {
+                provider: ProviderChoice::OpenRouter,
+                entry,
+            }));
+    }
+    Ok(out)
 }
 
 /// Checks the model, then records it. The dimension written to the index is the
@@ -1456,6 +1534,114 @@ pub fn model_settings(state: State<'_, AppState>) -> ModelSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn configured(
+        open_router: bool,
+        mnema_embed: bool,
+        mnema_chat: bool,
+    ) -> crate::provider::Configured {
+        crate::provider::Configured {
+            open_router,
+            mnema_embed,
+            mnema_chat,
+        }
+    }
+
+    fn or_entry(id: &str) -> mnema_provider::ModelEntry {
+        let mut e = mnema_entry(Role::Chat).unwrap();
+        e.id = id.into();
+        e.tools = true;
+        e
+    }
+
+    fn or_list(ids: &[&str]) -> Result<Catalogue, Error> {
+        Ok(Catalogue {
+            entries: ids.iter().map(|id| or_entry(id)).collect(),
+            unreadable: 0,
+            unreadable_records: Vec::new(),
+        })
+    }
+
+    /// What OpenRouter would list if it were asked; the tests assert it is not
+    /// in the result when its provider is not set up.
+    fn never_asked() -> Result<Catalogue, Error> {
+        or_list(&["leaked"])
+    }
+
+    #[test]
+    fn no_configured_provider_lists_nothing() {
+        for role in [Role::Embedding, Role::Chat, Role::Rerank] {
+            let c = merged_catalogue(configured(false, false, false), role, never_asked).unwrap();
+            assert!(c.entries.is_empty(), "{role:?}: {:?}", c.entries);
+        }
+    }
+
+    #[test]
+    fn a_keyless_open_router_lists_nothing() {
+        // Mnema serves chat only here: the embedding list is empty, not OpenRouter's.
+        let c =
+            merged_catalogue(configured(false, false, true), Role::Embedding, never_asked).unwrap();
+        assert!(c.entries.is_empty());
+        // And the chat list is Mnema's alone.
+        let c = merged_catalogue(configured(false, false, true), Role::Chat, never_asked).unwrap();
+        assert_eq!(c.entries.len(), 1);
+        assert_eq!(c.entries[0].provider, ProviderChoice::Mnema);
+    }
+
+    #[test]
+    fn mnema_entry_comes_first_and_is_never_tool_filtered() {
+        let c = merged_catalogue(configured(true, true, true), Role::Chat, || {
+            or_list(&["vendor/a", "vendor/b"])
+        })
+        .unwrap();
+        let ids: Vec<_> = c
+            .entries
+            .iter()
+            .map(|e| (e.provider, e.entry.id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (ProviderChoice::Mnema, crate::provider::LOCAL_CHAT_MODEL),
+                (ProviderChoice::OpenRouter, "vendor/a"),
+                (ProviderChoice::OpenRouter, "vendor/b"),
+            ]
+        );
+        let m = &c.entries[0].entry;
+        assert_eq!((m.tools, m.refusal.clone()), (false, None));
+        assert_eq!(m.name, "Google: Gemma 4 E2B");
+        assert_eq!(m.price, mnema_provider::Price::Known { amount: 0.0 });
+        let e = merged_catalogue(configured(true, true, true), Role::Embedding, || {
+            or_list(&["vendor/a"])
+        })
+        .unwrap();
+        assert_eq!(e.entries[0].entry.id, crate::provider::LOCAL_EMBED_MODEL);
+        assert_eq!(e.entries[0].entry.name, "BAAI: bge-m3");
+    }
+
+    #[test]
+    fn a_role_lists_only_the_mnema_model_that_is_ready_for_it() {
+        let c = merged_catalogue(configured(true, true, false), Role::Chat, || {
+            or_list(&["x"])
+        })
+        .unwrap();
+        assert!(
+            c.entries
+                .iter()
+                .all(|e| e.provider == ProviderChoice::OpenRouter)
+        );
+    }
+
+    #[test]
+    fn a_role_model_serialises_flat_with_its_provider() {
+        let m = RoleModel {
+            provider: ProviderChoice::Mnema,
+            entry: mnema_entry(Role::Embedding).unwrap(),
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["provider"], "mnema");
+        assert_eq!(v["id"], crate::provider::LOCAL_EMBED_MODEL);
+    }
 
     /// Every role the provider has is reachable from the window — checked by the
     /// compiler and not by counting to three.
