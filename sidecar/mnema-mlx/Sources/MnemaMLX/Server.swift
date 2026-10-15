@@ -206,6 +206,7 @@ public final class Server {
         case "/mnema/unload":
             let names = json["models"] as? [String] ?? ["chat", "embed"]
             work.submit(urgent: false) {
+                self.stubTrace("ran unload")
                 self.models?.engine.unload(names)
                 self.setLoaded(names, false)
                 reply(Response(204))
@@ -263,6 +264,7 @@ public final class Server {
         }
         stubTrace("started embed")
         if embedDelayMs > 0 { usleep(UInt32(embedDelayMs) * 1000) }
+        stubTrace("finished embed")
         let data = inputs.indices.map { i -> [String: Any] in
             var v = [Double](repeating: 0, count: 1024)
             if i < v.count { v[i] = 1.0 }
