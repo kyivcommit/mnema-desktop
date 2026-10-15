@@ -32,7 +32,8 @@
       return acc;
     }, []),
   );
-  const domId = (id: string) => `${uid}-${id}`;
+  // Index-based: raw ids may hold whitespace, which is not a valid IDREF.
+  const domId = (id: string) => `${uid}-${options.findIndex((o) => o.id === id)}`;
 
   async function show() {
     if (disabled) return;
@@ -56,6 +57,8 @@
   }
   function onkeydown(e: KeyboardEvent) {
     const i = enabled.findIndex((o) => o.id === active);
+    // In the search box Home/End move the caret.
+    if (open && e.target === input && (e.key === 'Home' || e.key === 'End')) return;
     if (!open) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); void show(); }
       return;
@@ -72,6 +75,13 @@
   function outside(e: MouseEvent) {
     if (open && root && !root.contains(e.target as Node)) open = false;
   }
+  function focusout(e: FocusEvent) {
+    const to = e.relatedTarget as Node | null;
+    if (open && to && root && !root.contains(to)) open = false;
+  }
+  $effect(() => {
+    if (open && active) document.getElementById(domId(active))?.scrollIntoView({ block: 'nearest' });
+  });
   // Typing can filter the active option out of the list; keep it on a visible one.
   $effect(() => {
     if (open && !enabled.some((o) => o.id === active)) active = enabled[0]?.id ?? null;
@@ -80,7 +90,7 @@
 
 <svelte:window onmousedown={outside} />
 
-<div class="picker" bind:this={root} {onkeydown} role="presentation">
+<div class="picker" bind:this={root} {onkeydown} onfocusout={focusout} role="presentation">
   <button
     type="button" role="combobox" class="picker-button" bind:this={button}
     aria-haspopup="listbox" aria-expanded={open} aria-labelledby={labelledby}
@@ -151,7 +161,7 @@
     position: absolute; z-index: 10; left: 0; right: 0; margin-top: 4px; max-height: 320px; overflow-y: auto;
     border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow);
   }
-  .picker-search { box-sizing: border-box; width: 100%; padding: 8px 13px; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); font: inherit; color: var(--ink); }
+  .picker-search { position: sticky; top: 0; box-sizing: border-box; width: 100%; padding: 8px 13px; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); font: inherit; color: var(--ink); }
   .picker-group { padding: 6px 13px 2px; font-size: 11.5px; color: var(--ink-soft); }
   .picker-option { padding: 7px 13px; cursor: pointer; font-size: 13.5px; }
   .picker-option.active { background: var(--surface-2); }

@@ -4,7 +4,9 @@ import { expect, test, vi, afterEach } from 'vitest';
 import Picker from './Picker.svelte';
 import { matches } from './picker';
 
-afterEach(cleanup);
+const scroll = vi.fn();
+Element.prototype.scrollIntoView = scroll;
+afterEach(() => { cleanup(); scroll.mockClear(); });
 
 const options = [
   { id: 'a', label: 'Alpha', aside: 'openrouter', group: 'G1' },
@@ -93,4 +95,53 @@ test('closed_button_shows_label_aside_or_placeholder', () => {
   cleanup();
   setup({ value: 'zzz' });
   expect(screen.getByRole('combobox').textContent).toContain('Pick');
+});
+
+test('tab_to_an_outside_element_closes_the_list', async () => {
+  const { button } = setup();
+  const other = document.createElement('button');
+  document.body.appendChild(other);
+  await fireEvent.click(button);
+  await fireEvent.focusOut(button, { relatedTarget: other });
+  expect(screen.queryByRole('listbox')).toBeNull();
+  expect(button.getAttribute('aria-expanded')).toBe('false');
+  other.remove();
+});
+
+test('the_active_option_is_scrolled_into_view', async () => {
+  const { button } = setup();
+  await fireEvent.click(button);
+  scroll.mockClear();
+  await fireEvent.keyDown(button, { key: 'End' });
+  const el = document.getElementById(button.getAttribute('aria-activedescendant')!)!;
+  expect(scroll.mock.contexts.at(-1)).toBe(el);
+  expect(scroll).toHaveBeenLastCalledWith({ block: 'nearest' });
+});
+
+test('home_and_end_are_left_to_the_search_input', async () => {
+  const { button } = setup({ searchable: true });
+  await fireEvent.click(button);
+  const input = screen.getByRole('searchbox');
+  const before = input.getAttribute('aria-activedescendant');
+  const ev = await fireEvent.keyDown(input, { key: 'End' });
+  expect(ev).toBe(true); // not preventDefault-ed
+  expect(input.getAttribute('aria-activedescendant')).toBe(before);
+});
+
+test('option_ids_with_whitespace_give_valid_dom_ids', async () => {
+  const { button } = setup({ options: [{ id: 'x y/z', label: 'Spacey' }] });
+  await fireEvent.click(button);
+  expect(screen.getByRole('option').id).not.toMatch(/\s/);
+});
+
+test('enter_with_no_match_does_nothing_and_activedescendant_stays_visible', async () => {
+  const { button, onchange } = setup({ searchable: true });
+  await fireEvent.click(button);
+  const input = screen.getByRole('searchbox');
+  await fireEvent.input(input, { target: { value: 'gam' } });
+  const id = input.getAttribute('aria-activedescendant')!;
+  expect(document.getElementById(id)!.textContent).toContain('Gamma');
+  await fireEvent.input(input, { target: { value: 'nomatch' } });
+  await fireEvent.keyDown(input, { key: 'Enter' });
+  expect(onchange).not.toHaveBeenCalled();
 });
