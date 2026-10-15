@@ -20,9 +20,12 @@
   let choice = $state<ProviderChoice>('openRouter');
   let configured = $state<Configured>({ openRouter: false, mnemaEmbed: false, mnemaChat: false });
   // `Models` owns the key and tells us when it changes, so the dot never lags a save.
+  // It also hands us its re-read, run after every change to the local files.
+  let localChanged: (() => void) | null = null;
   setContext('provider-card', {
     get view() { return choice; },
     keyPresent(present: boolean) { configured.openRouter = present; },
+    onLocalChange(f: () => void) { localChanged = f; },
   });
 
   const LABEL_ID = 'model-provider-label';
@@ -48,6 +51,7 @@
   // After a change to the local files: the rows, then what they make configured.
   async function reread() {
     await readRows();
+    localChanged?.();
     try {
       configured = (await modelSettings()).configured;
     } catch (e) {

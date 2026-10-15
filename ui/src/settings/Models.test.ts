@@ -987,6 +987,34 @@ async function pickModel(value: string, aside?: string) {
   await fireEvent.click(opt);
 }
 
+// A saved key fills the empty roles (backend substitution) and opens
+// OpenRouter's list: both are re-read, so the list is not left empty.
+test('after a key is saved the list is re-read and the substituted default is selected', async () => {
+  setLocale('en');
+  const empty = settings({
+    key: { kind: 'absent' },
+    roles: { embed: null, chat: null },
+    configured: { openRouter: false, mnemaEmbed: false, mnemaChat: false },
+  });
+  const filled = settings({
+    key: { kind: 'present' },
+    index: { ...(settings().index as Extract<ModelSettings['index'], { kind: 'read' }>), embeddingModel: 'emb-1' },
+  });
+  modelSettings.mockResolvedValueOnce(empty).mockResolvedValue(filled);
+  providerModels.mockResolvedValueOnce(emptyCatalogue())
+    .mockResolvedValue(catalogueOf([entry('emb-1')]));
+  setKey.mockResolvedValue({ balance: { kind: 'notStated' } });
+  renderModels();
+  await waitFor(() => expect(screen.getByLabelText('Key:')).toBeTruthy());
+
+  await fireEvent.input(screen.getByLabelText('Key:'), { target: { value: 'sk-test' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+  await waitFor(() => expect(screen.queryByTestId('model-selection')).not.toBeNull());
+  expect(optionValues()).toEqual(['emb-1']);
+  expect(selectedModel()).toBe('emb-1');
+});
+
 test('two named tabs; switching changes the select`s own options, both asserted positively', async () => {
   mockCatalogues({
     embedding: catalogueOf([entry('emb-1', { name: 'Embedding One' })]),
@@ -3485,7 +3513,7 @@ test('the key group is not drawn while the card shows another provider', async (
   const seen: boolean[] = [];
   render(Models, {
     props: { jobs },
-    context: new Map([['provider-card', { view: 'mnema', keyPresent: (p: boolean) => seen.push(p) }]]),
+    context: new Map([['provider-card', { view: 'mnema', keyPresent: (p: boolean) => seen.push(p), onLocalChange: () => {} }]]),
   });
   await waitFor(() => expect(seen).toEqual([true]));
   expect(screen.queryByTestId('model-key-group')).toBeNull();

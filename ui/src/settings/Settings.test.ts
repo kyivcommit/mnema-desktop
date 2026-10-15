@@ -4,7 +4,7 @@ import { expect, test, afterEach, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import Settings from './Settings.svelte';
 import { setLocale } from '../i18n';
-import type { AppPrefs, ModelSettings, ScanState } from '../lib/ipc';
+import type { AppPrefs, LocalModelRow, ModelSettings, ScanState } from '../lib/ipc';
 
 // 🔴 Annotated, so the compiler checks it. This fixture crosses a `vi.mock`
 // factory, whose return type is `unknown` — Task 3's three new REQUIRED fields
@@ -89,6 +89,10 @@ const excludeSubfolder = vi.fn();
 const listMasks = vi.fn();
 const maskPreview = vi.fn();
 const addMask = vi.fn();
+// Mnema is unavailable unless a test turns it on; then these are its rows.
+let mnemaOn = false;
+let localRows: LocalModelRow[] = [];
+const removeModel = vi.fn();
 let deliver: ((state: ScanState) => void) | null = null;
 
 // The window listens for `settings-section` straight from the event module, so
@@ -104,12 +108,12 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('../lib/ipc', () => ({
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.
-  mnemaAvailable: () => Promise.resolve(false),
-  localModels: () => Promise.resolve([]),
+  mnemaAvailable: () => Promise.resolve(mnemaOn),
+  localModels: () => Promise.resolve(localRows),
   listenLocalModelProgress: () => Promise.resolve(() => {}),
   downloadModel: vi.fn(),
   cancelDownload: vi.fn(),
-  removeModel: vi.fn(),
+  removeModel: (...a: unknown[]) => removeModel(...a),
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: vi.fn(),
   forgetKey: (...a: unknown[]) => forgetKey(...a),
@@ -190,6 +194,10 @@ beforeEach(() => {
   maskPreview.mockReset();
   maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
   addMask.mockReset();
+  mnemaOn = false;
+  localRows = [];
+  removeModel.mockReset();
+  removeModel.mockResolvedValue(undefined);
   deliver = null;
   sectionHandler = null;
   unlistenSection.mockReset();
@@ -1561,6 +1569,54 @@ test('mutation_outcome_survives_a_section_switch', async () => {
   await waitFor(() => expect(screen.getByTestId('model-embedding-error')).toBeTruthy());
   expect(screen.getByTestId('model-embedding-error').textContent).toContain(SENTENCE);
   expect(screen.getByTestId('model-index-failure')).toBeTruthy();
+});
+
+// Removing a local model empties its role in the backend: the Models half
+// re-reads, so the model leaves the list and the tab dot turns not ready.
+test('removing the Mnema embed model re-reads the roles, the dot and the list', async () => {
+  setLocale('en');
+  mnemaOn = true;
+  localRows = [{ id: 'embed', state: { kind: 'ready' } }, { id: 'chat', state: { kind: 'ready' } }];
+  const index = (SETTINGS.index.kind === 'read' ? SETTINGS.index : null)!;
+  const before: ModelSettings = {
+    ...SETTINGS, key: { kind: 'absent' },
+    roles: { embed: 'mnema', chat: 'mnema' },
+    configured: { openRouter: false, mnemaEmbed: true, mnemaChat: true },
+    index: { ...index, embeddingModel: 'baai/bge-m3', chatModel: 'gemma' },
+  };
+  // A key was saved meanwhile, so OpenRouter still offers a list.
+  const after: ModelSettings = {
+    ...before, key: { kind: 'present' }, roles: { embed: null, chat: 'mnema' },
+    configured: { openRouter: true, mnemaEmbed: false, mnemaChat: true },
+  };
+  modelSettings.mockResolvedValue(before);
+  const bge = { id: 'baai/bge-m3', name: 'bge-m3', provider: 'mnema', inputLimit: { kind: 'notStated' }, price: { kind: 'notStated' }, outputPrice: { kind: 'notStated' }, refusal: null, tools: false };
+  let removed = false;
+  const small = { ...bge, id: 'openai/small', name: 'small', provider: 'openRouter' };
+  providerModels.mockImplementation((role: string) => Promise.resolve(
+    { entries: role !== 'embedding' ? [] : removed ? [small] : [bge], unreadable: 0, unreadableRecords: [] }));
+  Element.prototype.scrollIntoView = vi.fn();
+  render(Settings);
+  const dot = () => screen.getByTestId('model-dot-embedding').getAttribute('data-configured');
+  await waitFor(() => expect(dot()).toBe('true'));
+  expect(screen.queryByTestId('model-selection')).not.toBeNull();
+
+  removeModel.mockImplementation(() => {
+    removed = true;
+    modelSettings.mockResolvedValue(after);
+    return Promise.resolve();
+  });
+  const row = await screen.findByRole('group', { name: 'Search model' });
+  await fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
+
+  await waitFor(() => expect(dot()).toBe('false'));
+  const ids = () => {
+    const box = within(screen.getByTestId('model-selection')).getByRole('combobox');
+    if (box.getAttribute('aria-expanded') !== 'true') box.click();
+    return within(screen.getByTestId('model-selection')).queryAllByRole('option')
+      .map((o) => (o.getAttribute('data-id') ?? '').split('\t')[1]);
+  };
+  await waitFor(() => expect(ids()).toEqual(['openai/small']));
 });
 
 // Task 9 (owner's ruling, live run 2026-09-10): the Forget confirmation is a

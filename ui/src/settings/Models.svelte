@@ -24,7 +24,9 @@
   const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
   // Present under `Provider`: which provider's card is showing, and a way to
   // tell it whether a key is saved (its dot). Absent, the key group always shows.
-  const providerCard = getContext<{ view: string; keyPresent(present: boolean): void } | undefined>('provider-card');
+  const providerCard = getContext<{
+    view: string; keyPresent(present: boolean): void; onLocalChange(f: () => void): void;
+  } | undefined>('provider-card');
   $effect(() => { if (settings) providerCard?.keyPresent(settings.key.kind === 'present'); });
 
   // The controller, as a PROP — the same rule `Folders` and `Scanning` already
@@ -224,6 +226,8 @@
     try {
       await setKey(value);
       editingKey = false;
+      // A key can fill empty roles and opens OpenRouter's list.
+      void loadCatalogue(activeTab);
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -263,6 +267,7 @@
     try {
       const result = await forgetKey();
       removal = result.kind;
+      void loadCatalogue(activeTab);
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -367,6 +372,12 @@
       catalogueErrors = { ...catalogueErrors, [role]: e instanceof Error ? e.message : String(e) };
     }
   }
+
+  // A local model downloaded or removed changes the roles, the dots and the list.
+  providerCard?.onLocalChange(() => {
+    refresh().catch(() => {});
+    void loadCatalogue(activeTab);
+  });
 
   let toolsOn = $state(true);
   async function toggleTools(e: Event) {
