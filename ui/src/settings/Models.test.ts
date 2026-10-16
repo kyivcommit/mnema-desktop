@@ -3494,7 +3494,10 @@ test('turning tools on over a Mnema chat asks before moving it to the cloud', as
   await fireEvent.click(box);
 
   await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(true, false));
-  expect(await screen.findByTestId('chat-tools-cloud-question')).toBeTruthy();
+  const question = await screen.findByTestId('chat-tools-cloud-question');
+  // Neutral: OpenRouter will not stay the only cloud provider.
+  expect(question.textContent).not.toMatch(/openrouter/i);
+  expect(screen.getByTestId('chat-tools-cloud-confirm').textContent).not.toMatch(/openrouter/i);
   expect(box.checked).toBe(false);
   expect(modelSettings.mock.calls.length).toBe(reads);
 

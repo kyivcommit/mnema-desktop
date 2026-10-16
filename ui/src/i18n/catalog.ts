@@ -317,8 +317,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_batch_only: 'Приховано {count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує',
     models_hidden_no_tool_use: 'Приховано {count}: не підтримує інструменти',
     models_chat_tools: 'Підтримка інструментів',
-    models_chat_tools_cloud_confirm: 'Локальна модель Mnema не підтримує інструменти. Перевести відповіді на OpenRouter? Питання й уривки документів надсилатимуться в хмару.',
-    models_chat_tools_cloud_yes: 'Перевести на OpenRouter',
+    models_chat_tools_cloud_confirm: 'Локальна модель не підтримує інструменти. Перевести відповіді на хмарного провайдера? Питання й уривки документів надсилатимуться за межі цього комп’ютера.',
+    models_chat_tools_cloud_yes: 'Перевести',
     models_hidden_router: 'Приховано {count}: маршрутизатори — модель і ціну обирає постачальник під час запиту',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
@@ -1195,8 +1195,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_batch_only: '{count} hidden: batch variants (results within 24 hours), which this application does not use',
     models_hidden_no_tool_use: '{count} hidden: no tool support',
     models_chat_tools: 'Tool support',
-    models_chat_tools_cloud_confirm: 'The local Mnema model has no tool support. Move answers to OpenRouter? Questions and document passages will be sent to the cloud.',
-    models_chat_tools_cloud_yes: 'Move to OpenRouter',
+    models_chat_tools_cloud_confirm: 'The local model has no tool support. Move answers to a cloud provider? Questions and document passages will leave this computer.',
+    models_chat_tools_cloud_yes: 'Move',
     models_hidden_router: '{count} hidden: routers — the provider picks the model and the price at request time',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
