@@ -288,7 +288,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},
-    set_chat_tools: (a) => (s.chatTools = a.on as boolean),
+    set_chat_tools: (a) => ({ kind: 'stored', on: (s.chatTools = a.on as boolean) }),
     provider_status: () => {
       const one = provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
         : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }

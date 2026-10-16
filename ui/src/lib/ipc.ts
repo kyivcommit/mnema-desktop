@@ -955,11 +955,15 @@ export const setAutostart = (enabled: boolean) =>
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
 
 // The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
-// the chat list to models that take tools. `setChatTools` answers the stored value.
+// the chat list to models that take tools. `setChatTools` answers the stored value,
+// or `asksCloud` (models.rs `ToolsSwitch`): turning it on would move the chat role
+// from Mnema to OpenRouter, nothing was written, and `cloud` confirms the move.
+export type ToolsSwitch = { kind: 'stored'; on: boolean } | { kind: 'asksCloud' };
 export const chatTools = () => invoke<boolean>('chat_tools_enabled');
 // Starts a new conversation: the backend forgets the session (`new_chat`).
 export const newChat = () => invoke<void>('new_chat');
-export const setChatTools = (on: boolean) => invoke<boolean>('set_chat_tools', { on });
+export const setChatTools = (on: boolean, cloud = false) =>
+  invoke<ToolsSwitch>('set_chat_tools', { on, cloud });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is

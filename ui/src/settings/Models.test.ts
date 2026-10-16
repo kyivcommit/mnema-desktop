@@ -3459,7 +3459,7 @@ test('a failed set_chat_tools puts the checkbox back to the stored value', async
 
   await fireEvent.click(box);
 
-  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false));
+  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false, false));
   await waitFor(() => expect(box.checked).toBe(true));
   expect(err).toHaveBeenCalled();
   err.mockRestore();
@@ -3467,7 +3467,7 @@ test('a failed set_chat_tools puts the checkbox back to the stored value', async
 
 test('toggling tool support stores it and re-reads the chat catalogue', async () => {
   mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
-  setChatTools.mockResolvedValue(false);
+  setChatTools.mockResolvedValue({ kind: 'stored', on: false });
   await renderWith(settings({ key: { kind: 'present' } }));
   await fireEvent.click(screen.getByTestId('model-tab-chat'));
   const box = (await screen.findByTestId('chat-tools')) as HTMLInputElement;
@@ -3476,9 +3476,42 @@ test('toggling tool support stores it and re-reads the chat catalogue', async ()
 
   await fireEvent.click(box);
 
-  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false));
+  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(false, false));
   await waitFor(() => expect(providerModels).toHaveBeenCalledWith('chat'));
   await waitFor(() => expect(box.checked).toBe(false));
+});
+
+test('turning tools on over a Mnema chat asks before moving it to the cloud', async () => {
+  mockCatalogues({ embedding: catalogueOf([entry('emb-1')]), chat: catalogueOf([entry('chat-1')]) });
+  chatTools.mockResolvedValue(false);
+  setChatTools.mockResolvedValueOnce({ kind: 'asksCloud' });
+  await renderWith(settings({ key: { kind: 'present' } }));
+  await fireEvent.click(screen.getByTestId('model-tab-chat'));
+  const box = (await screen.findByTestId('chat-tools')) as HTMLInputElement;
+  await waitFor(() => expect(box.checked).toBe(false));
+  const reads = modelSettings.mock.calls.length;
+
+  await fireEvent.click(box);
+
+  await waitFor(() => expect(setChatTools).toHaveBeenCalledWith(true, false));
+  expect(await screen.findByTestId('chat-tools-cloud-question')).toBeTruthy();
+  expect(box.checked).toBe(false);
+  expect(modelSettings.mock.calls.length).toBe(reads);
+
+  await fireEvent.click(screen.getByTestId('chat-tools-cloud-cancel'));
+  expect(screen.queryByTestId('chat-tools-cloud-question')).toBeNull();
+  expect(setChatTools).toHaveBeenCalledTimes(1);
+  expect(box.checked).toBe(false);
+
+  setChatTools.mockResolvedValueOnce({ kind: 'asksCloud' });
+  await fireEvent.click(box);
+  setChatTools.mockResolvedValueOnce({ kind: 'stored', on: true });
+  await fireEvent.click(await screen.findByTestId('chat-tools-cloud-confirm'));
+
+  await waitFor(() => expect(setChatTools).toHaveBeenLastCalledWith(true, true));
+  await waitFor(() => expect(box.checked).toBe(true));
+  expect(screen.queryByTestId('chat-tools-cloud-question')).toBeNull();
+  await waitFor(() => expect(modelSettings.mock.calls.length).toBeGreaterThan(reads));
 });
 
 // The provider picker: the key group belongs to the OpenRouter card alone, and a
@@ -3809,7 +3842,7 @@ test('the_provider_no_longer_offers_text_is_gone_from_every_locale', () => {
 
 test('turning_the_tools_switch_on_re_reads_the_roles_before_the_list', async () => {
   mockCatalogues({ chat: catalogueOf([entry(CHAT_DEFAULT)]) });
-  setChatTools.mockResolvedValue(true);
+  setChatTools.mockResolvedValue({ kind: 'stored', on: true });
   chatTools.mockResolvedValue(false);
   await renderWith(chatGone({ chatModel: CHAT_DEFAULT }));
   await openChat();

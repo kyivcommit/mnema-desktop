@@ -740,11 +740,16 @@ pub fn chat_tools_enabled(state: tauri::State<'_, AppState>) -> bool {
     chat_tools(state.data_dir())
 }
 
-/// Stores the tool-support switch and answers with the stored value; see
+/// Stores the tool-support switch and answers with the stored value, or asks
+/// for `cloud` first (`ToolsSwitch::AsksCloud`); see
 /// [`crate::models::choose_chat_tools`] for what turning it on does to the model.
 #[tauri::command(async)]
-pub fn set_chat_tools(state: tauri::State<'_, AppState>, on: bool) -> Result<bool, Error> {
-    crate::models::choose_chat_tools(&state, on)
+pub fn set_chat_tools(
+    state: tauri::State<'_, AppState>,
+    on: bool,
+    cloud: Option<bool>,
+) -> Result<crate::models::ToolsSwitch, Error> {
+    crate::models::choose_chat_tools(&state, on, cloud.unwrap_or(false))
 }
 
 /// Sets the idle threshold after which the launcher forgets its last answer,

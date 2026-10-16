@@ -16,8 +16,8 @@ use mnema_desktop::error::Error;
 use mnema_desktop::job::{EndReason, JobEvent, Progress};
 use mnema_desktop::models::{
     DEFAULT_MODELS, ExistingVectors, IndexRead, IndexSettings, KeyRemoval, KeyState,
-    KeyStoreFailure, UnreadableCause, forget_key, key_present, model_settings, provider_models,
-    set_chat_model, set_embedding_model, set_key, set_rerank_model,
+    KeyStoreFailure, ToolsSwitch, UnreadableCause, forget_key, key_present, model_settings,
+    provider_models, set_chat_model, set_embedding_model, set_key, set_rerank_model,
 };
 use mnema_desktop::prefs::{chat_tools, set_chat_tools};
 use mnema_desktop::provider::ProviderChoice;
@@ -3123,7 +3123,10 @@ fn with_tools_on_the_chat_list_refuses_models_without_them() {
 fn with_tools_off_nothing_is_refused_for_tools() {
     let fx = Fixture::with_provider_listing(TWO_CHATTERS);
     mnema_secrets::store(fx.credential_ref(), KEY).unwrap();
-    assert!(!set_chat_tools(fx.state(), false).expect("stored"));
+    assert_eq!(
+        set_chat_tools(fx.state(), false, None).expect("stored"),
+        ToolsSwitch::Stored { on: false }
+    );
     assert!(
         !chat_tools(fx.state().data_dir()),
         "read back after storing"
@@ -3370,7 +3373,7 @@ fn chat_on(listing: &str, provider: ProviderChoice, model: &str) -> Fixture {
         .with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, model))
         .unwrap();
     write_roles(&fx, Some(ProviderChoice::OpenRouter), Some(provider));
-    set_chat_tools(fx.state(), false).unwrap();
+    set_chat_tools(fx.state(), false, None).unwrap();
     fx
 }
 
@@ -3378,7 +3381,10 @@ fn chat_on(listing: &str, provider: ProviderChoice, model: &str) -> Fixture {
 fn tools_on_gives_an_open_router_model_without_tools_the_default() {
     let fx = chat_on(TWO_CHATTERS, ProviderChoice::OpenRouter, "vendor/without");
 
-    assert!(set_chat_tools(fx.state(), true).unwrap());
+    assert_eq!(
+        set_chat_tools(fx.state(), true, None).unwrap(),
+        ToolsSwitch::Stored { on: true }
+    );
 
     assert_eq!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
     assert_eq!(roles(&fx).1, Some(ProviderChoice::OpenRouter));
@@ -3392,7 +3398,7 @@ fn tools_on_keeps_an_open_router_model_that_has_tools() {
         "vendor/with-tools",
     );
 
-    set_chat_tools(fx.state(), true).unwrap();
+    set_chat_tools(fx.state(), true, None).unwrap();
 
     assert_eq!(chat_model_of(&fx).as_deref(), Some("vendor/with-tools"));
 }
@@ -3405,10 +3411,37 @@ fn tools_on_moves_a_mnema_chat_role_to_open_router_when_it_is_set_up() {
         mnema_desktop::provider::LOCAL_CHAT_MODEL,
     );
 
-    set_chat_tools(fx.state(), true).unwrap();
+    assert_eq!(
+        set_chat_tools(fx.state(), true, Some(true)).unwrap(),
+        ToolsSwitch::Stored { on: true }
+    );
 
     assert_eq!(roles(&fx).1, Some(ProviderChoice::OpenRouter));
     assert_eq!(chat_model_of(&fx).as_deref(), Some(DEFAULT_MODELS.chat));
+}
+
+/// Leaving Mnema sends questions and passages to the cloud: without the
+/// person's `cloud` the switch asks and writes nothing.
+#[test]
+fn tools_on_asks_before_moving_a_mnema_chat_role_to_the_cloud() {
+    let fx = chat_on(
+        TWO_CHATTERS,
+        ProviderChoice::Mnema,
+        mnema_desktop::provider::LOCAL_CHAT_MODEL,
+    );
+
+    for cloud in [None, Some(false)] {
+        assert_eq!(
+            set_chat_tools(fx.state(), true, cloud).unwrap(),
+            ToolsSwitch::AsksCloud
+        );
+        assert!(!chat_tools(fx.state().data_dir()), "the switch stayed off");
+        assert_eq!(roles(&fx).1, Some(ProviderChoice::Mnema));
+        assert_eq!(
+            chat_model_of(&fx).as_deref(),
+            Some(mnema_desktop::provider::LOCAL_CHAT_MODEL)
+        );
+    }
 }
 
 #[test]
@@ -3420,7 +3453,7 @@ fn tools_on_empties_a_mnema_chat_role_without_open_router() {
     );
     mnema_secrets::forget(fx.credential_ref()).unwrap();
 
-    set_chat_tools(fx.state(), true).unwrap();
+    set_chat_tools(fx.state(), true, None).unwrap();
 
     assert_eq!(roles(&fx).1, None);
     assert_eq!(
@@ -3438,8 +3471,9 @@ fn tools_on_with_an_unreadable_catalogue_changes_nothing() {
         "vendor/without",
     );
 
-    assert!(
-        set_chat_tools(fx.state(), true).unwrap(),
+    assert_eq!(
+        set_chat_tools(fx.state(), true, None).unwrap(),
+        ToolsSwitch::Stored { on: true },
         "the switch holds"
     );
 
@@ -3455,7 +3489,10 @@ fn tools_off_never_changes_the_model_or_the_role() {
         mnema_desktop::provider::LOCAL_CHAT_MODEL,
     );
 
-    assert!(!set_chat_tools(fx.state(), false).unwrap());
+    assert_eq!(
+        set_chat_tools(fx.state(), false, None).unwrap(),
+        ToolsSwitch::Stored { on: false }
+    );
 
     assert_eq!(roles(&fx).1, Some(ProviderChoice::Mnema));
     assert_eq!(
@@ -3477,7 +3514,7 @@ fn tools_on_with_a_no_tools_model_while_a_scan_holds_the_slot_fails_and_stays_of
         )
         .expect("the slot is free");
 
-    let refused = set_chat_tools(fx.state(), true);
+    let refused = set_chat_tools(fx.state(), true, None);
 
     assert!(refused.is_err(), "{refused:?}");
     assert!(!chat_tools(fx.state().data_dir()), "the switch stayed off");
@@ -3502,7 +3539,10 @@ fn tools_on_that_needs_no_write_succeeds_while_a_scan_holds_the_slot() {
         )
         .expect("the slot is free");
 
-    assert!(set_chat_tools(fx.state(), true).expect("no slot needed"));
+    assert_eq!(
+        set_chat_tools(fx.state(), true, None).expect("no slot needed"),
+        ToolsSwitch::Stored { on: true }
+    );
     assert!(chat_tools(fx.state().data_dir()));
 }
 

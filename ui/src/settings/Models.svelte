@@ -284,6 +284,8 @@
   }
 
   const chatToolsLabel = $derived.by(() => { void $locale; return t('models_chat_tools'); });
+  const cloudQuestionLabel = $derived.by(() => { void $locale; return t('models_chat_tools_cloud_confirm'); });
+  const cloudYesLabel = $derived.by(() => { void $locale; return t('models_chat_tools_cloud_yes'); });
   const providerLabel = $derived.by(() => { void $locale; return t('models_provider_label'); });
   // The one guard on this screen no test can tell from its absence: the
   // provider name is the same string in both locales — a brand, not a
@@ -380,17 +382,27 @@
   });
 
   let toolsOn = $state(true);
-  async function toggleTools(e: Event) {
-    const box = e.currentTarget as HTMLInputElement;
+  // Turning tools on would move the chat role from Mnema to OpenRouter: the
+  // backend wrote nothing and asks first (`asksCloud`).
+  let cloudQuestion = $state(false);
+  let toolsBox = $state<HTMLInputElement | null>(null);
+  async function toggleTools() {
+    await switchTools(!toolsOn, false);
+  }
+  async function switchTools(on: boolean, cloud: boolean) {
     actionError = null;
+    let answer;
     try {
-      toolsOn = await setChatTools(!toolsOn);
+      answer = await setChatTools(on, cloud);
     } catch (err) {
       console.error('set_chat_tools failed', err);
       actionError = err instanceof Error ? err.message : String(err);
-      box.checked = toolsOn; // unchanged state does not re-render: put the native box back
-      return;
     }
+    cloudQuestion = answer?.kind === 'asksCloud';
+    if (answer?.kind === 'stored') toolsOn = answer.on;
+    // unchanged state does not re-render: put the native box back
+    if (toolsBox) toolsBox.checked = toolsOn;
+    if (answer?.kind !== 'stored') return;
     // The switch may have moved the chat role to its default (the backend does
     // it in the same command): read that before the list is.
     await refresh().catch(() => {});
@@ -408,6 +420,7 @@
     // existing rule for a standing question, so it closes here too rather
     // than surviving under a role it was never asked about.
     forgetQuestion = false;
+    cloudQuestion = false;
     // And so are the two sentences a press leaves behind. "The change discarded
     // 4 embeddings…" and a rejection are reports on an act performed from the
     // embedding list; under the chat list they are a report about nothing the
@@ -1328,7 +1341,16 @@
 </div>
 
 <div class="tabpanel">
-{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
+{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" bind:this={toolsBox} checked={toolsOn} disabled={cloudQuestion} onchange={toggleTools} /> {chatToolsLabel}</label>
+  {#if cloudQuestion}
+    <div class="group">
+      <p data-testid="chat-tools-cloud-question">{cloudQuestionLabel}</p>
+      <div class="row">
+        <button type="button" data-testid="chat-tools-cloud-confirm" onclick={() => switchTools(true, true)}>{cloudYesLabel}</button>
+        <button type="button" data-testid="chat-tools-cloud-cancel" onclick={async () => { cloudQuestion = false; await tick(); toolsBox?.focus(); }}>{cancelLabel}</button>
+      </div>
+    </div>
+  {/if}{/if}{#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
   {#if unreadableSentence}<p data-testid="model-catalogue-unreadable">{unreadableSentence}</p>{/if}
