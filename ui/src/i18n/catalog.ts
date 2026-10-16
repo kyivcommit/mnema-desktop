@@ -11,15 +11,16 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'models_load_failed'
   | 'models_index_label'
   | 'models_tab_embedding' | 'models_tab_chat'
-  | 'models_status_ready' | 'models_status_not_ready'
+  | 'models_status_ready' | 'models_status_not_ready' | 'models_role_empty' | 'models_setup_first'
   | 'models_selection_label' | 'models_selection_not_chosen' | 'models_selection_unknown'
-  | 'models_selection_absent' | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
+  | 'models_option_priced' | 'models_option_priced_both' | 'models_price_note'
   | 'models_sort_name' | 'models_sort_price' | 'models_info_label'
   | 'models_dot_configured' | 'models_dot_not_configured' | 'models_dot_unknown'
   | 'models_catalogue_empty' | 'models_catalogue_unreadable'
   | 'models_hidden_input_too_small' | 'models_hidden_no_stated_limit'
   | 'models_hidden_limit_not_understood' | 'models_hidden_no_stated_output_modalities'
   | 'models_hidden_no_text_output' | 'models_hidden_batch_only' | 'models_hidden_router' | 'models_hidden_no_tool_use' | 'models_chat_tools'
+  | 'models_chat_tools_cloud_confirm' | 'models_chat_tools_cloud_yes'
   | 'models_catalogue_unreadable_record_absent' | 'models_catalogue_unreadable_record_not_a_string'
   | 'models_catalogue_unreadable_record_known'
   | 'models_embedding_confirm_title' | 'models_embedding_confirm_estimate'
@@ -34,8 +35,8 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
-  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_local_ready' | 'provider_missing_local_models' | 'provider_retired'
-  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model'
+  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
+  | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
@@ -261,18 +262,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // carries): provider + key + a chosen embedding model, fail-safe on
     // anything missing. Named sentences rather than a bare state, so a screen
     // reader announces the same thing a sighted person reads.
-    models_status_ready: 'Підключено — OpenRouter, ключ і обрана модель embedding готові.',
-    models_status_not_ready: 'Ще не підключено — додайте ключ і оберіть модель embedding, щоб увімкнути пошук за змістом.',
+    models_status_ready: 'Підключено — {provider}, модель обрано.',
+    models_status_not_ready: 'Ще не підключено — налаштуйте провайдера й оберіть модель.',
+    models_role_empty: 'Модель не обрано',
+    models_setup_first: 'Спершу налаштуйте провайдера',
     // Task 4 — the native model select. A label over the control (the same
     // pattern `models_provider_label`/`models_key_label` already use), and
-    // the placeholder option's own text for the three states a confirmed
+    // the placeholder option's own text for the two states a confirmed
     // model id cannot stand for on its own: a read that said nothing is
-    // chosen, a build that currently cannot say either way, and a confirmed
-    // id the active catalogue no longer lists.
+    // chosen, and a build that currently cannot say either way.
     models_selection_label: 'Модель:',
     models_selection_not_chosen: 'Модель ще не обрано.',
     models_selection_unknown: 'Поточна модель невідома.',
-    models_selection_absent: 'Встановлено «{id}» — постачальник більше не пропонує цю модель.',
     // The picker's option text: the price per million tokens beside the
     // name, as the provider stated it (owner, 2026-09-16). Input only when
     // the output price is nought or not stated — an embedding model.
@@ -316,6 +317,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_batch_only: 'Приховано {count}: пакетні варіанти (відповідь до 24 годин), застосунок їх не використовує',
     models_hidden_no_tool_use: 'Приховано {count}: не підтримує інструменти',
     models_chat_tools: 'Підтримка інструментів',
+    models_chat_tools_cloud_confirm: 'Локальна модель не підтримує інструменти. Перевести відповіді на хмарного провайдера? Питання й уривки документів надсилатимуться за межі цього комп’ютера.',
+    models_chat_tools_cloud_yes: 'Перевести',
     models_hidden_router: 'Приховано {count}: маршрутизатори — модель і ціну обирає постачальник під час запиту',
     // `RecordId`'s three states (catalogue.rs:293-304) — a record that never
     // became a model still gets one line naming its position, so "N records
@@ -357,6 +360,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'Постачальник не відповідає: {reason}',
     provider_missing_key: 'Немає ключа постачальника — відкрити налаштування моделей',
     provider_missing_model: 'Не обрано модель вкладень — відкрити налаштування моделей',
+    provider_missing_chat_model: 'Не обрано модель чату — відкрити налаштування моделей',
+    provider_missing_role: 'Не обрано провайдера для ролі — відкрити налаштування моделей',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (локально)',
     provider_mnema_hint: '~3,1 ГБ диска, ~4 ГБ пам\'яті',
@@ -369,9 +374,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_no_space: 'Потрібно ~{needed} ГБ, вільно {free} ГБ',
     provider_row_ready: '✓',
     provider_downloading: 'Завантаження: {name}',
-    provider_local_ready: 'Моделі Mnema завантажені',
     provider_missing_local_models: 'Завантажте моделі Mnema — відкрити налаштування моделей',
-    provider_retired: 'Зміна відкинула {count, plural, one {# ембединг} few {# ембединги} many {# ембедингів} other {# ембедингів}}.',
     card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
@@ -1166,12 +1169,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_index_label: 'Index:',
     models_tab_embedding: 'Embedding',
     models_tab_chat: 'Chat',
-    models_status_ready: 'Connected — OpenRouter, a key and a chosen embedding model are all set.',
-    models_status_not_ready: 'Not connected yet — add a key and choose an embedding model to enable content search.',
+    models_status_ready: 'Connected — {provider}, a model is chosen.',
+    models_status_not_ready: 'Not connected yet — set up the provider and choose a model.',
+    models_role_empty: 'No model chosen',
+    models_setup_first: 'Set up a provider first',
     models_selection_label: 'Model:',
     models_selection_not_chosen: 'No model chosen yet.',
     models_selection_unknown: 'The current model is unknown.',
-    models_selection_absent: 'Set to "{id}", which the provider no longer lists.',
     models_option_priced: '{name} — {input}',
     models_option_priced_both: '{name} — {input} / {output}',
     models_price_note: 'Prices are per 1M tokens: input / output, as the provider states them.',
@@ -1191,6 +1195,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     models_hidden_batch_only: '{count} hidden: batch variants (results within 24 hours), which this application does not use',
     models_hidden_no_tool_use: '{count} hidden: no tool support',
     models_chat_tools: 'Tool support',
+    models_chat_tools_cloud_confirm: 'The local model has no tool support. Move answers to a cloud provider? Questions and document passages will leave this computer.',
+    models_chat_tools_cloud_yes: 'Move',
     models_hidden_router: '{count} hidden: routers — the provider picks the model and the price at request time',
     models_catalogue_unreadable_record_absent: 'Record at position {index}: the provider stated no model id.',
     models_catalogue_unreadable_record_not_a_string: 'Record at position {index}: the model id was not text.',
@@ -1225,6 +1231,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_unreachable: 'The provider is unreachable: {reason}',
     provider_missing_key: 'No provider key — open the model settings',
     provider_missing_model: 'No embedding model chosen — open the model settings',
+    provider_missing_chat_model: 'No chat model chosen — open the model settings',
+    provider_missing_role: 'No provider chosen for the role — open the model settings',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (local)',
     provider_mnema_hint: '~3.1 GB of disk, ~4 GB of memory',
@@ -1237,9 +1245,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_no_space: 'About {needed} GB needed, {free} GB free',
     provider_row_ready: '✓',
     provider_downloading: 'Downloading: {name}',
-    provider_local_ready: 'Mnema models are downloaded',
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
-    provider_retired: 'The change discarded {count, plural, one {# embedding} other {# embeddings}}.',
     card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',

@@ -63,6 +63,9 @@ final class StubTrace {
         }
     }
 
+    /// Every line read so far, in the order the stub wrote them.
+    var snapshot: [String] { cond.lock(); defer { cond.unlock() }; return lines }
+
     /// Waits until `line` has appeared `count` times; false after 10 s.
     func wait(for line: String, count: Int = 1) -> Bool {
         let deadline = Date().addingTimeInterval(10)
@@ -235,6 +238,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try loaded(port), ["baai/bge-m3": false, "gemma-4-e2b-it": false])
     }
 
+    func test_load_with_models_loads_only_those() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        XCTAssertEqual(http(port, "/mnema/load", method: "POST", body: #"{"models":["embed"]}"#).status, 204)
+        XCTAssertEqual(try loaded(port), ["baai/bge-m3": true, "gemma-4-e2b-it": false])
+    }
+
     func test_unload_one_model() throws {
         let (p, port) = try startStub()
         defer { p.terminate() }
@@ -306,7 +316,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(trace.wait(for: "stub: started embed"), "the embed never started")
         fire("unload", "/mnema/unload", #"{"models":["embed"]}"#)
         group.wait()
-        XCTAssertEqual(finished, ["embed:200", "unload:204"])
+        XCTAssertEqual(finished.sorted(), ["embed:200", "unload:204"])
+        // The order the server RAN the jobs in, not the order the replies arrived: replies are sent
+        // asynchronously, so a finished unload's 204 can reach the client before the embed's 200.
+        XCTAssertTrue(trace.wait(for: "stub: ran unload"), "the unload never ran")
+        let order = trace.snapshot.filter { $0 == "stub: finished embed" || $0 == "stub: ran unload" }
+        XCTAssertEqual(order, ["stub: finished embed", "stub: ran unload"])
     }
 
     func test_negative_content_length_does_not_kill_the_process() throws {

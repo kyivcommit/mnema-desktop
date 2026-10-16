@@ -4,7 +4,8 @@
 //! stdin closes. Knobs (env): `FAKE_MLX_DIE_AFTER=<n>` (authorised requests), `FAKE_MLX_HANG=1`,
 //! `FAKE_MLX_CHAT_MS`, `FAKE_MLX_LOAD_MS`, `FAKE_MLX_IGNORE_STDIN=1`,
 //! `FAKE_MLX_FAIL_START=1` (logs its spawn, then exits before `PORT`),
-//! `FAKE_MLX_LOG=<file>`.
+//! `FAKE_MLX_LOG=<file>`. A load naming a model whose `--embed`/`--chat`
+//! directory is missing answers 500, as the real engine does.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -79,6 +80,28 @@ fn main() {
             }
         });
     }
+}
+
+/// The first model a load body asks for (an empty body asks for both) whose
+/// directory, as passed with `--embed`/`--chat`, does not exist.
+fn missing_model(body: &str) -> Option<String> {
+    let asked: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["models"].as_array().cloned())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["embed".into(), "chat".into()]);
+    let args: Vec<String> = std::env::args().collect();
+    asked.into_iter().find(|name| {
+        let flag = format!("--{name}");
+        args.iter()
+            .position(|a| *a == flag)
+            .and_then(|i| args.get(i + 1))
+            .is_some_and(|dir| !std::path::Path::new(dir).exists())
+    })
 }
 
 fn handle(stream: TcpStream, token: &str) -> u16 {
@@ -156,9 +179,14 @@ fn handle(stream: TcpStream, token: &str) -> u16 {
                 )
             }
             "/mnema/load" => {
+                log(&format!("body {sent} {body}"));
                 std::thread::sleep(Duration::from_millis(env_num("FAKE_MLX_LOAD_MS")));
-                // The real server answers 204 with an empty body here.
-                (204, String::new())
+                match missing_model(&body) {
+                    // As the real engine: a model whose files are not there fails the load.
+                    Some(name) => (500, format!(r#"{{"error":"load: no files for {name}"}}"#)),
+                    // The real server answers 204 with an empty body here.
+                    None => (204, String::new()),
+                }
             }
             "/mnema/unload" => {
                 log(&format!("body {sent} {body}"));

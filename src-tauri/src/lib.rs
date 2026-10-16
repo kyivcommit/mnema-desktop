@@ -95,8 +95,6 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::set_chat_model,
         models::model_settings,
         provider_status::provider_status,
-        provider::provider_choice,
-        provider::set_provider_choice,
         provider::mnema_available,
         provider::local_models,
         provider::download_model,
@@ -630,6 +628,21 @@ fn with_app_menu<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
     builder
 }
 
+/// The production job observer: the scan event, then the substitutions
+/// deferred while a job held the slot, then the tray redraw on the main thread.
+/// A function so a test can install exactly what `.setup` installs.
+pub fn job_observer<R: tauri::Runtime>(handle: tauri::AppHandle<R>) -> Box<state::JobObserver> {
+    Box::new(move || {
+        let inner = handle.clone();
+        let scan = handle.state::<state::AppState>().scan_state();
+        let _ = handle.emit(SCAN_PROGRESS_EVENT, &scan);
+        provider::on_slot_change(&handle.state::<state::AppState>());
+        let _ = handle.run_on_main_thread(move || {
+            tray::refresh_tray(&inner);
+        });
+    })
+}
+
 /// Builds and runs the application. Returns only when the tray's «Вийти» calls
 /// `app.exit(0)`, or start-up fails (§6: window closes and ⌘Q hide, never quit —
 /// the tray is the only exit).
@@ -960,15 +973,7 @@ pub fn run() -> anyhow::Result<()> {
                 // can arrive in either order) — harmless: a window that
                 // re-draws from an unchanged `ScanState` draws the same thing
                 // it already had.
-                let handle = app.handle().clone();
-                state.set_job_observer(Box::new(move || {
-                    let inner = handle.clone();
-                    let scan = handle.state::<state::AppState>().scan_state();
-                    let _ = handle.emit(SCAN_PROGRESS_EVENT, &scan);
-                    let _ = handle.run_on_main_thread(move || {
-                        tray::refresh_tray(&inner);
-                    });
-                }));
+                state.set_job_observer(job_observer(app.handle().clone()));
                 // Seeded AFTER the observer is installed, which is what makes
                 // "nothing is missed between the two" a fact about the order
                 // rather than a claim that nothing can have claimed the slot

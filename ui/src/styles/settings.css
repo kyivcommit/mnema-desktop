@@ -193,7 +193,8 @@ main select:focus-visible {
 .model-row {
   flex-wrap: nowrap;
 }
-.model-row select {
+.model-row select,
+.model-row .pick {
   flex: 1;
   min-width: 0;
 }

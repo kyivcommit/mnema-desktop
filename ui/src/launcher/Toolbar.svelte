@@ -27,6 +27,8 @@
         return t(
           status.missing === 'key' ? 'provider_missing_key'
             : status.missing === 'localModels' ? 'provider_missing_local_models'
+              : status.missing === 'role' ? 'provider_missing_role'
+              : status.missing === 'chatModel' ? 'provider_missing_chat_model'
               : 'provider_missing_model',
         );
     }

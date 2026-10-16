@@ -1,26 +1,33 @@
 <script lang="ts">
-  import { getContext, onMount, tick } from 'svelte';
+  import { getContext, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import {
     modelSettings, setKey, forgetKey, providerModels, setChatModel, chatTools, setChatTools,
     setEmbeddingModel, jobStatus,
-    type ModelSettings, type KeyRemoval, type Catalogue,
+    type ModelSettings, type KeyRemoval, type RoleCatalogue, type RoleModel, type ProviderChoice,
     type ModelEntry, type ModelRefusal, type Price, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
   } from '../lib/ipc';
   import type { JobController } from './jobs';
   import type { ScanSnapshot } from '../lib/ipc';
-  // Reused rather than re-derived: `providerReady` is the exact PR 3 ruling
-  // this section's green dot owes ("provider + key + a chosen embedding
-  // model, fail-safe on null/undefined"), already written and tested for the
-  // launcher's Arms row. A second copy of this boolean is the "two truths,
+  // Reused rather than re-derived: `roleReady` is the one per-role readiness
+  // rule ("the role's provider can serve it + a chosen model, fail-safe on
+  // null/undefined"); the launcher's cloud reads it too, next to the backend's
+  // probe. A second copy of this boolean is the "two truths,
   // one message" class this project has paid for 22 times in one cycle — one
   // of the two would eventually read a fixed set of fields differently.
-  import { providerReady } from '../launcher/state';
+  import { roleReady, roleServed } from '../launcher/state';
+  import Picker from './Picker.svelte';
 
   // Set by `Provider.svelte`, whose dropdown is then the section's Provider row.
   const providerRowOwned = getContext<boolean | undefined>('provider-row-owned');
+  // Present under `Provider`: which provider's card is showing, and a way to
+  // tell it whether a key is saved (its dot). Absent, the key group always shows.
+  const providerCard = getContext<{
+    view: string; keyPresent(present: boolean): void; onLocalChange(f: () => void): void;
+  } | undefined>('provider-card');
+  $effect(() => { if (settings) providerCard?.keyPresent(settings.key.kind === 'present'); });
 
   // The controller, as a PROP — the same rule `Folders` and `Scanning` already
   // follow, and this section was the one left out. It matters here for two
@@ -219,6 +226,8 @@
     try {
       await setKey(value);
       editingKey = false;
+      // A key can fill empty roles and opens OpenRouter's list.
+      void loadCatalogue(activeTab);
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -258,6 +267,7 @@
     try {
       const result = await forgetKey();
       removal = result.kind;
+      void loadCatalogue(activeTab);
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -274,6 +284,8 @@
   }
 
   const chatToolsLabel = $derived.by(() => { void $locale; return t('models_chat_tools'); });
+  const cloudQuestionLabel = $derived.by(() => { void $locale; return t('models_chat_tools_cloud_confirm'); });
+  const cloudYesLabel = $derived.by(() => { void $locale; return t('models_chat_tools_cloud_yes'); });
   const providerLabel = $derived.by(() => { void $locale; return t('models_provider_label'); });
   // The one guard on this screen no test can tell from its absence: the
   // provider name is the same string in both locales — a brand, not a
@@ -342,7 +354,7 @@
   // rerank and verify stay hidden (D123/D124) — two tabs, not four.
   // `set_rerank_model` exists on the Rust side and stays uncalled here.
   let activeTab = $state<Tab>('embedding');
-  let catalogues = $state<Record<Tab, Catalogue | null>>({ embedding: null, chat: null });
+  let catalogues = $state<Record<Tab, RoleCatalogue | null>>({ embedding: null, chat: null });
   let catalogueErrors = $state<Record<Tab, string | null>>({ embedding: null, chat: null });
   // Same ordering hazard as `settings`, one instance per tab: a stale
   // `provider_models` answer for a role a person has since left, and come
@@ -363,16 +375,37 @@
     }
   }
 
+  // A local model downloaded or removed changes the roles, the dots and the list.
+  providerCard?.onLocalChange(() => {
+    refresh().catch(() => {});
+    void loadCatalogue(activeTab);
+  });
+
   let toolsOn = $state(true);
-  async function toggleTools(e: Event) {
-    const box = e.currentTarget as HTMLInputElement;
+  // Turning tools on would move the chat role from Mnema to OpenRouter: the
+  // backend wrote nothing and asks first (`asksCloud`).
+  let cloudQuestion = $state(false);
+  let toolsBox = $state<HTMLInputElement | null>(null);
+  async function toggleTools() {
+    await switchTools(!toolsOn, false);
+  }
+  async function switchTools(on: boolean, cloud: boolean) {
+    actionError = null;
+    let answer;
     try {
-      toolsOn = await setChatTools(!toolsOn);
+      answer = await setChatTools(on, cloud);
     } catch (err) {
       console.error('set_chat_tools failed', err);
-      box.checked = toolsOn; // unchanged state does not re-render: put the native box back
-      return;
+      actionError = err instanceof Error ? err.message : String(err);
     }
+    cloudQuestion = answer?.kind === 'asksCloud';
+    if (answer?.kind === 'stored') toolsOn = answer.on;
+    // unchanged state does not re-render: put the native box back
+    if (toolsBox) toolsBox.checked = toolsOn;
+    if (answer?.kind !== 'stored') return;
+    // The switch may have moved the chat role to its default (the backend does
+    // it in the same command): read that before the list is.
+    await refresh().catch(() => {});
     await loadCatalogue('chat');
   }
 
@@ -387,6 +420,7 @@
     // existing rule for a standing question, so it closes here too rather
     // than surviving under a role it was never asked about.
     forgetQuestion = false;
+    cloudQuestion = false;
     // And so are the two sentences a press leaves behind. "The change discarded
     // 4 embeddings…" and a rejection are reports on an act performed from the
     // embedding list; under the chat list they are a report about nothing the
@@ -402,7 +436,7 @@
     void loadCatalogue(role);
   }
 
-  async function chooseChatModel(model: string) {
+  async function chooseChatModel(model: string, provider: ProviderChoice) {
     actionError = null;
     changeBusy = true;
     // Command and refresh get their OWN try/catch (review P2-1/umbrella):
@@ -413,7 +447,7 @@
     // trusting its own result and that bump, no read already in flight can
     // land in the gap and be mistaken for the newer word.
     try {
-      await setChatModel(model);
+      await setChatModel(model, provider);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       // Review, PR44 P2-1: this role's own outcome, never the shared one —
@@ -427,7 +461,7 @@
       changeBusy = false;
       return;
     }
-    chatWriteOutcome = { kind: 'acknowledged', model };
+    chatWriteOutcome = { kind: 'acknowledged', model, provider };
     await refresh().catch(() => {});
     changeBusy = false;
   }
@@ -471,7 +505,7 @@
   // the type since a value can no longer land in the wrong field by mistake.
   type WriteOutcome =
     | null
-    | { kind: 'acknowledged'; model: string }
+    | { kind: 'acknowledged'; model: string; provider: ProviderChoice }
     | { kind: 'unknown' };
   let embeddingWriteOutcome = $state<WriteOutcome>(null);
   let chatWriteOutcome = $state<WriteOutcome>(null);
@@ -491,6 +525,13 @@
       return outcome.kind === 'acknowledged' ? outcome.model : null;
     }
     return role === 'chat' ? currentChatModel : currentEmbeddingModel;
+  }
+  // The provider the role runs on: what a write just acknowledged, else what
+  // the last read said. `null` is an empty role.
+  function visibleProviderFor(role: Tab): ProviderChoice | null {
+    const outcome = outcomeFor(role);
+    if (outcome) return outcome.kind === 'acknowledged' ? outcome.provider : null;
+    return settings?.roles[role === 'chat' ? 'chat' : 'embed'] ?? null;
   }
   const visibleEmbeddingModel = $derived(visibleModelFor('embedding'));
   const visibleChatModel = $derived(visibleModelFor('chat'));
@@ -517,9 +558,20 @@
   function dotState(role: Tab): 'true' | 'false' | 'unknown' {
     if (outcomeFor(role)?.kind === 'unknown') return 'unknown';
     if (!settings || loadError) return 'unknown';
-    if (settings.key.kind !== 'present') return 'false';
-    if (settings.index.kind !== 'read') return 'unknown';
-    return visibleModelFor(role) !== null ? 'true' : 'false';
+    const k = role === 'chat' ? 'chat' : 'embed';
+    // The settings as the screen shows them: a write just acknowledged speaks
+    // before the re-read that will confirm it.
+    const model = visibleModelFor(role);
+    const view: ModelSettings = {
+      ...settings,
+      roles: { ...settings.roles, [k]: visibleProviderFor(role) },
+      index: settings.index.kind === 'read'
+        ? { ...settings.index, [k === 'chat' ? 'chatModel' : 'embeddingModel']: model }
+        : settings.index,
+    };
+    if (roleReady(view, k)) return 'true';
+    // A provider that can serve the role over an index nobody could read: not red.
+    return view.roles[k] !== null && roleServed(view, k) && view.index.kind !== 'read' ? 'unknown' : 'false';
   }
   const embeddingDotState = $derived(dotState('embedding'));
   const chatDotState = $derived(dotState('chat'));
@@ -532,9 +584,24 @@
   const embeddingDotLabel = $derived.by(() => { void $locale; return dotLabel(embeddingDotState); });
   const chatDotLabel = $derived.by(() => { void $locale; return dotLabel(chatDotState); });
 
-  const ready = $derived(!!settings && providerReady(settings));
-  const readyLabel = $derived.by(() => { void $locale; return t('models_status_ready'); });
-  const notReadyLabel = $derived.by(() => { void $locale; return t('models_status_not_ready'); });
+  const activeRole = $derived(activeTab === 'chat' ? 'chat' : 'embed');
+  const activeProvider = $derived(settings?.roles[activeRole] ?? null);
+  const ready = $derived(!!settings && roleReady(settings, activeRole));
+  // The status line names the provider the active role runs on; an empty role
+  // has its own sentence, since "not connected" would blame a provider it lacks.
+  const statusLabel = $derived.by(() => {
+    void $locale;
+    if (activeProvider === null && settings) return t('models_role_empty');
+    return ready
+      ? t('models_status_ready', { provider: roleProviderName(activeProvider ?? 'openRouter') })
+      : t('models_status_not_ready');
+  });
+  function roleProviderName(p: ProviderChoice): string {
+    void $locale;
+    return t(p === 'mnema' ? 'provider_mnema' : 'provider_openrouter');
+  }
+  // The muted label beside a model; pinned wording, not translated.
+  const providerAside = (p: ProviderChoice) => (p === 'mnema' ? 'mnema (local)' : 'openrouter');
 
   const embeddingTabLabel = $derived.by(() => { void $locale; return t('models_tab_embedding'); });
   const chatTabLabel = $derived.by(() => { void $locale; return t('models_tab_chat'); });
@@ -639,7 +706,7 @@
   const selectableEntries = $derived.by(() => {
     const cat = activeCatalogue;
     if (!cat) return [];
-    return cat.entries.filter((entry: ModelEntry) => !isRefused(entry));
+    return cat.entries.filter((entry) => !isRefused(entry));
   });
 
   // The option's text: the name, and the price per million tokens when the
@@ -682,12 +749,15 @@
   // (owner's independent review of PR #51, P2: a known output of nought
   // beside an unknown input sorted ahead of every priced model).
   const unpriced = (entry: ModelEntry) => (entry.price.kind === 'known' ? 0 : 1);
+  // Mnema's group first, then OpenRouter; the order inside a group is today's.
+  const groupRank = (e: RoleModel) => (e.provider === 'mnema' ? 0 : 1);
   const sortedEntries = $derived.by(() => {
     const entries = [...selectableEntries];
     return sortBy === 'name'
-      ? entries.sort((a, b) => a.name.localeCompare(b.name))
+      ? entries.sort((a, b) => groupRank(a) - groupRank(b) || a.name.localeCompare(b.name))
       : entries.sort((a, b) =>
-          unpriced(a) - unpriced(b)
+          groupRank(a) - groupRank(b)
+            || unpriced(a) - unpriced(b)
             || (unpriced(a)
               ? a.name.localeCompare(b.name) // the unpriced group keeps name order
               : priceKey(a.outputPrice) - priceKey(b.outputPrice) || priceKey(a.price) - priceKey(b.price)));
@@ -759,7 +829,7 @@
 
   // The model a press has proposed and nobody has confirmed yet. `null` is
   // "no question is being asked", which is also the state a cancel returns to.
-  let pendingEmbedding = $state<string | null>(null);
+  let pendingEmbedding = $state<{ model: string; provider: ProviderChoice } | null>(null);
   // What the change reported it actually threw away — `AdoptedModel.retired`,
   // measured by the index at the moment of destruction. A different number
   // from the estimate shown before the act, and never a re-rendering of it.
@@ -788,7 +858,7 @@
   // is about (`scan_state::EmbedOutcome`'s own warning).
   const embedPassEnded = $derived(snapshot.kind === 'ended' && snapshot.report.endedIn === 'embedding');
 
-  function chooseEmbeddingModel(model: string) {
+  function chooseEmbeddingModel(model: string, provider: ProviderChoice) {
     // The model the SELECT is currently showing is not a change — compared
     // against `visibleEmbeddingModel`, not `currentEmbeddingModel` (review,
     // Important 1). The latter is only the LAST READ: after an acknowledged
@@ -803,7 +873,7 @@
     // reason: a pick that turns out to be a real no-op must leave the
     // previous round's own report and error exactly as they were, not wipe
     // them first and decide afterwards that nothing needed to happen.
-    if (model === visibleEmbeddingModel) return;
+    if (model === visibleEmbeddingModel && provider === visibleProviderFor('embedding')) return;
     changeError = null;
     retiredReport = null;
     // With no readable index there is no estimate to state, so there is
@@ -819,44 +889,43 @@
     // some other space is non-empty, which is the count this branch has just
     // read as zero, so the value that would refuse is the value that cannot
     // refuse here.
-    if (!indexRead || estimatedEmbeddings === 0) {
-      void commitEmbedding(model, 'keep');
+    if (!indexRead || atRisk(model) === 0) {
+      void commitEmbedding(model, provider, 'keep');
       return;
     }
-    pendingEmbedding = model;
+    pendingEmbedding = { model, provider };
   }
 
-  // The change handler for the native `<select>` — the SAME mechanism
-  // `Application.svelte`'s `onLanguageSelect` uses, and for the same reason
-  // (read that handler's own comment): Svelte's `value={selectValue}`
-  // compiles to a dirty check against the LAST value Svelte itself wrote, not
-  // against what the DOM currently shows, so a pick this build does not
-  // confirm (Cancel, a rejection, an unreadable read) would otherwise leave
-  // the user's own click showing on screen forever — and a SECOND pick of
-  // that same candidate would then fire no `change` event at all, since the
-  // DOM element's `.value` is already equal to it (review P2-2). Reading the
-  // candidate and writing `currentTarget.value` back to the CONFIRMED value
-  // immediately, before either model function is even called, keeps the DOM
-  // in sync on every change regardless of what Svelte thinks moved; the
-  // candidate itself lives only in `pendingEmbedding` (or is handed straight
-  // to `chooseChatModel`) until an IPC round says otherwise.
-  function onModelSelect(e: Event) {
-    const select = e.currentTarget as HTMLSelectElement;
-    const candidate = select.value;
-    select.value = selectValue;
-    // `disabled` is the ordinary guard a person meets; it does not stop a
-    // script-dispatched `change` (disabled only withholds events the BROWSER
-    // would generate from a real interaction). Checked here too, so a second
-    // write genuinely cannot start while the first command is still an open
-    // question the backend has not answered — including across a section
-    // switch, since this component now survives one (review P2-1).
+  // Option ids are `<index>\t<model id>`: the index keeps two listings of one
+  // model apart (`catalogue.rs` enforces no uniqueness over `id`), and it is
+  // the entry's place in `sortedEntries` that says which provider was meant.
+  const pickerOptions = $derived(sortedEntries.map((e, i) => ({
+    id: `${i}\t${e.id}`, label: optionText(e), aside: providerAside(e.provider), group: roleProviderName(e.provider),
+  })));
+  // The selection needs the provider as well as the id: bge-m3 under one
+  // provider is not the same choice as under the other.
+  const pickerValue = $derived.by(() => {
+    const i = sortedEntries.findIndex((e) => e.id === visibleActiveModel && e.provider === visibleProviderFor(activeTab));
+    return i < 0 ? null : pickerOptions[i].id;
+  });
+  function onPick(id: string) {
+    // `disabled` is the ordinary guard a person meets; this one also stops a
+    // second write from starting while the first is still an open question the
+    // backend has not answered, including across a section switch.
     if (changeBusy) return;
-    if (activeTab === 'chat') {
-      void chooseChatModel(candidate);
-    } else {
-      chooseEmbeddingModel(candidate);
-    }
+    const entry = sortedEntries[Number(id.split('\t')[0])];
+    if (!entry) return;
+    if (activeTab === 'chat') void chooseChatModel(entry.id, entry.provider);
+    else chooseEmbeddingModel(entry.id, entry.provider);
   }
+  // No provider can serve this role yet: the list is empty for that reason, so the
+  // picker stays on screen, disabled, and says what to do first.
+  const nothingConfigured = $derived(
+    !!settings && !settings.configured.openRouter
+    && !(activeTab === 'chat' ? settings.configured.mnemaChat : settings.configured.mnemaEmbed),
+  );
+  const setupFirst = $derived.by(() => { void $locale; return t('models_setup_first'); });
+  const SELECTION_LABEL_ID = 'model-selection-label';
 
   const selectValue = $derived(visibleActiveModel ?? '');
   const selectionLabel = $derived.by(() => { void $locale; return t('models_selection_label'); });
@@ -880,15 +949,67 @@
   const selectPlaceholder = $derived.by(() => {
     void $locale;
     const model = visibleActiveModel;
+    // An empty role has no provider to have stopped listing anything.
+    if (visibleProviderFor(activeTab) === null && settings?.index.kind === 'read') return { value: '', label: t('models_role_empty') };
     if (model === null) {
       const status = statusFor(activeTab);
       return { value: '', label: status === 'unknown' ? t('models_selection_unknown') : t('models_selection_not_chosen') };
     }
-    if (selectableEntries.some((entry) => entry.id === model)) return null;
-    return { value: model, label: t('models_selection_absent', { id: model }) };
+    if (pickerValue !== null) return null;
+    // A chosen model the picker cannot offer. Refused: it is named, with the
+    // reason. Retired: not announced; the default replaces it below, and until
+    // then the role reads as not chosen.
+    const refused = activeCatalogue?.entries.find(
+      (e) => e.id === model && e.provider === visibleProviderFor(activeTab) && isRefused(e),
+    );
+    if (refused && isRefused(refused)) {
+      return { value: '', label: `${refused.name} — ${hiddenReasonLabel(refused.refusal, 1)}` };
+    }
+    return { value: '', label: t(activeCatalogue ? 'models_selection_not_chosen' : 'models_selection_unknown') };
   });
 
-  async function commitEmbedding(model: string, existingVectors: ExistingVectors) {
+  const pickerPlaceholder = $derived(nothingConfigured ? setupFirst : (selectPlaceholder ? selectPlaceholder.label : ''));
+
+  // A chosen model that a successfully loaded catalogue no longer lists is
+  // replaced by its provider's default, once per (role, provider, model): the
+  // chat role is written; the embedding role goes through the same choice as a
+  // press (no vectors anywhere: written at once with `keep`; vectors: the
+  // existing count-based confirmation, nothing sent until it is answered).
+  // Nothing happens when the default itself is not offered, so a bad default
+  // cannot loop. A refused chosen model counts as absent (the picker cannot
+  // offer it); a catalogue with unreadable records replaces nothing.
+  const DEFAULT_MODEL: Record<Tab, Record<ProviderChoice, string>> = {
+    chat: { openRouter: 'openai/gpt-6-luna', mnema: 'gemma-4-e2b-it' },
+    embedding: { openRouter: 'baai/bge-m3', mnema: 'baai/bge-m3' },
+  };
+  const replacedAbsent = new Set<string>();
+  $effect(() => {
+    const tab = activeTab;
+    const cat = activeCatalogue;
+    const model = visibleActiveModel;
+    const provider = visibleProviderFor(tab);
+    if (!cat || !settings || settings.index.kind !== 'read' || changeBusy) return;
+    // A record this build could not read may be the very model chosen: nothing
+    // is known to be absent, so nothing is replaced.
+    if (cat.unreadable > 0) return;
+    if (model === null || provider === null || outcomeFor(tab) !== null) return;
+    const served = provider === 'mnema'
+      ? (tab === 'chat' ? settings.configured.mnemaChat : settings.configured.mnemaEmbed)
+      : settings.configured.openRouter;
+    if (!served) return;
+    const lists = (id: string) => cat.entries.some((e) => e.id === id && e.provider === provider && !isRefused(e));
+    if (lists(model)) return;
+    const fallback = DEFAULT_MODEL[tab][provider];
+    const key = `${tab}\t${provider}\t${model}`;
+    if (replacedAbsent.has(key) || !cat.entries.some((e) => e.id === fallback && e.provider === provider && !isRefused(e))) return;
+    replacedAbsent.add(key);
+    untrack(() => {
+      if (tab === 'chat') void chooseChatModel(fallback, provider);
+      else chooseEmbeddingModel(fallback, provider);
+    });
+  });
+
+  async function commitEmbedding(model: string, provider: ProviderChoice, existingVectors: ExistingVectors) {
     pendingEmbedding = null;
     changeError = null;
     changeBusy = true;
@@ -900,10 +1021,10 @@
     // Review, PR44 P2-1: this role's own field only — `chatWriteOutcome` is a
     // different role's state and must survive an embedding write untouched.
     try {
-      const adopted = await setEmbeddingModel(model, existingVectors);
+      const adopted = await setEmbeddingModel(model, provider, existingVectors);
       retiredReport = adopted.retired;
       jobRunning = false;
-      embeddingWriteOutcome = { kind: 'acknowledged', model };
+      embeddingWriteOutcome = { kind: 'acknowledged', model, provider };
       await refresh().catch(() => {});
     } catch (e) {
       changeError = e instanceof Error ? e.message : String(e);
@@ -957,7 +1078,13 @@
   // exactly the spaces it forgets. `models.rs` says so on the field itself,
   // and `the_settings_tell_the_active_space_apart_from_the_whole_index` is
   // where the two numbers are held apart.
-  const estimatedEmbeddings = $derived(indexRead ? indexRead.embeddedChunksEverywhere : 0);
+  // Choosing the model the index is already on (the other provider's listing of
+  // one space: bge-m3 on OpenRouter and Mnema share it) keeps the active space,
+  // so only the OTHER spaces' vectors are at risk.
+  const atRisk = (model: string) => !indexRead ? 0
+    : model === visibleEmbeddingModel ? indexRead.embeddedChunksEverywhere - indexRead.embeddedChunks
+      : indexRead.embeddedChunksEverywhere;
+  const estimatedEmbeddings = $derived(pendingEmbedding ? atRisk(pendingEmbedding.model) : indexRead ? indexRead.embeddedChunksEverywhere : 0);
 
   // Semantic search is dark: the index points at a vector space, it holds
   // documents, and that space holds nothing for them.
@@ -1062,7 +1189,7 @@
   const emptyCatalogueSentence = $derived.by(() => {
     void $locale;
     const cat = activeCatalogue;
-    if (!cat || cat.entries.length !== 0 || cat.unreadable !== 0) return null;
+    if (!cat || cat.entries.length !== 0 || cat.unreadable !== 0 || nothingConfigured) return null;
     return t('models_catalogue_empty');
   });
 </script>
@@ -1083,13 +1210,14 @@
        defect report nobody reading this window can act on. The previous order
        put that defect report between the provider row and the key rows, and
        left the single actionable instruction at the bottom, unlabelled. -->
+  {#if !providerCard || providerCard.view === 'openRouter'}
   <div class="group" data-testid="model-key-group" bind:this={keyGroupEl}>
     <!-- One occurrence of the word, not two: when the editable field is on
          screen the group's subject heading IS that field's label, so
          `getByLabelText('Key')` still resolves to exactly one control. -->
     {#if showInput}
       <label class="fl" for="model-key-input" data-testid="model-key-label">{keyLabel}</label>
-    {:else}
+    {:else if settings.key.kind !== 'present'}
       <span class="fl" data-testid="model-key-label">{keyLabel}</span>
     {/if}
     <!-- The sentence about the key's state, directly under its own subject. -->
@@ -1160,6 +1288,7 @@
     {/if}
     {#if removalLabel}<p data-testid="model-key-removal">{removalLabel}</p>{/if}
   </div>
+  {/if}
 {/if}
 <!-- Outside `{#if settings}` on purpose: a mount that rejects never sets
      `settings`, and an error paragraph inside that block could not be shown in
@@ -1212,7 +1341,16 @@
 </div>
 
 <div class="tabpanel">
-{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" checked={toolsOn} onchange={toggleTools} /> {chatToolsLabel}</label>{/if}{#if activeCatalogueError}
+{#if activeTab === 'chat'}<label class="tools-switch"><input type="checkbox" data-testid="chat-tools" bind:this={toolsBox} checked={toolsOn} disabled={cloudQuestion} onchange={toggleTools} /> {chatToolsLabel}</label>
+  {#if cloudQuestion}
+    <div class="group">
+      <p data-testid="chat-tools-cloud-question">{cloudQuestionLabel}</p>
+      <div class="row">
+        <button type="button" data-testid="chat-tools-cloud-confirm" onclick={() => switchTools(true, true)}>{cloudYesLabel}</button>
+        <button type="button" data-testid="chat-tools-cloud-cancel" onclick={async () => { cloudQuestion = false; await tick(); toolsBox?.focus(); }}>{cancelLabel}</button>
+      </div>
+    </div>
+  {/if}{/if}{#if activeCatalogueError}
   <p data-testid="model-catalogue-failure">{activeCatalogueError}</p>
 {:else if activeCatalogue}
   {#if unreadableSentence}<p data-testid="model-catalogue-unreadable">{unreadableSentence}</p>{/if}
@@ -1221,35 +1359,19 @@
   {/each}
   {#if emptyCatalogueSentence}
     <p data-testid="model-catalogue-empty">{emptyCatalogueSentence}</p>
-  {:else if activeCatalogue.entries.length > 0}
+  {:else if activeCatalogue.entries.length > 0 || nothingConfigured}
     <div class="row model-row">
-      <label class="fl" for="model-selection" data-testid="model-selection-label">{selectionLabel}</label>
-      <!-- One native `<select>` for the active role (Task 4, review P1/P2-1/
-           P2-2) rather than the frozen list's row of buttons: only `refusal
-           === null` entries (`selectableEntries`) become an `<option>` now
-           (owner's ruling, live run, 2026-09-10) — a refused entry no longer
-           gets a disabled row at all, it disappears from the list and its
-           reason moves to `hiddenReasons` below. Duplicates are preserved
-           exactly as the old list preserved them — unkeyed, for the same
-           reason Task 8 made the frozen list unkeyed: `catalogue.rs`
-           enforces no uniqueness over `id`, and a keyed `{#each}` throws on a
-           repeat (`each_key_duplicate`), taking the whole section down with
-           it. `option.value` is the model id; the backend's own
-           `set_*_model` still validates the choice. -->
-      <select
-        id="model-selection"
-        data-testid="model-selection"
-        disabled={changeBusy}
-        value={selectValue}
-        onchange={onModelSelect}
-      >
-        {#if selectPlaceholder}
-          <option value={selectPlaceholder.value} disabled>{selectPlaceholder.label}</option>
-        {/if}
-        {#each sortedEntries as entry}
-          <option value={entry.id}>{optionText(entry)}</option>
-        {/each}
-      </select>
+      <span class="fl" id={SELECTION_LABEL_ID} data-testid="model-selection-label">{selectionLabel}</span>
+      <!-- One searchable picker for the active role. Only `refusal === null`
+           entries (`selectableEntries`) are offered; a refused entry's reason
+           lives in `hiddenReasons` below. `data-model` is the model the screen
+           shows as current, whatever the list holds. -->
+      <div class="pick" data-testid="model-selection" data-model={selectValue}>
+        <Picker
+          searchable options={pickerOptions} value={pickerValue} onchange={onPick}
+          placeholder={pickerPlaceholder} disabled={changeBusy || nothingConfigured} labelledby={SELECTION_LABEL_ID}
+        />
+      </div>
       <button
         type="button"
         data-testid="model-sort"
@@ -1294,7 +1416,7 @@
      that returns to a green dot and says nothing is a promise the product
      cannot keep; the sentences about what just happened come after it now, and
      the last word on the screen is the loss rather than the reassurance. -->
-<p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{ready ? readyLabel : notReadyLabel}</p>
+<p data-testid="model-status-dot" data-active={ready ? 'true' : 'false'}>{statusLabel}</p>
 </div>
 </div>
 
@@ -1324,7 +1446,7 @@
       <button
         type="button"
         data-testid="model-embedding-discard"
-        onclick={() => commitEmbedding(chosen, 'discard')}>{confirmLabels.discard}</button>
+        onclick={() => commitEmbedding(chosen.model, chosen.provider, 'discard')}>{confirmLabels.discard}</button>
       <button
         type="button"
         data-testid="model-embedding-cancel"

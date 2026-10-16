@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, providerChoice, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
-  import { checkQuery, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
+  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, modelSettings, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
+  import { checkQuery, roleReady, roleServed, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
@@ -75,8 +75,28 @@
   let providerGen = 0;
   function refreshProvider() {
     const gen = ++providerGen;
-    Promise.all([providerStatus(), providerChoice().catch((): ProviderChoice => 'openRouter')])
-      .then(([s, c]) => { if (gen === providerGen) { status = s; statusProvider = c ?? 'openRouter'; } })
+    Promise.all([providerStatus(), modelSettings().catch(() => null)])
+      .then(([backend, settings]) => {
+        if (gen !== providerGen) return;
+        const roles = settings?.roles;
+        // The backend's `ok` is a probe of the provider; whether the ROLE is set up
+        // is `roleReady`, the same rule the settings tab dots use. A failed
+        // settings read is not ready.
+        const effective = (role: keyof RoleStatuses): ProviderStatus => {
+          const probe = backend[role];
+          if (probe.kind !== 'ok' || (settings && roleReady(settings, role))) return probe;
+          const missing = !settings || !roles?.[role] ? 'role'
+            : !roleServed(settings, role) ? (roles[role] === 'openRouter' ? 'key' : 'localModels')
+              : role === 'chat' ? 'chatModel' : 'embeddingModel';
+          return { kind: 'notConfigured', missing };
+        };
+        const s: RoleStatuses = { embed: effective('embed'), chat: effective('chat') };
+        // Answers need the chat role and search the embed role: the cloud shows
+        // the first of the two that is not ok.
+        const role: keyof RoleStatuses = s.chat.kind !== 'ok' || s.embed.kind === 'ok' ? 'chat' : 'embed';
+        status = s[role];
+        statusProvider = roles?.[role] ?? 'openRouter';
+      })
       .catch((e) => console.error('provider_status failed', e));
   }
 

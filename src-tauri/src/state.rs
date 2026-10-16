@@ -170,6 +170,9 @@ pub struct AppState {
     /// The language of the last question asked under Mnema, for the next
     /// question that does not show its own (`mnema_rag::detect`'s `previous`).
     last_lang: Mutex<Option<mnema_rag::Lang>>,
+    /// Substitutions a busy job slot refused; [`crate::provider::on_slot_change`]
+    /// applies them once the slot is free.
+    pending_fills: Mutex<Vec<crate::provider::Fill>>,
     /// The launcher's conversation; memory only (see [`crate::dialogue`]).
     pub dialogue: crate::dialogue::Session,
 }
@@ -233,6 +236,7 @@ impl AppState {
                 PathBuf::new(),
             ))),
             last_lang: Mutex::new(None),
+            pending_fills: Mutex::new(Vec::new()),
             dialogue: crate::dialogue::Session::default(),
         }
     }
@@ -420,7 +424,7 @@ impl AppState {
     }
 
     /// OpenRouter's address. Every model request goes through
-    /// [`AppState::endpoint`]; only the two calls that are about OpenRouter
+    /// [`AppState::endpoint_for`]; only the two calls that are about OpenRouter
     /// itself — checking its key, listing its catalogue — name it directly.
     pub fn openrouter_base(&self) -> &str {
         &self.provider_base
@@ -443,7 +447,7 @@ impl AppState {
         )
     }
 
-    /// Everything [`AppState::endpoint`] reads, owned — what a job carries.
+    /// Everything [`AppState::endpoint_for`] reads, owned — what a job carries.
     pub fn provider(&self) -> crate::provider::Provider {
         crate::provider::Provider {
             data_dir: self.data_dir.clone(),
@@ -453,8 +457,34 @@ impl AppState {
         }
     }
 
-    pub fn provider_choice(&self) -> crate::provider::ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir, self.mnema_available())
+    /// Records a substitution to apply when the job slot is released; one copy
+    /// of each.
+    pub(crate) fn queue_fill(&self, fill: crate::provider::Fill) {
+        let mut q = self
+            .pending_fills
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !q.contains(&fill) {
+            q.push(fill);
+        }
+    }
+
+    pub(crate) fn take_fills(&self) -> Vec<crate::provider::Fill> {
+        std::mem::take(
+            &mut *self
+                .pending_fills
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Which providers are set up for which role right now.
+    pub fn configured_providers(&self) -> crate::provider::Configured {
+        self.provider().configured()
+    }
+
+    pub fn roles(&self) -> crate::provider::Roles {
+        self.provider().roles()
     }
 
     /// Whether this machine can run the local provider (`Local::available`).
@@ -462,36 +492,34 @@ impl AppState {
         self.local().available()
     }
 
-    /// The one place a model request learns where to go. See
-    /// [`crate::provider::Provider::endpoint`].
-    pub fn endpoint(&self) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().endpoint()
-    }
-
-    pub fn endpoint_as(
+    /// Where a role's requests go. See
+    /// [`crate::provider::Provider::endpoint_for`].
+    pub fn endpoint_for(
         &self,
-        choice: crate::provider::ProviderChoice,
+        p: Option<crate::provider::ProviderChoice>,
+        id: mnema_local::ModelId,
     ) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().endpoint_as(choice)
+        self.provider().endpoint_for(p, id)
     }
 
-    /// [`crate::provider::Provider::question_endpoint_as`]: a question's wait
+    /// [`crate::provider::Provider::question_endpoint_for`]: a question's wait
     /// for the local models is bounded.
-    pub fn question_endpoint_as(
+    pub fn question_endpoint_for(
         &self,
-        choice: crate::provider::ProviderChoice,
+        p: Option<crate::provider::ProviderChoice>,
+        id: mnema_local::ModelId,
     ) -> Result<crate::provider::Endpoint, Error> {
-        self.provider().question_endpoint_as(choice)
+        self.provider().question_endpoint_for(p, id)
     }
 
-    /// How the answer to `question` should be voiced: the server's prompt for
-    /// OpenRouter; for Mnema, the question's language, falling back to the
-    /// previous question's and then the system's.
-    pub fn voice(&self, question: &str) -> mnema_rag::Voice {
-        self.voice_as(self.provider_choice(), question)
+    /// [`crate::provider::Provider::open_router`].
+    pub fn open_router_endpoint(&self) -> Result<crate::provider::Endpoint, Error> {
+        self.provider().open_router()
     }
 
-    /// [`AppState::voice`] for a choice the caller already read.
+    /// How the answer to `question` should be voiced by the chat provider
+    /// `choice`: the server's prompt for OpenRouter; for Mnema, the question's
+    /// language, falling back to the previous question's and then the system's.
     pub fn voice_as(
         &self,
         choice: crate::provider::ProviderChoice,

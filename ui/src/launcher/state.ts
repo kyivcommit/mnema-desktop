@@ -39,17 +39,24 @@ export type LauncherState =
   | { kind: 'refused'; reason: Refusal } // F
   | { kind: 'error'; reason: 'tooLong' | 'askFailed' | 'historyUnreadable' | 'historyFailed' }; // the query guard, a rejected ask, and a Recents open that failed: every non-idle state goes through the machine, so `error` is live
 
-// §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when a provider
-// key is present AND the index has a chosen embedding model. A stored key with no chosen model
-// still cannot embed a query, so key-present alone is not enough. Fail SAFE: `typeof … === 'string'`
-// is true only for a real model name, so a null model — or a wire field renamed away to `undefined`
-// — reads as no-model and content stays OFF, never wrongly ON.
-export function providerReady(s: ModelSettings): boolean {
-  return (
-    s.key.kind === 'present' &&
-    s.index.kind === 'read' &&
-    typeof s.index.embeddingModel === 'string'
-  );
+// §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when the embed
+// role has a provider that can serve it AND the index has a chosen embedding model. A stored key
+// with no chosen model still cannot embed a query, so a provider alone is not enough. Fail SAFE:
+// `typeof … === 'string'` is true only for a real model name, so a null model — or a wire field
+// renamed away to `undefined` — reads as no-model and the role stays NOT ready, never wrongly ready.
+// One predicate for both roles: the settings tab dots and status line call it, and so does the
+// launcher's cloud (Launcher.svelte), which is `ok` only when the backend probe is ok AND this holds.
+// Whether the role's provider can serve it right now, apart from the index.
+export function roleServed(s: ModelSettings, role: 'embed' | 'chat'): boolean {
+  const provider = s.roles[role];
+  if (provider === null) return false;
+  if (provider === 'openRouter') return s.key.kind === 'present';
+  return role === 'embed' ? s.configured.mnemaEmbed : s.configured.mnemaChat;
+}
+
+export function roleReady(s: ModelSettings, role: 'embed' | 'chat'): boolean {
+  if (!roleServed(s, role) || s.index.kind !== 'read') return false;
+  return typeof (role === 'embed' ? s.index.embeddingModel : s.index.chatModel) === 'string';
 }
 
 export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {

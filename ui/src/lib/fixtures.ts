@@ -1,5 +1,5 @@
 import type {
-  AskAnswer, AskCitation, Hit, HistoryEntry, SourceAround, SourceBlock, TreeListing,
+  AskAnswer, AskCitation, Hit, HistoryEntry, ModelSettings, SourceAround, SourceBlock, TreeListing,
 } from './ipc';
 
 // Anchors 3 and 7, NOT 1 and 2: `anchor` is the model's own ordinal into
@@ -429,3 +429,26 @@ export const excerptInAnotherBlock: Excerpt = {
   hasMoreAfter: true,
   freshness: { kind: 'current' },
 };
+
+// The two `ModelSettings` fields added with provider-per-role, for test
+// fixtures that do not care about them: both roles on OpenRouter, key only.
+export const ROLE_FIELDS: Pick<ModelSettings, 'roles' | 'configured'> = {
+  roles: { embed: 'openRouter', chat: 'openRouter' },
+  configured: { openRouter: true, mnemaEmbed: false, mnemaChat: false },
+};
+
+// Settings on which the backend's own provider probe may say "ok" while the role is not set up.
+// Read by the settings tab dots and by the launcher's cloud, which must agree on both (`roleReady`).
+const AGREE_INDEX = { kind: 'read' as const, failedChunks: 0, pendingChunks: 0, scanIncomplete: false, indexedFiles: 0, lastIndexedAt: null, embeddedChunks: 0, embeddedChunksEverywhere: 0, totalChunks: 6, searchTextArm: true, searchContentArm: false };
+export const READINESS_FIXTURES: { name: string; settings: ModelSettings; embedReady: boolean; chatReady: boolean }[] = [
+  { name: 'ready', embedReady: true, chatReady: true, settings: {
+    key: { kind: 'present' }, platform: 'linux', ...ROLE_FIELDS,
+    index: { ...AGREE_INDEX, embeddingModel: 'emb', chatModel: 'chat' } } },
+  { name: 'Mnema embed downloaded, no active space', embedReady: false, chatReady: true, settings: {
+    key: { kind: 'present' }, platform: 'linux',
+    roles: { embed: 'mnema', chat: 'openRouter' }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: false },
+    index: { ...AGREE_INDEX, embeddingModel: null, chatModel: 'chat' } } },
+  { name: 'OpenRouter chat with a key, no chat model', embedReady: true, chatReady: false, settings: {
+    key: { kind: 'present' }, platform: 'linux', ...ROLE_FIELDS,
+    index: { ...AGREE_INDEX, embeddingModel: 'emb', chatModel: null } } },
+];

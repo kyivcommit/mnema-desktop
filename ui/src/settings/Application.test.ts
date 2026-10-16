@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
@@ -31,10 +32,8 @@ vi.mock('../lib/ipc', () => ({
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.
   mnemaAvailable: () => Promise.resolve(false),
-  providerChoice: () => Promise.resolve('openRouter'),
   localModels: () => Promise.resolve([]),
   listenLocalModelProgress: () => Promise.resolve(() => {}),
-  setProviderChoice: vi.fn(),
   downloadModel: vi.fn(),
   cancelDownload: vi.fn(),
   removeModel: vi.fn(),
@@ -85,6 +84,7 @@ const SETTINGS: ModelSettings = {
     scanIncomplete: false, searchTextArm: true, searchContentArm: true,
   },
   platform: 'linux',
+  ...ROLE_FIELDS,
 };
 
 // What a process in which nothing has happened yet reports (`ScanState::default`).

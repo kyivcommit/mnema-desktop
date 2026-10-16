@@ -1,3 +1,4 @@
+import { ROLE_FIELDS } from '../lib/fixtures';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
@@ -54,6 +55,7 @@ function settings(over: Partial<ModelSettings> = {}): ModelSettings {
       searchTextArm: true, searchContentArm: true,
     },
     platform: 'linux',
+    ...ROLE_FIELDS,
     ...over,
   };
 }

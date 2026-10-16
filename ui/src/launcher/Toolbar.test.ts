@@ -111,6 +111,12 @@ test('the cloud names the missing local models, not the key', () => {
   expect(cloud.getAttribute('aria-label')).not.toContain('ключа');
 });
 
+test('the cloud names an empty role, not the embedding model', () => {
+  setLocale('uk');
+  render(Toolbar, props({ status: { kind: 'notConfigured', missing: 'role' } }));
+  expect(screen.getByTestId('provider-cloud').getAttribute('aria-label')).toBe('Не обрано провайдера для ролі — відкрити налаштування моделей');
+});
+
 test('the status button names the provider in use', () => {
   const name = (over: Record<string, unknown>) => {
     const r = render(Toolbar, props(over));

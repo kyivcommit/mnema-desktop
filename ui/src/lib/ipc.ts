@@ -348,7 +348,18 @@ export type IndexRead = Extract<IndexSettings, { kind: 'read' }>;
 // convention every union in this module already follows.
 export type Platform = 'mac' | 'windows' | 'linux';
 
-export type ModelSettings = { key: KeyState; index: IndexSettings; platform: Platform };
+// `Roles` / `Configured` (provider.rs): each role's provider (`null` = the role
+// is empty) and which providers can serve which role.
+export type Roles = { embed: ProviderChoice | null; chat: ProviderChoice | null };
+export type Configured = { openRouter: boolean; mnemaEmbed: boolean; mnemaChat: boolean };
+
+export type ModelSettings = {
+  key: KeyState;
+  index: IndexSettings;
+  platform: Platform;
+  roles: Roles;
+  configured: Configured;
+};
 
 export const modelSettings = () => invoke<ModelSettings>('model_settings');
 
@@ -445,9 +456,15 @@ export type Catalogue = {
 // shown before an account exists. `role` is validated on the Rust side
 // (`Error::UnknownRole`); this module only ever passes the two roles the
 // window offers (D123/D124 keep rerank and verify off screen).
-export const providerModels = (role: ModelRole) => invoke<Catalogue>('provider_models', { role });
+export const providerModels = (role: ModelRole) => invoke<RoleCatalogue>('provider_models', { role });
 
-export const setChatModel = (model: string) => invoke<void>('set_chat_model', { model });
+// `RoleModel` / `RoleCatalogue` (models.rs): the entry's fields are flattened
+// beside `provider`.
+export type RoleModel = ModelEntry & { provider: ProviderChoice };
+export type RoleCatalogue = Omit<Catalogue, 'entries'> & { entries: RoleModel[] };
+
+export const setChatModel = (model: string, provider: ProviderChoice) =>
+  invoke<void>('set_chat_model', { model, provider });
 
 // `ExistingVectors` (models.rs) — the one destructive parameter in this
 // application, and the reason it is a union of two names rather than a
@@ -481,8 +498,8 @@ export type AdoptedModel = {
   index: IndexSettings;
 };
 
-export const setEmbeddingModel = (model: string, existingVectors: ExistingVectors) =>
-  invoke<AdoptedModel>('set_embedding_model', { model, existingVectors });
+export const setEmbeddingModel = (model: string, provider: ProviderChoice, existingVectors: ExistingVectors) =>
+  invoke<AdoptedModel>('set_embedding_model', { model, provider, existingVectors });
 
 // ---------------------------------------------------------------------------
 // Job events (`src-tauri/src/job.rs`) — a channel carrying one job's progress
@@ -938,11 +955,15 @@ export const setAutostart = (enabled: boolean) =>
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
 
 // The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
-// the chat list to models that take tools. `setChatTools` answers the stored value.
+// the chat list to models that take tools. `setChatTools` answers the stored value,
+// or `asksCloud` (models.rs `ToolsSwitch`): turning it on would move the chat role
+// from Mnema to OpenRouter, nothing was written, and `cloud` confirms the move.
+export type ToolsSwitch = { kind: 'stored'; on: boolean } | { kind: 'asksCloud' };
 export const chatTools = () => invoke<boolean>('chat_tools_enabled');
 // Starts a new conversation: the backend forgets the session (`new_chat`).
 export const newChat = () => invoke<void>('new_chat');
-export const setChatTools = (on: boolean) => invoke<boolean>('set_chat_tools', { on });
+export const setChatTools = (on: boolean, cloud = false) =>
+  invoke<ToolsSwitch>('set_chat_tools', { on, cloud });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is
@@ -989,10 +1010,15 @@ export const setLocaleChoice = (choice: LocaleChoice) =>
 // local facts on every call; `unreachable` and `ok` come from the provider and
 // are cached by the core for a minute. `reason` is the core's own sentence.
 export type ProviderStatus =
-  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' | 'localModels' }
+  // `chatModel` is the launcher's own (a served chat role with no model); the
+  // backend never sends it.
+  | { kind: 'notConfigured'; missing: 'key' | 'embeddingModel' | 'chatModel' | 'localModels' | 'role' }
   | { kind: 'unreachable'; reason: string }
   | { kind: 'ok' };
-export const providerStatus = () => invoke<ProviderStatus>('provider_status');
+// One status per role (provider_status.rs `RoleStatuses`): answers need `chat`,
+// search needs `embed`.
+export type RoleStatuses = { embed: ProviderStatus; chat: ProviderStatus };
+export const providerStatus = () => invoke<RoleStatuses>('provider_status');
 
 // ---------------------------------------------------------------------------
 // The Mnema (local) provider (`src-tauri/src/provider.rs`). Wire spellings are
@@ -1011,11 +1037,7 @@ export type DownloadError =
   | { kind: 'noSpace'; needed: number; free: number }
   | { kind: 'cancelled' }
   | { kind: 'failed'; message: string };
-export type ProviderSwitch = { choice: ProviderChoice; retired: RetiredSpace[] };
 
-export const providerChoice = () => invoke<ProviderChoice>('provider_choice');
-export const setProviderChoice = (choice: ProviderChoice, existingVectors: ExistingVectors) =>
-  invoke<ProviderSwitch>('set_provider_choice', { choice, existingVectors });
 export const mnemaAvailable = () => invoke<boolean>('mnema_available');
 export const localModels = () => invoke<LocalModelRow[]>('local_models');
 export const downloadModel = (id: LocalModelId) => invoke<void>('download_model', { id });

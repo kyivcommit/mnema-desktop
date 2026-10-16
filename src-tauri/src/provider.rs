@@ -1,7 +1,8 @@
-//! Which provider answers — OpenRouter or the local Mnema process — behind ONE
-//! endpoint. Every call that leaves for a model asks [`endpoint`] (through
-//! `AppState::endpoint` or a job's captured [`Provider`]), so the two can never
-//! be chosen differently at two sites.
+//! Which provider answers each role — OpenRouter or the local Mnema process.
+//! Every call that leaves for a model asks [`Provider::endpoint_for`] with its
+//! role's provider (through `AppState::endpoint_for` or a job's captured
+//! [`Provider`]), so one role's provider is never chosen differently at two
+//! sites.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +27,44 @@ pub enum ProviderChoice {
 }
 
 pub const PREFS_KEY: &str = "provider";
+
+/// What a provider is used for. Each role picks its own provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Embed,
+    Chat,
+}
+
+/// The provider chosen for each role; `None` = nothing configured for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Roles {
+    pub embed: Option<ProviderChoice>,
+    pub chat: Option<ProviderChoice>,
+}
+
+/// Which providers are set up and able to serve which role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Configured {
+    pub open_router: bool,
+    pub mnema_embed: bool,
+    pub mnema_chat: bool,
+}
+
+impl Configured {
+    pub fn serves(&self, p: ProviderChoice, r: Role) -> bool {
+        match (p, r) {
+            (ProviderChoice::OpenRouter, _) => self.open_router,
+            (ProviderChoice::Mnema, Role::Embed) => self.mnema_embed,
+            (ProviderChoice::Mnema, Role::Chat) => self.mnema_chat,
+        }
+    }
+
+    pub fn any(&self, p: ProviderChoice) -> bool {
+        self.serves(p, Role::Embed) || self.serves(p, Role::Chat)
+    }
+}
 
 /// How long a local answer may take. A weak Mac writes slower than the cloud's
 /// `INTERACTIVE_TIMEOUT` allows.
@@ -69,7 +108,7 @@ impl ProviderChoice {
 }
 
 /// The local models and the process that serves them. Started lazily, on the
-/// first [`endpoint`] that finds both models `Ready`.
+/// first use by a role on Mnema whose model is `Ready`.
 pub struct Local {
     pub store: Store,
     binary: PathBuf,
@@ -97,7 +136,11 @@ pub struct Local {
     question_wait: Duration,
     /// What loads the models into the process: [`Sidecar::load`], unless a
     /// test makes the load misbehave in a way the fake cannot.
-    load: fn(&Sidecar) -> Result<(), mnema_local::Error>,
+    load: fn(&Sidecar, &[ModelId]) -> Result<(), mnema_local::Error>,
+    /// The models a load asks for: those of the roles on Mnema ([`on_show`]
+    /// and every role change set it); both until then. A load asks only for
+    /// the ones that are downloaded.
+    wanted: Mutex<Vec<ModelId>>,
 }
 
 impl Local {
@@ -115,11 +158,15 @@ impl Local {
             available: mnema_local::available(),
             question_wait: LOCAL_CHAT_TIMEOUT,
             load: Sidecar::load,
+            wanted: Mutex::new(vec![ModelId::Embed, ModelId::Chat]),
         }
     }
 
     #[cfg(test)]
-    fn with_load(mut self, load: fn(&Sidecar) -> Result<(), mnema_local::Error>) -> Self {
+    fn with_load(
+        mut self,
+        load: fn(&Sidecar, &[ModelId]) -> Result<(), mnema_local::Error>,
+    ) -> Self {
         self.load = load;
         self
     }
@@ -151,10 +198,8 @@ impl Local {
         self
     }
 
-    pub fn models_ready(&self) -> bool {
-        [ModelId::Embed, ModelId::Chat]
-            .into_iter()
-            .all(|id| self.store.state(id) == ModelState::Ready)
+    pub fn ready(&self, id: ModelId) -> bool {
+        self.store.state(id) == ModelState::Ready
     }
 
     /// [`Local::endpoint_within`] with no limit on the wait for a load: what
@@ -217,6 +262,21 @@ impl Local {
             let began = match st.running {
                 Some(began) => began,
                 None => {
+                    // Only what is downloaded: the process fails a whole load
+                    // that names a model whose files are gone.
+                    let which: Vec<ModelId> = self
+                        .wanted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .iter()
+                        .copied()
+                        .filter(|id| self.ready(*id))
+                        .collect();
+                    // An empty load asks for both; nothing to load is no load
+                    // (the process loads on demand).
+                    if which.is_empty() {
+                        return Ok(());
+                    }
                     let attempt = st.attempt + 1;
                     let began = Instant::now();
                     let (loads, sidecar, load) =
@@ -233,7 +293,7 @@ impl Local {
                                 pid,
                                 result: None,
                             };
-                            end.result = Some(load(&sidecar));
+                            end.result = Some(load(&sidecar, &which));
                         })
                         .map_err(|e| {
                             mnema_local::Error::Io(format!("cannot start the model load: {e}"))
@@ -330,7 +390,7 @@ impl Local {
         &self.cancel[id as usize]
     }
 
-    /// Stops the process (if any): the next [`endpoint`] starts a fresh one
+    /// Stops the process (if any): the next [`Provider::endpoint_for`] starts a fresh one
     /// over whatever files are there by then.
     pub(crate) fn stop(&self) {
         let old = self
@@ -382,7 +442,7 @@ impl Drop for LoadEnd {
     }
 }
 
-/// Everything [`endpoint`] reads, owned, so a job thread can carry it without
+/// Everything [`Provider::endpoint_for`] reads, owned, so a job thread can carry it without
 /// `AppState`.
 #[derive(Clone)]
 pub struct Provider {
@@ -393,68 +453,90 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// The choice as the preferences file states it right now.
-    pub fn choice(&self) -> ProviderChoice {
-        crate::prefs::provider_choice(&self.data_dir, self.local.available())
+    /// The provider of each role, as the preferences file states it, with the
+    /// migration from the single key read against what is set up right now.
+    pub fn roles(&self) -> Roles {
+        // Built only when a migration needs it: no keychain read otherwise.
+        crate::prefs::roles(&self.data_dir, || self.configured())
     }
 
-    /// Where to send model requests, and the secret for them.
-    ///
-    /// OpenRouter: its base for both `base` and `query_base`, and the stored key
-    /// (`Error::NoKey` when none). Mnema: the local process, or
-    /// `Error::ProviderNotReady` while either model is not downloaded.
-    pub fn endpoint(&self) -> Result<Endpoint, Error> {
-        self.endpoint_as(self.choice())
-    }
-
-    /// [`Provider::endpoint`] for a choice the caller already read — so a
-    /// command that branches on the choice and then asks for the endpoint
-    /// cannot read the preferences file twice and get two answers.
-    pub fn endpoint_as(&self, choice: ProviderChoice) -> Result<Endpoint, Error> {
-        endpoint(
-            choice,
-            &self.openrouter_base,
-            &self.credential_ref,
-            &self.local,
-            None,
+    /// Which providers can serve which role right now. Reads the keychain.
+    pub fn configured(&self) -> Configured {
+        // An unreadable store is not "no key": it must not move a role away.
+        self.configured_given(
+            mnema_secrets::load(&self.credential_ref).map_or(true, |k| k.is_some()),
         )
     }
 
-    /// [`Provider::endpoint_as`] for a question: under Mnema it waits for a
+    /// [`Provider::configured`] with OpenRouter's answer already measured.
+    pub fn configured_given(&self, open_router: bool) -> Configured {
+        let up = self.local.available();
+        Configured {
+            open_router,
+            mnema_embed: up && self.local.ready(ModelId::Embed),
+            mnema_chat: up && self.local.ready(ModelId::Chat),
+        }
+    }
+
+    /// The models of the roles on Mnema that are downloaded.
+    fn mnema_models(&self) -> Vec<ModelId> {
+        let r = self.roles();
+        [(r.embed, ModelId::Embed), (r.chat, ModelId::Chat)]
+            .into_iter()
+            .filter(|(p, id)| *p == Some(ProviderChoice::Mnema) && self.local.ready(*id))
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// Where to send a role's requests, and the secret for them. `p` is the
+    /// role's provider and `id` its local model.
+    ///
+    /// No provider: `Error::RoleEmpty`, never OpenRouter in its place, so data
+    /// a person keeps local never leaves the machine. OpenRouter: see
+    /// [`Provider::open_router`]. Mnema: the local process, or
+    /// `Error::ProviderNotReady` while this role's model is not downloaded.
+    pub fn endpoint_for(&self, p: Option<ProviderChoice>, id: ModelId) -> Result<Endpoint, Error> {
+        self.resolve(p, id, None)
+    }
+
+    /// [`Provider::endpoint_for`] for a question: under Mnema it waits for a
     /// load no longer than [`LOCAL_CHAT_TIMEOUT`], then hears
     /// [`Error::LocalLoading`] and answers with the passages.
-    pub fn question_endpoint_as(&self, choice: ProviderChoice) -> Result<Endpoint, Error> {
-        endpoint(
-            choice,
-            &self.openrouter_base,
-            &self.credential_ref,
-            &self.local,
-            Some(self.local.question_wait),
-        )
+    pub fn question_endpoint_for(
+        &self,
+        p: Option<ProviderChoice>,
+        id: ModelId,
+    ) -> Result<Endpoint, Error> {
+        self.resolve(p, id, Some(self.local.question_wait))
     }
-}
 
-pub fn endpoint(
-    choice: ProviderChoice,
-    openrouter_base: &str,
-    credential_ref: &str,
-    local: &Local,
-    load_wait: Option<Duration>,
-) -> Result<Endpoint, Error> {
-    match choice {
-        ProviderChoice::OpenRouter => {
-            let token = mnema_secrets::load(credential_ref)?.ok_or(Error::NoKey)?;
-            Ok(Endpoint {
-                base: openrouter_base.to_string(),
-                query_base: openrouter_base.to_string(),
-                token,
-            })
-        }
-        ProviderChoice::Mnema => {
-            if !local.models_ready() {
-                return Err(Error::ProviderNotReady);
+    /// OpenRouter whatever the roles say: its base for both `base` and
+    /// `query_base`, and the stored key (`Error::NoKey` when none). For the
+    /// probes of OpenRouter itself (a key check, a model's width).
+    pub fn open_router(&self) -> Result<Endpoint, Error> {
+        let token = mnema_secrets::load(&self.credential_ref)?.ok_or(Error::NoKey)?;
+        Ok(Endpoint {
+            base: self.openrouter_base.clone(),
+            query_base: self.openrouter_base.clone(),
+            token,
+        })
+    }
+
+    fn resolve(
+        &self,
+        p: Option<ProviderChoice>,
+        id: ModelId,
+        load_wait: Option<Duration>,
+    ) -> Result<Endpoint, Error> {
+        match p.ok_or(Error::RoleEmpty)? {
+            ProviderChoice::OpenRouter => self.open_router(),
+            ProviderChoice::Mnema => {
+                // A host that cannot run the process has no model ready to it.
+                if !(self.local.available() && self.local.ready(id)) {
+                    return Err(Error::ProviderNotReady);
+                }
+                self.local.endpoint_within(load_wait)
             }
-            local.endpoint_within(load_wait)
         }
     }
 }
@@ -536,104 +618,6 @@ impl From<mnema_local::Error> for DownloadError {
 }
 
 #[tauri::command]
-pub fn provider_choice(state: tauri::State<'_, crate::state::AppState>) -> ProviderChoice {
-    state.provider_choice()
-}
-
-/// What [`set_provider_choice`] did: the choice now in force, and the spaces a
-/// confirmed `Discard` destroyed on the way (empty otherwise) — the same fact
-/// `set_embedding_model` puts on the wire as `AdoptedModel::retired`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderSwitch {
-    pub choice: ProviderChoice,
-    pub retired: Vec<crate::models::RetiredSpace>,
-}
-
-#[tauri::command(async)]
-pub fn set_provider_choice(
-    state: tauri::State<'_, crate::state::AppState>,
-    choice: ProviderChoice,
-    existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderSwitch, Error> {
-    change(&state, choice, existing_vectors)
-}
-
-/// [`set_provider_choice`]'s body, reachable without a `State`.
-pub fn change(
-    state: &crate::state::AppState,
-    choice: ProviderChoice,
-    existing_vectors: crate::models::ExistingVectors,
-) -> Result<ProviderSwitch, Error> {
-    let mut retired = Vec::new();
-    // The job slot, for the reason `models::set_embedding_model` takes it: a
-    // scan resolves its endpoint once, on its own thread, after its claim
-    // (`scan_job::ScanDeps::production`). Refused while one runs, the choice
-    // cannot move under a run that is already embedding through the other
-    // provider; claimed, no run can start until the choice is written.
-    let mut slot = state.claim_job(
-        crate::scan_state::Phase::Other {
-            job: crate::scan_state::OtherJob::ModelAdoption,
-        },
-        false,
-    )?;
-    if choice == ProviderChoice::Mnema {
-        // The local process embeds with bge-m3 alone. From OpenRouter's
-        // bge-m3 this finds the same space and moves nothing; from any other
-        // model with vectors it is refused under `Keep` — the ordinary model
-        // change's own refusal, which the window answers with its count-based
-        // confirmation — and retires the old space under `Discard` (owner's
-        // ruling on F1, option B). Refused, the choice is not written.
-        let (before, adopted) = state.with_index(|db| {
-            let before = db.active_space()?;
-            Ok((
-                before,
-                crate::models::adopt_retiring_whatever_blocks(
-                    db,
-                    LOCAL_EMBED_MODEL,
-                    LOCAL_EMBED_DIM,
-                    state.credential_ref(),
-                    &mnema_chunk::chunker_hash(),
-                    existing_vectors,
-                ),
-            ))
-        })?;
-        // `set_embedding_model`'s rule: a kept resumable report counts against
-        // the active space, so an exit that moved it gives the report up. Only
-        // one that moved it: from OpenRouter's bge-m3 the space stays, and so
-        // does «Продовжити» with its partial-reading warning.
-        match adopted {
-            Ok((space, gone)) => {
-                if before != Some(space.space_id) {
-                    slot.forget_restore();
-                }
-                retired = gone;
-            }
-            Err(e) => {
-                if matches!(e, Error::RetiredThenFailed { .. }) {
-                    slot.forget_restore();
-                }
-                return Err(e);
-            }
-        }
-    }
-    crate::prefs::write_key(
-        state.data_dir(),
-        PREFS_KEY,
-        serde_json::to_value(choice).expect("a unit variant serialises"),
-    )?;
-    state.forget_provider_status();
-    if choice != ProviderChoice::Mnema {
-        // Nothing of the local provider should stay in memory under OpenRouter.
-        state.local().stop();
-    }
-    Ok(ProviderSwitch {
-        choice: state.provider_choice(),
-        retired,
-    })
-}
-
-#[tauri::command]
 pub fn mnema_available(state: tauri::State<'_, crate::state::AppState>) -> bool {
     state.mnema_available()
 }
@@ -667,6 +651,7 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
+    on_configured(&state, ProviderChoice::Mnema, Some(id.into()));
     Ok(())
 }
 
@@ -691,20 +676,228 @@ pub fn remove_model(
 
 /// [`remove_model`]'s body, reachable without a `State`.
 pub fn remove(state: &crate::state::AppState, id: LocalModel) -> Result<(), Error> {
-    // The job slot, as `change` takes it: a scan embedding through the process
-    // would otherwise end Failed with "connection refused" for a removal the
-    // person made. Drawn as a model change (`ModelAdoption`) — it is one; the
-    // kept resumable ending is restored on release, the space does not move.
-    let _slot = state.claim_job(
-        crate::scan_state::Phase::Other {
-            job: crate::scan_state::OtherJob::ModelAdoption,
-        },
-        false,
-    )?;
+    // The job slot, as every role writer takes it: a scan embedding through
+    // the process would otherwise end Failed with "connection refused" for a
+    // removal the person made. Drawn as a model change (`ModelAdoption`) — it
+    // is one; the kept resumable ending is restored on release, the space does
+    // not move.
+    let _slot = adoption_slot(state)?;
+    // The role first: a removal that then fails leaves a choice to make again,
+    // never a role on a model that is gone.
+    on_unconfigured(state, ProviderChoice::Mnema, Some(id.into()))?;
     let local = state.local();
     local.stop();
     local.store.remove(id.into())?;
     Ok(())
+}
+
+/// The slot every role write is made under: the scan re-reads the embed role
+/// inside its run and relies on it staying put.
+pub(crate) fn adoption_slot(
+    state: &crate::state::AppState,
+) -> Result<crate::state::JobSlot, Error> {
+    state.claim_job(
+        crate::scan_state::Phase::Other {
+            job: crate::scan_state::OtherJob::ModelAdoption,
+        },
+        false,
+    )
+}
+
+/// `p` just became configured (a key stored, a local model downloaded): every
+/// EMPTY role `p` serves gets a model, and a role already on `p` whose model is
+/// missing gets one too. A chosen role is never touched. Best effort: a failed
+/// write leaves the role empty; a busy slot defers it to [`on_slot_change`].
+///
+/// `which` limits Mnema to the role of the model that arrived — Mnema is
+/// configured per model, so downloading bge-m3 says nothing new about chat.
+pub fn on_configured(state: &crate::state::AppState, p: ProviderChoice, which: Option<ModelId>) {
+    fill_roles(state, p, true, which);
+}
+
+/// [`on_configured`]'s substitution. `empty_too: false` fills only roles
+/// already on `p` whose model is missing (a key stored while the index was
+/// shut): a boot never moves an empty role — one emptied by removing a local
+/// model would otherwise go to OpenRouter at every launch.
+pub(crate) fn fill_roles(
+    state: &crate::state::AppState,
+    p: ProviderChoice,
+    empty_too: bool,
+    which: Option<ModelId>,
+) {
+    let Ok(_slot) = adoption_slot(state) else {
+        // A scan holds the slot: applied when it is released.
+        state.queue_fill(Fill {
+            p,
+            empty_too,
+            which,
+        });
+        return;
+    };
+    let before = state.roles();
+    let configured = state.provider().configured();
+    for (role, id, now) in [
+        (Role::Chat, ModelId::Chat, before.chat),
+        (Role::Embed, ModelId::Embed, before.embed),
+    ] {
+        if !configured.serves(p, role) || which.is_some_and(|w| w != id) {
+            continue;
+        }
+        let fill = match now {
+            None => empty_too,
+            Some(q) => q == p && model_missing(state, role),
+        };
+        if fill {
+            match role {
+                Role::Chat => fill_chat(state, p),
+                Role::Embed => fill_embed(state, p),
+            }
+        }
+    }
+    after_role_change(state, before);
+}
+
+/// A [`fill_roles`] call a busy slot deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fill {
+    p: ProviderChoice,
+    empty_too: bool,
+    which: Option<ModelId>,
+}
+
+/// The job slot changed hands (the job observer): apply the substitutions a
+/// busy slot deferred. One that still finds the slot taken queues itself again.
+pub fn on_slot_change(state: &crate::state::AppState) {
+    for f in state.take_fills() {
+        fill_roles(state, f.p, f.empty_too, f.which);
+    }
+}
+
+/// The role is on a provider but the index has no model for it.
+fn model_missing(state: &crate::state::AppState, role: Role) -> bool {
+    match role {
+        Role::Chat => matches!(
+            state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL)),
+            Ok(None)
+        ),
+        Role::Embed => matches!(state.with_index(|db| db.active_space()), Ok(None)),
+    }
+}
+
+/// Chat: `p`'s default model, then the role. The model write is best effort:
+/// Mnema's chat never reads it, and a shut index is filled at the next boot.
+fn fill_chat(state: &crate::state::AppState, p: ProviderChoice) {
+    // Gemma takes no tools: with the switch on it is no valid default, and the
+    // role is left as it is (never moved to the cloud either).
+    if p == ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir()) {
+        return;
+    }
+    let model = match p {
+        ProviderChoice::OpenRouter => crate::models::DEFAULT_MODELS.chat,
+        ProviderChoice::Mnema => LOCAL_CHAT_MODEL,
+    };
+    let _ = state.with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, model));
+    let _ = crate::prefs::write_role(state.data_dir(), Role::Chat, Some(p));
+}
+
+/// Embedding: the active space's model if `p` offers it, else nothing; no
+/// space — `p`'s default, adopted without retiring anything. Never `Discard`:
+/// an automatic act deletes no vectors.
+fn fill_embed(state: &crate::state::AppState, p: ProviderChoice) {
+    let space = state.with_index(|db| match db.active_space()? {
+        Some(id) => Ok(Some(db.space_model(id)?.0)),
+        None => Ok(None),
+    });
+    let ok = match space {
+        // Every space was built from an OpenRouter model or from bge-m3, which
+        // OpenRouter offers too; Mnema offers bge-m3 alone.
+        Ok(Some(model)) => p == ProviderChoice::OpenRouter || model == LOCAL_EMBED_MODEL,
+        Ok(None) => adopt_default_embedding(state, p).is_ok(),
+        // A shut index: OpenRouter's model is filled at the next boot; Mnema's
+        // cannot be checked against a space nobody can read.
+        Err(_) => p == ProviderChoice::OpenRouter,
+    };
+    if ok {
+        let _ = crate::prefs::write_role(state.data_dir(), Role::Embed, Some(p));
+    }
+}
+
+/// Adopts `p`'s default embedding model into an index with no active space.
+/// OpenRouter's width is the provider's answer; Mnema's is the pinned file's.
+fn adopt_default_embedding(state: &crate::state::AppState, p: ProviderChoice) -> Result<(), Error> {
+    let (model, dim) = match p {
+        ProviderChoice::OpenRouter => {
+            let endpoint = state.open_router_endpoint()?;
+            let model = crate::models::DEFAULT_MODELS.embedding;
+            let check =
+                mnema_provider::check_embedding_model(&endpoint.base, &endpoint.token, model)?;
+            (model, check.dim as i64)
+        }
+        ProviderChoice::Mnema => (LOCAL_EMBED_MODEL, LOCAL_EMBED_DIM),
+    };
+    state.with_index(|db| {
+        db.adopt_embedding_model(
+            model,
+            dim,
+            state.credential_ref(),
+            &mnema_chunk::chunker_hash(),
+        )
+    })?;
+    Ok(())
+}
+
+/// `p` stopped being configured: every role on it is emptied (`which` limits
+/// Mnema to that model's role). Only the choice: the space, its vectors and
+/// the chat model stay. The caller holds the job slot.
+pub fn on_unconfigured(
+    state: &crate::state::AppState,
+    p: ProviderChoice,
+    which: Option<ModelId>,
+) -> Result<(), Error> {
+    let before = state.roles();
+    for (role, id, now) in [
+        (Role::Embed, ModelId::Embed, before.embed),
+        (Role::Chat, ModelId::Chat, before.chat),
+    ] {
+        if now == Some(p) && which.is_none_or(|w| w == id) {
+            crate::prefs::write_role(state.data_dir(), role, None)?;
+        }
+    }
+    after_role_change(state, before);
+    Ok(())
+}
+
+/// After a role write: no role left on Mnema stops the process; a role that
+/// left Mnema has its model unloaded from a process that keeps running.
+pub(crate) fn after_role_change(state: &crate::state::AppState, before: Roles) {
+    state.forget_provider_status();
+    let after = state.roles();
+    let local = state.local();
+    let mnema = Some(ProviderChoice::Mnema);
+    let which: Vec<ModelId> = [(after.embed, ModelId::Embed), (after.chat, ModelId::Chat)]
+        .into_iter()
+        .filter(|(p, _)| *p == mnema)
+        .map(|(_, id)| id)
+        .collect();
+    // Empty keeps the last set, as at a show: nothing on Mnema loads nothing.
+    if !which.is_empty() {
+        *local.wanted.lock().unwrap_or_else(PoisonError::into_inner) = which;
+    }
+    if after.embed != mnema && after.chat != mnema {
+        local.stop();
+        return;
+    }
+    if let Some(sidecar) = local.started() {
+        for (was, now, id) in [
+            (before.embed, after.embed, ModelId::Embed),
+            (before.chat, after.chat, ModelId::Chat),
+        ] {
+            if was == mnema && now != mnema {
+                // Best effort: a process that will not answer holds nothing.
+                let _ = sidecar.unload(Some(id));
+            }
+        }
+    }
 }
 
 /// The launcher went cold (hidden long enough): give the memory back.
@@ -712,15 +905,13 @@ pub fn on_cold(state: &crate::state::AppState) {
     let local = state.local();
     local.cold.store(true, Ordering::SeqCst);
     local.want.store(false, Ordering::SeqCst);
-    if state.provider_choice() != ProviderChoice::Mnema {
-        return;
-    }
     if let Some(sidecar) = local.started() {
         local.forget_loaded();
         // Best effort: a process that will not answer holds no memory worth
         // waiting for, and the next show asks again.
-        // bge-m3 stays while a scan runs: it is what the scan embeds with.
-        let _ = sidecar.unload(scan_running(state).then_some(ModelId::Chat));
+        // bge-m3 stays while a scan runs on Mnema: it is what the scan embeds with.
+        let keep_embed = scan_running(state) && state.roles().embed == Some(ProviderChoice::Mnema);
+        let _ = sidecar.unload(keep_embed.then_some(ModelId::Chat));
     }
 }
 
@@ -730,8 +921,19 @@ pub fn on_show(state: &crate::state::AppState) -> std::thread::JoinHandle<()> {
     let provider = state.provider();
     provider.local.cold.store(false, Ordering::SeqCst);
     provider.local.shown.fetch_add(1, Ordering::SeqCst);
+    let which = provider.mnema_models();
+    // An empty set sets nothing and loads nothing: with no role on Mnema no
+    // `endpoint` reaches the process, so `want` alone does no harm.
+    if !which.is_empty() {
+        *provider
+            .local
+            .wanted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = which.clone();
+    }
+    // After `wanted`: a caller that sees `want` must see the set it loads.
     provider.local.want.store(true, Ordering::SeqCst);
-    if provider.choice() != ProviderChoice::Mnema || !provider.local.models_ready() {
+    if which.is_empty() {
         return std::thread::spawn(|| {});
     }
     std::thread::spawn(move || {
@@ -787,7 +989,8 @@ impl Provider {
     /// [`on_scan_end`] for a job thread, which carries a `Provider` and not
     /// `AppState`.
     pub fn scan_end(&self) {
-        if self.choice() != ProviderChoice::Mnema || !self.local.cold.load(Ordering::SeqCst) {
+        let r = self.roles();
+        if r.embed != Some(ProviderChoice::Mnema) || !self.local.cold.load(Ordering::SeqCst) {
             return;
         }
         if let Some(sidecar) = self.local.started() {
@@ -807,7 +1010,9 @@ mod tests {
     /// whatever host the test runs on: a Linux CI run otherwise reads the
     /// stored choice as OpenRouter.
     fn state_choosing(dir: &std::path::Path, choice: ProviderChoice) -> AppState {
-        crate::prefs::write_key(dir, PREFS_KEY, serde_json::to_value(choice).unwrap()).unwrap();
+        for role in [Role::Embed, Role::Chat] {
+            crate::prefs::write_role(dir, role, Some(choice)).unwrap();
+        }
         let state = AppState::new(
             dir.to_path_buf(),
             "w".into(),
@@ -854,33 +1059,22 @@ mod tests {
     fn mnema_without_ready_models_asks_for_the_models() {
         let dir = tempfile::tempdir().unwrap();
         let state = state_choosing(dir.path(), ProviderChoice::Mnema);
-        let endpoint = state.endpoint();
+        let endpoint = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
         assert!(
             matches!(endpoint, Err(Error::ProviderNotReady)),
             "{endpoint:?}"
         );
         assert_eq!(
             crate::provider_status::status(&state),
-            ProviderStatus::NotConfigured {
-                missing: Missing::LocalModels
+            crate::provider_status::RoleStatuses {
+                embed: ProviderStatus::NotConfigured {
+                    missing: Missing::LocalModels
+                },
+                chat: ProviderStatus::NotConfigured {
+                    missing: Missing::LocalModels
+                },
             }
         );
-    }
-
-    #[test]
-    fn a_host_that_cannot_run_mnema_reads_openrouter_and_offers_no_mnema() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = state_choosing(dir.path(), ProviderChoice::Mnema);
-        state.install_local(
-            Local::new(
-                Store::new(dir.path().join("models"), HUB.to_string()),
-                PathBuf::from("unused"),
-            )
-            .with_available(false),
-        );
-        assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
-        assert_eq!(state.provider().choice(), ProviderChoice::OpenRouter);
-        assert!(!state.mnema_available());
     }
 
     #[test]
@@ -901,7 +1095,7 @@ mod tests {
             mnema_provider::OPENROUTER_BASE.into(),
             reference,
         );
-        let endpoint = state.endpoint();
+        let endpoint = state.endpoint_for(state.roles().chat, ModelId::Chat);
         assert!(
             matches!(&endpoint, Ok(e) if e.base == mnema_provider::OPENROUTER_BASE
                 && e.query_base == mnema_provider::OPENROUTER_BASE
@@ -995,12 +1189,15 @@ mod lifecycle {
     }
 
     /// Panics on its first call, then loads as the real one does.
-    fn a_load_that_panics_once(sidecar: &Sidecar) -> Result<(), mnema_local::Error> {
+    fn a_load_that_panics_once(
+        sidecar: &Sidecar,
+        which: &[ModelId],
+    ) -> Result<(), mnema_local::Error> {
         static CALLS: AtomicU64 = AtomicU64::new(0);
         if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
             panic!("a load that panics (test)");
         }
-        sidecar.load()
+        sidecar.load(which)
     }
 
     /// A load thread that panics must not leave its load "in flight" for ever:
@@ -1080,7 +1277,9 @@ mod lifecycle {
     fn going_cold_unloads_under_mnema() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         on_cold(&state);
         assert_eq!(
             count(&log, "start POST /mnema/unload"),
@@ -1088,6 +1287,99 @@ mod lifecycle {
             "{}",
             logged(&log)
         );
+    }
+
+    fn set_roles(dir: &Path, embed: ProviderChoice, chat: ProviderChoice) {
+        crate::prefs::write_role(dir, Role::Embed, Some(embed)).unwrap();
+        crate::prefs::write_role(dir, Role::Chat, Some(chat)).unwrap();
+    }
+
+    #[test]
+    fn a_chat_only_mnema_role_loads_only_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        on_show(&state).join().unwrap();
+        let text = logged(&log);
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["chat"]}"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_embed_only_role_starts_without_gemma_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        on_show(&state).join().unwrap();
+        let text = logged(&log);
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["embed"]}"#),
+            "{text}"
+        );
+    }
+
+    /// `wanted` still at its default (both) while Gemma is not downloaded: the
+    /// load asks for bge-m3 alone, or the process fails every load.
+    #[test]
+    fn a_stale_wanted_set_loads_only_downloaded_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(dir.path(), ProviderChoice::Mnema, ProviderChoice::Mnema);
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        state.local().want.store(true, Ordering::SeqCst);
+        let got = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
+        let text = logged(&log);
+        assert!(got.is_ok(), "the embed endpoint loads: {got:?}\n{text}");
+        assert!(
+            text.lines()
+                .any(|l| l == r#"body /mnema/load {"models":["embed"]}"#),
+            "{text}"
+        );
+    }
+
+    /// A role change sets the load set to the roles on Mnema, so a chat role
+    /// moved to OpenRouter no longer loads Gemma.
+    #[test]
+    fn a_role_change_resets_the_load_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(dir.path(), ProviderChoice::Mnema, ProviderChoice::Mnema);
+        let before = state.roles();
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        after_role_change(&state, before);
+        assert_eq!(*state.local().wanted.lock().unwrap(), vec![ModelId::Embed]);
+    }
+
+    #[test]
+    fn no_role_on_mnema_neither_starts_nor_unloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::OpenRouter,
+        );
+        on_show(&state).join().unwrap();
+        on_cold(&state);
+        assert_eq!(logged(&log), "");
+        assert!(state.local().started().is_none());
     }
 
     #[test]
@@ -1148,7 +1440,9 @@ mod lifecycle {
             &[("FAKE_MLX_LOAD_MS", "600")],
         );
         let loading = on_show(&state);
-        let ep = state.endpoint().expect("the question's endpoint");
+        let ep = state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the question's endpoint");
         let answer = post(&ep, "/v1/chat/completions", "{}");
         loading.join().unwrap();
         let text = logged(&log);
@@ -1185,7 +1479,9 @@ mod lifecycle {
     fn going_cold_during_a_scan_keeps_bge_m3() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         // The slot a scan holds; any job that holds it counts, as for every
         // other "a job is running" question.
         let _scan = state
@@ -1224,7 +1520,9 @@ mod lifecycle {
         // Cold while the scan ran: bge-m3 goes when it ends.
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         drop(scan);
@@ -1238,7 +1536,9 @@ mod lifecycle {
         // Shown again meanwhile: the launcher is not cold, bge-m3 stays.
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let scan = scan_slot(&state);
         on_cold(&state);
         on_show(&state).join().unwrap();
@@ -1252,6 +1552,107 @@ mod lifecycle {
     }
 
     #[test]
+    fn going_cold_during_a_scan_with_embed_on_openrouter_unloads_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+        let _scan = scan_slot(&state);
+        on_cold(&state);
+        let text = logged(&log);
+        assert!(
+            text.lines().any(|l| l == "body /mnema/unload "),
+            "the scan embeds elsewhere, so nothing is kept:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_scan_end_unload_follows_the_embed_role() {
+        // Embed on Mnema, chat elsewhere: bge-m3 goes when the cold scan ends.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::Mnema,
+            ProviderChoice::OpenRouter,
+        );
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+        let scan = scan_slot(&state);
+        on_cold(&state);
+        drop(scan);
+        on_scan_end(&state);
+        assert!(
+            logged(&log).lines().any(|l| l == EMBED_GONE),
+            "{}",
+            logged(&log)
+        );
+
+        // Chat on Mnema, embed elsewhere: bge-m3 was never this process's.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        set_roles(
+            dir.path(),
+            ProviderChoice::OpenRouter,
+            ProviderChoice::Mnema,
+        );
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+        let scan = scan_slot(&state);
+        on_cold(&state);
+        drop(scan);
+        on_scan_end(&state);
+        assert!(
+            !logged(&log).lines().any(|l| l == EMBED_GONE),
+            "{}",
+            logged(&log)
+        );
+    }
+
+    #[test]
+    fn each_role_asks_only_for_its_own_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        std::fs::remove_dir_all(state.local().store.dir(ModelId::Chat)).unwrap();
+        let mnema = Some(ProviderChoice::Mnema);
+        assert!(matches!(
+            state.endpoint_for(mnema, ModelId::Chat),
+            Err(Error::ProviderNotReady)
+        ));
+        assert!(matches!(
+            state.endpoint_for(None, ModelId::Embed),
+            Err(Error::RoleEmpty)
+        ));
+        assert_eq!(count_prefix(&log, "spawn"), 0);
+        state
+            .endpoint_for(mnema, ModelId::Embed)
+            .expect("the embed model alone is enough for the embed role");
+    }
+
+    #[test]
+    fn a_host_that_cannot_run_mnema_has_no_mnema_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        let (local, _) = local_at(dir.path(), &[]);
+        state.install_local(local.with_available(false));
+        let endpoint = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
+        assert!(
+            matches!(endpoint, Err(Error::ProviderNotReady)),
+            "{endpoint:?}"
+        );
+        assert!(!state.mnema_available());
+        assert_eq!(count_prefix(&log, "spawn"), 0);
+    }
+
+    #[test]
     fn a_restarted_process_is_loaded_again_before_the_next_question() {
         let dir = tempfile::tempdir().unwrap();
         // Dies after its second authorised request: the show's load, then one chat.
@@ -1261,10 +1662,14 @@ mod lifecycle {
             &[("FAKE_MLX_DIE_AFTER", "2")],
         );
         on_show(&state).join().unwrap();
-        let ep = state.endpoint().expect("the first process answers");
+        let ep = state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the first process answers");
         post(&ep, "/v1/chat/completions", "{}");
         wait_dead(&state);
-        state.endpoint().expect("the supervisor's restart");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the supervisor's restart");
         let text = logged(&log);
         assert!(eventually(|| count_prefix(&log, "spawn") == 2), "{text}");
         assert_eq!(
@@ -1274,22 +1679,46 @@ mod lifecycle {
         );
     }
 
+    /// [`app`] with both roles on Mnema, an open index, and the process up.
+    fn started_on_mnema(dir: &Path) -> (AppState, PathBuf) {
+        let (state, log) = app(dir, ProviderChoice::Mnema, &[]);
+        set_roles(dir, ProviderChoice::Mnema, ProviderChoice::Mnema);
+        state.open_index().expect("an index");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+        (state, log)
+    }
+
     #[test]
-    fn leaving_mnema_stops_the_process() {
+    fn moving_chat_off_mnema_unloads_gemma() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
-        assert!(state.local().started().is_some());
-        let switched = change(
-            &state,
-            ProviderChoice::OpenRouter,
-            crate::models::ExistingVectors::Keep,
-        )
-        .expect("switching to OpenRouter");
-        assert_eq!(switched.choice, ProviderChoice::OpenRouter);
+        let (state, log) = started_on_mnema(dir.path());
+        crate::models::choose_chat_model(&state, "vendor/chat".into(), ProviderChoice::OpenRouter)
+            .expect("chat moves to OpenRouter");
+        assert_eq!(
+            count(&log, r#"body /mnema/unload {"models":["chat"]}"#),
+            1,
+            "{}",
+            logged(&log)
+        );
+        assert!(
+            state.local().started().is_some(),
+            "embedding is still on Mnema: the process stays"
+        );
+    }
+
+    #[test]
+    fn no_mnema_role_stops_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = started_on_mnema(dir.path());
+        crate::prefs::write_role(dir.path(), Role::Embed, Some(ProviderChoice::OpenRouter))
+            .unwrap();
+        crate::models::choose_chat_model(&state, "vendor/chat".into(), ProviderChoice::OpenRouter)
+            .expect("chat moves to OpenRouter");
         assert!(
             state.local().started().is_none(),
-            "no process is left running under OpenRouter"
+            "no process is left running with no role on Mnema"
         );
     }
 
@@ -1303,14 +1732,19 @@ mod lifecycle {
             &[("FAKE_MLX_DIE_AFTER", "1")],
         );
         let die = |state: &AppState| {
-            let ep = state.endpoint().expect("an endpoint");
+            let ep = state
+                .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+                .expect("an endpoint");
             post(&ep, "/v1/models", "");
             wait_dead(state);
         };
         die(&state); // process 1
         die(&state); // its one restart
         assert!(
-            matches!(state.endpoint(), Err(Error::Local(_))),
+            matches!(
+                state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed),
+                Err(Error::Local(_))
+            ),
             "dead twice, and said so"
         );
         // A status poll finds it dead and never spawns.
@@ -1321,7 +1755,7 @@ mod lifecycle {
             logged(&log)
         );
         // The next explicit use starts a fresh one, with a fresh restart budget.
-        let fresh = state.endpoint();
+        let fresh = state.endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed);
         assert!(fresh.is_ok(), "{fresh:?}");
         assert!(
             eventually(|| count_prefix(&log, "spawn") == 3),
@@ -1336,7 +1770,9 @@ mod lifecycle {
         use tauri::Manager as _;
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         let mock = tauri::test::mock_app();
         mock.manage(crate::launcher_layout::HiddenAt::default());
         mock.manage(state);
@@ -1409,7 +1845,9 @@ mod lifecycle {
     fn going_cold_during_a_job_that_is_not_a_scan_unloads_everything() {
         let dir = tempfile::tempdir().unwrap();
         let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
-        state.endpoint().expect("the process starts");
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
         // Only a scan thread calls `scan_end`; keeping bge-m3 for this job would
         // keep it resident for good.
         let _adoption = state

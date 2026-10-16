@@ -135,12 +135,13 @@ case_ "Folders.svelte: the row loses its layout class" \
 # other value nobody wrote — has a live carrier one property over:
 # `value={selectValue}` (`Models.svelte:942`), asserted at
 # `Models.test.ts:1015` and `:1028` among others. Rebound there instead of
-# invented back into CSS.
+# invented back into CSS. Rebound again (per-role providers): the select is now
+# a `Picker`, whose shown selection is `value={pickerValue}`.
 case_ "Models.svelte: the select stops showing which model is actually current" \
   ui/src/settings/Models.svelte \
-  "s~        disabled=\{changeBusy\}\n        value=\{selectValue\}~        disabled={changeBusy}\n        value={''}~" \
-  "value={''}" \
-  src/settings/Models.test.ts 'the shown selection does not change until set_chat_model AND its re-read both resolve — not on the click alone' runner=vitest
+  "s~value=\{pickerValue\}~value={null}~" \
+  "value={null}" \
+  src/settings/Models.test.ts 'the_selection_follows_the_role_provider_not_just_the_model_id' runner=vitest
 
 case_ "settings.css: !important on a font property that already sets the triple" \
   ui/src/styles/settings.css \

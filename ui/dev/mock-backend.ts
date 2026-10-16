@@ -17,7 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 import { LAUNCHER_COLD_EVENT } from '../src/lib/ipc';
 import { excerptSpanA, generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
+  AppPrefs, AskAnswer, Catalogue, RoleCatalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
   ScanState, ThemeChoice, TreeListing,
 } from '../src/lib/ipc';
 
@@ -77,7 +77,7 @@ function initialState(scenario: string) {
 // always carries priced models, refused ones and a router, and the window
 // draws the ⓘ and its notes only when it does (`Models.svelte`'s `hasNotes`).
 // A clean list here hid that button once already.
-const catalogue = (role: ModelRole): Catalogue => {
+const catalogue = (role: ModelRole, openRouter: boolean, mnema: boolean): RoleCatalogue => {
   const usd = (perMillion: number) => ({ kind: 'known' as const, amount: perMillion / 1e6 });
   const ok = (id: string, price: number, out = 0): Catalogue['entries'][number] => ({
     id, name: id.split('/')[1], inputLimit: { kind: 'known', tokens: 8192 },
@@ -100,7 +100,17 @@ const catalogue = (role: ModelRole): Catalogue => {
         refused('openrouter/auto', { kind: 'router' }),
         refused('openai/dall-e-3', { kind: 'noTextOutput' }),
       ];
-  return { entries, unreadable: 0, unreadableRecords: [] };
+  // Mnema's own entry comes first and states no price; a provider that is not set up lists nothing.
+  const local = role === 'embedding'
+    ? { ...ok('baai/bge-m3', 0), name: 'BAAI: bge-m3', price: { kind: 'notStated' as const }, outputPrice: { kind: 'notStated' as const } }
+    : { ...ok('gemma-4-e2b-it', 0), name: 'Google: Gemma 4 E2B', price: { kind: 'notStated' as const }, outputPrice: { kind: 'notStated' as const } };
+  return {
+    entries: [
+      ...(mnema ? [{ ...local, provider: 'mnema' as const }] : []),
+      ...(openRouter ? entries.map((e) => ({ ...e, provider: 'openRouter' as const })) : []),
+    ],
+    unreadable: 0, unreadableRecords: [],
+  };
 };
 
 export function installMockBackend(win: 'settings' | 'launcher') {
@@ -110,7 +120,14 @@ export function installMockBackend(win: 'settings' | 'launcher') {
   const provider = query.get('provider') ?? 'ok';
   const s = initialState(scenario);
   const bump = () => { s.scan = { ...s.scan, revision: s.scan.revision + 1 }; };
-  const settings = () => ({ key: s.key, index: s.index, platform: 'mac' as const });
+  // Each role has its own provider; a fresh install has none (the settings Provider picker only chooses a card).
+  const roles: { embed: 'openRouter' | 'mnema' | null; chat: 'openRouter' | 'mnema' | null } =
+    scenario === 'fresh' ? { embed: null, chat: null } : { embed: 'openRouter', chat: 'openRouter' };
+  const settings = () => ({
+    key: s.key, index: s.index, platform: 'mac' as const,
+    roles,
+    configured: { openRouter: s.key.kind === 'present', mnemaEmbed: local.embed?.kind === 'ready', mnemaChat: local.chat?.kind === 'ready' },
+  });
 
   // ponytail: a scan is three timer ticks, not the real phase machine; enough
   // to draw the progress strip, add phases here when a task needs them.
@@ -144,7 +161,6 @@ export function installMockBackend(win: 'settings' | 'launcher') {
   }
 
   // Mnema (local): ?local=nospace makes every download answer "no space".
-  let choice: 'openRouter' | 'mnema' = 'openRouter';
   const local: Record<string, { kind: string; done?: number; total?: number }> = {
     embed: { kind: 'absent' }, chat: { kind: 'absent' },
   };
@@ -165,8 +181,6 @@ export function installMockBackend(win: 'settings' | 'launcher') {
 
   const handlers: Record<string, (a: Args) => unknown> = {
     mnema_available: () => true,
-    provider_choice: () => choice,
-    set_provider_choice: (a) => { choice = a.choice as typeof choice; return { choice, retired: [] }; },
     local_models: () => Object.entries(local).map(([id, state]) => ({ id, state })),
     download_model: (a) => downloadMock(a.id as string),
     cancel_download: (a) => { cancelled.add(a.id as string); },
@@ -188,9 +202,13 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.key = { kind: 'absent' };
       return { kind: had ? 'removed' : 'nothingToRemove' };
     },
-    provider_models: (a) => catalogue(a.role as ModelRole),
-    set_chat_model: (a) => { s.index = { ...s.index, chatModel: a.model as string }; },
+    provider_models: (a) => catalogue(
+      a.role as ModelRole, s.key.kind === 'present',
+      local[a.role === 'embedding' ? 'embed' : 'chat']?.kind === 'ready',
+    ),
+    set_chat_model: (a) => { roles.chat = a.provider as 'openRouter' | 'mnema'; s.index = { ...s.index, chatModel: a.model as string }; },
     set_embedding_model: (a) => {
+      roles.embed = a.provider as 'openRouter' | 'mnema';
       s.index = { ...s.index, embeddingModel: a.model as string, embeddedChunks: 0, embeddedChunksEverywhere: 0 };
       return { model: a.model, dim: 1536, spaceId: 2, created: true, retired: [], index: s.index };
     },
@@ -270,10 +288,13 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},
-    set_chat_tools: (a) => (s.chatTools = a.on as boolean),
-    provider_status: () => provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
-      : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
-      : { kind: 'ok' },
+    set_chat_tools: (a) => ({ kind: 'stored', on: (s.chatTools = a.on as boolean) }),
+    provider_status: () => {
+      const one = provider === 'unreachable' ? { kind: 'unreachable', reason: 'connection timed out' }
+        : provider === 'missing' ? { kind: 'notConfigured', missing: 'key' }
+        : { kind: 'ok' };
+      return { embed: one, chat: one };
+    },
     open_settings: (a) => {
       win === 'launcher' && open('/dev/settings.html' + location.search, '_blank');
       // The bench's event bus is page-local, so the section reaches only this

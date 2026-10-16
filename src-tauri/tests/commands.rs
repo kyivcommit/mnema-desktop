@@ -1512,6 +1512,14 @@ fn search_reports_the_inspected_pool_not_the_embedded_count() {
 fn a_fresh_index_with_no_arm_written_answers_with_both_arms_on() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // OpenRouter chosen for embedding, no key stored: the "no key" case proper.
+    // A fresh install's empty role is "no embedding model chosen" instead.
+    mnema_desktop::prefs::write_role(
+        app.state::<AppState>().data_dir(),
+        mnema_desktop::provider::Role::Embed,
+        Some(mnema_desktop::provider::ProviderChoice::OpenRouter),
+    )
+    .unwrap();
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
@@ -1711,8 +1719,12 @@ const ASK_CREDITS: &str = r#"{"data":{"total_credits":10.0,"total_usage":1.0}}"#
 /// is `pub` and the point here is only to reach the `Ready` gate, not to prove
 /// registration (which `search`'s own registration test already covers).
 fn set_chat_model_via(state: &State<'_, AppState>, model: &str) {
-    mnema_desktop::models::set_chat_model(state.clone(), model.into())
-        .expect("the chat model is saved");
+    mnema_desktop::models::set_chat_model(
+        state.clone(),
+        model.into(),
+        mnema_desktop::provider::ProviderChoice::OpenRouter,
+    )
+    .expect("the chat model is saved");
 }
 
 /// The private gate (spec §7.2): with no chat model set, `ask` must answer
@@ -4416,11 +4428,11 @@ fn every_model_command_the_window_calls_is_registered() {
         // not happen rather than as a build that stopped.
         (
             "set_embedding_model",
-            json!({ "model": "baai/bge-m3", "existingVectors": "keep" }),
+            json!({ "model": "baai/bge-m3", "provider": "openRouter", "existingVectors": "keep" }),
         ),
         (
             "set_embedding_model",
-            json!({ "model": "baai/bge-m3", "existingVectors": "discard" }),
+            json!({ "model": "baai/bge-m3", "provider": "openRouter", "existingVectors": "discard" }),
         ),
         (
             "set_rerank_model",
@@ -4428,7 +4440,7 @@ fn every_model_command_the_window_calls_is_registered() {
         ),
         (
             "set_chat_model",
-            json!({ "model": "anthropic/claude-opus-4" }),
+            json!({ "model": "anthropic/claude-opus-4", "provider": "openRouter" }),
         ),
         ("model_settings", json!({})),
     ] {
@@ -4632,7 +4644,7 @@ fn a_model_change_that_says_nothing_about_the_existing_vectors_is_refused() {
     let refused = call(
         &webview,
         "set_embedding_model",
-        json!({ "model": "baai/bge-m3" }),
+        json!({ "model": "baai/bge-m3", "provider": "openRouter" }),
     )
     .expect_err("a model change with no answer about the existing vectors was accepted");
     let refused = error_text(&refused);
@@ -11195,6 +11207,14 @@ fn reading_positions(snapshots: &[ScanState]) -> Vec<u64> {
 fn a_scan_reads_every_watched_folder_under_one_pass_and_keeps_what_each_said() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // OpenRouter chosen for embedding, no key stored: the "no key" case proper.
+    // A fresh install's empty role is "no embedding model chosen" instead.
+    mnema_desktop::prefs::write_role(
+        app.state::<AppState>().data_dir(),
+        mnema_desktop::provider::Role::Embed,
+        Some(mnema_desktop::provider::ProviderChoice::OpenRouter),
+    )
+    .unwrap();
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
@@ -11904,6 +11924,9 @@ fn the_scan_job_is_reachable_through_the_ipc() {
 fn a_scan_reads_the_key_from_the_store_this_application_files_it_under() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
+    // Embedding on OpenRouter before and after: the key, not the role, moves.
+    let or = Some(mnema_desktop::provider::ProviderChoice::OpenRouter);
+    set_roles(&app.state::<AppState>(), or, or);
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let folder = dir_holding(&["a1.txt"]);
@@ -12187,7 +12210,10 @@ fn mnema_endpoint_is_the_sidecar() {
     );
     choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
     state.install_local(support::ready_local(dir.path(), &[]));
-    let endpoint = state.endpoint();
+    let endpoint = state.endpoint_for(
+        Some(mnema_desktop::provider::ProviderChoice::Mnema),
+        mnema_local::ModelId::Embed,
+    );
     assert!(
         matches!(&endpoint, Ok(e) if e.base.starts_with("http://127.0.0.1:")
             && e.query_base.starts_with("http://127.0.0.1:")
@@ -12207,7 +12233,12 @@ struct MnemaApp {
 }
 
 fn mnema_app(dir: &std::path::Path, files: usize, env: &[(&str, &str)]) -> MnemaApp {
-    let app = app_with_provider(dir, NO_PROVIDER);
+    mnema_app_on(dir, files, env, NO_PROVIDER)
+}
+
+/// [`mnema_app`] whose OpenRouter base is `base`, for a role left on OpenRouter.
+fn mnema_app_on(dir: &std::path::Path, files: usize, env: &[(&str, &str)], base: &str) -> MnemaApp {
+    let app = app_with_provider(dir, base);
     let state = app.state::<AppState>();
     choose(&state, mnema_desktop::provider::ProviderChoice::Mnema);
     state.install_local(support::ready_local(dir, env));
@@ -12255,7 +12286,7 @@ fn chunks_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (i64, i64
 
 #[test]
 fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
-    use mnema_desktop::provider::{ProviderChoice, change};
+    use mnema_desktop::provider::ProviderChoice;
     let dir = tempfile::tempdir().unwrap();
     let fx = mnema_app(dir.path(), 3, &[]);
     let refusal: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
@@ -12274,10 +12305,10 @@ fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
             );
             let mut slot = seen.lock().unwrap();
             if embedding && slot.is_none() {
-                let answer = change(
+                let answer = mnema_desktop::models::choose_chat_model(
                     state,
+                    "vendor/chat".into(),
                     ProviderChoice::OpenRouter,
-                    mnema_desktop::models::ExistingVectors::Keep,
                 );
                 *slot = Some(format!("{answer:?}"));
             }
@@ -12285,12 +12316,14 @@ fn switching_provider_mid_scan_is_refused_and_the_scan_continues() {
     );
     let refusal = refusal.lock().unwrap().clone();
     assert!(
-        refusal.as_deref().is_some_and(|r| r.starts_with("Err(")),
+        refusal
+            .as_deref()
+            .is_some_and(|r| r.starts_with("Err(JobAlreadyRunning")),
         "a switch while the scan holds the slot must be refused, got {refusal:?}"
     );
     assert_eq!(
-        fx.app.state::<AppState>().provider_choice(),
-        ProviderChoice::Mnema
+        fx.app.state::<AppState>().roles().embed,
+        Some(ProviderChoice::Mnema)
     );
     assert_eq!(
         report_of(&settled).reason,
@@ -12680,13 +12713,14 @@ fn active_and_vectors(app: &tauri::App<MockRuntime>, space_id: i64) -> (Option<i
         .unwrap()
 }
 
-/// F1 as the owner ruled it (option B): bge-m3 is shared, so switching onto
-/// Mnema from it moves nothing; from another model with vectors the switch is
-/// refused like any model change, and only a confirmed Discard makes it.
+/// F1 as the owner ruled it (option B): bge-m3 is shared, so moving the
+/// embedding role onto Mnema from it moves nothing; from another model with
+/// vectors the change is refused like any model change, and only a confirmed
+/// Discard makes it.
 #[test]
-fn switching_to_mnema_from_another_space_keeps_it() {
-    use mnema_desktop::models::ExistingVectors;
-    use mnema_desktop::provider::{ProviderChoice, change};
+fn set_embedding_model_on_mnema_from_another_space_is_refused_under_keep() {
+    use mnema_desktop::models::{ExistingVectors, choose_embedding_model};
+    use mnema_desktop::provider::ProviderChoice::Mnema;
 
     // (a) From OpenRouter's bge-m3: same space, same vectors, no confirmation.
     let dir = tempfile::tempdir().unwrap();
@@ -12694,11 +12728,13 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let bge = index_with_one_vector(&app, "baai/bge-m3", 1024);
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
-    let switched = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    let switched =
+        choose_embedding_model(&state, "baai/bge-m3".into(), Mnema, ExistingVectors::Keep);
     assert!(
-        matches!(&switched, Ok(s) if s.choice == ProviderChoice::Mnema && s.retired.is_empty()),
+        matches!(&switched, Ok(s) if s.space_id == bge && s.retired.is_empty()),
         "{switched:?}"
     );
+    assert_eq!(state.roles().embed, Some(Mnema));
     assert_eq!(active_and_vectors(&app, bge), (Some(bge), 1));
 
     // (b) From a 1536 space with vectors: refused, nothing moved.
@@ -12707,7 +12743,8 @@ fn switching_to_mnema_from_another_space_keeps_it() {
     let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
-    let refused = change(&state, ProviderChoice::Mnema, ExistingVectors::Keep);
+    let refused =
+        choose_embedding_model(&state, "baai/bge-m3".into(), Mnema, ExistingVectors::Keep);
     // The existing model-change class, which the window's count-based
     // confirmation keys on — not any refusal at all.
     assert!(
@@ -12717,20 +12754,26 @@ fn switching_to_mnema_from_another_space_keeps_it() {
                 mnema_index::Error::SpaceNotEmpty { space_id, embedded_chunks: 1 }
             )) if space_id == small
         ),
-        "a switch that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
+        "a change that strands vectors must be refused as SpaceNotEmpty: {refused:?}"
     );
-    assert_eq!(state.provider_choice(), ProviderChoice::OpenRouter);
+    // Refused, the role is not written.
+    assert_eq!(state.roles().embed, None);
     assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
 
     // ... and confirmed with Discard: the index is on bge-m3.
-    let confirmed = change(&state, ProviderChoice::Mnema, ExistingVectors::Discard);
+    let confirmed = choose_embedding_model(
+        &state,
+        "baai/bge-m3".into(),
+        Mnema,
+        ExistingVectors::Discard,
+    );
     assert!(
-        matches!(&confirmed, Ok(s) if s.choice == ProviderChoice::Mnema
-            && s.retired.len() == 1
+        matches!(&confirmed, Ok(s) if s.retired.len() == 1
             && s.retired[0].space_id == small
             && s.retired[0].embedded_chunks == 1),
-        "the confirmed switch must say which space and how many vectors went: {confirmed:?}"
+        "the confirmed change must say which space and how many vectors went: {confirmed:?}"
     );
+    assert_eq!(state.roles().embed, Some(Mnema));
     let model = state
         .with_index(|db| {
             let space = db.active_space()?.expect("an active space");
@@ -12738,6 +12781,184 @@ fn switching_to_mnema_from_another_space_keeps_it() {
         })
         .unwrap();
     assert_eq!(model, ("baai/bge-m3".to_string(), 1024));
+}
+
+fn write_roles(
+    state: &AppState,
+    embed: Option<mnema_desktop::provider::ProviderChoice>,
+    chat: Option<mnema_desktop::provider::ProviderChoice>,
+) {
+    use mnema_desktop::provider::Role;
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Embed, embed).unwrap();
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Chat, chat).unwrap();
+}
+
+/// Mnema offers bge-m3 alone: a space of another model leaves the embedding
+/// role empty when the local models arrive, and moves nothing — while chat,
+/// which Mnema can serve, is filled.
+#[test]
+fn mnema_cannot_serve_a_foreign_space() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let small = index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+    mnema_desktop::provider::on_configured(&state, Mnema, None);
+
+    assert_eq!(
+        state.roles().embed,
+        None,
+        "Mnema cannot embed into this space"
+    );
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(active_and_vectors(&app, small), (Some(small), 1));
+}
+
+/// A `Local` whose two models are one one-byte file each, downloaded from
+/// `server`; `chat_ready` pre-writes Gemma's file.
+fn downloadable_local(
+    dir: &std::path::Path,
+    server: &MockServer,
+    chat_ready: bool,
+) -> mnema_desktop::provider::Local {
+    use mnema_local::{FileSpec, Manifest, ModelId, ModelSpec, Store};
+    // sha256 of the one byte `x` the mock serves.
+    const SHA_X: &str = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+    let spec = |name: &str| ModelSpec {
+        repo: format!("test/{name}"),
+        commit: "0".into(),
+        files: vec![FileSpec::new("weights", 1, SHA_X)],
+    };
+    let store = Store::new(dir.join("models"), server.base().to_string()).with_manifest(Manifest {
+        embed: spec("embed"),
+        chat: spec("chat"),
+    });
+    if chat_ready {
+        std::fs::create_dir_all(store.dir(ModelId::Chat)).unwrap();
+        std::fs::write(store.dir(ModelId::Chat).join("weights"), b"x").unwrap();
+    }
+    mnema_desktop::provider::Local::new(store, PathBuf::new()).with_available(true)
+}
+
+/// A finished download fills the empty role its model serves.
+#[test]
+fn a_finished_download_fills_its_models_empty_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
+}
+
+/// With the tools switch on (the default) Gemma is no valid default: an empty
+/// chat role stays empty after its download, and nothing moves to the cloud.
+#[test]
+fn a_gemma_download_with_tools_on_leaves_an_empty_chat_role_empty() {
+    use mnema_desktop::provider::{LocalModel, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, None);
+}
+
+/// A download that finishes while a scan holds the slot is not lost: the
+/// empty role stays empty during the scan and is filled when the slot is
+/// released, through the job observer production installs.
+#[test]
+fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    // Gemma takes no tools: with the switch on it is not filled.
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+    state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
+    let scan = state
+        .claim_job(
+            mnema_desktop::scan_state::Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+    assert_eq!(state.roles().chat, None, "the scan holds the slot");
+
+    drop(scan);
+    assert_eq!(
+        state.roles().chat,
+        Some(Mnema),
+        "the deferred substitution is applied when the slot is released"
+    );
+}
+
+/// Mnema is configured per model: bge-m3 arriving says nothing new about
+/// chat, so an empty chat role stays empty though Gemma was already there.
+#[test]
+fn downloading_bge_m3_leaves_an_empty_chat_role_alone() {
+    use mnema_desktop::provider::{LocalModel, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, true));
+    write_roles(&state, None, None);
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::Embed);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(
+        state.roles().chat,
+        None,
+        "a bge-m3 download filled the chat role"
+    );
+}
+
+/// «Видалити» bge-m3 empties the embedding role and only it.
+#[test]
+fn remove_local_embed_resets_only_the_embed_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, remove};
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(support::ready_local(dir.path(), &[]));
+    write_roles(&state, Some(Mnema), Some(Mnema));
+
+    remove(&state, LocalModel::Embed).expect("removed");
+
+    assert_eq!(state.roles().embed, None);
+    assert_eq!(state.roles().chat, Some(Mnema));
 }
 
 /// A scan that stopped mid-embedding and offers «Продовжити», put in the slot
@@ -12776,15 +12997,19 @@ fn keep_a_resumable_ending(state: &AppState) -> ScanReport {
 /// switch that moves the space forgets it.
 #[test]
 fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
-    use mnema_desktop::models::ExistingVectors;
-    use mnema_desktop::provider::{ProviderChoice, change};
+    use mnema_desktop::models::{ExistingVectors, choose_embedding_model};
+    use mnema_desktop::provider::ProviderChoice;
+    let to_mnema = |state: &AppState, existing| {
+        state.install_local(support::ready_local(state.data_dir(), &[]));
+        choose_embedding_model(state, "baai/bge-m3".into(), ProviderChoice::Mnema, existing)
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let app = app_with_provider(dir.path(), NO_PROVIDER);
     index_with_one_vector(&app, "baai/bge-m3", 1024);
     let state = app.state::<AppState>();
     let report = keep_a_resumable_ending(&state);
-    change(&state, ProviderChoice::Mnema, ExistingVectors::Keep).expect("same space");
+    to_mnema(&state, ExistingVectors::Keep).expect("same space");
     assert_eq!(
         state.scan_state().snapshot,
         ScanSnapshot::Ended { report },
@@ -12796,7 +13021,7 @@ fn a_provider_switch_forgets_the_resumable_ending_only_when_the_space_moves() {
     index_with_one_vector(&app, "openai/text-embedding-3-small", 1536);
     let state = app.state::<AppState>();
     keep_a_resumable_ending(&state);
-    change(&state, ProviderChoice::Mnema, ExistingVectors::Discard).expect("confirmed");
+    to_mnema(&state, ExistingVectors::Discard).expect("confirmed");
     assert_eq!(
         state.scan_state().snapshot,
         ScanSnapshot::Idle,
@@ -12821,7 +13046,10 @@ fn the_status_poll_under_mnema_starts_no_process() {
     state.open_index().unwrap();
     let webview = main_webview(&app);
     let status = call(&webview, "provider_status", json!({})).expect("status");
-    assert_eq!(status, json!({ "kind": "ok" }));
+    assert_eq!(
+        status,
+        json!({ "embed": { "kind": "ok" }, "chat": { "kind": "ok" } })
+    );
     let spawns = std::fs::read_to_string(&log)
         .unwrap_or_default()
         .lines()
@@ -12875,7 +13103,10 @@ fn removing_a_model_mid_scan_is_refused_and_allowed_when_idle() {
 
     let state = fx.app.state::<AppState>();
     remove(&state, LocalModel::Embed).expect("idle: the removal goes ahead");
-    assert!(!state.local().models_ready(), "the model is gone");
+    assert!(
+        !state.local().ready(mnema_local::ModelId::Embed),
+        "the model is gone"
+    );
 }
 
 // ---- Query history: `ask` records, three commands list, reopen and delete. ----
@@ -13505,6 +13736,8 @@ fn turning_the_switch_off_mid_session_drops_the_session() {
     let server = MockServer::new(vec![
         Reply::ok(&chat_text("It resonates <c>1</c>.")),
         Reply::ok(&chat_text("A journal <c>1</c>.")),
+        // Turning the switch on reads the public catalogue for the chat model.
+        Reply::ok(r#"{"data":[]}"#),
         Reply::ok(&chat_text("Resonance again <c>1</c>.")),
     ]);
     let dir = tempfile::tempdir().unwrap();
@@ -13519,6 +13752,7 @@ fn turning_the_switch_off_mid_session_drops_the_session() {
     assert_eq!(third["via"], json!("search"), "{third}");
     server.request();
     server.request();
+    server.request(); // the catalogue read
     let r = server.request();
     assert!(
         !r.contains("\"tools\""),
@@ -13912,6 +14146,9 @@ fn a_session_without_a_generated_turn_still_searches_first() {
     let app = app_with_provider(dir.path(), server.base());
     let (webview, _) = dialogue_ready(&app);
     let state = app.state::<AppState>();
+    // Chat on OpenRouter whatever the key does: the key alone is this test's subject.
+    use mnema_desktop::provider::ProviderChoice::OpenRouter;
+    set_roles(&state, Some(OpenRouter), Some(OpenRouter));
 
     mnema_secrets::forget(state.credential_ref()).expect("the key is forgotten");
     let first = ask_q(&webview, FIRST_Q);
@@ -14015,4 +14252,195 @@ fn an_empty_saved_dialogue_is_unreadable_and_keeps_the_session() {
         app.state::<AppState>().dialogue.first_query().as_deref(),
         Some(FIRST_Q)
     );
+}
+
+// ---- Each role asks its own provider ----
+
+fn set_roles(
+    state: &AppState,
+    embed: Option<mnema_desktop::provider::ProviderChoice>,
+    chat: Option<mnema_desktop::provider::ProviderChoice>,
+) {
+    use mnema_desktop::provider::Role;
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Embed, embed).unwrap();
+    mnema_desktop::prefs::write_role(state.data_dir(), Role::Chat, chat).unwrap();
+}
+
+/// A Mnema app whose OpenRouter is `server`, with a key stored and a chat
+/// model set, logging the fake's requests to the returned file.
+fn mixed_app(
+    dir: &std::path::Path,
+    server: &MockServer,
+    files: usize,
+) -> (MnemaApp, std::path::PathBuf) {
+    let log = dir.join("fake-mlx.log");
+    let log_env = log.display().to_string();
+    let fx = mnema_app_on(dir, files, &[("FAKE_MLX_LOG", &log_env)], server.base());
+    let state = fx.app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-mixed").unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    (fx, log)
+}
+
+#[test]
+fn a_mixed_question_uses_two_endpoints() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), Some(OpenRouter));
+    scan_to_completion(fx.app.handle());
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+    let request = server.request();
+    assert!(request.contains("/chat/completions"), "{request}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l == "start POST /interactive/v1/embeddings"),
+        "the query was not embedded locally: {text}"
+    );
+    assert!(!text.contains("chat/completions"), "{text}");
+}
+
+#[test]
+fn an_empty_chat_role_answers_with_citations_only() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    // A reply OpenRouter would give, so a fallback to it shows as an answer.
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), None);
+    scan_to_completion(fx.app.handle());
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+    assert_eq!(answer["why"]["kind"], json!("notAsked"), "{answer}");
+    assert!(
+        !answer["citations"].as_array().unwrap().is_empty(),
+        "{answer}"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(!text.contains("chat/completions"), "{text}");
+    assert_eq!(server.request_if_any(), None, "nothing went to OpenRouter");
+}
+
+/// The local-only property: an empty embed role is never OpenRouter's, even
+/// with a key stored for it.
+#[test]
+fn an_empty_embed_role_searches_text_only() {
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    let server = MockServer::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    scan_to_completion(fx.app.handle());
+    set_roles(&fx.app.state::<AppState>(), None, Some(Mnema));
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&log).unwrap();
+
+    let found = call(&fx.webview, "search", json!({ "query": "synthetic topic" })).unwrap();
+    assert!(!found["hits"].as_array().unwrap().is_empty(), "{found}");
+    // "No embedding model chosen", not "no key": a key is stored.
+    assert_eq!(found["content"]["kind"], json!("noModel"), "{found}");
+    let after = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !after[before.len()..].contains("embeddings"),
+        "the query was embedded: {after}"
+    );
+    assert_eq!(
+        server.request_if_any(),
+        None,
+        "the query went to OpenRouter"
+    );
+}
+
+#[test]
+fn the_scan_embeds_through_the_embed_role() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    const FILES: usize = 20;
+    // Embed on Mnema, chat on OpenRouter: the fake's small batches, OpenRouter untouched.
+    let server = MockServer::new(vec![]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, FILES);
+    set_roles(&fx.app.state::<AppState>(), Some(Mnema), Some(OpenRouter));
+    scan_to_completion(fx.app.handle());
+    assert_eq!(
+        chunks_and_vectors(&fx.app, fx.space_id),
+        (FILES as i64, FILES as i64)
+    );
+    let (sizes, _) = scan_embed_shape(&log);
+    assert_eq!(sizes.iter().sum::<usize>(), FILES, "{sizes:?}");
+    assert!(sizes.iter().all(|&n| n <= 16), "{sizes:?}");
+    assert_eq!(server.request_if_any(), None, "the scan went to OpenRouter");
+
+    // The other way round: embed on OpenRouter, chat on Mnema.
+    let server = MockServer::new(vec![Reply::ok(&one_vector(1024))]);
+    let dir = tempfile::tempdir().unwrap();
+    let (fx, log) = mixed_app(dir.path(), &server, 1);
+    set_roles(&fx.app.state::<AppState>(), Some(OpenRouter), Some(Mnema));
+    scan_to_completion(fx.app.handle());
+    assert_eq!(chunks_and_vectors(&fx.app, fx.space_id), (1, 1));
+    assert!(server.request().contains("/embeddings"));
+    let (sizes, _) = scan_embed_shape(&log);
+    assert!(sizes.is_empty(), "the scan embedded locally: {sizes:?}");
+}
+
+#[test]
+fn dialogue_follows_the_chat_role() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+    // The embed role on Mnema does not turn the conversation off.
+    set_roles(&state, Some(Mnema), Some(OpenRouter));
+
+    assert_eq!(ask_q(&webview, FIRST_Q)["kind"], json!("generated"));
+    let next = ask_q(&webview, "tell me more");
+    assert_eq!(next["via"], json!("conversation"), "{next}");
+
+    // And no chat role is no conversation.
+    let id = only_row(&webview)["id"].as_i64().unwrap();
+    set_roles(&state, Some(OpenRouter), None);
+    assert_eq!(continue_row(&webview, id), json!(false));
+}
+
+/// An embed provider that cannot be reached says nothing about a chat
+/// provider that is another one: the chat is still asked (D171 holds only
+/// within one provider).
+#[test]
+fn an_unreachable_embed_provider_does_not_stop_another_chat_provider() {
+    use mnema_desktop::provider::ProviderChoice::{Mnema, OpenRouter};
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app_on(dir.path(), 1, &[], NO_PROVIDER);
+    let state = fx.app.state::<AppState>();
+    scan_to_completion(fx.app.handle());
+    mnema_secrets::store(state.credential_ref(), "test-key-unreachable").unwrap();
+    set_roles(&state, Some(OpenRouter), Some(Mnema));
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["content"]["kind"], json!("failed"), "{answer}");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
 }

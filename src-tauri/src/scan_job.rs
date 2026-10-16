@@ -94,13 +94,16 @@ pub(crate) struct ScanDeps {
 /// is the one place D-g says it must not be called from.
 /// [`ScanDeps::production`] captures a [`crate::provider::Provider`] instead.
 /// What the production key read makes of the provider's answer: only "nobody
-/// entered a key" is the ordinary empty answer. Mnema without its models
+/// entered a key" (or chose a provider for embedding) is the ordinary empty
+/// answer. Mnema without its models
 /// (`ProviderNotReady`) stays an error so the scan can say *that*, not "no key".
 pub(crate) fn key_answer(
     answer: Result<crate::provider::Endpoint, Error>,
 ) -> Result<Option<crate::provider::Endpoint>, Error> {
     match answer {
         Ok(endpoint) => Ok(Some(endpoint)),
+        // `RoleEmpty` passes through: it is "no embedding model chosen", not an
+        // empty key store, and the scan reports it as such.
         Err(Error::NoKey) => Ok(None),
         Err(e) => Err(e),
     }
@@ -129,18 +132,25 @@ impl ScanDeps {
     /// puts the key read so that a keychain dialog is waited for under the
     /// `Embedding` phase rather than in front of the claim.
     ///
-    /// The provider CHOICE is read inside both closures, on the job thread,
-    /// after the claim — never here. `set_provider_choice` needs the slot, so
-    /// from the claim on the choice cannot move under this run; read before the
-    /// claim it could, and the run would embed through the provider the person
-    /// had just left.
+    /// The embed role's provider is read inside both closures, on the job
+    /// thread, after the claim — never here. Every role writer needs the
+    /// slot (`provider::adoption_slot`), so from the claim on the role cannot
+    /// move under this run; read before the claim it could, and the run would
+    /// embed through the provider
+    /// the person had just left.
     pub(crate) fn production(state: &AppState) -> Self {
         let provider = state.provider();
         let for_embed = provider.clone();
         Self {
-            key: std::sync::Arc::new(move || key_answer(provider.endpoint())),
+            key: std::sync::Arc::new(move || {
+                key_answer(
+                    provider.endpoint_for(provider.roles().embed, mnema_local::ModelId::Embed),
+                )
+            }),
             embed: std::sync::Arc::new(move |db, base, key, cancel, on_progress| {
-                let choice = for_embed.choice();
+                // Only sizes the batches: the run reached here with the embed
+                // role's endpoint, so the role is chosen.
+                let choice = for_embed.roles().embed.unwrap_or_default();
                 mnema_embed::run_with(
                     db,
                     base,
@@ -891,6 +901,11 @@ fn embed_after(slot: JobSlot, job_db: Db, deps: ScanDeps) {
         // nothing it was allowed to do next.
         Ok(None) => {
             skip_embedding(slot, &job_db, SkipWhy::NoKey);
+            return;
+        }
+        // The embed role was reset: the person's next step is the model picker.
+        Err(Error::RoleEmpty) => {
+            skip_embedding(slot, &job_db, SkipWhy::NoModel);
             return;
         }
         // Mnema chosen and its models not downloaded: as ordinary as a fresh
@@ -1698,6 +1713,11 @@ mod tests {
         Ok(None)
     }
 
+    /// The embed role has no provider chosen.
+    fn embed_role_empty() -> Result<Option<crate::provider::Endpoint>, Error> {
+        Err(Error::RoleEmpty)
+    }
+
     /// The local provider chosen, its models not downloaded.
     fn local_models_not_ready() -> Result<Option<crate::provider::Endpoint>, Error> {
         Err(Error::ProviderNotReady)
@@ -2384,6 +2404,12 @@ mod tests {
     #[test]
     fn the_production_key_read_keeps_no_key_and_no_local_models_apart() {
         assert!(matches!(key_answer(Err(Error::NoKey)), Ok(None)));
+        // An empty embed role is not "no key": it stays an error so the scan can
+        // say "no embedding model chosen".
+        assert!(matches!(
+            key_answer(Err(Error::RoleEmpty)),
+            Err(Error::RoleEmpty)
+        ));
         assert!(matches!(
             key_answer(Err(Error::ProviderNotReady)),
             Err(Error::ProviderNotReady)
@@ -2414,6 +2440,29 @@ mod tests {
             "Mnema without its models must not tell a person to enter a key: {report:?}"
         );
         assert_eq!(report.reason, EndReason::Completed, "{report:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// An emptied embed role is "no embedding model chosen", not an empty key
+    /// store: the person's next step is the model picker.
+    #[test]
+    fn an_empty_embed_role_is_reported_as_no_model_not_as_no_key() {
+        let turn = take_scan_turn();
+        let data = tempfile::tempdir().expect("a data directory");
+        let folder = dir_holding(&["a1.txt"]);
+        let state = app_in(data.path());
+        watch(&state, folder.path());
+        adopt_a_model(&state);
+
+        let (deps, calls) = deps_counting_embeds(embed_role_empty, a_pass_that_must_not_run());
+        let (_, settled) = run_scan(&turn, &state, Entry::Full, deps);
+
+        assert_eq!(
+            report_of(&settled).embedding,
+            EmbedOutcome::Skipped {
+                why: SkipWhy::NoModel
+            }
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
