@@ -109,15 +109,15 @@ async function askAndOpenAFolder() {
 // command; each ask test overrides with its own reply.
 beforeEach(() => { providerReply = okStatus; invoke.mockReset(); mockBackend(undefined); });
 
-// jsdom's window is 1024 wide by default, and the default layout (240 + 520 +
-// 480) is already an overlay at that width. The shell reads the width once, as
-// a real window does when it is raised, so a test that cares says which window
-// it is in; the others get the same default the suite always had.
+// The suite lays out in a 1440 window, where the default 240 + 520 + 480 fits
+// as three columns. A test that cares which pane a narrow window takes says so
+// itself; the shell reads the width once, as a real window does when it is
+// raised.
 function setWindowWidth(width: number) {
   Object.defineProperty(window, 'innerWidth', { value: width, configurable: true });
 }
-const WIDE = 1440; // a column window for the default layout
-beforeEach(() => setWindowWidth(1024));
+const WIDE = 1440;
+beforeEach(() => setWindowWidth(WIDE));
 
 async function submit(value: string) {
   const box = screen.getByRole('textbox');
@@ -453,9 +453,9 @@ test('an_answer_with_citations_opens_the_panel_on_the_first_one', async () => {
   setWindowWidth(WIDE); // a column window: opening the area covers nothing
   mockCited({ ...generated, citations: [citationB, citationA] });
   render(Launcher);
-  // §3: in a column window the panel opens even if the person had collapsed
-  // the right area — it takes its own track and covers nothing. In an overlay
-  // it stays shut (the test below).
+  // §3: the panel opens even if the person had collapsed the right area — it
+  // takes its own column and covers nothing (the composer keeps its 520 at
+  // every width).
   await fireEvent.click(toggle('right'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
 
@@ -541,12 +541,13 @@ test('an_answer_without_citations_does_not_reopen_a_collapsed_panel', async () =
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
 });
 
-// §2 and §3 together: in an overlay window the right area is painted OVER the
-// transcript at 480px plus a scrim, so an answer that opened it would cover the
-// answer it came with. An answer switches the FILE inside the area and leaves
-// the opening to the person; a click — a source card — opens it as before.
-test('an answer does not open a closed overlay over itself, and a click still does', async () => {
-  mockCited(generated); // 1024 is an overlay for the default 240 + 520 + 480
+// §2 and §3 together: the right area is always a column, so an answer that
+// opens it can never paint over the answer it came with or the composer. At
+// 1024 the only pane that yields is the conversations one, and its toggle keeps
+// the person's choice.
+test('an answer opens the panel as a column, and the transcript keeps its 520', async () => {
+  setWindowWidth(1024); // leaves the default 240 + 520 + 480 no room
+  mockCited(generated);
   render(Launcher);
   await fireEvent.click(toggle('right'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
@@ -555,9 +556,15 @@ test('an answer does not open a closed overlay over itself, and a click still do
 
   await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
   expect(openDocumentCalls()[0][1]).toMatchObject({ chunkId: 42, citedOrd: 0 });
-  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  // The column takes 480 of the 1024: the transcript has 544, above its 520,
+  // and the conversations pane waits without being switched off.
+  const shell = screen.getByTestId('shell').getAttribute('style') ?? '';
+  expect(shell).toContain('grid-template-columns: 0px minmax(0, 1fr) 480px');
+  expect(screen.queryByTestId('col-recents')).toBeNull();
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 
-  // The person asks to see it: the same pane, now on screen.
+  // A source card is still a way to the file, and it reuses the same column.
   await fireEvent.click(screen.getByTestId('preview-7'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
   expect((await screen.findByTestId('hl')).textContent).toBe('A second cited passage.');

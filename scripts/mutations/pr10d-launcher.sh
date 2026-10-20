@@ -17,13 +17,13 @@ case_ "launcher: primary source highlight loses its outline" \
 
 case_ "launcher: the right area loses its own track" \
   ui/src/launcher/Shell.svelte \
-  's~minmax\(0, 1fr\) \$\{trackW\}px~minmax(0, 1fr) 0px~' \
+  's~minmax\(0, 1fr\) \$\{view\.right\}px~minmax(0, 1fr) 0px~' \
   'minmax(0, 1fr) 0px' \
   src/launcher/Shell.test.ts 'a toggle hands its width to the neighbour' runner=vitest
 
 case_ "launcher: the tree toggle stops hiding the tree" \
   ui/src/launcher/Shell.svelte \
-  's~hidden=\{!view\.tree\}~hidden={false}~' \
+  's~hidden=\{!panels\.tree\}~hidden={false}~' \
   'hidden={false}' \
   src/launcher/Shell.test.ts 'the tree toggle does not change the transcript width' runner=vitest
 

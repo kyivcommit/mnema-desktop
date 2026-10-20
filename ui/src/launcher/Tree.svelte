@@ -300,11 +300,14 @@
               data-testid={`tree-root-toggle-${root.rootId}`}
               aria-expanded={isOpen(root.rootId, '')}
               onclick={() => toggle(root.rootId, '')}>{root.name}</button>
-            {#if isOpen(root.rootId, '')}
-              {@render branch(nodes, root.rootId)}
-            {/if}
           </li>
         </ul>
+        <!-- A sibling of the root's own list, not a child of its <li>: nested
+             there, level-1 folders inherit the `ul ul` indent meant for level 2
+             and deeper (`launcher.css`). -->
+        {#if isOpen(root.rootId, '')}
+          {@render branch(nodes, root.rootId)}
+        {/if}
       </section>
     {/each}
   {/if}

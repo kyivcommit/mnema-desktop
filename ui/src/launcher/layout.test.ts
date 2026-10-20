@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from 'vitest';
 import {
-  DEFAULTS, MIN, clampLayout, defaultWidth, isOverlay, loadLayout, maxWidth, saveLayout,
+  DEFAULTS, MIN, clampLayout, defaultWidth, layoutFor, loadLayout, maxWidth, saveLayout,
   type PanelState,
 } from './layout';
 
@@ -39,18 +39,56 @@ test('a saved layout narrower than the minimums is clamped on read', () => {
   expect(s).toMatchObject({ left: true, right: true, tree: true });
 });
 
-test('toggle left hands its width to the transcript, not to the window', () => {
-  // At 1000 the right area and the transcript cannot both fit: the columns are
-  // the reason. Hiding the recents panel — not resizing the window — is what
-  // makes it fit, which is exactly the width going to the 1fr track.
-  const narrow = 1000;
-  expect(isOverlay(DEFAULTS, narrow)).toBe(true);
-  expect(isOverlay({ ...DEFAULTS, left: false }, narrow)).toBe(false);
-  // And the hidden width is the same one the pane had while it was on screen.
-  expect(clampLayout(DEFAULTS, WINDOW).L).toBe(DEFAULTS.L);
+test('a hidden pane hands its width to the transcript, not to the window', () => {
+  // The three areas at 1440: the recents track, the 1fr, the panel's track.
+  expect(layoutFor(DEFAULTS, WINDOW)).toEqual({ left: 240, right: 480, tree: 212, transcript: 720 });
+  // Hiding a pane removes its track; the 1fr takes it and the window keeps its
+  // size. The panel never changes width because a neighbour left.
+  expect(layoutFor({ ...DEFAULTS, left: false }, WINDOW)).toEqual({
+    left: 0, right: 480, tree: 212, transcript: 960,
+  });
+  expect(layoutFor({ ...DEFAULTS, right: false }, WINDOW)).toEqual({
+    left: 240, right: 0, tree: 0, transcript: 1200,
+  });
 });
 
-test('the transcript never goes below 520 while dragging the left splitter', () => {
+// §2, the ruling of 2026-10-20: the composer is never covered. These are the
+// tracks the browser is handed, so the claim is arithmetic, not prose: the sum
+// of every visible pane plus the transcript's floor can never exceed the window.
+test('the transcript keeps its 520 at every legal window width', () => {
+  for (const width of [900, 1000, 1240, WINDOW]) {
+    const t = layoutFor(DEFAULTS, width);
+    expect(t.left + t.right + MIN.TRANSCRIPT, String(width)).toBeLessThanOrEqual(width);
+    expect(t.transcript, String(width)).toBeGreaterThanOrEqual(MIN.TRANSCRIPT);
+  }
+});
+
+test('the conversations pane yields first and comes back with the room', () => {
+  // 240 + 520 + 480 = 1240: at that width all three fit, one pixel less and
+  // the conversations cannot be a column beside the panel.
+  expect(layoutFor(DEFAULTS, 1240)).toEqual({ left: 240, right: 480, tree: 212, transcript: 520 });
+  expect(layoutFor(DEFAULTS, 1239)).toEqual({ left: 0, right: 480, tree: 212, transcript: 759 });
+  // The 900 minimum: the panel shrinks to the room beside the 520 — never under
+  // its 360 — and the conversations wait.
+  const tight = layoutFor(DEFAULTS, 900);
+  expect(tight).toEqual({ left: 0, right: 380, tree: 180, transcript: 520 });
+  // None of this rewrites the person's widths.
+  expect(clampLayout(DEFAULTS)).toEqual(DEFAULTS);
+  expect(clampLayout({ ...DEFAULTS, W: 600 })).toEqual({ ...DEFAULTS, W: 600 });
+});
+
+// §2: file panel above conversations. A pane the window took is not a pane the
+// person switched off: pressing its toggle at that width makes the file panel
+// yield instead, and the open file comes back when both fit.
+test('the file panel yields for a conversations pane the person insists on', () => {
+  expect(layoutFor(DEFAULTS, 900, true)).toEqual({ left: 240, right: 0, tree: 0, transcript: 660 });
+  // The room returns and the pin costs nothing: both panes are drawn again.
+  expect(layoutFor(DEFAULTS, 1240, true)).toEqual({ left: 240, right: 480, tree: 212, transcript: 520 });
+  // Pinned, the recents splitter may use the room the file panel left.
+  expect(maxWidth(DEFAULTS, 'L', 900, true)).toBe(380);
+});
+
+test('the transcript never goes below 520 while dragging a splitter', () => {
   // The drag wall, read from the same function `Shell` writes the pane with.
   expect(maxWidth(DEFAULTS, 'L', WINDOW)).toBe(WINDOW - MIN.TRANSCRIPT - DEFAULTS.W);
   // The same drag with the right area hidden may go further: W takes no room.
@@ -72,48 +110,21 @@ test('the transcript never goes below 520 while dragging the left splitter', () 
   expect(maxWidth(DEFAULTS, 'T', WINDOW)).toBe(DEFAULTS.W - MIN.FILE);
 });
 
-test('below the sum the right area becomes an overlay', () => {
-  const overlayAt = DEFAULTS.L + MIN.TRANSCRIPT + DEFAULTS.W; // 1240
-  // The widths the person chose, at the widths a real window can be: the
-  // decision and the overlay's W both survive the window being too narrow,
-  // instead of collapsing to the minimums (180 + 520 + 360 = 1060).
-  for (const narrow of [900, 1100, overlayAt - 1]) {
-    expect(isOverlay(DEFAULTS, narrow), String(narrow)).toBe(true);
-    const drawn = clampLayout(DEFAULTS, narrow);
-    expect(drawn.L, String(narrow)).toBe(DEFAULTS.L);
-    expect(drawn.W, String(narrow)).toBe(DEFAULTS.W);
-    // The overlay is the person's W, not the squeezed one.
-    expect(maxWidth(drawn, 'W', narrow), String(narrow)).toBe(DEFAULTS.W);
-  }
-  expect(isOverlay(DEFAULTS, overlayAt)).toBe(false);
-  // The threshold follows the widths the person dragged, not the constants.
-  expect(isOverlay({ ...DEFAULTS, W: 600 }, overlayAt)).toBe(true);
-  // A hidden right area is never an overlay, however narrow the window.
-  expect(isOverlay({ ...DEFAULTS, right: false }, 900)).toBe(false);
-});
-
-test('an overlay wider than the room keeps the recents pane uncovered', () => {
-  // The recents pane's splitter is the only way back from an overlay that grew
-  // too wide, so the overlay paints `min(W, window − L)`, never over the pane.
+test('a saved width wider than the room is drawn narrower, and kept as saved', () => {
   const wide = { ...DEFAULTS, L: 380, W: 600 };
-  expect(maxWidth(wide, 'W', 900)).toBe(900 - 380);
-  expect(clampLayout(wide, 900).W).toBe(900 - 380);
-  // Under the cap the person's W is what is painted: min(600, 900 − 240) is 600.
-  expect(maxWidth({ ...DEFAULTS, W: 600 }, 'W', 900)).toBe(600);
-  // The floor is the pane minimum, not zero.
-  expect(maxWidth({ ...DEFAULTS, W: 600 }, 'W', 900)).toBeGreaterThanOrEqual(MIN.W);
-  // Once the window has room, the stored width is back — the cap is display
-  // only.
-  expect(clampLayout(wide, 1600).W).toBe(600);
+  expect(layoutFor(wide, 900)).toEqual({ left: 0, right: 380, tree: 180, transcript: 520 });
+  // The squeeze is display only: the person's 600 is still in the state, so a
+  // wider window draws it again.
+  expect(clampLayout(wide)).toEqual(wide);
+  expect(layoutFor(clampLayout(wide), 1440).right).toBe(600);
 });
 
 test('double-click restores the default width for that pane', () => {
   expect(defaultWidth('L')).toBe(DEFAULTS.L);
   expect(defaultWidth('W')).toBe(DEFAULTS.W);
   expect(defaultWidth('T')).toBe(DEFAULTS.T);
-  // The write that follows a reset is clamped like a drag: a window where the
-  // panes are already at their minimums has only 400 for the right area, so
-  // the default 480 cannot come back at that width.
+  // The write that follows a reset is clamped like a drag: at 1100 the room
+  // beside the 520 leaves the panel 400 once the recents sit at their 180.
   const narrow = { ...DEFAULTS, L: MIN.L, W: MIN.W }; // 1060, fits a 1100 window
   const wall = maxWidth(narrow, 'W', 1100);
   expect(wall).toBe(1100 - MIN.TRANSCRIPT - MIN.L);

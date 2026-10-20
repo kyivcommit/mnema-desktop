@@ -18,50 +18,59 @@ export const DEFAULTS: PanelState = { left: true, right: true, tree: true, L: 24
 // tree splitter is capped to leave it that much room.
 export const MIN = { L: 180, W: 360, T: 160, FILE: 200, TRANSCRIPT: 520 };
 
+// The tracks a window hands the browser, in px. `transcript` is the `1fr`
+// carried as a number so callers can check the sum instead of inferring it.
+export type Tracks = { left: number; right: number; tree: number; transcript: number };
+
 const KEY = 'mnema.window';
 
-// §2: below the sum of the widths the person chose, the right area stops being
-// a column and becomes an overlay of the same width W over the transcript.
-// Read from the STORED widths, never from a clamped layout: the clamped one has
-// already been squeezed to fit, so a decision taken from it would always be
-// 180 + 520 + 360 = 1060 whatever the person set, and the overlay would be as
-// wide as the squeeze rather than as wide as the pane.
-export function isOverlay(s: PanelState, windowWidth: number): boolean {
-  return s.right && windowWidth < (s.left ? s.L : 0) + MIN.TRANSCRIPT + s.W;
+// §2: what is actually drawn at this width. The composer's 520 is the one width
+// that is never negotiated — no pane ever paints over it, at any legal window:
+//
+// - the right area is always a COLUMN, at `min(W, window − 520)`, never under
+//   360; at the 900 minimum that is 380, so it always fits;
+// - the conversations pane is a column of `L` only while `L + 520 + W` fits,
+//   and yields first when it does not;
+// - `pinned` is the person pressing its toggle anyway: the FILE panel yields
+//   instead, and the open file stays in state until there is room for both.
+export function layoutFor(s: PanelState, windowWidth: number, pinned = false): Tracks {
+  const roomy = s.right ? Math.max(MIN.W, Math.min(s.W, windowWidth - MIN.TRANSCRIPT)) : 0;
+  const L = Math.max(MIN.L, s.L);
+  const share = roomy > 0 && s.left && L + roomy + MIN.TRANSCRIPT <= windowWidth;
+  const showLeft = s.left && (share || pinned || roomy === 0);
+  const showRight = s.right && !(pinned && !share);
+  const left = showLeft ? L : 0;
+  const right = showRight ? roomy : 0;
+  // The tree sits inside the right area: it takes its T while leaving the file
+  // stripe its 200, and the file takes the rest.
+  const tree = showRight ? Math.max(MIN.T, Math.min(s.T, roomy - MIN.FILE)) : 0;
+  return { left, right, tree, transcript: windowWidth - left - right };
 }
 
-// The widest a pane may get. The transcript keeps its 520 and the file stripe
-// its 200; the overlay is not a column, so it is not bounded by the transcript
-// — but it IS bounded by the recents pane, because that pane's splitter is the
-// only way back from an overlay that grew too wide. So an overlay paints
-// `min(W, window − L)`, floored at the pane minimum, and that capped value is
-// the one `aria-valuemax` announces. `clampLayout`, `Shell`'s splitter writes
-// and every `aria-valuemax` read this one rule, so the wall a drag stops at and
-// the wall a screen reader hears cannot differ.
-export function maxWidth(s: PanelState, pane: 'L' | 'W' | 'T', windowWidth: number): number {
-  const overlay = isOverlay(s, windowWidth);
+// The widest a pane may get: the wall a drag stops at, and the one `aria-valuemax`
+// announces. Read from the tracks on screen, so a splitter never drags its own
+// pane off the layout.
+export function maxWidth(
+  s: PanelState, pane: 'L' | 'W' | 'T', windowWidth: number, pinned = false,
+): number {
+  const drawn = layoutFor(s, windowWidth, pinned);
   switch (pane) {
     case 'L':
-      return Math.max(MIN.L, windowWidth - MIN.TRANSCRIPT - (s.right && !overlay ? s.W : 0));
+      return Math.max(MIN.L, windowWidth - MIN.TRANSCRIPT - drawn.right);
     case 'W':
-      return overlay
-        ? Math.max(MIN.W, Math.min(s.W, windowWidth - (s.left ? s.L : 0)))
-        : Math.max(MIN.W, windowWidth - MIN.TRANSCRIPT - (s.left ? s.L : 0));
+      return Math.max(MIN.W, windowWidth - MIN.TRANSCRIPT - drawn.left);
     case 'T':
-      return Math.max(MIN.T, s.W - MIN.FILE);
+      return Math.max(MIN.T, drawn.right - MIN.FILE);
   }
 }
 
-// What is drawn. In a column window the stored widths already fit (otherwise
-// `isOverlay` would be true), so this only lifts a width past the minimums and
-// caps the tree against the file's 200 — it never makes a decision about the
-// overlay, and its result is never written back to storage.
-export function clampLayout(s: PanelState, windowWidth: number): PanelState {
-  const base = { ...s, L: Math.max(MIN.L, s.L), W: Math.max(MIN.W, s.W) };
-  const L = base.left ? Math.min(base.L, maxWidth(base, 'L', windowWidth)) : base.L;
-  const W = base.right ? Math.min(base.W, maxWidth({ ...base, L }, 'W', windowWidth)) : base.W;
-  const T = Math.min(Math.max(MIN.T, s.T), maxWidth({ ...base, L, W }, 'T', windowWidth));
-  return { ...base, L, W, T };
+// Saved widths are lifted to the minimums and the tree is capped to leave the
+// file stripe its 200. The window is not consulted: a saved layout is not
+// squeezed to the window it happens to be read in — `layoutFor` decides what
+// fits on every render and its answer is never written back.
+export function clampLayout(s: PanelState): PanelState {
+  const W = Math.max(MIN.W, s.W);
+  return { ...s, L: Math.max(MIN.L, s.L), W, T: Math.min(Math.max(MIN.T, s.T), W - MIN.FILE) };
 }
 
 // A saved layout belongs to the window that wrote it; the window may have
@@ -80,7 +89,7 @@ export function loadLayout(): PanelState {
       L: width(raw.L, DEFAULTS.L),
       W: width(raw.W, DEFAULTS.W),
       T: width(raw.T, DEFAULTS.T),
-    }, Number.POSITIVE_INFINITY);
+    });
   } catch {
     return { ...DEFAULTS };
   }

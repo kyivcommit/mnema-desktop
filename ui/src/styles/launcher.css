@@ -49,17 +49,6 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
  * fetch), and `display: flex` above would otherwise beat the UA `[hidden]`
  * rule and leave it on screen. */
 .shell > .right[hidden], .tree-pane[hidden] { display: none; }
-/* Narrower than L + 520 + W: the right area stops taking a track and paints
- * over the transcript instead, at the same width W. It is not modal (owner,
- * 2026-10-20): no scrim — the transcript keeps taking keys, clicks and scroll
- * beside it. It starts below the 38px header, so the «Файли» toggle and the
- * drag handle stay clickable; Esc is the keyboard way out (`Shell.onKeydown`).
- * The shadow is plain: the earlier tinted-glow layer read as a blue defect
- * bleeding off the panel's left edge. */
-.shell > .right.overlay {
-  position: absolute; top: 38px; right: 0; bottom: 0; z-index: 20;
-  box-shadow: -6px 0 16px -8px var(--shadow);
-}
 .head, .right-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; }
 /* macOS draws its traffic lights over the content (`titleBarStyle: Overlay`,
  * `tauri.conf.json`). The row is the window's drag handle — the buttons inside

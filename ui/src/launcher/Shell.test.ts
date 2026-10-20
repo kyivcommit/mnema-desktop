@@ -2,10 +2,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
-import { createRawSnippet } from 'svelte';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import Shell from './Shell.svelte';
-import { DEFAULTS, MIN } from './layout';
+import { DEFAULTS, MIN, layoutFor } from './layout';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +45,12 @@ afterEach(cleanup);
 // would lay out rather than a class name.
 const tracks = () => (screen.getByTestId('shell') as HTMLElement).getAttribute('style') ?? '';
 const rightTracks = () => document.querySelector('.right-body')!.getAttribute('style') ?? '';
+// The two columns the shell hands the browser, parsed back out of the style.
+function drawn() {
+  const m = tracks().match(/grid-template-columns: (\d+)px minmax\(0, 1fr\) (\d+)px/);
+  expect(m).not.toBeNull();
+  return { left: Number(m![1]), right: Number(m![2]) };
+}
 const toggle = (side: 'left' | 'right' | 'tree') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
 const stored = () => JSON.parse(storage.getItem('mnema.window')!) as typeof DEFAULTS;
 
@@ -166,76 +171,93 @@ test('a file opened while the tree is hidden does not bring the tree back', asyn
   expect(screen.queryByTestId('tree-hidden')).toBeNull();
 });
 
-// Owner, 2026-10-20: the overlay is not modal — no scrim blocks the centre, so
-// the transcript keeps typing and scrolling beside the panel, and the person
-// keeps their cursor. The ways out: Esc, and the «Файли» toggle the panel no
-// longer covers (it starts below the header — `launcher.css`'s `top: 38px`).
-test('at 900px the right area floats over a transcript that stays usable; Esc and «Файли» close it', async () => {
+// Owner, 2026-10-20: the composer is never covered. These are the tracks the
+// browser is handed, at the widths the spec names — a probe textarea in the
+// transcript proves nothing, and the earlier test passed while the box was 74%
+// painted over. The composer is `.centre-body`'s child, inset by its 20px
+// padding, so its edges are the middle track's edges inset.
+test.each([900, 1000, 1240])(
+  'at %ipx the composer keeps its 520 and nothing paints over it',
+  (width) => {
+    setWindowWidth(width);
+    render(Shell, { fileOpen: true });
+    const view = layoutFor(DEFAULTS, width);
+    expect(drawn()).toEqual({ left: view.left, right: view.right });
+    // Visible panes plus the transcript's floor never exceed the window.
+    expect(view.left + view.right + MIN.TRANSCRIPT).toBeLessThanOrEqual(width);
+    const composerLeft = view.left + 20;
+    const composerRight = width - view.right - 20;
+    expect(composerLeft).toBeGreaterThanOrEqual(view.left);
+    expect(composerRight).toBeLessThanOrEqual(width - view.right);
+    // 520 minus the two insets: a line of text at every one of these widths.
+    expect(composerRight - composerLeft).toBeGreaterThanOrEqual(MIN.TRANSCRIPT - 40);
+    // And the right area is a column like any other: no overlay, no painted
+    // width, no scrim.
+    expect(screen.getByTestId('shell').hasAttribute('data-overlay')).toBe(false);
+    expect(screen.getByTestId('col-right').className).not.toContain('overlay');
+    expect(screen.getByTestId('col-right').getAttribute('style')).toBeNull();
+  },
+);
+
+// §2's priority, high to low: transcript > file panel > conversations. The
+// toggle keeps showing the person's choice, so an auto-hidden pane is not a
+// switched-off one and a press can bring it back.
+test('at 900px the conversations pane waits for room, and its toggle still brings it back', async () => {
   setWindowWidth(900);
-  const probe = createRawSnippet(() => ({ render: () => '<textarea data-testid="probe"></textarea>' }));
-  render(Shell, { transcript: probe });
-  const shell = screen.getByTestId('shell');
-  expect(shell.getAttribute('data-overlay')).toBe('true');
-  // Same width W, painted over the transcript instead of squeezing it — and
-  // the recents pane keeps the width it was given, not its minimum.
-  expect(screen.getByTestId('col-right').className).toContain('overlay');
-  expect(screen.getByTestId('col-right').getAttribute('style')).toContain(`width: ${DEFAULTS.W}px`);
-  expect(tracks()).toContain(`grid-template-columns: ${DEFAULTS.L}px minmax(0, 1fr) 0px`);
-  // No scrim: nothing sits between the person and the centre.
-  expect(screen.queryByTestId('overlay-scrim')).toBeNull();
+  render(Shell, { fileOpen: true });
+  // The window took the track; the person did not untoggle it.
+  expect(screen.queryByTestId('col-recents')).toBeNull();
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+  expect(drawn()).toEqual({ left: 0, right: 380 });
 
-  // Typing in the composer beside the panel works, and Esc takes the cursor
-  // from nowhere: it stays in the field the person was typing in.
-  const box = screen.getByTestId('probe') as HTMLTextAreaElement;
-  box.focus();
-  await fireEvent.input(box, { target: { value: 'draft' } });
-  expect(box.value).toBe('draft');
-  const area = screen.getByTestId('col-right');
-  await fireEvent.keyDown(window, { key: 'Escape' });
-  // Closed means hidden: the tree stays mounted for the next open.
-  expect(screen.getByTestId('col-right')).toBe(area);
-  expect(area.hasAttribute('hidden')).toBe(true);
-  expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
-  expect(document.activeElement).toBe(box);
+  // The press asks for it at a width where it cannot sit beside the panel, so
+  // the FILE panel yields: the open file stays in state, the transcript keeps
+  // its 520, and the 240 goes to the conversations.
+  await fireEvent.click(toggle('left'));
+  expect(screen.getByTestId('col-recents')).toBeTruthy();
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+  expect(screen.getByTestId('col-file')).toBeTruthy();
+  expect(drawn()).toEqual({ left: DEFAULTS.L, right: 0 });
+  expect(toggle('right').getAttribute('aria-pressed')).toBe('true');
 
-  // The pointer way out is the header's own «Файли» toggle.
+  // «Файли» takes the room back — the file panel has priority — and the
+  // conversations yield again, still wanted.
   await fireEvent.click(toggle('right'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
-  await fireEvent.click(toggle('right'));
-  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+  expect(screen.queryByTestId('col-recents')).toBeNull();
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+
+  // The window grows and everything fits: the conversations return untouched.
+  setWindowWidth(1240);
+  await fireEvent(window, new Event('resize'));
+  expect(screen.getByTestId('col-recents')).toBeTruthy();
+  expect(drawn()).toEqual({ left: DEFAULTS.L, right: DEFAULTS.W });
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });
 
-test('a drag writes back only the pane it moved, never the clamped neighbour', async () => {
-  // 1100 is narrower than the person's 240 + 520 + 480: the right area is an
-  // overlay and L is drawn as it was stored. A drag must not persist the
-  // squeezed copy — that is how the person's widths disappeared for good.
-  setWindowWidth(1100);
+test('a drag writes only the pane it moved, and stops at the transcript wall', async () => {
+  // 1240 is exactly L + 520 + W: the recents pane has no room to grow, so a
+  // drag leaves BOTH widths as the person set them — no squeezed copy lands in
+  // storage, which is how those widths used to disappear for good.
+  setWindowWidth(1240);
   render(Shell);
   const [recents] = screen.getAllByRole('separator');
   await fireEvent.keyDown(recents, { key: 'ArrowRight' });
-  expect(stored().L).toBe(DEFAULTS.L + 8);
+  expect(stored().L).toBe(DEFAULTS.L);
   expect(stored().W).toBe(DEFAULTS.W);
 
-  // The window grows back and the person's widths are still there.
+  // At 900 the panel is drawn at the room beside the 520 (380), not at the
+  // stored 480. Its splitter narrows the panel and never the transcript; the
+  // conversations pane keeps its width while it waits.
   cleanup();
-  setWindowWidth(WINDOW);
-  render(Shell);
-  expect(tracks()).toContain(`grid-template-columns: ${DEFAULTS.L + 8}px minmax(0, 1fr) ${DEFAULTS.W}px`);
-});
-
-test('an overlay wider than the room never covers the conversations pane', () => {
-  // 380 + 600 + 520 > 900: the overlay paints min(600, 900 − 380) and stops at
-  // the recents pane's edge, so its splitter stays reachable.
-  storage.setItem('mnema.window', JSON.stringify({ ...DEFAULTS, L: 380, W: 600 }));
   setWindowWidth(900);
   render(Shell);
-  expect(screen.getByTestId('shell').getAttribute('data-overlay')).toBe('true');
-  expect(tracks()).toContain(`grid-template-columns: 380px minmax(0, 1fr) 0px`);
-  expect(screen.getByTestId('col-right').getAttribute('style')).toContain(`width: ${900 - 380}px`);
-  // The right area's own splitter stays out while the overlay is open; the
-  // recents splitter — the way back from an overlay grown too wide — is on
-  // screen, not under the overlay. The tree's splitter rides inside the panel.
-  expect(screen.getAllByRole('separator')).toHaveLength(2);
+  const [right] = screen.getAllByRole('separator');
+  expect(right.getAttribute('aria-valuemax')).toBe(String(900 - MIN.TRANSCRIPT));
+  await fireEvent.keyDown(right, { key: 'ArrowRight' });
+  expect(stored().W).toBe(900 - MIN.TRANSCRIPT - 8);
+  expect(stored().L).toBe(DEFAULTS.L);
+  expect(drawn()).toEqual({ left: 0, right: 900 - MIN.TRANSCRIPT - 8 });
 });
 
 test('the header is the drag handle, and it is the only one', () => {

@@ -194,6 +194,22 @@ test('the tree nests files under their folders instead of listing flat paths', a
   expect(screen.queryByText('notes/a.md')).toBeNull();
 });
 
+// Owner, 2026-10-20: the root's branch list is a sibling of the root row, not a
+// child of its <li> — nested there, level-1 folders picked up the `ul ul` indent
+// meant for level 2 and deeper (`launcher.css`).
+test('the root branch is not nested inside the root row', async () => {
+  mockTree(oneRootMixedDepths);
+  mount(null);
+
+  const top = (await screen.findByTestId('tree-folder-a')).closest('ul')!;
+  expect(top.parentElement!.tagName).toBe('SECTION');
+  // Level 2 still nests inside its folder's <li>: that indent is the one that
+  // tells the depths apart.
+  await fireEvent.click(screen.getByTestId('tree-folder-a'));
+  const nested = screen.getByTestId('tree-folder-a/b').closest('ul')!;
+  expect(nested.parentElement!.tagName).toBe('LI');
+});
+
 test('a non-ASCII folder name survives the split and its own test id', async () => {
   // Ruling K: this fixture is local because `lib/fixtures.ts` is read by the
   // Cyrillic guard (`i18n/guard.test.ts:19-21`) and a `.test.ts` is not.

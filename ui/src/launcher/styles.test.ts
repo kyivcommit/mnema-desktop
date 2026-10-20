@@ -212,13 +212,14 @@ test('the composer draws one focus ring: the box, never the field inside it', ()
   expect(css).toMatch(/\.composer textarea\s*\{[^}]*outline:\s*none/);
 });
 
-// Owner, 2026-10-20: the narrow overlay is not modal — no scrim may sit
-// between the person and the transcript — and it starts below the header, so
-// the «Файли» toggle and the drag handle stay clickable. No blue glow: the
-// earlier --glow layer read as a defect bleeding off the panel's left edge.
-test('the narrow overlay leaves the header free and blocks nothing', () => {
+// §2 (owner, 2026-10-20): the right area is a column like the others — the
+// overlay painted over the transcript and the composer, and typing into
+// invisible text is not a usable transcript. Nothing in the sheet positions it
+// over the centre; a hidden pane leaves the grid instead.
+test('the right area is a column, never an overlay', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  expect(css).toMatch(/\.shell > \.right\.overlay\s*\{[^}]*top:\s*38px/);
+  expect(css).toMatch(/\.shell > \.right\s*\{[^}]*position:\s*relative/);
+  expect(css).not.toMatch(/\.overlay/);
   expect(css).not.toMatch(/\.scrim/);
   expect(css).not.toMatch(/--glow/);
 });

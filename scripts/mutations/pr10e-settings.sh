@@ -43,7 +43,7 @@
 
 case_ "tokens.css: a declared token that no stylesheet reads" \
   ui/src/styles/tokens.css \
-  's~(--glow: ([^;]+);)~$1\n  --unused-probe: $2;~g' \
+  's~\n:root \{~\n:root {\n  --unused-probe: #FFFFFF;~' \
   '--unused-probe:' \
   src/styles/tokens.test.ts 'uses every token it declares' runner=vitest
 
