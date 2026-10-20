@@ -54,6 +54,7 @@ test('a live tail answer becomes the block sequence it is written as', () => {
 
   const ordered = blocks[3];
   if (ordered.kind !== 'ol') throw new Error('expected an ol');
+  expect(ordered.start).toBe(1);
   expect(ordered.items).toEqual([
     [{ kind: 'text', text: 'Start the tail.' }],
     [{ kind: 'text', text: 'Filter for the lines that matter.' }],
@@ -91,6 +92,57 @@ test('a list ends at a blank line or a non-item, so the prose after it is a para
   expect(renderMarkdown('- one\n- two\n\nAfter.\n\n1. first\n2. second')).toEqual([
     { kind: 'ul', items: [[{ kind: 'text', text: 'one' }], [{ kind: 'text', text: 'two' }]] },
     { kind: 'p', spans: [{ kind: 'text', text: 'After.' }] },
-    { kind: 'ol', items: [[{ kind: 'text', text: 'first' }], [{ kind: 'text', text: 'second' }]] },
+    { kind: 'ol', start: 1, items: [[{ kind: 'text', text: 'first' }], [{ kind: 'text', text: 'second' }]] },
   ]);
+});
+
+// Models write loose lists, and they number the second half of an interrupted
+// one: a blank line between items kept the list apart, and every `ol` drew «1.»
+// because its first number had nowhere to go.
+test('a blank line between items keeps one list, and its first number is its start', () => {
+  expect(renderMarkdown('1. a\n\n2. b')).toEqual([{
+    kind: 'ol', start: 1,
+    items: [[{ kind: 'text', text: 'a' }], [{ kind: 'text', text: 'b' }]],
+  }]);
+  expect(renderMarkdown('3. c\n4. d')).toEqual([
+    { kind: 'ol', start: 3, items: [[{ kind: 'text', text: 'c' }], [{ kind: 'text', text: 'd' }]] },
+  ]);
+  // Interrupted by prose, the second list resumes at the number it was written
+  // with instead of restarting at 1.
+  const interrupted = renderMarkdown('1. a\n\nProse.\n\n2. b');
+  expect(interrupted.map((b) => b.kind)).toEqual(['ol', 'p', 'ol']);
+  expect(interrupted[2]).toEqual({ kind: 'ol', start: 2, items: [[{ kind: 'text', text: 'b' }]] });
+});
+
+// Neither form is parsed here, so both stay literal — but a table squashed onto
+// one line was a regression: `pre-wrap` used to show its rows.
+test('a table row and a quote keep their own line breaks', () => {
+  expect(renderMarkdown('| a | b |\n| --- | --- |\n| 1 | 2 |')).toEqual([{
+    kind: 'p',
+    spans: [{ kind: 'text', text: '| a | b |\n| --- | --- |\n| 1 | 2 |' }],
+  }]);
+  expect(renderMarkdown('> one\n> two'))
+    .toEqual([{ kind: 'p', spans: [{ kind: 'text', text: '> one\n> two' }] }]);
+  // Ordinary prose still joins with a space.
+  expect(renderMarkdown('one\ntwo'))
+    .toEqual([{ kind: 'p', spans: [{ kind: 'text', text: 'one two' }] }]);
+});
+
+test('an indented marker starts a list instead of gluing into the prose', () => {
+  expect(renderMarkdown('Prose:\n  - item')).toEqual([
+    { kind: 'p', spans: [{ kind: 'text', text: 'Prose:' }] },
+    { kind: 'ul', items: [[{ kind: 'text', text: 'item' }]] },
+  ]);
+});
+
+test('an unterminated fence ends at the first anchor, so the rest still renders', () => {
+  expect(renderMarkdown('```\ntail -f app.log\n<c>3</c> follows the end.')).toEqual([
+    { kind: 'code', text: 'tail -f app.log' },
+    { kind: 'p', spans: [{ kind: 'text', text: '<c>3</c> follows the end.' }] },
+  ]);
+  // A closed fence still wins: its contents are literal, anchor included.
+  expect(renderMarkdown('```\necho <c>3</c>\n```'))
+    .toEqual([{ kind: 'code', text: 'echo <c>3</c>' }]);
+  // With nothing to recover, an open fence runs to the end, as it must.
+  expect(renderMarkdown('```\none\ntwo')).toEqual([{ kind: 'code', text: 'one\ntwo' }]);
 });

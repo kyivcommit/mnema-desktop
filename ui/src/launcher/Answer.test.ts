@@ -67,6 +67,28 @@ test('an anchor survives outside a paragraph: inside a list item, under a headin
   expect(within(first).getByText(/tail -f/).tagName).toBe('CODE');
 });
 
+// The brief is «an anchor survives in every block»: a fence is a block, and it
+// used to render `{block.text}` raw, so a `<c>N</c>` inside one reached the DOM
+// as a tag.
+test('an anchor survives inside a fence, which stays literal around it', () => {
+  const answer = { ...gen(generated), answer: '```\ntail -f<c>3</c>\n```' };
+  render(Answer, { query: 'q', answer, onSelect: vi.fn() });
+  const pre = screen.getByTestId('answer-body').querySelector('pre')!;
+  expect(within(pre).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(pre.textContent).toBe('tail -f[3]');
+});
+
+// The worse half of the same defect: a fence the model never closed swallowed
+// the rest of the answer, so every citation after it was literal text.
+test('an unclosed fence ends at the first anchor: the rest of the answer still renders', () => {
+  const answer = { ...gen(generated), answer: '```\ntail -f app.log\n<c>3</c> follows the end.' };
+  render(Answer, { query: 'q', answer, onSelect: vi.fn() });
+  const body = screen.getByTestId('answer-body');
+  expect(body.querySelector('pre')!.textContent).toBe('tail -f app.log');
+  expect(within(body).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(body.textContent).not.toMatch(/<c>/);
+});
+
 test('the anchor resolves by value, not by position', async () => {
   const onSelect = vi.fn();
   render(Answer, { query: 'q', answer: gen(generated), onSelect }); // anchors 3 and 7

@@ -119,6 +119,22 @@ test('a saved width wider than the room is drawn narrower, and kept as saved', (
   expect(layoutFor(clampLayout(wide), 1440).right).toBe(600);
 });
 
+// The pane that stays without `share` — pinned, or beside a shut right area —
+// was drawn at its saved width, which a drag at a wider window can make longer
+// than the window: the transcript went negative and the composer was covered.
+test('a width dragged at a wider window is bounded by the transcript after narrowing', () => {
+  // 1440 with the right area shut: the drag wall lets the conversations go to 920.
+  const dragged = { ...DEFAULTS, right: false, L: 920 };
+  expect(maxWidth(dragged, 'L', WINDOW)).toBe(920);
+  // At 900 that pane is drawn at 380 — the wall the same function announces.
+  expect(layoutFor(dragged, 900)).toEqual({ left: 380, right: 0, tree: 0, transcript: MIN.TRANSCRIPT });
+  expect(maxWidth(dragged, 'L', 900)).toBe(380);
+  // Pinned is the same state from the other side: the panel yields, the pane
+  // is bounded by the transcript rather than by the saved width.
+  expect(layoutFor({ ...DEFAULTS, L: 920 }, 900, true))
+    .toEqual({ left: 380, right: 0, tree: 0, transcript: MIN.TRANSCRIPT });
+});
+
 test('double-click restores the default width for that pane', () => {
   expect(defaultWidth('L')).toBe(DEFAULTS.L);
   expect(defaultWidth('W')).toBe(DEFAULTS.W);

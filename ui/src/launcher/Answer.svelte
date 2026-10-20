@@ -27,7 +27,7 @@
   const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
   // The markdown layer is pure and knows nothing of citations; the anchors are
   // split out of each span below, so `[n]` works inside a paragraph, a list
-  // item and a heading alike.
+  // item, a heading and a fenced block alike.
   const blocks = $derived(renderMarkdown(answer.answer));
 
   function citationFor(n: number): AskCitation {
@@ -56,10 +56,10 @@
   <span class="via" data-testid="answer-via">{viaText}</span>
   <div class="answer-body" data-testid="answer-body">
     {#each blocks as block}
-      {#if block.kind === 'code'}<pre>{block.text}</pre>
+      {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
       {:else if block.kind === 'h'}<h4>{@render inline(block.spans)}</h4>
       {:else if block.kind === 'p'}<p>{@render inline(block.spans)}</p>
-      {:else}<svelte:element this={block.kind}>{#each block.items as item}<li>{@render inline(item)}</li>{/each}</svelte:element>
+      {:else}<svelte:element this={block.kind} start={block.kind === 'ol' ? block.start : undefined}>{#each block.items as item}<li>{@render inline(item)}</li>{/each}</svelte:element>
       {/if}
     {/each}
   </div>

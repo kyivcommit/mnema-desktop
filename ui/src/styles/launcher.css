@@ -204,13 +204,15 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
 }
 /* The answer renders as blocks (`lib/markdown.ts`), so the block parser owns
-   the newlines now: no `white-space: pre-wrap` here, or a paragraph's own
-   breaks would double what the blocks already space. Margins stay 0 —
-   `.answer-card`'s column gap is the spacing. */
+   the newlines now: it joins a paragraph's soft breaks with spaces, so
+   `pre-wrap` here only preserves the lines it left literal — a table row, a
+   quote — and that is the one place the previous rendering is kept. Margins
+   stay 0 — `.answer-card`'s column gap is the spacing. */
 .answer-body { display: flex; flex-direction: column; gap: 12px; }
 .answer-body :is(p, h4, ul, ol) {
   margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere;
 }
+.answer-body p { white-space: pre-wrap; }
 .answer-body h4 {
   font-family: var(--sans); font-weight: 600; font-style: normal;
   font-size: 14px; line-height: 1.45; color: var(--ink);

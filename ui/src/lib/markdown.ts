@@ -14,13 +14,21 @@ export type Span = { kind: 'text' | 'strong' | 'code'; text: string };
 export type Block =
   | { kind: 'h'; spans: Span[] }
   | { kind: 'p'; spans: Span[] }
-  | { kind: 'ul' | 'ol'; items: Span[][] }
+  | { kind: 'ul'; items: Span[][] }
+  | { kind: 'ol'; start: number; items: Span[][] }
   | { kind: 'code'; text: string };
 
 const FENCE = /^\s*```/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
-const BULLET = /^[-*]\s+(.*)$/;
-const NUMBERED = /^\d+\.\s+(.*)$/;
+// Up to three spaces of indentation, as markdown allows: a model's list is
+// often indented under the sentence before it, and gluing `- item` into that
+// sentence shows the raw marker.
+const BULLET = /^ {0,3}[-*]\s+(.*)$/;
+const NUMBERED = /^ {0,3}(\d+)\.\s+(.*)$/;
+// A table row or a quote line: neither is parsed here, both stay literal text,
+// so the line keeps its own break instead of running into its neighbour. The
+// marker must lead the line — `</c>` would otherwise match every anchored line.
+const LITERAL = /^\s*[|>]/;
 
 function startsBlock(line: string): boolean {
   return FENCE.test(line) || HEADING.test(line) || BULLET.test(line) || NUMBERED.test(line);
@@ -58,9 +66,19 @@ export function renderMarkdown(text: string): Block[] {
     }
 
     if (FENCE.test(lines[i])) {
+      const open = i;
       const body: string[] = [];
       for (i++; i < lines.length && !FENCE.test(lines[i]); i++) body.push(lines[i]);
-      i++; // the closing fence, or past the end when the model forgot one
+      if (i === lines.length) {
+        // The model forgot the closing fence. It must not swallow the rest of
+        // the answer: the fence ends at the first line carrying an anchor, so
+        // every citation after an open fence still renders as a button.
+        const anchor = body.findIndex((line) => line.includes('<c>'));
+        if (anchor !== -1) body.length = anchor;
+        i = open + 1 + body.length;
+      } else {
+        i++; // past the closing fence
+      }
       blocks.push({ kind: 'code', text: body.join('\n') });
       continue;
     }
@@ -76,25 +94,37 @@ export function renderMarkdown(text: string): Block[] {
     const numbered = bullet ? null : NUMBERED.exec(lines[i]);
     if (bullet || numbered) {
       const ordered = numbered !== null;
-      const item = ordered ? NUMBERED : BULLET;
       const items: Span[][] = [];
+      // A blank line between items does not end the list — models write loose
+      // lists — and the first number is the list's `start`, so an interrupted
+      // list resumes at the number it was written with.
+      const start = numbered ? Number(numbered[1]) : 1;
       for (; i < lines.length; i++) {
-        const match = item.exec(lines[i]);
-        if (!match) break;
-        items.push(toSpans(match[1].trim()));
+        const match = ordered ? NUMBERED.exec(lines[i]) : BULLET.exec(lines[i]);
+        if (match) items.push(toSpans((ordered ? match[2] : match[1]).trim()));
+        else if (lines[i].trim() !== '') break;
       }
-      blocks.push({ kind: ordered ? 'ol' : 'ul', items });
+      blocks.push(ordered ? { kind: 'ol', start, items } : { kind: 'ul', items });
       continue;
     }
 
     // A paragraph runs to the next blank line or block, and its lines join with
     // a space: a soft line break is a space in markdown, and the block parser
-    // now owns the newlines that `white-space: pre-wrap` used to.
+    // now owns the newlines that `white-space: pre-wrap` used to. A line left
+    // literal — a table row, a quote — keeps its own newline so it still reads
+    // as a row, and `pre-wrap` on the paragraph is what draws that break.
     const paragraph: string[] = [];
     for (; i < lines.length && lines[i].trim() !== '' && !startsBlock(lines[i]); i++) {
       paragraph.push(lines[i].trim());
     }
-    blocks.push({ kind: 'p', spans: toSpans(paragraph.join(' ')) });
+    let text = '';
+    let literal = false;
+    for (const line of paragraph) {
+      if (text !== '') text += literal ? '\n' : ' ';
+      text += line;
+      literal = LITERAL.test(line);
+    }
+    blocks.push({ kind: 'p', spans: toSpans(text) });
   }
 
   return blocks;

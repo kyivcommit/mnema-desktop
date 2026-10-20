@@ -39,8 +39,12 @@ export function layoutFor(s: PanelState, windowWidth: number, pinned = false): T
   const share = roomy > 0 && s.left && L + roomy + MIN.TRANSCRIPT <= windowWidth;
   const showLeft = s.left && (share || pinned || roomy === 0);
   const showRight = s.right && !(pinned && !share);
-  const left = showLeft ? L : 0;
   const right = showRight ? roomy : 0;
+  // The pane that stays without `share` — pinned, or beside a shut right area —
+  // is still bounded by the transcript's 520: a width dragged at a wider window
+  // must not become the composer's loss when the window narrows, and the same
+  // bound is what `aria-valuemax` announces.
+  const left = showLeft ? Math.min(L, windowWidth - MIN.TRANSCRIPT - right) : 0;
   // The tree sits inside the right area: it takes its T while leaving the file
   // stripe its 200, and the file takes the rest.
   const tree = showRight ? Math.max(MIN.T, Math.min(s.T, roomy - MIN.FILE)) : 0;
