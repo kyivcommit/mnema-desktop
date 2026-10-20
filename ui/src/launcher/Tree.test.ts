@@ -502,8 +502,8 @@ test('a new selection leaves the folders the person opened elsewhere exactly as 
   expect(currentRows()).toEqual(['tree-file-doc-1']);
 });
 
-// The control for the rule above: a refresh returning the SAME listing leaves
-// the shut folder shut, because the stamp did not move.
+// A refresh returning the SAME listing leaves the shut folder shut: the stamp
+// did not move, so the effect did not run.
 test('a refresh that changes nothing leaves the folder the person shut alone', async () => {
   mockTree(oneRootTwoFolders);
   mount(SELECTED);
@@ -521,10 +521,8 @@ test('a refresh that changes nothing leaves the folder the person shut alone', a
 // 🔴 The other direction of the same rule, and it is here because the first
 // version of the fix broke it: clearing the hand-toggle on the selection's path
 // made a folder the person had OPENED depend on the selection to stay open, so
-// it snapped shut the moment the next answer was a refusal — Ruling M's defect,
-// reached the long way round. The fix sets a shut folder open instead of
-// forgetting what the person did, and this test is what says so. It passes on
-// `14ab473` too: it is the property that had to survive the fix, not a defect.
+// it snapped shut the moment the selection went away. The fix sets a shut
+// folder open instead of forgetting what the person did, and this test says so.
 test('a folder the person opened stays open after the selection goes away', async () => {
   mockTree(oneRootTwoFolders);
   const { rerender } = mount(null);
@@ -538,6 +536,33 @@ test('a folder the person opened stays open after the selection goes away', asyn
   await tick();
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
   expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy();
+});
+
+// The pair key changes one behaviour on purpose. A refresh that moves the
+// selected file to a different path leaves the selection naming a pair the
+// listing no longer holds, so nothing is marked — and because there is no
+// folder chain on the new path, the hand-shut folder stays shut. Under the old
+// document-id key the same refresh re-opened it and marked the moved row.
+test('a refresh that moves the selected file selects nothing and re-opens nothing', async () => {
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED); // notes/a.md — notes/ opens
+
+  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
+  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
+
+  const [root] = oneRootTwoFolders.roots;
+  mockTree({ // the same document id, one folder deeper
+    roots: [{ ...root, files: [{ relativePath: 'notes/deep/a.md', documentId: 'doc-1' }] }],
+  });
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+
+  // The moved row is inside the folder still shut, and the selection names a
+  // path the listing no longer holds.
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+  expect(currentRows()).toEqual([]);
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
 });
 
 // Ruling N: the plan's "never an empty card that looks like an empty index"

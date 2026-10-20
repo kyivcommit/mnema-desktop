@@ -134,6 +134,64 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
   expect(acknowledged).toHaveBeenCalledTimes(1);
 });
 
+// The parent acknowledges the handled focus by clearing it. That is not a new
+// open: without the guard the effect re-reads the file WITHOUT the citation,
+// the answer comes back with no `spans`, and the highlight disappears under the
+// person who just clicked the citation.
+test('clearing the handled focus neither refetches nor drops the highlight', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [1],
+    spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    freshness: { kind: 'current' },
+  });
+  const { rerender } = render(FilePane, {
+    location,
+    focus: { chunkId: 42, ord: 0, text: 'Ціна' },
+    onFocusHandled: () => {},
+  });
+  expect((await screen.findByTestId('hl')).textContent).toBe('Ціна');
+  expect(openCalls()).toHaveLength(1);
+
+  await rerender({ focus: null });
+
+  expect(openCalls()).toHaveLength(1);
+  expect(screen.getByTestId('hl').textContent).toBe('Ціна');
+});
+
+// `headline` is `block.type` verbatim, and the HTML and docx readers emit it
+// for a real heading. Their text is not markdown: `#1 Priority` is the line.
+test('a headline from a reader that is not markdown keeps its leading hash', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'headline', text: '#1 Priority', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, { location, focus: null, onFocusHandled: () => {} });
+
+  expect((await screen.findByTestId('file-block')).textContent).toBe('#1 Priority');
+});
+
+// A span may begin inside the marker (a chunk can cover a heading). The start
+// clamps to 0, and the end must move by the same amount or the highlight grows
+// by the stripped prefix: `##   Heading text` with [2, 12) paints "Heading".
+test('a span that starts inside the heading marker keeps its end', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'headline', text: '##   Heading text', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [1],
+    spans: [{ blockId: 1, blockStart: 2, length: 10, primary: true }],
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, { location, focus: null, onFocusHandled: () => {} });
+
+  expect((await screen.findByTestId('file-block')).textContent).toBe('Heading text');
+  expect(screen.getByTestId('hl').textContent).toBe('Heading');
+});
+
 test('a gone file shows the badge and keeps its text', async () => {
   mockView({
     kind: 'file',

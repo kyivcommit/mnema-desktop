@@ -126,16 +126,41 @@ test('the layout survives a remount', async () => {
   expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
 });
 
-// Carried finding from Task 4: with no file open, hiding the tree left a 480 px
-// panel holding a single button. The tree is the area's content then, so it
-// stays; its toggle has nothing to hand the width to and says so.
-test('with no file open the tree stays on screen and its toggle is inert', async () => {
+// Carried finding from Task 4, resolved the other way round: with no file open
+// and the tree hidden the area would be blank, so it says so and offers the
+// only way back. The toggle itself is honest — hidden means hidden.
+test('hiding the tree with no file open leaves a way back', async () => {
   render(Shell);
-  expect(toggle('tree').getAttribute('aria-pressed')).toBe('true');
-  expect(toggle('tree').hasAttribute('disabled')).toBe(true);
   await fireEvent.click(toggle('tree'));
+
+  expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
+  const empty = screen.getByTestId('tree-hidden');
+  expect(empty.textContent).toContain('The tree is hidden.');
+  expect(screen.queryByTestId('col-file')).toBeNull();
+
+  await fireEvent.click(screen.getByTestId('show-tree'));
   expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(false);
-  expect(rightTracks()).toContain(`grid-template-columns: ${DEFAULTS.W}px`);
+  expect(toggle('tree').getAttribute('aria-pressed')).toBe('true');
+});
+
+// The transition that made the old force-on rule wrong: hide the tree, open a
+// file, and the tree must not reappear under the person's click (§3 — a tree
+// that was open stays open, and one that was shut stays shut).
+test('a file opened while the tree is hidden does not bring the tree back', async () => {
+  const { rerender } = render(Shell);
+  await fireEvent.click(toggle('tree'));
+  expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
+
+  // `panels` is passed through the rerender because this harness has no parent
+  // binding one: without it a prop update re-applies the component's captured
+  // default and would report the toggle as never having happened. The state the
+  // test carries over is the one the person chose — the tree shut.
+  await rerender({ fileOpen: true, panels: { ...DEFAULTS, tree: false } });
+
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
+  expect(screen.getByTestId('col-file')).toBeTruthy();
+  expect(screen.queryByTestId('tree-hidden')).toBeNull();
 });
 
 test('at 900px the right area is an overlay of the person\'s width; Esc and a click beside it close it', async () => {

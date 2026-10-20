@@ -41,14 +41,25 @@
     return pieces;
   }
 
-  // A headline's text is the file's literal slice, so it arrives with its own
-  // `#` markers (spec §3). They are stripped for display only, and the span
-  // offsets are moved by exactly the stripped prefix — those offsets count from
-  // the stored text, marker included.
+  // A markdown headline's text is the file's literal slice, so it arrives with
+  // its own `#` marker (spec §3) — and only a markdown ATX marker is stripped.
+  // `headline` also comes from the HTML and docx readers, where the text IS the
+  // heading and `#1 Priority` is the document's own line: markdown requires a
+  // space (or the line's end) after the hashes, and that is what the pattern
+  // insists on. Markers are stripped for display only; the span offsets count
+  // from the stored text, so they move by exactly the stripped prefix, and a
+  // span that starts inside the marker keeps its end where it was.
   export function heading(text: string, spans: PaneSpan[]): { text: string; spans: PaneSpan[] } {
-    const shown = text.replace(/^#{1,6}\s*/, '');
+    const shown = text.replace(/^ {0,3}#{1,6}(?:[ \t]+|$)/, '');
     const cut = [...text].length - [...shown].length;
-    return { text: shown, spans: spans.map((s) => ({ ...s, blockStart: Math.max(0, s.blockStart - cut) })) };
+    return {
+      text: shown,
+      spans: spans.map((s) => {
+        const start = Math.max(0, s.blockStart - cut);
+        const end = Math.max(start, s.blockStart + s.length - cut);
+        return { ...s, blockStart: start, length: end - start };
+      }),
+    };
   }
 </script>
 

@@ -100,6 +100,13 @@ test('real tree marks the current file while leaving neighbours plain', async ()
   expect(getComputedStyle(selected).borderColor).toBe('var(--cite-line)');
   expect(getComputedStyle(other).background).not.toBe('var(--cite-wash)');
   expect(getComputedStyle(other).borderColor).not.toBe('var(--cite-line)');
+  // A file reads as secondary to a folder: same weight, `--ink-soft` — while
+  // the open row above is lifted back to `--ink`.
+  expect(getComputedStyle(other).color).toBe('var(--ink-soft)');
+  expect(getComputedStyle(other).fontWeight).toBe('400');
+  expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).color).toBe('var(--ink)');
+  expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).fontWeight).toBe('500');
+  expect(getComputedStyle(selected).color).toBe('var(--ink)');
 });
 
 // §4: the conversation on screen is `--select`, not the file tree's
@@ -173,10 +180,15 @@ test('real file pane paints the cited span and keeps its badge on screen', async
 // The carried finding from the shell: with the tree hidden its track is 0 px,
 // and a file pane placed by auto-flow lands in that track and is invisible.
 // Both panes name their column, so the file stays in the second one in both
-// modes.
+// modes — asserted after the tree is actually hidden, not just with the class
+// rule in the sheet.
 test('the file pane keeps the second track when the tree is hidden', async () => {
   render(Shell, { fileOpen: true });
   expect(getComputedStyle(screen.getByTestId('col-tree')).gridColumn).toBe('1');
+  expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
+
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
   expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
 });
 

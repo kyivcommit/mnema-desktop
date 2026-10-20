@@ -1,11 +1,9 @@
 //! One document's whole text, as the window's right pane paints it (§3).
 //!
 //! Beside `write.rs` rather than inside it because the question is different:
-//! `reading_window` answers "a passage and its neighbours", this answers "the
-//! file", and the two disagree about what a block is worth showing —
-//! `reading_window` drops whitespace-only blocks so `radius` counts visible
-//! source, while a whole-file view shows them, because a line of spaces is part
-//! of the file.
+//! this answers "the file", not a window around a passage. Every block is
+//! returned, whitespace-only ones included — a line of spaces is part of the
+//! file, and a view that dropped it would show text the file does not contain.
 //!
 //! Read-only: nothing on this path writes.
 

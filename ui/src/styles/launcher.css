@@ -128,6 +128,10 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .tree li > button {
   font-family: var(--sans); font-weight: 500; font-style: normal; color: var(--ink);
 }
+/* Files read as secondary to folders: the tree's job is navigation, and a
+   leaf is not a place to open. Same weight and colour as the rest of the
+   card's secondary text; `[aria-current]` above still lifts the open file. */
+.tree li > button.file-row { font-family: var(--sans); font-weight: 400; font-style: normal; color: var(--ink-soft); }
 .tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
 .tree li > button[aria-expanded="true"]::before { content: '▾'; }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
@@ -160,6 +164,15 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .recents-body .guard {
   margin: 0 0 8px; padding: 8px; overflow-wrap: anywhere; font-size: 12px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
+}
+.right-empty {
+  grid-column: 1 / -1; align-self: start; padding: 12px;
+  font-size: 12.5px; color: var(--ink-soft);
+}
+.right-empty button {
+  margin-left: 8px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: inherit; cursor: pointer;
+  font-family: var(--sans); font-weight: 400; font-style: normal; font-size: 12.5px;
 }
 .tree h4 {
   margin: 10px 0 4px; overflow-wrap: anywhere;

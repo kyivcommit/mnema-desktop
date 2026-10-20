@@ -185,42 +185,21 @@
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
   }
 
-  // 🔴 Owner review on PR #24, P4. The invariant: when the source card shows a
-  // passage, this card shows which row it came from. Two states broke it, and
-  // `openByDefault` above cannot reach either — it is consulted only where
-  // `toggled` has no entry, and only by the Files tab.
+  // Folders on the selected file's path that the person had shut are set open
+  // when a NEW selection lands there. `toggled` still wins over `openByDefault`
+  // everywhere else (Ruling M): a folder the person opened or shut somewhere
+  // else is none of this selection's business, and clearing those would snap
+  // every folder shut on each click.
   //
-  // `toggled` winning over `openByDefault` is Ruling M and it stands: folders
-  // must not snap shut on every question. But "this citation is now selected"
-  // is a DIFFERENT event from "an answer arrived" — it is the person's own
-  // click on a citation, and its entire purpose is to be shown where the
-  // passage came from. So a NEW selection clears the hand-toggle on the folders
-  // along its own path, and on no others: a folder opened or shut somewhere
-  // else is none of this selection's business, and clearing those would be
-  // Ruling M's defect with an extra step.
+  // The stamp is the selection key plus the folders on its way, so the effect
+  // fires when the selection changes or when the listing that completes it
+  // arrives — and not on every refresh. A refresh that returns the same listing
+  // moves nothing. A file that moves to a new path no longer matches the pair,
+  // so it is no longer selected and no folder is re-opened: the tree stops
+  // claiming the pane's file is there, which is the honest answer.
   //
-  // Deliberately NOT undone by an ANSWER: a person who shuts the folder of the
-  // passage already on screen keeps it shut while the selection stands. They
-  // acted on a row they could see, and no new event has happened since.
-  //
-  // ⚠️ "While the selection stands" is the whole of the promise, and the wider
-  // form this comment used to make was false (review Minor 4). It is also
-  // narrower than a reader will take it: a SECOND citation in the same document
-  // does not re-open the folder either, because the stamp does not change — the
-  // shut folder stays shut, and the person keeps the view they chose. Only a
-  // change to the selected document's folder chain moves it. The stamp below
-  // holds the folders on the selected document's way, so a REFRESH that
-  // reshapes that chain — the file moved — re-fires the effect and re-opens the
-  // folder, on an event the person did not cause. That is defensible: the chain
-  // really did change. And it can only ever open, never shut: the loop writes
-  // `false → true` and nothing else. Both halves are pinned in `Tree.test.ts`
-  // (`a refresh that moves the selected file…` and its control, `a refresh that
-  // changes nothing…`).
-  //
-  // The stamp is what makes "a change" precise: it holds the selected document
-  // and the folders on its way, so it also fires when the listing arrives after
-  // the selection did. Everything it writes is read inside `untrack`, so this
-  // effect depends on the selection and the listing, never on what it sets.
+  // Everything it writes is read inside `untrack`, so this effect depends on
+  // the selection and the listing, never on what it sets.
   let lastSelection = '';
   $effect(() => {
     const id = selectedKey;
@@ -279,6 +258,7 @@
                is. -->
           <button
             type="button"
+            class="file-row"
             data-testid={`tree-file-${node.documentId}`}
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
             onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}

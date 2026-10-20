@@ -47,12 +47,12 @@
   // at the person's W — capped by `maxWidth` to the room beside the recents
   // pane, whose splitter is the only way back from an overlay grown too wide.
   const trackW = $derived(view.right && !overlay ? view.W : 0);
-  // With no file open the tree IS the area's content, so it stays on screen
-  // whatever its own toggle says: a hidden tree beside no file would leave a
-  // 480 px panel holding one button. The toggle becomes meaningful the moment a
-  // file gives it something to hand the width to.
-  const treeVisible = $derived(view.tree || !fileOpen);
-  const treeW = $derived(treeVisible ? (fileOpen ? view.T : view.W) : 0);
+  // The tree's own toggle is always honest: `view.tree` decides, whichever pane
+  // has content. Forcing it on when no file is open made it reappear after a
+  // person hid it, and then vanish the moment they pressed a file in it
+  // (spec §3: a tree that was open stays open — and one that was shut stays
+  // shut). With no file and no tree the area draws a one-line way back instead.
+  const treeW = $derived(view.tree ? (fileOpen ? view.T : view.W) : 0);
   // Written as inline tracks rather than as custom properties: the stylesheet
   // token guard (`styles/tokens.test.ts`) allows `var(--…)` only for the
   // palette, and these are one window's numbers, not tokens.
@@ -82,7 +82,13 @@
 
   const labels = $derived.by(() => {
     void $locale;
-    return { recents: t('toggle_recents'), files: t('toggle_files'), tree: t('toggle_tree') };
+    return {
+      recents: t('toggle_recents'),
+      files: t('toggle_files'),
+      tree: t('toggle_tree'),
+      hidden: t('tree_hidden'),
+      show: t('tree_show'),
+    };
   });
 </script>
 
@@ -149,14 +155,13 @@
     {/if}
     <div class="right-head">
       <button type="button" class="tb" data-testid="toggle-tree"
-        aria-pressed={treeVisible} aria-label={labels.tree} title={labels.tree}
-        disabled={!fileOpen}
+        aria-pressed={view.tree} aria-label={labels.tree} title={labels.tree}
         onclick={() => toggle('tree')}>
         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h4M3 8h7M3 12h5"/></svg>
       </button>
     </div>
     <div class="right-body" style={rightStyle}>
-      <div class="tree-pane" data-testid="col-tree" hidden={!treeVisible}>
+      <div class="tree-pane" data-testid="col-tree" hidden={!view.tree}>
         <div class="pane-body">{@render tree?.()}</div>
         {#if fileOpen}
           <Splitter
@@ -170,6 +175,13 @@
       </div>
       {#if fileOpen}
         <div class="file-pane" data-testid="col-file"><div class="pane-body">{@render file?.()}</div></div>
+      {:else if !view.tree}
+        <!-- The only way back: the tree is hidden and there is no file whose
+             width it could take, so the area would otherwise be blank. -->
+        <div class="right-empty" data-testid="tree-hidden">
+          <span>{labels.hidden}</span>
+          <button type="button" data-testid="show-tree" onclick={() => toggle('tree')}>{labels.show}</button>
+        </div>
       {/if}
     </div>
   </aside>
