@@ -36,8 +36,9 @@ pub struct DocumentViewRow {
 
 impl Db {
     /// The document's blocks in `(page_no, reading_order)` order — document
-    /// reading order, which is the pair and not `reading_order` alone (that
-    /// column restarts on every page, `schema.sql:134`).
+    /// reading order, which is the pair and not `reading_order` alone: that
+    /// column restarts on every page, and the schema's own uniqueness is
+    /// `(page_id, reading_order)` (`ix_block_page`, `schema.sql:140`).
     ///
     /// `None` when no `document` row has that id. The distinction from `Some`
     /// with no blocks is load-bearing: the pane says "no such document" for one

@@ -4764,9 +4764,9 @@ fn list_tree_enumerates_roots_and_indexed_files() {
 
 #[test]
 fn open_document_refuses_a_document_past_the_block_ceiling() {
-    // Mirrors `tree.rs`'s `MAX_BLOCKS`; a mismatch here would make this test
-    // pass or fail for the wrong reason, so it is asserted below rather than
-    // trusted to stay in step.
+    // Mirrors `tree.rs`'s `MAX_BLOCKS`. The constant itself is asserted in the
+    // library's `tree::tests::the_block_ceiling_is_fifty_thousand`; this test is
+    // the behavioural half — one block over the ceiling is refused.
     const MAX_BLOCKS: i64 = 50_000;
 
     let dir = tempfile::tempdir().unwrap();
@@ -4791,6 +4791,7 @@ fn open_document_refuses_a_document_past_the_block_ceiling() {
                  INSERT INTO block (page_id, document_id, type, reading_order, text)
                  SELECT {page}, '{doc}', 'paragraph', i, 'x' FROM n"
             ))?;
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
             Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
@@ -4831,14 +4832,12 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
     let (chunk, passage) = state
         .with_index(|db| {
             let root = db.insert_watched_root("/nowhere/at/all")?;
-            let (chunk, passage) = write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                1,
-                0,
-                PARAGRAPHS[1].chars().count() as u32,
-            );
+            // `block_start` 7 and 6 characters: the chunk is a **strict
+            // substring** of its 13-character block, so a `length` taken from
+            // the whole block (the mutant this assertion exists for) is 13 and
+            // fails. A chunk covering the whole block could not tell the two
+            // apart.
+            let (chunk, passage) = write_paragraph_document(db, &doc, &PARAGRAPHS, 1, 7, 6);
             db.insert_path(
                 root,
                 "notes/a.txt",
@@ -4850,6 +4849,7 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
                 "text",
                 1,
             )?;
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
             Ok::<_, mnema_index::Error>((chunk, passage))
         })
         .unwrap();
@@ -4890,11 +4890,19 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
     );
     let span = &v["spans"][0];
     assert_eq!(span["blockId"], focus[0], "{v}");
-    assert_eq!(span["blockStart"], json!(0), "{v}");
+    assert_eq!(
+        span["blockStart"],
+        json!(7),
+        "the highlight starts where the chunk starts inside its block: {v}"
+    );
     assert_eq!(
         span["length"],
         json!(passage.chars().count()),
         "the highlight must measure the chunk's own slice, not the whole block: {v}"
+    );
+    assert!(
+        passage.chars().count() < PARAGRAPHS[1].chars().count(),
+        "the fixture must keep the chunk a strict substring, or a whole-block length passes"
     );
     assert_eq!(span["primary"], json!(true), "{v}");
 
@@ -4919,6 +4927,256 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
         "a chunk id without `ord` and `text` cannot name the passage it meant: {unhighlighted}"
     );
     assert_eq!(unhighlighted["spans"], json!([]), "{unhighlighted}");
+}
+
+/// A document with two blocks on one page and one chunk covering **both**.
+/// Returns the chunk id, the chunk's own text, and the two block ids in reading
+/// order.
+///
+/// The shape a one-block fixture cannot tell apart from `anchor.spans.first()`:
+/// the focus must name both blocks.
+fn two_block_chunk(db: &mnema_index::Db, doc: &str) -> (i64, String, [i64; 2]) {
+    use mnema_index::DocumentStatus;
+
+    let first_text = "Перший абзац.";
+    let second_text = "Другий абзац.";
+    db.insert_document(doc, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let page = db
+        .insert_page(doc, 1, "native:txt", Some("Розділ"))
+        .unwrap();
+    let block = |order: i64, text: &str| {
+        db.insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: order,
+                language: None,
+                text: text.to_string(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .unwrap()
+    };
+    let first = block(0, first_text);
+    let second = block(1, second_text);
+
+    // The chunker joins blocks with a blank line, so the second span starts two
+    // characters after the first ends — in the chunk's own text, not in either
+    // block.
+    let first_chars = first_text.chars().count() as u32;
+    let second_chars = second_text.chars().count() as u32;
+    let text = format!("{first_text}\n\n{second_text}");
+    let chunk = db
+        .insert_chunk(
+            doc,
+            0,
+            &text,
+            &Locator {
+                spans: vec![
+                    Segment {
+                        block_id: first,
+                        start: 0,
+                        end: first_chars,
+                        block_start: 0,
+                    },
+                    Segment {
+                        block_id: second,
+                        start: first_chars + 2,
+                        end: first_chars + 2 + second_chars,
+                        block_start: 0,
+                    },
+                ],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    db.set_document_status(doc, DocumentStatus::Indexed)
+        .unwrap();
+    (chunk, text, [first, second])
+}
+
+#[test]
+fn a_chunk_spanning_two_blocks_yields_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "4".repeat(64);
+    let (chunk, text, blocks) = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(two_block_chunk(db, &doc)))
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "chunkId": chunk, "citedOrd": 0, "citedText": text }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(
+        v["focusBlockIds"],
+        json!([blocks[0], blocks[1]]),
+        "a chunk over two blocks must name both — `anchor.spans.first()` names one: {v}"
+    );
+    let spans = v["spans"].as_array().expect("spans");
+    assert_eq!(spans.len(), 2, "one span per covered block: {v}");
+    assert_eq!(spans[0]["blockId"], json!(blocks[0]), "{v}");
+    assert_eq!(spans[1]["blockId"], json!(blocks[1]), "{v}");
+}
+
+/// The other half of the identity pin: the id **and** the text match, and `ord`
+/// does not. Without this, the triple guard at `build_document_view`'s focus
+/// match has no test that fails when `ord` is dropped from it.
+#[test]
+fn a_wrong_ord_yields_no_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "5".repeat(64);
+    let (chunk, text, _blocks) = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(two_block_chunk(db, &doc)))
+        .unwrap();
+
+    // The chunk is at `ord` 0; the client claims 1.
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "chunkId": chunk, "citedOrd": 1, "citedText": text }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("file"), "the file still opens: {v}");
+    assert_eq!(
+        v["focusBlockIds"],
+        json!([]),
+        "an id whose ord is not the chunk's must not highlight anything: {v}"
+    );
+    assert_eq!(v["spans"], json!([]), "{v}");
+}
+
+/// A click while a rebuild is rewriting the document. `clear_document_content`
+/// returns the row to `pending` before the pages go (`write.rs:1221`) and
+/// ingest writes the file back a slice at a time, so `pending` **with blocks
+/// present** is a prefix of the file — answering it would be a partial file
+/// that claims to be whole.
+#[test]
+fn a_document_mid_rebuild_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "3".repeat(64);
+    state
+        .with_index(|db| {
+            // Blocks and a chunk are there — the state after the first slice
+            // has landed, not after the clear.
+            write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                0,
+                0,
+                PARAGRAPHS[0].chars().count() as u32,
+            );
+            db.set_document_status(&doc, mnema_index::DocumentStatus::Pending)?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+
+    let v = call(&webview, "open_document", json!({ "documentId": doc }))
+        .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("unavailable"), "{v}");
+    assert_eq!(
+        v["reason"],
+        json!("rebuilding"),
+        "a document being rewritten must say so, not show the blocks written so far: {v}"
+    );
+    assert!(
+        v.get("blocks").is_none(),
+        "a refusal carries no blocks: {v}"
+    );
+}
+
+/// Neither `failed` nor `skipped` has corpus text the pane could show: the
+/// pipeline gave up on the document, so the answer is the same as an indexed
+/// document with no blocks.
+#[test]
+fn an_unindexed_document_is_no_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let ids = ["2".repeat(64), "1".repeat(64)];
+    state
+        .with_index(|db| {
+            for (id, status) in ids.iter().zip([
+                mnema_index::DocumentStatus::Failed,
+                mnema_index::DocumentStatus::Skipped,
+            ]) {
+                write_paragraph_document(
+                    db,
+                    id,
+                    &PARAGRAPHS,
+                    0,
+                    0,
+                    PARAGRAPHS[0].chars().count() as u32,
+                );
+                db.set_document_status(id, status)?;
+            }
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+
+    for id in &ids {
+        let v = call(&webview, "open_document", json!({ "documentId": id }))
+            .expect("open_document was rejected");
+        assert_eq!(v["kind"], json!("unavailable"), "{v}");
+        assert_eq!(
+            v["reason"],
+            json!("noBlocks"),
+            "a failed or skipped document has nothing to show: {v}"
+        );
+        assert!(v.get("blocks").is_none(), "{v}");
+    }
+}
+
+/// The third reason, and the one the core's `Option` exists for: no row at all
+/// is a different answer from a document with nothing in it. Asserted as the
+/// whole payload, so an extra field cannot ride along unnoticed.
+#[test]
+fn an_unknown_document_is_no_such_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>()
+        .open_index()
+        .expect("the index opens");
+    let webview = main_webview(&app);
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": "f".repeat(64) }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(
+        v,
+        json!({ "kind": "unavailable", "reason": "noSuchDocument" }),
+        "a document id no row carries must not read as an empty document"
+    );
 }
 
 /// One indexed document the tree listing returns, written the way the pipeline

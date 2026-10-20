@@ -223,7 +223,9 @@ export type DocumentView =
   | { kind: 'file';
       blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
       focusBlockIds: number[]; spans: PaneSpan[]; freshness: Freshness }
-  | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'tooLarge' };
+  // `rebuilding`: the document is being rewritten right now, so the index holds
+  // a prefix of it, not the file — retry after the scan rather than show it.
+  | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'rebuilding' | 'tooLarge' };
 
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the

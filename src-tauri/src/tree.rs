@@ -13,7 +13,7 @@
 use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
-use mnema_index::{Db, PathOccupant};
+use mnema_index::{Db, DocumentStatus, PathOccupant};
 use mnema_walk::{BuiltinLayers, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -845,6 +845,10 @@ pub fn source_around(
 /// 50 000 blocks is hundreds of thousands of pages and well past any real
 /// document — the number is a guess, not a measurement.
 ///
+/// Pinned by `tests::the_block_ceiling_is_fifty_thousand` in this file: the
+/// shell test that pins the refusal would pass for any smaller number, so the
+/// number itself needs its own assertion.
+///
 /// shortcut: paging, when a document this size actually turns up; v1 sends the
 /// whole file in one payload.
 const MAX_BLOCKS: usize = 50_000;
@@ -908,6 +912,11 @@ pub struct PaneSpan {
 pub enum UnavailableReason {
     NoSuchDocument,
     NoBlocks,
+    /// The document is being written right now (`document.status = 'pending'`):
+    /// ingest clears and rewrites it a slice at a time, so what the index holds
+    /// is a prefix of the file, not the file. A fourth reason rather than
+    /// `noBlocks`, which would say the document is empty when it is unfinished.
+    Rebuilding,
     TooLarge,
 }
 
@@ -961,6 +970,29 @@ fn build_document_view(
             reason: UnavailableReason::NoSuchDocument,
         }));
     };
+
+    // The status gate, and why it is not optional: ingest records a rebuild and
+    // then writes the document back **a slice at a time** (`STATUS_REBUILDING`,
+    // `mnema-ingest/src/lib.rs:530`, written through before the first slice),
+    // while `clear_document_content_in` returns the row to `pending` before the
+    // pages go (`write.rs:1221`). A `pending` document that still holds blocks
+    // is therefore a file being rewritten, and answering with those blocks
+    // would be a partial file that claims to be whole — the one failure this
+    // pane exists to avoid. `failed`/`skipped` have no corpus text to show.
+    match db.document_status(document_id)? {
+        DocumentStatus::Pending => {
+            return Ok(ComposedView::Settled(DocumentView::Unavailable {
+                reason: UnavailableReason::Rebuilding,
+            }));
+        }
+        DocumentStatus::Failed | DocumentStatus::Skipped => {
+            return Ok(ComposedView::Settled(DocumentView::Unavailable {
+                reason: UnavailableReason::NoBlocks,
+            }));
+        }
+        DocumentStatus::Indexed => {}
+    }
+
     if view.truncated {
         return Ok(ComposedView::Settled(DocumentView::Unavailable {
             reason: UnavailableReason::TooLarge,
@@ -2002,5 +2034,13 @@ mod tests {
             v.get("recents").is_none(),
             "list_tree still carries recents: {v}"
         );
+    }
+
+    /// The ceiling is part of the wire contract, not a tuning knob: any smaller
+    /// number still refuses a 50 001-block document, so the shell test that
+    /// pins the refusal cannot see a downward drift. This is that half.
+    #[test]
+    fn the_block_ceiling_is_fifty_thousand() {
+        assert_eq!(MAX_BLOCKS, 50_000);
     }
 }
