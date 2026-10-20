@@ -1,7 +1,7 @@
 import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
 import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, firstCard, turnsAfter } from './state';
-import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
+import { generated, citationA, citationB, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
 test('a non-blank query within the limit is accepted', () => {
@@ -92,12 +92,15 @@ test('roleReady(embed): a present key and a model name on an index that is not r
   expect(roleReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
-test('firstCard: the first citation of either answer, null when there is none', () => {
-  const g = stateFromAnswer('q', generated);
+// The array order is NOT anchor order on purpose: 7 sits before 3, so a plain
+// `citations[0]` returns `citationB` and fails here.
+test('firstCard: the smallest anchor of either answer, null when there is none', () => {
+  const g = stateFromAnswer('q', { ...generated, citations: [citationB, citationA] } as AskAnswer);
   const c = stateFromAnswer('q', citationsOnly);
   const e = stateFromAnswer('q', emptyCitationsOnly);
   if (g.kind !== 'generated' || c.kind !== 'citationsOnly' || e.kind !== 'citationsOnly') throw new Error('fixture');
-  expect(firstCard(g.answer)).toBe(g.answer.citations[0]);
+  expect(g.answer.citations[0]).toBe(citationB);
+  expect(firstCard(g.answer)).toBe(citationA);
   expect(firstCard(c.answer)).toBe(c.answer.citations[0]);
   expect(firstCard(e.answer)).toBeNull();
 });

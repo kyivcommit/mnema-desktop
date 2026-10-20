@@ -6,7 +6,7 @@ import { roleReady } from './state';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, citationA, citationB, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
+import { refusedNoCandidates, citationA, citationB, generated, generatedArchived, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
 import type { TreeListing } from '../lib/ipc';
 import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -488,9 +488,30 @@ test('the_tree_stays_open_and_follows_the_open_file', async () => {
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
 });
 
-// «Цитат немає → панель не відкривається й не чіпає те, що в ній було»: the
-// pane keeps its file, and a right area the person had collapsed stays shut.
+// «Цитат немає → панель не відкривається й не чіпає те, що в ній було»: an OPEN
+// pane stays open, the same file stays in it, and nothing is read or scrolled
+// again. The pane is open on purpose — begun collapsed, this test passed a
+// mutant that closed it.
 test('an_answer_without_citations_leaves_the_panel_untouched', async () => {
+  mockCited(generated, emptyCitationsOnly);
+  render(Launcher);
+  await submit('one');
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  const opened = openDocumentCalls().length;
+
+  await submit('two');
+  await screen.findByTestId('citations-banner');
+
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  expect(openDocumentCalls()).toHaveLength(opened); // no read, so no focus written
+  expect(screen.getByTestId('hl').textContent).toBe('A cited passage.');
+  expect(screen.getByTestId('hl').getAttribute('data-primary')).toBe('true');
+});
+
+// The other direction: a right area the person had collapsed is not reopened by
+// an answer with nothing to show.
+test('an_answer_without_citations_does_not_reopen_a_collapsed_panel', async () => {
   mockCited(generated, emptyCitationsOnly);
   render(Launcher);
   await submit('one');
@@ -503,8 +524,55 @@ test('an_answer_without_citations_leaves_the_panel_untouched', async () => {
 
   expect(openDocumentCalls()).toHaveLength(opened);
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
-  await fireEvent.click(toggle('right'));
-  expect(screen.getByTestId('hl').textContent).toBe('A cited passage.');
+});
+
+// «Дерево, якщо було відкрите, лишається відкритим» — and one the person hid
+// stays hidden: the answer opens the FILE area and never the tree.
+test('a_hidden_tree_stays_hidden_as_the_answer_opens_the_panel', async () => {
+  mockCited(generated);
+  render(Launcher);
+  await fireEvent.click(toggle('tree'));
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
+
+  await submit('q');
+
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
+  expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
+});
+
+// A citations-only answer has no anchors and its hits ARE the answer: the pane
+// opens on the first one, exactly as a generated answer's first citation does.
+test('an_answer_with_citations_only_opens_the_panel_on_its_first_passage', async () => {
+  mockCited(citationsOnly);
+  render(Launcher);
+  await submit('q');
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
+  expect(openDocumentCalls()[0][1]).toMatchObject({
+    documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md',
+    chunkId: 7, citedOrd: 0, citedText: 'A bare passage.',
+  });
+  expect((await screen.findByTestId('hl')).textContent).toBe('A bare passage.');
+});
+
+// `generatedArchived` is a citation with no place on disk: its document opens,
+// and the tree mark the previous answer set has no row to move to and survives.
+test('a_citation_without_a_path_keeps_the_tree_mark', async () => {
+  mockCited(generated, generatedArchived);
+  render(Launcher);
+  await submit('one');
+  await waitFor(() => expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true'));
+
+  await submit('two');
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(2));
+  expect(openDocumentCalls()[1][1]).toMatchObject({
+    documentId: 'doc-3', rootId: null, relativePath: null, chunkId: 50, citedOrd: 0,
+  });
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
 });
 
 // «Клік по картці джерела … переводить її на цю цитату»: the same pane moves,
@@ -603,7 +671,7 @@ test('the shell is one row of tracks and the transcript is the only scroller', (
 
 // --- the toolbar -------------------------------------------------------------
 
-const toggle = (side: 'left' | 'right') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
+const toggle = (side: 'left' | 'right' | 'tree') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
 
 test('turning the recents panel off keeps it off across the next answer', async () => {
   mockAsks(generated, generated);
@@ -769,6 +837,24 @@ const OPENED_OLD = { kind: 'dialogue', turns: [{ query: 'old q', answer: generat
 async function openRecent(id: number) {
   await fireEvent.click(await screen.findByTestId(`recents-open-${id}`));
 }
+
+// Task 7's other entry point, and the one the report could not point a test at:
+// a source card in a STORED conversation moves the same pane. Drawing the entry
+// opens nothing (no answer arrived), so only the press does anything here.
+test('a source card in a stored conversation moves the panel', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('warm');
+  await screen.findByTestId('turn');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
+  const opened = openDocumentCalls().length;
+
+  await fireEvent.click(screen.getByTestId('preview-7'));
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(opened + 1));
+  expect(openDocumentCalls().at(-1)![1]).toMatchObject({ chunkId: 43, citedOrd: 1, citedText: 'A second cited passage.' });
+});
 
 test('opening a question draws its snapshot without asking', async () => {
   mockRecents({ asks: [generated], opened: OPENED_OLD });
