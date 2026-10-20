@@ -1,19 +1,13 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
   import { openSettings, type ProviderChoice, type ProviderStatus } from '../lib/ipc';
-  import type { Heat } from './state';
 
-  let { heat, left = $bindable(false), right = $bindable(false), status, provider = 'openRouter' }: {
-    heat: Heat;
-    left?: boolean;
-    right?: boolean;
+  // The header's right cluster: the cloud and the settings button. The panel
+  // toggles live on `Shell` now (§2), beside the panel each one owns.
+  let { status, provider = 'openRouter' }: {
     status: ProviderStatus | null; // null: not asked yet, or the ask failed
     provider?: ProviderChoice; // which provider `status` speaks for
   } = $props();
-
-  // Cold shows no side panel, so a toggle there would change nothing visible:
-  // it is disabled and reads as off whatever `left`/`right` hold.
-  const cold = $derived(heat === 'cold');
 
   const cloudTitle = $derived.by(() => {
     void $locale;
@@ -32,8 +26,6 @@
         );
     }
   });
-  const leftLabel = $derived.by(() => { void $locale; return t('toolbar_left'); });
-  const rightLabel = $derived.by(() => { void $locale; return t('toolbar_right'); });
   const settingsLabel = $derived.by(() => { void $locale; return t('toolbar_settings'); });
 
   // Only the missing configuration has somewhere to go; the other two states
@@ -51,14 +43,6 @@
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12.5a3 3 0 0 1-.4-5.97A4 4 0 0 1 11.9 5.6 3.45 3.45 0 0 1 11.5 12.5z"/></svg>
     </button>
   {/if}
-  <button class="tb" data-testid="toggle-left" disabled={cold} aria-pressed={!cold && left}
-    aria-label={leftLabel} title={leftLabel} onclick={() => (left = !left)}>
-    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M6.5 3v10"/></svg>
-  </button>
-  <button class="tb" data-testid="toggle-right" disabled={cold} aria-pressed={!cold && right}
-    aria-label={rightLabel} title={rightLabel} onclick={() => (right = !right)}>
-    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M9.5 3v10"/></svg>
-  </button>
   <!-- U1: a stable hook for `i18n/wiring.test.ts`, which reads this button's
        aria-label to prove the locale switch reached the DOM. The accessible name
        cannot be the selector when it is the thing under test. -->

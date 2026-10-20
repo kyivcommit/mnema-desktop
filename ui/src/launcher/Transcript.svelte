@@ -16,8 +16,8 @@
   } = $props();
 
   // The answer on screen that is not a turn — a failed one — is drawn last with
-  // its own question. The rule `Cards` already held: a turn is drawn once, and
-  // identity is how it is recognised (the launcher keeps these as `$state.raw`).
+  // its own question. A turn is drawn once, and identity is how it is
+  // recognised (the launcher keeps these as `$state.raw`).
   const items = $derived.by(() => {
     const drawn = turns.map((t) => ({ answer: t.answer, query: t.query }));
     if (

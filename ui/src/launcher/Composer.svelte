@@ -3,14 +3,12 @@
   import { refusalText } from '../i18n/refusal';
   import { MAX_ASK_QUERY, type LauncherState } from './state';
 
-  // §5: the field that asks. It replaces `SearchLine`'s send behaviour — Enter
-  // sends, Shift+Enter is a newline — and keeps the messages that line carried,
-  // so an error or a refusal still has a place to be read once `SearchLine` is
-  // gone.
+  // §5: the field that asks. Enter sends, Shift+Enter is a newline, and the
+  // guard and refusal messages have their one place here.
   // The prop is `state`; the LOCAL binding is renamed. Svelte reads `$state` as
   // a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
-  // this binding is out of the way (`store_rune_conflict`, `Cards.svelte:10-13`).
+  // this binding is out of the way (`store_rune_conflict`).
   let { value = $bindable(''), state: launcherState, onSubmit }: {
     value?: string;
     state: LauncherState;
@@ -63,7 +61,7 @@
 </script>
 
 <!-- Every show of the window ends in `set_focus`; the cursor goes to the field,
-     so the person can type without a click first (as `SearchLine` does). -->
+     so the person can type without a click first. -->
 <svelte:window onfocus={() => box?.focus()} />
 
 <div class="composer">

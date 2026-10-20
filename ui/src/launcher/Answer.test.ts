@@ -7,7 +7,7 @@ import { generated, generatedArchived, generatedNoPath } from '../lib/fixtures';
 import { setLocale } from '../i18n';
 import type { AskAnswer } from '../lib/ipc';
 
-// Mirrors Cards.test.ts: `locale` is a module-level store shared by every
+// As everywhere in this suite: `locale` is a module-level store shared by every
 // test in this file. Restore unconditionally so a failed assertion in the
 // locale-switch test cannot leave the next test to fail for a reason that
 // has nothing to do with what it claims.
@@ -17,7 +17,7 @@ afterEach(() => setLocale('en'));
 // `Extract<AskAnswer, { kind: 'generated' }>` (it pairs with
 // `LauncherState.generated`, `state.ts:22`, the way Task 8b will mount it),
 // but the fixtures in `lib/fixtures.ts` are declared as the wide `AskAnswer`
-// union. Narrow through the same door `Cards.test.ts:23` already uses
+// union. Narrow through the same door the transcript's turns use
 // (`stateFromAnswer`) instead of widening the component's prop type.
 function gen(a: AskAnswer) {
   const s = stateFromAnswer('q', a);

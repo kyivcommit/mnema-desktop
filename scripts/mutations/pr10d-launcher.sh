@@ -15,23 +15,23 @@ case_ "launcher: primary source highlight loses its outline" \
   'mark[data-primary="never"]' \
   src/launcher/styles.test.ts 'real source distinguishes primary highlight from its sibling' runner=vitest
 
-case_ "launcher: source is placed into the tree column" \
-  ui/src/styles/launcher.css \
-  's~(\[data-cols="lsr"\] > \.doc \{ grid-column: )3~${1}1~' \
-  '[data-cols="lsr"] > .doc { grid-column: 1;' \
-  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
+case_ "launcher: the right area loses its own track" \
+  ui/src/launcher/Shell.svelte \
+  's~minmax\(0, 1fr\) \$\{trackW\}px~minmax(0, 1fr) 0px~' \
+  'minmax(0, 1fr) 0px' \
+  src/launcher/Shell.test.ts 'a toggle hands its width to the neighbour' runner=vitest
 
-case_ "launcher: source loses its grid hook" \
-  ui/src/launcher/Cards.svelte \
-  's~class="float doc" data-testid="card-source"~class="float" data-testid="card-source"~' \
-  'class="float" data-testid="card-source"' \
-  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
+case_ "launcher: the tree toggle stops hiding the tree" \
+  ui/src/launcher/Shell.svelte \
+  's~\{#if view\.tree\}~{#if true}~' \
+  '{#if true}' \
+  src/launcher/Shell.test.ts 'the tree toggle does not change the transcript width' runner=vitest
 
-case_ "launcher: cards cannot scroll" \
+case_ "launcher: the transcript cannot scroll" \
   ui/src/styles/launcher.css \
-  's~padding: 14px; overflow: auto;~padding: 14px; overflow: hidden;~' \
-  'padding: 14px; overflow: hidden;' \
-  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
+  's~.centre-body > .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto; }~.centre-body > .transcript { flex: 1 1 auto; min-height: 0; }~' \
+  '.centre-body > .transcript { flex: 1 1 auto; min-height: 0; }' \
+  src/launcher/Launcher.test.ts 'the shell is one row of tracks and the transcript is the only scroller' runner=vitest
 
 case_ "launcher: the selected tab looks inactive" \
   ui/src/styles/launcher.css \

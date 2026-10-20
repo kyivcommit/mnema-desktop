@@ -56,7 +56,7 @@ function mockTreeFailure() {
   treeReply = () => Promise.reject(new Error('list_tree failed'));
 }
 // A listing that has NOT arrived yet, so a second request can be attempted
-// while the first is still on the wire (`Cards.test.ts` keeps the same shape).
+// while the first is still on the wire (the launcher's own reads keep the same shape).
 function mockTreePending() {
   let resolve!: (listing: TreeListing) => void;
   const pending = new Promise<TreeListing>((r) => (resolve = r));
@@ -120,7 +120,7 @@ beforeEach(() => {
   failDelete = false;
 });
 
-// Mirrors Cards.test.ts / Answer.test.ts: `locale` is a module-level store
+// Mirrors Answer.test.ts: `locale` is a module-level store
 // shared by every test in this file, and an in-test restore is skipped when an
 // assertion fails first. Restore unconditionally.
 afterEach(() => {

@@ -1,26 +1,19 @@
 /* §1: the window is opaque now, so the document paints the surface the panels
  * sit on instead of leaving it to a transparent window.
  *
- * The tracks are still written out per `data-cols` (l = tree, s = search,
- * r = source) until the layout task rewrites them; they no longer size the
- * window, which the person controls. The grid starts at the window's left edge
- * and follows `data-cols` alone: the panels move within one window now, so no
- * frame is painted at the wrong width by a window resize.
- * ponytail: the traffic lights sit over the top-left corner on macOS and the
- * search column starts there until the layout task moves the panels down. */
+ * §2: one row of three areas — [recents L][transcript 1fr][right W] — and the
+ * right area is [tree T][file W − T]. The widths are the person's (`layout.ts`);
+ * a hidden panel hands its width to the transcript by leaving the grid, so the
+ * window never changes size because a panel did. No `data-cols`, no Rust.
+ */
 html, body { overflow: hidden; }
-main.panels {
+main.shell {
+  position: relative;
   height: 100dvh;
-  padding: 0px 0px;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  gap: 5px;
-  justify-content: start;
+  overflow: hidden;
 }
-main.panels[data-cols="s"] { grid-template-columns: 470px; }
-main.panels[data-cols="ls"] { grid-template-columns: 285px 470px; }
-main.panels[data-cols="sr"] { grid-template-columns: 470px 366px; }
-main.panels[data-cols="lsr"] { grid-template-columns: 285px 470px 366px; }
 main button, main input {
   font: inherit;
   font-family: var(--sans);
@@ -35,32 +28,66 @@ main :is(button, input):focus-visible {
   outline-offset: 2px;
 }
 main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="true"]) { background-color: var(--surface-3); }
-/* Opaque (owner, 2026-09-25): a 90% fill with a backdrop blur let the window
- * behind show through every panel, and WebKit dropped and re-drew the blur
- * with a delay each time the window gained or lost focus. */
-.searchbar, .float {
-  min-width: 0;
-  min-height: 0;
-  background: var(--surface);
-  border-radius: 14px;
+/* The three areas. Opaque (owner, 2026-09-25): a 90% fill with a backdrop blur
+ * let the window behind show through every panel, and WebKit dropped and re-drew
+ * the blur with a delay each time the window gained or lost focus. */
+.shell > .recents {
+  grid-column: 1; position: relative;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--surface); border-right: 1px solid var(--line);
+  /* The traffic lights are drawn over this corner too (`titleBarStyle:
+     Overlay`): the strip stays clear until the sidebar fills it. */
+  padding: 38px 8px 8px;
 }
-.searchbar {
-  flex: none;
-  padding: 11px 13px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  box-shadow: 0 22px 50px -20px var(--glow), 0 6px 16px -8px var(--shadow);
+.shell > .centre { grid-column: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.shell > .right {
+  grid-column: 3; position: relative;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--surface); border-left: 1px solid var(--line);
 }
-.sb-row { display: flex; align-items: flex-start; gap: 12px; min-height: 26px; } /* the handle offset assumes this row is `.tb` tall */
-.sb-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* Narrower than L + 520 + W: the right area stops taking a track and paints
+ * over the transcript instead, at the same width W. */
+.shell > .right.overlay {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
+  box-shadow: -24px 0 50px -20px var(--glow), -6px 0 16px -8px var(--shadow);
+}
+.scrim {
+  position: absolute; inset: 0; z-index: 10; padding: 0; border: 0;
+  background: var(--shadow); opacity: .22; cursor: default;
+}
+.head, .right-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; }
+/* macOS draws its traffic lights over the content (`titleBarStyle: Overlay`,
+ * `tauri.conf.json`): the recents toggle starts after them, and this row is the
+ * window's drag handle — the buttons inside it are excluded by tag. */
+.head { padding: 0 10px 0 78px; }
+.right-head { padding: 0 10px; }
+.centre-body {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 0 20px 16px;
+}
+.centre-body > .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.centre-body > .composer { flex: none; }
+.right-body {
+  flex: 1 1 auto; min-height: 0;
+  display: grid;
+}
+.tree-pane, .file-pane {
+  position: relative; min-width: 0; min-height: 0; overflow: auto; padding: 0 12px 12px;
+}
+.file-pane { border-left: 1px solid var(--line); }
+/* §2: a 1px line with a 5px hit target and no visible handle. It sits on its
+ * pane's inner edge, so it takes no track of its own and the widths in
+ * `layout.ts` are the widths on screen. */
+.splitter {
+  position: absolute; top: 0; bottom: 0; width: 1px; z-index: 3;
+  background: var(--line); cursor: col-resize; touch-action: none; outline: none;
+}
+.splitter::before { content: ''; position: absolute; inset: 0 -2px; }
+.splitter:hover, .splitter:focus-visible { background: var(--accent); }
+.recents > .splitter, .tree-pane > .splitter { right: -1px; }
+.right > .splitter { left: -1px; }
 .toolbar { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.search-line { flex: 1; min-width: 0; }
-.search-line input {
-  width: 100%; min-width: 0; border: 0; background: transparent;
-  padding: 2px 0; font-size: 15.5px;
-}
-.search-line input::placeholder { color: var(--ink-soft); }
 .tb {
   flex: none; width: 26px; height: 26px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -74,28 +101,6 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 .cloud[data-status="unreachable"] { color: var(--err); }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
-.search-line :is(.guard, .refusal) {
-  margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px;
-}
-.search-line .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
-.search-line .refusal { color: var(--ink-soft); }
-.float {
-  padding: 14px; overflow: auto;
-  box-shadow: 0 20px 46px -20px var(--shadow), 0 3px 8px -4px var(--shadow);
-}
-/* One grid row, and nothing spans: the centre track holds a flex column (search
-   panel above results), and the tree and source cards each take a whole track.
-   A card spanning two rows made WKWebView feed its content height into the
-   `auto` first row, which grew the search panel (25 pt in the three-column
-   layout, measured; Chromium never did). */
-.col-centre { display: flex; flex-direction: column; gap: 5px; min-width: 0; min-height: 0; }
-.col-centre > .results { flex: 1 1 auto; }
-/* The centre column is the first track unless the tree is on screen. */
-main > .col-side { grid-column: 1; }
-main > .col-centre { grid-column: 1; }
-main.panels:is([data-cols="ls"], [data-cols="lsr"]) > .col-centre { grid-column: 2; }
-main.panels[data-cols="sr"] > .doc { grid-column: 2; }
-main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 
 .tree { font-size: 13px; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
@@ -151,7 +156,6 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
   font-size: 14px; line-height: 1.5; overflow-wrap: anywhere;
 }
 .answer-card .via { margin-top: -9px; font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 11px; color: var(--ink-soft); }
-.results .turn + .turn { margin-top: 22px; }
 /* §5: the conversation. Role is told by alignment, so nothing here names a
    speaker: the question sits right (`.umsg`, drawn by `Answer`), the answer is
    the plain text column on the left, without a bubble. */

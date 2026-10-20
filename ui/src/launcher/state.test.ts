@@ -1,6 +1,6 @@
 import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, heatAfter, firstCard, turnsAfter } from './state';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, firstCard, turnsAfter } from './state';
 import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
@@ -90,26 +90,6 @@ const unreadableIndexCarryingAModel = {
 
 test('roleReady(embed): a present key and a model name on an index that is not read → false', () => {
   expect(roleReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
-});
-
-// Cold -> hot happens on an answer that has something to show, and only then.
-test('heatAfter: a generated or non-empty citations-only answer warms the launcher', () => {
-  expect(heatAfter('cold', stateFromAnswer('q', generated))).toBe('hot');
-  expect(heatAfter('cold', stateFromAnswer('q', citationsOnly))).toBe('hot');
-});
-
-test('heatAfter: a refusal, an empty citations-only answer, idle and in-flight leave a cold launcher cold', () => {
-  expect(heatAfter('cold', stateFromAnswer('q', refusedNoCandidates))).toBe('cold');
-  expect(heatAfter('cold', stateFromAnswer('q', emptyCitationsOnly))).toBe('cold');
-  expect(heatAfter('cold', { kind: 'idle' })).toBe('cold');
-  expect(heatAfter('cold', { kind: 'inFlight', query: 'q' })).toBe('cold');
-  expect(heatAfter('cold', { kind: 'error', reason: 'askFailed' })).toBe('cold');
-});
-
-test('heatAfter: a hot launcher stays hot through every state', () => {
-  expect(heatAfter('hot', { kind: 'error', reason: 'askFailed' })).toBe('hot');
-  expect(heatAfter('hot', stateFromAnswer('q', refusedNoCandidates))).toBe('hot');
-  expect(heatAfter('hot', { kind: 'idle' })).toBe('hot');
 });
 
 test('firstCard: the first citation of either answer, null when there is none', () => {

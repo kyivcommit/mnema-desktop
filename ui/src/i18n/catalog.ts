@@ -35,10 +35,9 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'composer_send' | 'composer_hint'
   | 'phase_text' | 'phase_content' | 'phase_chat'
-  | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
+  | 'toggle_recents' | 'toggle_files' | 'toggle_tree' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
-  | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
   | 'history_empty' | 'history_remove' | 'history_unreadable'
@@ -353,11 +352,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // §5: the send button's own name (its visible mark is «↵»), and the one line
     // under the field that says what the two Enter keys do.
     composer_send: 'Надіслати',
-    composer_hint: '↵ надсилати · ⇧+↵ новий рядок',
+    composer_hint: '↵ надіслати · ⇧+↵ новий рядок',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
-    toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
+    toggle_recents: 'Бесіди', toggle_files: 'Файли', toggle_tree: 'Дерево', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
     provider_ok_mnema: 'Mnema (локально) готова',
     provider_unreachable_mnema: 'Mnema (локально) не відповідає: {reason}',
@@ -379,7 +378,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_row_ready: '✓',
     provider_downloading: 'Завантаження: {name}',
     provider_missing_local_models: 'Завантажте моделі Mnema — відкрити налаштування моделей',
-    card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
     // for the thing it says is unavailable, where a person using a screen
@@ -1229,7 +1227,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
-    toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
+    toggle_recents: 'Conversations', toggle_files: 'Files', toggle_tree: 'Tree', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
     provider_ok_mnema: 'Mnema (local) is ready',
     provider_unreachable_mnema: 'Mnema (local) is not responding: {reason}',
@@ -1251,7 +1249,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_row_ready: '✓',
     provider_downloading: 'Downloading: {name}',
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
-    card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_tab_files: 'Files', tree_tab_recents: 'Recents',

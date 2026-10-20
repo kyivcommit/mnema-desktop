@@ -20,19 +20,14 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // seed) always resolves so it never crashes a render; `ask` is what each
 // test controls.
 //
-// 🔴 Ruling Y, and it is not optional: from Task 8b `Cards` mounts `Tree`, which
-// calls `list_tree` on mount. Every test that reaches state B goes through it,
-// and the bare `Promise.resolve()` this function used to give unknown commands
-// made the card read `.roots` off `undefined`.
+// 🔴 Ruling Y, and it is not optional: the shell mounts `Tree` from the start
+// (§2: the tree is the entry point), and `Tree` calls `list_tree` on mount.
+// Every test goes through it, and a bare `Promise.resolve()` for unknown
+// commands made it read `.roots` off `undefined`.
 //
-// A launcher test that never clicks a citation never reaches `source_around`, so
-// that one stays unmocked on purpose — but M2 (review round 1) measured what
-// that actually looks like, and only half of it is loud: vitest reports an
-// unhandled `TypeError: Cannot read properties of undefined (reading 'kind')`,
-// so the run is not green, yet the card still PAINTS — a settled
-// `data-pending="0"` `source-failed` card under a correct header. A future test
-// that waits on `card-source` and asserts anything other than the excerpt would
-// pass against it. Mock the command rather than trusting the crash.
+// `source_around` is still stubbed for the tests that drive the old `Source`
+// path by hand (`styles.test.ts`); the launcher mounts no source panel until
+// the file pane lands (Task 6), so a launcher test never reaches it.
 const READY_INDEX = { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'emb', chatModel: 'chat', searchTextArm: true, searchContentArm: false };
 // Both roles on OpenRouter with a key and a chosen model each: the cloud may say `ok`.
 const SETTINGS_READY = {
@@ -64,10 +59,9 @@ function mockAsks(...replies: unknown[]) {
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
-    // Loud past the end, never a silent repeat (M2). `Cards.test.ts` takes the
-    // same policy for the same reason: a test that asks once more than its
-    // author intended would get the previous answer back and attribute whatever
-    // it then asserts to the wrong cause.
+    // Loud past the end, never a silent repeat (M2): a test that asks once
+    // more than its author intended would get the previous answer back and
+    // attribute whatever it then asserts to the wrong cause.
     if (cmd === 'ask') {
       if (next >= replies.length) throw new Error(`mockAsks: no reply for ask #${next + 1}`);
       return Promise.resolve(replies[next++]);
@@ -116,8 +110,8 @@ test('a query that refuses shows the F message', async () => {
 
 // Ruling Z: this test used to make both claims at once. The echo half moved to
 // its own test below the moment the bubble stopped being the launcher's: §7
-// gives state F no bubble at all, and `Cards` draws nothing there, so asserting
-// one here would now be asserting something the design says must not exist.
+// gives state F no bubble at all, and the transcript draws nothing there, so
+// asserting one here would be asserting something the design says must not exist.
 // The line-clears half is true in every ready state and stays on the refusal.
 test('on ready the line clears', async () => {
   mockBackend(refusedNoCandidates); // any successful answer clears the line; a refusal is one
@@ -229,17 +223,16 @@ function mockAsksThenReject(first: unknown) {
   });
 }
 
-test('a failed ask in the hot state brings the previous answer back and shows the error in the line', async () => {
+test('a failed ask brings the previous answer back and shows the error in the composer', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockAsksThenReject(generated);
   render(Launcher);
   await submit('first');
-  const before = (await screen.findByTestId('card-centre')).textContent;
+  const before = (await screen.findByTestId('turn')).textContent;
   await submit('second');
   await screen.findByRole('alert');
   expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
-  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   err.mockRestore();
 });
 
@@ -248,51 +241,46 @@ test('two failed asks in a row keep the answer and its echo', async () => {
   mockAsksThenReject(generated);
   render(Launcher);
   await submit('first');
-  const before = (await screen.findByTestId('card-centre')).textContent;
+  const before = (await screen.findByTestId('turn')).textContent;
   await submit('second');
   await screen.findByRole('alert');
   await submit('third');
   await waitFor(() => expect(askCalls()).toHaveLength(3));
   await screen.findByRole('alert');
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first');
   err.mockRestore();
 });
 
-test('a failed ask in the cold state stays an error with no answer cards', async () => {
+test('a failed first ask draws no answer at all', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockBackend('offline', { reject: true });
   render(Launcher);
   await submit('q');
   await screen.findByRole('alert');
-  expect(screen.queryByTestId('card-centre')).toBeNull();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.queryByTestId('turn')).toBeNull();
   err.mockRestore();
 });
 
-test('a generated answer renders the centre card, not a refusal', async () => {
+test('a generated answer draws a turn, not a refusal', async () => {
   mockBackend(generated);
   render(Launcher);
   await submit('q');
-  await screen.findByTestId('card-centre');
-  // Not a refusal. The source card carries a `status` of its own, so the role
-  // alone says nothing: the refusal is the line's message.
+  await screen.findByTestId('turn');
+  // Not a refusal: the refusal is the composer's message, and only that.
   expect(screen.queryAllByRole('status').filter((el) => /found|знайдено/i.test(el.textContent ?? ''))).toHaveLength(0);
 });
 
-// 🔴 C1, and the only place it can be seen: `Cards.test.ts` drives `Cards` by
-// hand and can build a transition the product never performs, while these tests
-// drive the real `runSearch`. `Cards` gates its cards on the launcher's state
-// and `runSearch` sets `inFlight` before EVERY ask (`runSearch` in `Launcher.svelte`), so a
-// tree drawn only for a generated answer is torn down and refetched in the
-// middle of every question — the outcome Ruling AC forbids, reached with no
-// `{#key}` anywhere. Both are anchored on the echo, which only a RESOLVED ask
-// can write (`runSearch` in `Launcher.svelte`).
+// 🔴 C1, and the only place it can be seen: the tree is mounted by the shell,
+// not by the answer, and `runSearch` sets `inFlight` before EVERY ask
+// (`Launcher.svelte`). A tree drawn only for a generated answer would be torn
+// down and refetched in the middle of every question — the outcome Ruling AC
+// forbids, reached with no `{#key}` anywhere. Both are anchored on the echo,
+// which only a RESOLVED ask can write.
 //
-// 🔴 I-A: two tests, not one with two assertions. Against the only mutant that
-// exists for them — the pre-fix gate — a single test fails on the `list_tree`
-// count and the folder assertion is never reached, which is the exact shape
-// `Cards.test.ts` split apart one level down.
+// 🔴 I-A: two tests, not one with two assertions. Against the mutant that
+// exists for them — the state-gated tree — a single test fails on the
+// `list_tree` count and the folder assertion is never reached.
 test('a second question does not refetch the tree', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
@@ -328,8 +316,8 @@ test('a refusal does not refetch the tree', async () => {
   await submit('nothing indexed');
   await screen.findByText(/Nothing was found/i);
 
-  expect(screen.getByTestId('card-tree')).toBeTruthy();
-  expect(screen.queryByTestId('card-centre')).toBeNull(); // the answer card really is gone
+  expect(screen.getByTestId('tree-body')).toBeTruthy();
+  expect(screen.queryByTestId('turn')).toBeNull(); // the answer card really is gone
   expect(listTreeCalls()).toHaveLength(1);
 });
 
@@ -351,26 +339,20 @@ test('a second submit while in flight is ignored — one ask at a time', async (
   expect(askCalls()).toHaveLength(1); // the second Enter did not start a second ask
 });
 
-// 🔴 M3: the whole tree gate rests on ONE negative — every other state keeps the
-// card — and until now that negative lived only in `Cards.test.ts`, driven by
-// hand. C1 was invisible at exactly that level for 143 green tests. This puts
-// the negative where the positives already are: the first screen a person ever
-// sees, through the real component tree.
-test('a freshly mounted launcher shows no cards at all (state A)', () => {
+// The tree is the entry point of the window (§2), so it is up before any
+// question; the transcript, which holds the answer, is what starts empty.
+test('a freshly mounted window shows the tree and no answer', () => {
   render(Launcher);
-  expect(screen.queryByTestId('card-tree')).toBeNull();
-  expect(screen.queryByTestId('card-centre')).toBeNull();
-  expect(screen.queryByTestId('card-source')).toBeNull();
+  expect(screen.getByTestId('tree-body')).toBeTruthy();
+  expect(screen.queryByTestId('turn')).toBeNull();
 });
 
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
 //
-// The gate keeps the tree for `error`, and `error` carries two reasons. The
-// `Cards`-level test pins `reason: 'tooLong'`; these pin the transition the ruling
-// was actually argued from — a person with three cards on screen mistyping an
-// Enter — which is the half that makes "do not narrow the gate by reason"
-// falsifiable. Anchored on the guard message, which only a completed validation
-// writes (`SearchLine.svelte:46`).
+// The transition the ruling was argued from — a person with an answer on screen
+// mistyping an Enter — which is the half that makes "do not narrow the gate by
+// reason" falsifiable. Anchored on the guard message, which only a completed
+// validation writes (`Composer.svelte`).
 test('a too-long Enter from state B keeps the tree (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
@@ -378,7 +360,7 @@ test('a too-long Enter from state B keeps the tree (blank Enter is inert; see th
   await submit('x'.repeat(2049));
   await screen.findByRole('alert');
 
-  expect(screen.getByTestId('card-tree')).toBeTruthy();
+  expect(screen.getByTestId('tree-body')).toBeTruthy();
 });
 
 test('a too-long Enter from state B does not shut a hand-opened folder (blank Enter is inert; see the empty-line test)', async () => {
@@ -391,29 +373,15 @@ test('a too-long Enter from state B does not shut a hand-opened folder (blank En
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a too-long Enter from state B keeps the answer and source cards (blank Enter is inert; see the empty-line test)', async () => {
+test('a too-long Enter from state B keeps the answer on screen (blank Enter is inert; see the empty-line test)', async () => {
   mockBackend(generated);
   await askAndOpenAFolder();
-  const before = screen.getByTestId('card-centre').textContent;
+  const before = screen.getByTestId('transcript').textContent;
 
   await submit('x'.repeat(2049));
   await screen.findByRole('alert');
 
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
-  expect(screen.getByTestId('card-source')).toBeTruthy();
-  expect(screen.getByTestId('query-echo').textContent).toBe('first question');
-});
-
-test('a too-long Enter from state B keeps the answer and source cards', async () => {
-  mockBackend(generated);
-  await askAndOpenAFolder();
-  const before = screen.getByTestId('card-centre').textContent;
-
-  await submit('x'.repeat(2049));
-  await screen.findByRole('alert');
-
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
-  expect(screen.getByTestId('card-source')).toBeTruthy();
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first question');
 });
 
@@ -443,153 +411,38 @@ test('Cmd+, and Ctrl+, open the settings window; a bare comma does not', async (
   expect(openCalls()).toHaveLength(2);
 });
 
-test('the search panel is the drag handle and nothing else is', async () => {
-  // `Cards` renders a different component per backend state (review finding
-  // 7): a `data-tauri-drag-region` added to, say, the refusal card would pass
-  // this guard if only the idle state were checked. Submit a question in each
-  // of the two states the fixtures already imported at the top of the file
-  // cover, and wait for that state's own card before checking.
-  for (const reply of [generated, refusedNoCandidates]) {
-    mockBackend(reply);
-    const { container } = render(Launcher);
-    await submit('drag region check');
-    if (reply === generated) {
-      await screen.findByTestId('card-centre');
-    } else {
-      await screen.findByRole('status');
-    }
-    // "deep": any click inside the panel drags, except on the input and the toolbar
-    // buttons, which Tauri's own drag script excludes by tag (D155).
-    const handles = container.querySelectorAll('[data-tauri-drag-region]');
-    expect(Array.from(handles).map((el) => el.className)).toEqual(['searchbar']);
-    expect(handles[0].getAttribute('data-tauri-drag-region')).toBe('deep');
-    cleanup();
-  }
-  // The attribute is inert without the permission — guard both in one place.
-  const capability = JSON.parse(
-    readFileSync(join(HERE, '../../../src-tauri/capabilities/launcher.json'), 'utf8'),
-  ) as { windows: string[]; permissions: string[] };
-  expect(capability.windows).toContain('launcher');
-  expect(capability.permissions).toContain('core:window:allow-start-dragging');
-  expect(capability.permissions).not.toContain('core:window:allow-internal-toggle-maximize');
-});
-
-test('the grid starts at the window edge and follows data-cols alone', () => {
-  // The new window frame shows the new `data-cols` laid out at the old width
-  // for one frame. A grid that starts at the left edge is right in that frame;
-  // a centred one jumped, and viewport-based margins landed 290 off. So: no
-  // centring, no margin, no width media query to place the grid.
+test('the shell is one row of tracks and the transcript is the only scroller', () => {
+  // §2: the tracks are written inline by `Shell` from the layout state, and
+  // nothing places the shell by viewport maths or a width media query — a
+  // hidden panel leaves the grid instead. `Shell.test.ts` pins the numbers.
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  const panels = css.match(/main\.panels\s*\{[^}]*\}/)![0];
-  expect(panels).not.toMatch(/justify-content:\s*center/);
-  expect(panels).toMatch(/justify-content:\s*start/);
-  expect(css).not.toMatch(/main\.panels[^{]*\{[^}]*margin-left/);
+  const shell = css.match(/main\.shell\s*\{[^}]*\}/)![0];
+  expect(shell).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\)/);
+  expect(shell).not.toMatch(/grid-template-columns/);
+  expect(css).not.toMatch(/\[data-cols=/);
   expect(css).not.toMatch(/@media[^{]*width/);
-  expect(css).not.toMatch(/minmax\(0, 470px\)/);
-});
-
-// --- cold and hot ------------------------------------------------------------
-
-test('a cold launcher is the search column alone', () => {
-  render(Launcher);
-  for (const id of ['card-tree', 'card-source', 'card-source-empty', 'card-results-empty']) {
-    expect(screen.queryByTestId(id), id).toBeNull();
-  }
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
-});
-
-test('the first answer warms the launcher: both panels, the first card open', async () => {
-  mockBackend(generated);
-  render(Launcher);
-  await submit('q');
-  await screen.findByTestId('card-source');
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
-  expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
-  expect(screen.getByTestId('source-header').textContent).toMatch(/^notes\/a\.md/);
-});
-
-test('a refusal from the cold state leaves it cold: no source, no empty panels, the tree not drawn', async () => {
-  mockBackend(refusedNoCandidates);
-  render(Launcher);
-  await submit('nothing');
-  await screen.findByRole('status');
-  for (const id of ['card-source', 'card-source-empty', 'card-results-empty']) {
-    expect(screen.queryByTestId(id), id).toBeNull();
-  }
-  // Mounted (C1: mounting follows the state) but not drawn.
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
-});
-
-test('an answer with no passages does not warm a cold launcher', async () => {
-  mockBackend(emptyCitationsOnly);
-  render(Launcher);
-  await submit('q');
-  await screen.findByTestId('card-centre');
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
-});
-
-test('a failed ask in the hot state keeps it hot', async () => {
-  mockAsks(generated);
-  render(Launcher);
-  await submit('one');
-  await screen.findByTestId('card-source');
-  mockBackend(new Error('boom'), { reject: true });
-  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-  await submit('two');
-  await screen.findByRole('alert');
-  err.mockRestore();
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
-  expect(screen.getByTestId('card-tree')).toBeTruthy();
-  // The previous answer is back, so neither side shows its empty placeholder.
-  expect(screen.getByTestId('card-centre')).toBeTruthy();
-  expect(screen.queryByTestId('card-results-empty')).toBeNull();
-  expect(screen.queryByTestId('card-source-empty')).toBeNull();
+  expect(css).toMatch(/\.centre-body > \.transcript\s*\{[^}]*overflow-y:\s*auto/);
 });
 
 // --- the toolbar -------------------------------------------------------------
 
 const toggle = (side: 'left' | 'right') => screen.getByTestId(`toggle-${side}`) as HTMLButtonElement;
 
-test('a cold launcher: both toggles are disabled and not pressed', () => {
-  render(Launcher);
-  for (const side of ['left', 'right'] as const) {
-    expect(toggle(side).disabled).toBe(true);
-    expect(toggle(side).getAttribute('aria-pressed')).toBe('false');
-  }
-});
-
-test('turning the left panel off in the hot state keeps it off across the next answer', async () => {
+test('turning the recents panel off keeps it off across the next answer', async () => {
   mockAsks(generated, generated);
   render(Launcher);
   await submit('one');
-  await screen.findByTestId('card-source');
-  expect(toggle('left').disabled).toBe(false);
+  await screen.findByTestId('turn');
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 
   await fireEvent.click(toggle('left'));
   expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.queryByTestId('col-recents')).toBeNull();
 
   await submit('second question');
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('second question'));
   expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('sr');
-});
-
-test('the left panel off and on again keeps the tree: hidden, not unmounted (Ruling C1)', async () => {
-  mockBackend(generated);
-  await askAndOpenAFolder();
-  expect(listTreeCalls()).toHaveLength(1);
-
-  await fireEvent.click(toggle('left'));
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
-  await fireEvent.click(toggle('left'));
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
-
-  expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
-  expect(listTreeCalls()).toHaveLength(1);
+  expect(screen.queryByTestId('col-recents')).toBeNull();
 });
 
 test('provider_status is asked again when the window gains focus', async () => {
@@ -630,15 +483,17 @@ test('a slow earlier provider probe cannot overwrite a newer one', async () => {
   expect(cloud().getAttribute('data-status')).toBe('ok');
 });
 
-test('turning the right panel off in the hot state hides the source column', async () => {
+test('turning the files panel off hides the right area and leaves the recents one', async () => {
   mockBackend(generated);
   render(Launcher);
   await submit('q');
-  await screen.findByTestId('card-source');
+  await screen.findByTestId('turn');
+  expect(screen.getByTestId('col-right')).toBeTruthy();
   await fireEvent.click(toggle('right'));
   expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('ls');
+  expect(screen.queryByTestId('col-right')).toBeNull();
+  expect(screen.getByTestId('col-recents')).toBeTruthy();
 });
 
 // The Toolbar takes the provider from the chat role in `model_settings`, read with the status.
@@ -740,7 +595,7 @@ test('opening a question draws its snapshot without asking', async () => {
   mockRecents({ asks: [generated], opened: OPENED_OLD });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   const box = screen.getByRole('textbox') as HTMLInputElement;
   await fireEvent.input(box, { target: { value: 'a draft' } });
   const asks = askCalls().length;
@@ -754,22 +609,6 @@ test('opening a question draws its snapshot without asking', async () => {
   expect(box.value).toBe('a draft');
 });
 
-test('a cold launcher warms on an opened question', async () => {
-  mockRecents({ asks: [emptyCitationsOnly], opened: OPENED_OLD });
-  render(Launcher);
-  await submit('first');
-  await screen.findByTestId('card-centre');
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(true);
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
-
-  await openRecent(7);
-
-  await screen.findByTestId('card-source');
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('lsr');
-  expect(invoke.mock.calls.filter((c) => c[0] === 'source_around')[0][1]).toMatchObject({ chunkId: 42 });
-});
-
 test('opening is ignored while an ask is in flight', async () => {
   mockRecents({ ask: new Promise(() => {}) });
   render(Launcher);
@@ -777,18 +616,18 @@ test('opening is ignored while an ask is in flight', async () => {
   await waitFor(() => expect(askCalls()).toHaveLength(1));
   await openRecent(7);
   expect(historyEntryCalls()).toHaveLength(0);
-  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('turn')).toBeNull();
 });
 
 test('an unreadable entry keeps the answer on screen and says so', async () => {
   mockRecents({ asks: [generated], opened: { kind: 'unreadable' } });
   render(Launcher);
   await submit('first');
-  const before = (await screen.findByTestId('card-centre')).textContent;
+  const before = (await screen.findByTestId('turn')).textContent;
   await openRecent(7);
   await screen.findByRole('alert');
   expect(screen.getByRole('alert').textContent).toMatch(/cannot be opened|не відкривається/);
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first');
   expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
 });
@@ -797,11 +636,11 @@ test('a gone entry rereads the list and changes nothing else', async () => {
   mockRecents({ asks: [generated], opened: { kind: 'gone' } });
   render(Launcher);
   await submit('first');
-  const before = (await screen.findByTestId('card-centre')).textContent;
+  const before = (await screen.findByTestId('turn')).textContent;
   const reads = listHistoryCalls().length;
   await openRecent(7);
   await waitFor(() => expect(listHistoryCalls()).toHaveLength(reads + 1));
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first');
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
@@ -812,11 +651,11 @@ test('a rejected open keeps the answer and says the query failed', async () => {
   mockRecents({ asks: [generated], openedReject: true });
   render(Launcher);
   await submit('first');
-  const before = (await screen.findByTestId('card-centre')).textContent;
+  const before = (await screen.findByTestId('turn')).textContent;
   await openRecent(7);
   await screen.findByRole('alert');
   expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(err).toHaveBeenCalled();
   err.mockRestore();
 });
@@ -825,16 +664,16 @@ test('deleting the question on screen keeps the answer and removes only its row'
   mockRecents({ asks: [generated], opened: OPENED_OLD });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
-  const before = screen.getByTestId('card-centre').textContent;
+  const before = screen.getByTestId('transcript').textContent;
   const asks = askCalls().length;
 
   await fireEvent.click(screen.getByTestId('history-remove-7'));
 
   await waitFor(() => expect(screen.queryByTestId('tree-history-7')).toBeNull());
-  expect(screen.getByTestId('card-centre').textContent).toBe(before);
+  expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(askCalls()).toHaveLength(asks);
   // The × does not open the row it sits in: only the first open read an entry.
   expect(historyEntryCalls()).toHaveLength(1);
@@ -844,7 +683,7 @@ test('a recorded answer bumps the history list; a refusal does not', async () =>
   mockRecents({ asks: [generated, refusedNoCandidates] });
   render(Launcher);
   await submit('one');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await waitFor(() => expect(listHistoryCalls()).toHaveLength(2));
   await submit('two');
   await screen.findByRole('status');
@@ -855,7 +694,7 @@ test('a new recorded answer clears the mark on the question that was opened', as
   mockRecents({ asks: [generated, generated], opened: OPENED_OLD });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
   await submit('second');
@@ -863,17 +702,15 @@ test('a new recorded answer clears the mark on the question that was opened', as
   await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull());
 });
 
-test('an opened answer without citations opens cold and draws no source card', async () => {
+test('an opened answer without citations draws its turn and no alert', async () => {
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   mockRecents({ asks: [emptyCitationsOnly], opened: { kind: 'dialogue', turns: [{ query: 'old q', answer: emptyCitationsOnly }] } });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
-  expect(screen.getByTestId('card-centre')).toBeTruthy();
-  expect(screen.queryByTestId('card-source')).toBeNull();
-  expect(document.querySelector('main')!.getAttribute('data-cols')).toBe('s');
+  expect(screen.getByTestId('turn')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(err).not.toHaveBeenCalled();
   err.mockRestore();
@@ -884,7 +721,7 @@ test('a search started while an entry is read is not overwritten by the entry', 
   mockRecents({ asks: [generated, new Promise(() => {})], opened: new Promise((r) => { resolveOpen = r; }) });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await submit('second');
   await waitFor(() => expect(askCalls()).toHaveLength(2));
@@ -899,7 +736,7 @@ test('a refused search takes the mark off the opened question and does not rerea
   mockRecents({ asks: [generated, refusedNoCandidates], opened: OPENED_OLD });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
   const reads = listHistoryCalls().length;
@@ -916,7 +753,7 @@ test('an entry read that lands after a search has answered is dropped, not drawn
   mockRecents({ asks: [generated, generated], opened: new Promise((r) => { resolveOpen = r; }) });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
 
   await submit('second');
@@ -944,7 +781,7 @@ test('two opens that resolve out of order: the later click wins', async () => {
   });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
   await fireEvent.click(await screen.findByTestId('history-open-7'));
   await fireEvent.click(await screen.findByTestId('history-open-8'));
@@ -979,18 +816,7 @@ test('with tool support on, two asks draw two turns in order, each with its own 
   expect(echoes()).toEqual(['first', 'second']);
   expect(screen.getByTestId('preview-3')).toBeTruthy(); // the first turn's, still there
   expect(screen.getByTestId('preview-2')).toBeTruthy();
-  expect(screen.getAllByTestId('card-centre')).toHaveLength(1);
-});
-
-test('a citation of the first turn opens the first turn\'s passage', async () => {
-  await askTwice(true);
-  await waitFor(() => expect(callsOf('source_around').at(-1)![1]).toMatchObject({ chunkId: 61 })); // the latest turn is selected
-  const before = callsOf('source_around').length;
-  await fireEvent.click(screen.getByTestId('preview-3'));
-  // The siblings in the same document load after the clicked one, so look at all the new calls.
-  await waitFor(() => expect(callsOf('source_around').slice(before).map((c) => c[1].chunkId)).toContain(42));
-  // ...and its own sibling in the same document (43), not the latest turn's citations.
-  await waitFor(() => expect(callsOf('source_around').slice(before).map((c) => c[1].chunkId)).toContain(43));
+  expect(screen.getAllByTestId('transcript')).toHaveLength(1);
 });
 
 test('with tool support off there is no New chat button and the second ask replaces the first turn', async () => {
@@ -1021,7 +847,7 @@ test('New chat calls new_chat, empties the centre and leaves the search line alo
   expect(echoes()).toEqual([]);
   expect(screen.queryByTestId('preview-3')).toBeNull();
   expect(screen.queryByTestId('preview-2')).toBeNull();
-  expect(screen.queryByTestId('card-centre')).toBeNull();
+  expect(screen.queryByTestId('turn')).toBeNull();
   expect(box.value).toBe('a draft');
   // The next ask starts the new conversation: one turn, not three.
   mockRecents({ chatTools: true, asks: [generated] });
@@ -1043,13 +869,12 @@ test('under Mnema with the switch on the launcher shows one turn and no New chat
   expect(screen.queryByTestId('new-chat')).toBeNull();
 });
 
-test('New chat keeps the panels: the left one stays, the centre and right ones are empty', async () => {
+test('New chat keeps the panels: the tree stays, the transcript is empty', async () => {
   await askTwice(true);
   await fireEvent.click(screen.getByTestId('new-chat'));
   await waitFor(() => expect(echoes()).toEqual([]));
-  expect(screen.getByTestId('card-tree').hasAttribute('hidden')).toBe(false);
-  expect(screen.getByTestId('card-results-empty')).toBeTruthy();
-  expect(screen.getByTestId('card-source-empty')).toBeTruthy();
+  expect(screen.getByTestId('tree-body')).toBeTruthy();
+  expect(screen.queryByTestId('turn')).toBeNull();
 });
 
 test('a failed new_chat keeps the screen as it was', async () => {
@@ -1096,7 +921,7 @@ test('opening a stored conversation draws every turn and the next ask adds a thi
   render(Launcher);
   await screen.findByTestId('new-chat');
   await submit('first'); // warm the launcher so Recents is reachable
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(echoes()).toEqual(['old q', 'old q2']));
   mockRecents({ chatTools: true, opened, asks: [{ ...generatedOther }] });
@@ -1146,7 +971,7 @@ test('of two overlapping opens only the one drawn continues the backend session'
   render(Launcher);
   await screen.findByTestId('new-chat');
   await submit('warm');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
   await fireEvent.click(await screen.findByTestId('history-open-7'));
   await fireEvent.click(await screen.findByTestId('history-open-8'));
@@ -1165,7 +990,7 @@ test('an open that a submit superseded never continues the backend session', asy
   render(Launcher);
   await screen.findByTestId('new-chat');
   await submit('warm');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(historyEntryCalls()).toHaveLength(1));
   await submit('typed meanwhile');
@@ -1180,7 +1005,7 @@ test('an open continues the session before the next ask reaches the backend', as
   render(Launcher);
   await screen.findByTestId('new-chat');
   await submit('warm');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(echoes()).toEqual(['old q']));
   await submit('next');
@@ -1193,7 +1018,7 @@ test('with conversations off an open does not touch the backend session', async 
   mockRecents({ chatTools: false, asks: [generated], opened: OPENED_OLD });
   render(Launcher);
   await submit('first');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
   expect(continueCalls()).toHaveLength(0);
@@ -1206,7 +1031,7 @@ test('New chat waits for a continue that is still on its way to the backend', as
   render(Launcher);
   await screen.findByTestId('new-chat');
   await submit('warm');
-  await screen.findByTestId('card-centre');
+  await screen.findByTestId('turn');
   await openRecent(7);
   await waitFor(() => expect(continueCalls()).toHaveLength(1));
   await fireEvent.click(screen.getByTestId('new-chat'));

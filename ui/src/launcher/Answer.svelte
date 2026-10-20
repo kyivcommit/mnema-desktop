@@ -8,7 +8,7 @@
   // (`state.ts:22`) already carries this exact type, and Task 8b mounts
   // `Answer` from that state — the compiler should enforce the pairing, not
   // let a wrong-state mount render two headings over an empty card. Callers
-  // holding a wider `AskAnswer` narrow the way `Cards.test.ts:23` already
+  // holding a wider `AskAnswer` narrow the way the transcript's turns already
   // does, through `stateFromAnswer`.
   let { answer, query, onSelect }: {
     answer: Extract<AskAnswer, { kind: 'generated' }>;
@@ -35,7 +35,7 @@
   // Ruling D: `citationLabel()` reads the locale store at call time (through
   // `t()` and `formatLocator()`) but is not reactive on its own, so the whole
   // preview list is rebuilt inside one $derived.by that reads $locale — the
-  // house pattern (Arms.svelte:11-12, Cards.svelte:91).
+  // house pattern (Arms.svelte:11-12, Shell.svelte).
   // Ruling S: the rule itself lives in `i18n/label.ts` and `Source.svelte`
   // calls the same function — one rule, one place. What stays here is the
   // reactivity, which is per-component.

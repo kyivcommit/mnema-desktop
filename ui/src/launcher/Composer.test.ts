@@ -6,7 +6,7 @@ import { tick } from 'svelte';
 import { expect, test, vi } from 'vitest';
 import Composer from './Composer.svelte';
 import { t } from '../i18n';
-import type { LauncherState } from './state';
+import { MAX_ASK_QUERY, type LauncherState } from './state';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -82,4 +82,38 @@ test('the_box_grows_to_five_rows_and_then_scrolls', async () => {
   expect(rule).not.toBeNull();
   expect(rule![0]).toMatch(/max-height:\s*calc\(1\.5em\s*\*\s*5\)/);
   expect(rule![0]).toMatch(/overflow-y:\s*auto/);
+});
+
+// Carried from `SearchLine.test.ts` before that line was replaced (§5): the
+// composer inherits the guard and refusal rows, so the four checks that pinned
+// their real logic move with them rather than dying with the input they sat in.
+
+test('state error(tooLong) shows the too-long message with the limit interpolated', () => {
+  // The only real-logic error branch (an interpolated placeholder): if the intl
+  // param name drifts from MAX_ASK_QUERY, IntlMessageFormat throws at render
+  // time and this fails.
+  render(Composer, { value: 'x', state: { kind: 'error', reason: 'tooLong' } as LauncherState, onSubmit: vi.fn() });
+  expect(screen.getByRole('alert').textContent).toContain(String(MAX_ASK_QUERY));
+});
+
+test('state error(askFailed) shows the failure message (a rejected ask is visible)', () => {
+  render(Composer, { state: { kind: 'error', reason: 'askFailed' } as LauncherState, onSubmit: vi.fn() });
+  expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
+});
+
+test('state F shows the refusal message, not an alert', () => {
+  const { container } = render(Composer, { state: { kind: 'refused', reason: { kind: 'noCandidates' } } as LauncherState, onSubmit: vi.fn() });
+  // Reached by class, asserted as a role: the refusal is a status, not an error.
+  expect(container.querySelector('.refusal')!.getAttribute('role')).toBe('status');
+  expect(screen.getByRole('status').textContent).toMatch(/found|знайдено/i);
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+test('state D draws no alert and no progress bar; the field is the only busy signal', () => {
+  const { container } = render(Composer, { value: 'my question', state: { kind: 'inFlight', query: 'my question' }, onSubmit: vi.fn() });
+  expect(container.querySelector('.spinner')).toBeNull();
+  expect(screen.queryByRole('progressbar')).toBeNull();
+  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my question');
+  expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBe('true');
+  expect(screen.queryByRole('alert')).toBeNull(); // in flight is not also an error
 });

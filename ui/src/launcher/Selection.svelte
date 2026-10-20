@@ -6,7 +6,7 @@
   import { firstCard, type CardAnswer } from './state';
 
   // 🔴 Ruling AC — why this component exists at all. The selection lives HERE,
-  // and `Cards` wraps this component in `{#key state}`. A
+  // and the transcript keys this component by the answer it draws. A
   // `let selected = $state(null)` declared one level up would sit OUTSIDE that
   // block and survive it untouched: the children would remount still holding the
   // previous answer's citation, and the right card would keep painting the first
@@ -39,13 +39,13 @@
   // component sits under `{#key}`, so a new answer is a new component.
   let selected = $state<AskCitation | Hit | null>(untrack(() => firstCard(answer)));
 
-  // The tree is deliberately outside the key (`Cards.svelte`) and therefore
-  // cannot read `selected` from in here, so it is reported upward. This fires on
+  // The file pane is deliberately outside the key (`Transcript.svelte`) and
+  // therefore cannot read `selected` from in here, so it is reported upward. This fires on
   // mount too — which is exactly what lets go of the left card's mark when a new
   // answer recreates this component.
   //
-  // Only `selected` is tracked: the callback is a fresh closure whenever `Cards`
-  // re-derives its turns, and re-reporting on that would let an older turn's
+  // Only `selected` is tracked: the callback is a fresh closure whenever the
+  // transcript re-derives its turns, and re-reporting on that would let an older turn's
   // effect run after a newer turn's and take the selection back.
   $effect(() => {
     const value = selected;

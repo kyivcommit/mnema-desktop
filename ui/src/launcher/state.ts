@@ -58,20 +58,6 @@ export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
 // says so, so a refusal cannot reach a card component by accident.
 export type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
 
-// The launcher is cold until an answer with something to show arrives, and
-// the first such answer is the only way in; nothing goes back — the window is
-// no longer forgotten while it is hidden. A refusal, an error and a
-// citations-only answer with no passages leave a cold launcher as narrow as it
-// was, and a hot one stays hot through everything.
-export type Heat = 'cold' | 'hot';
-
-export function heatAfter(prev: Heat, s: LauncherState): Heat {
-  if ((s.kind === 'generated' || s.kind === 'citationsOnly') && s.answer.citations.length > 0) {
-    return 'hot';
-  }
-  return prev;
-}
-
 // One question with the answer it got. A conversation is a list of these.
 export type Turn = { query: string; answer: CardAnswer };
 
@@ -86,9 +72,9 @@ export function turnsAfter(turns: Turn[], query: string, a: AskAnswer): Turn[] {
   return turns;
 }
 
-// The card the source panel opens on. The centre lists previews (generated) or
+// The card the file pane opens on. The transcript lists previews (generated) or
 // ranked passages (citations only) in `citations` order, so the first of that
-// list is the first card it draws; `Cards.test.ts` holds this against the DOM.
+// list is the first card it draws; `Selection` starts on it.
 export function firstCard(a: CardAnswer): AskCitation | Hit | null {
   return a.citations[0] ?? null;
 }
