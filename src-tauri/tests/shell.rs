@@ -211,6 +211,36 @@ fn the_focus_mark_is_managed_for_the_cold_timer() {
     );
 }
 
+// The mock has no window manager to raise `Focused` on, so this reads the two
+// arms that implement the rule, the same text-guard shape the close guard above
+// uses: losing focus arms the clock, and the focus coming back has to reach the
+// load path — otherwise a return of focus is unloaded behind by the clock the
+// loss started.
+#[test]
+fn focus_in_after_a_cold_show_loads_the_models() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let src = std::fs::read_to_string(&path).expect("lib.rs reads");
+    fn arm<'a>(src: &'a str, event: &str) -> &'a str {
+        let at = src
+            .find(event)
+            .unwrap_or_else(|| panic!("the {event} arm is gone"));
+        let rest = &src[at..];
+        &rest[..rest
+            .find("\n            }")
+            .expect("the arm is not one match arm")]
+    }
+    assert!(
+        arm(&src, "tauri::WindowEvent::Focused(false)")
+            .contains("launcher_hidden(window.app_handle())"),
+        "a focus loss no longer arms the clock"
+    );
+    assert!(
+        arm(&src, "tauri::WindowEvent::Focused(true)")
+            .contains("launcher_shown(window.app_handle())"),
+        "a focus-in no longer shows the launcher, so nothing loads the models again"
+    );
+}
+
 #[test]
 fn hide_launcher_records_when_it_hid() {
     // The primitive, not the mechanism: the mock cannot tell visible from

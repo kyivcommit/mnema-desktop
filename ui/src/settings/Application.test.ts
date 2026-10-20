@@ -898,7 +898,7 @@ test('a person who opens Application in the settings window reads the shortcut, 
     + ' Мова:'
     + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
     + ' Лаунчер'
-    + ' Лаунчер забуває останню відповідь через (хвилин):'
+    + ' Вивантажувати локальну модель через (хвилин) без фокуса:'
     + ' Запуск'
     + ' Запуск під час входу в систему:'
     + ' Mnema не запускається під час входу в систему.'

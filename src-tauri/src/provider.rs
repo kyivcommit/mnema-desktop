@@ -1830,6 +1830,39 @@ mod lifecycle {
         assert_eq!(unloads_after(rehidden), 0, "a later hide owns the clock");
     }
 
+    /// The half the window's `Focused(true)` arm adds (§1): losing focus arms
+    /// the clock, and the focus coming back loads what that clock would have
+    /// taken away. The arm reaches this through `crate::launcher_shown`.
+    #[test]
+    fn focus_in_after_a_cold_show_loads_the_models() {
+        use tauri::Manager as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+        let loads_before = count(&log, "start POST /mnema/load");
+        let mock = tauri::test::mock_app();
+        mock.manage(HiddenAt::default());
+        mock.manage(state);
+        let handle = mock.handle().clone();
+
+        on_cold(&handle.state::<AppState>());
+        assert_eq!(
+            count(&log, "start POST /mnema/unload"),
+            1,
+            "{}",
+            logged(&log)
+        );
+
+        crate::launcher_shown(&handle);
+        assert!(
+            eventually(|| count(&log, "start POST /mnema/load") > loads_before),
+            "the focus coming back did not load what the clock had unloaded: {}",
+            logged(&log)
+        );
+    }
+
     #[test]
     fn going_cold_during_a_job_that_is_not_a_scan_unloads_everything() {
         let dir = tempfile::tempdir().unwrap();

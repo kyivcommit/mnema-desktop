@@ -286,11 +286,8 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
             // Every show path comes through here: the local models load while
-            // the person types, not when they press Enter. `try_state`: the
-            // shell tests build no `AppState`.
-            if let Some(state) = app.try_state::<state::AppState>() {
-                drop(provider::on_show(&state));
-            }
+            // the person types, not when they press Enter.
+            launcher_shown(app);
             let _ = window.show();
             if window.is_minimized().unwrap_or(false) {
                 let _ = window.unminimize();
@@ -299,6 +296,17 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
             true
         }
         None => false,
+    }
+}
+
+/// The launcher is in front of the person: load what it will need. One path
+/// for the hotkey, the tray and a return of focus. `on_show` bumps `shown`,
+/// which is what voids every clock armed before it — so the focus coming back
+/// cancels the clock the focus loss started, instead of being unloaded behind
+/// by it. `try_state`: the shell tests build no `AppState`.
+fn launcher_shown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(state) = app.try_state::<state::AppState>() {
+        drop(provider::on_show(&state));
     }
 }
 
@@ -725,6 +733,13 @@ pub fn run() -> anyhow::Result<()> {
             // window and marks again through `hide_launcher`.
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
                 launcher_hidden(window.app_handle());
+            }
+            // The window is in front again: load what that clock would take
+            // away. The `shown` bump in `on_show` voids the clock the arm
+            // above armed, so a return of focus is never unloaded behind by a
+            // timer started before it.
+            tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
+                launcher_shown(window.app_handle());
             }
             _ => {}
         })
