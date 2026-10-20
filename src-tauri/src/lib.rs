@@ -85,6 +85,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         tree::list_subfolders,
         tree::list_tree,
         tree::mask_preview,
+        tree::open_document,
         tree::source_around,
         models::provider_models,
         models::key_present,

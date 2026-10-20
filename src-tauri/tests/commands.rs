@@ -4762,6 +4762,165 @@ fn list_tree_enumerates_roots_and_indexed_files() {
     assert!(roots[0].get("root_id").is_none());
 }
 
+#[test]
+fn open_document_refuses_a_document_past_the_block_ceiling() {
+    // Mirrors `tree.rs`'s `MAX_BLOCKS`; a mismatch here would make this test
+    // pass or fail for the wrong reason, so it is asserted below rather than
+    // trusted to stay in step.
+    const MAX_BLOCKS: i64 = 50_000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "9".repeat(64);
+    state
+        .with_index(|db| {
+            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
+            let page = db.insert_page(&doc, 1, "native:txt", None)?;
+            // One more block than the ceiling, in one statement: 50 001 calls
+            // to `insert_block` would each be their own transaction. Raw SQL
+            // because nothing in the index crate writes blocks in bulk, and
+            // this is the only fixture that needs to.
+            db.conn().execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (
+                     SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {MAX_BLOCKS}
+                 )
+                 INSERT INTO block (page_id, document_id, type, reading_order, text)
+                 SELECT {page}, '{doc}', 'paragraph', i, 'x' FROM n"
+            ))?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+
+    let v = call(&webview, "open_document", json!({ "documentId": doc }))
+        .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("unavailable"), "{v}");
+    assert_eq!(
+        v["reason"],
+        json!("tooLarge"),
+        "a document past the ceiling must refuse whole, never answer with a shortened list: {v}"
+    );
+    assert!(
+        v.get("blocks").is_none(),
+        "an unavailable answer must carry no blocks at all: {v}"
+    );
+}
+
+/// The whole file and the citation's highlight, through the wire — the shape
+/// Task 6's pane reads. Also pins the ruling the brief left implicit: a call
+/// that names only `documentId` takes the document's **sole** path for the
+/// freshness verdict, so the answer here is `fileMissing` (nothing is at that
+/// path) rather than `noPath` (nothing was resolved to compare).
+#[test]
+fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
+    use mnema_core::OnDisk;
+
+    const PARAGRAPHS: [&str; 2] = ["Перший абзац.", "Другий абзац."];
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "6".repeat(64);
+    let (chunk, passage) = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/nowhere/at/all")?;
+            let (chunk, passage) = write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                1,
+                0,
+                PARAGRAPHS[1].chars().count() as u32,
+            );
+            db.insert_path(
+                root,
+                "notes/a.txt",
+                &doc,
+                OnDisk {
+                    size_bytes: 1,
+                    mtime: 1,
+                },
+                "text",
+                1,
+            )?;
+            Ok::<_, mnema_index::Error>((chunk, passage))
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "chunkId": chunk, "citedOrd": 0, "citedText": passage }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("file"), "{v}");
+    let texts: Vec<&str> = v["blocks"]
+        .as_array()
+        .expect("a blocks array")
+        .iter()
+        .map(|b| b["text"].as_str().expect("a block text"))
+        .collect();
+    assert_eq!(
+        texts, PARAGRAPHS,
+        "the pane opens the whole file, in reading order: {v}"
+    );
+    assert_eq!(
+        v["blocks"][0]["sectionTitle"],
+        json!("Розділ перший"),
+        "{v}"
+    );
+    assert!(
+        v["blocks"][0].get("section_title").is_none(),
+        "snake_case leaked out of the block payload: {v}"
+    );
+
+    let focus = v["focusBlockIds"].as_array().expect("a focus array");
+    assert_eq!(
+        focus.len(),
+        1,
+        "the chunk sits in one block, and the pane scrolls to every block a chunk covers: {v}"
+    );
+    let span = &v["spans"][0];
+    assert_eq!(span["blockId"], focus[0], "{v}");
+    assert_eq!(span["blockStart"], json!(0), "{v}");
+    assert_eq!(
+        span["length"],
+        json!(passage.chars().count()),
+        "the highlight must measure the chunk's own slice, not the whole block: {v}"
+    );
+    assert_eq!(span["primary"], json!(true), "{v}");
+
+    assert_eq!(
+        v["freshness"],
+        json!({ "kind": "fileMissing" }),
+        "the sole path must be the one freshness is decided for; `noPath` here would mean \
+         the fallback never found it: {v}"
+    );
+
+    // Half a focus is no focus: the file still opens, and nothing is painted.
+    let unhighlighted = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "chunkId": chunk }),
+    )
+    .expect("open_document was rejected");
+    assert_eq!(unhighlighted["kind"], json!("file"), "{unhighlighted}");
+    assert_eq!(
+        unhighlighted["focusBlockIds"],
+        json!([]),
+        "a chunk id without `ord` and `text` cannot name the passage it meant: {unhighlighted}"
+    );
+    assert_eq!(unhighlighted["spans"], json!([]), "{unhighlighted}");
+}
+
 /// One indexed document the tree listing returns, written the way the pipeline
 /// leaves it: an `Indexed` status, a `chunk`/`done` stage (so
 /// [`mnema_index::Db::recent_indexed_documents`]'s INNER JOIN reaches it) and a

@@ -1,3 +1,4 @@
+mod file_view;
 mod history;
 mod journal;
 mod meta;
@@ -8,6 +9,7 @@ mod space;
 mod text_prep;
 mod write;
 
+pub use file_view::{DocumentViewRow, ViewBlockRow};
 pub use history::{HISTORY_LIMIT, HistoryRow};
 pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use meta::{

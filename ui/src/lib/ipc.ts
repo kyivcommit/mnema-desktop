@@ -211,6 +211,20 @@ export type SourceAround =
       sectionTitle: string | null; hasMoreBefore: boolean; hasMoreAfter: boolean; freshness: Freshness }
   | { kind: 'gone'; reason: { kind: 'noSuchChunk' } | { kind: 'idReused' } };
 
+// The whole of one document, from `open_document`. `blocks` is the file itself,
+// not a window around a citation: the pane scrolls it from beginning to end.
+// `kind` is `block.type` verbatim, so the caller decides what it draws as a
+// heading. `spans` measure into `blockId` in Unicode scalar values, exactly as
+// `WireSegment` documents — `length` is the slice, `primary` the clicked one.
+export type DocumentLocation = { documentId: string; rootId: number | null; relativePath: string | null };
+export type DocumentFocus = { chunkId: number; ord: number; text: string };
+export type PaneSpan = { blockId: number; blockStart: number; length: number; primary: boolean };
+export type DocumentView =
+  | { kind: 'file';
+      blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
+      focusBlockIds: number[]; spans: PaneSpan[]; freshness: Freshness }
+  | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'tooLarge' };
+
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
@@ -235,6 +249,15 @@ export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
     chunkId: c.chunkId, passageText: c.text,
     citedDocumentId: c.documentId, citedOrd: c.ord, citedRootId: c.rootId,
     citedRelativePath: c.relativePath, radius,
+  });
+// A citation opens the whole file with its passage highlighted; the tree opens
+// the same file with no focus. A partial `focus` is ignored by the backend —
+// `chunk.id` is reused, so an id is only meaningful with the full `ord` + `text`
+// pair `source_around` pins.
+export const openDocument = (location: DocumentLocation, focus: DocumentFocus | null = null) =>
+  invoke<DocumentView>('open_document', {
+    documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath,
+    chunkId: focus?.chunkId ?? null, citedOrd: focus?.ord ?? null, citedText: focus?.text ?? null,
   });
 
 // A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only

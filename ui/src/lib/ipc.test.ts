@@ -235,6 +235,27 @@ test('SourceAround rejects Rust snake_case wire fields', () => {
   expect(source.kind).toBe('excerpt');
 });
 
+test('openDocument sends the location and the full citation pair, nulls included', async () => {
+  invoke.mockResolvedValue({ kind: 'unavailable', reason: 'noSuchDocument' });
+
+  await ipc.openDocument(
+    { documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md' },
+    { chunkId: 42, ord: 0, text: 'A cited passage.' },
+  );
+  expect(invoke).toHaveBeenCalledWith('open_document', {
+    documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md',
+    chunkId: 42, citedOrd: 0, citedText: 'A cited passage.',
+  });
+
+  // The tree opens a file with no citation; the keys are sent as null rather
+  // than dropped, so the command's optional arguments bind to `None`.
+  await ipc.openDocument({ documentId: 'doc-2', rootId: null, relativePath: null });
+  expect(invoke).toHaveBeenLastCalledWith('open_document', {
+    documentId: 'doc-2', rootId: null, relativePath: null,
+    chunkId: null, citedOrd: null, citedText: null,
+  });
+});
+
 test('the fixtures carry the pinned AskAnswer tags', () => {
   expect(generated.kind).toBe('generated');
   expect(citationsOnly.kind).toBe('citationsOnly');

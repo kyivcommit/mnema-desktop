@@ -837,6 +837,251 @@ pub fn source_around(
     })
 }
 
+/// The most blocks `open_document` will return.
+///
+/// At the ceiling the command answers `unavailable { tooLarge }` rather than a
+/// shortened list: the citation the pane was opened for can sit past the cut,
+/// and a list missing it reads as "nothing found" instead of "incomplete".
+/// 50 000 blocks is hundreds of thousands of pages and well past any real
+/// document — the number is a guess, not a measurement.
+///
+/// shortcut: paging, when a document this size actually turns up; v1 sends the
+/// whole file in one payload.
+const MAX_BLOCKS: usize = 50_000;
+
+/// The whole of one document's indexed text, or the reason it cannot be shown.
+///
+/// `blocks` is the file, not a window around a citation — the pane scrolls the
+/// file itself. `kind` on each block is `block.type` verbatim, so the pane can
+/// drop page headers or draw headings without the backend baking that display
+/// choice in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum DocumentView {
+    File {
+        blocks: Vec<ViewBlock>,
+        /// Every block the focused citation covers, in reading order — a chunk
+        /// can span several. Empty when no focus was accepted.
+        focus_block_ids: Vec<i64>,
+        /// The exact slice to paint inside those blocks.
+        spans: Vec<PaneSpan>,
+        freshness: Freshness,
+    },
+    /// The document cannot be shown whole, and a partial one never is.
+    Unavailable { reason: UnavailableReason },
+}
+
+/// One block of [`DocumentView::File`], section title included from its page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewBlock {
+    pub block_id: i64,
+    pub kind: String,
+    pub text: String,
+    pub page_no: i64,
+    pub section_title: Option<String>,
+}
+
+/// A highlight measured inside one block, flattened for a whole-file pane.
+///
+/// The unit is [`WireSegment`]'s: `block_start` is the offset into the text of
+/// block `block_id`, in **Unicode scalar values**, not UTF-16 code units.
+/// `start`/`end` from the stored span are not shipped: they index the chunk's
+/// own text, and that text is not on this wire — only their difference, as
+/// `length`, is useful. `primary` mirrors `Source.svelte`'s own spans; v1
+/// highlights one citation, so every span here is primary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneSpan {
+    pub block_id: i64,
+    pub block_start: u32,
+    pub length: u32,
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnavailableReason {
+    NoSuchDocument,
+    NoBlocks,
+    TooLarge,
+}
+
+/// [`DocumentView::File`] minus the verdict only a `stat` can give — the same
+/// split as [`ExcerptFields`], for the same reason.
+struct FileFields {
+    blocks: Vec<ViewBlock>,
+    focus_block_ids: Vec<i64>,
+    spans: Vec<PaneSpan>,
+}
+
+impl FileFields {
+    fn with(self, freshness: Freshness) -> DocumentView {
+        DocumentView::File {
+            blocks: self.blocks,
+            focus_block_ids: self.focus_block_ids,
+            spans: self.spans,
+            freshness,
+        }
+    }
+}
+
+/// What one snapshot can know about a document view; the freshness verdict is
+/// decided after it, outside the snapshot and outside `with_index`.
+enum ComposedView {
+    Settled(DocumentView),
+    Pending {
+        file: FileFields,
+        occupant: Option<PathOccupant>,
+    },
+}
+
+/// One document's blocks, its focus and the `path` row freshness needs — no
+/// `stat`, for the reason [`build_source_around`] gives.
+///
+/// The fallback for a caller that named no location: when the document has
+/// exactly one `path` row, that row is the location; when it has several or
+/// none, the verdict is [`Freshness::NoPath`] rather than a guess about one of
+/// them. Half a location (a root with no path) is left to [`cited_occupant`],
+/// which already says what it can and cannot resolve.
+fn build_document_view(
+    db: &Db,
+    document_id: &str,
+    root_id: Option<i64>,
+    relative_path: Option<&str>,
+    focus: Option<(i64, i64, &str)>,
+    limit: usize,
+) -> Result<ComposedView, mnema_index::Error> {
+    let Some(view) = db.document_view(document_id, limit)? else {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::NoSuchDocument,
+        }));
+    };
+    if view.truncated {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::TooLarge,
+        }));
+    }
+    if view.blocks.is_empty() {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::NoBlocks,
+        }));
+    }
+
+    // The focus is accepted only with its full occurrence identity, exactly as
+    // `source_around` pins it: `chunk.id` is reused, so the id alone could
+    // highlight another passage inside the right file.
+    let (focus_block_ids, spans) = match focus {
+        Some((chunk_id, ord, text)) => match db.chunk_anchor(chunk_id)? {
+            Some(anchor)
+                if anchor.document_id == document_id
+                    && anchor.ord == ord
+                    && anchor.text == text =>
+            {
+                (
+                    anchor.spans.iter().map(|s| s.block_id).collect(),
+                    anchor
+                        .spans
+                        .into_iter()
+                        // Through the one `WireSegment` conversion, not a second
+                        // copy of it: this is the payload the pane paints, and
+                        // the unit it documents is the same one.
+                        .map(|s| {
+                            let wire = WireSegment::from(s);
+                            PaneSpan {
+                                block_id: wire.block_id,
+                                block_start: wire.block_start,
+                                length: wire.end - wire.start,
+                                primary: true,
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            _ => (Vec::new(), Vec::new()),
+        },
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let occupant = match (root_id, relative_path) {
+        (None, None) => match db.document_path(document_id)? {
+            Some((root, path)) => cited_occupant(db, Some(root), Some(&path))?,
+            None => None,
+        },
+        (root_id, relative_path) => cited_occupant(db, root_id, relative_path)?,
+    };
+
+    Ok(ComposedView::Pending {
+        file: FileFields {
+            blocks: view
+                .blocks
+                .into_iter()
+                .map(|b| ViewBlock {
+                    block_id: b.block_id,
+                    kind: b.kind,
+                    text: b.text,
+                    page_no: b.page_no,
+                    section_title: b.section_title,
+                })
+                .collect(),
+            focus_block_ids,
+            spans,
+        },
+        occupant,
+    })
+}
+
+/// The whole of one document, read out of the index — what the right pane
+/// paints in place of `source_around`'s window.
+///
+/// Everything the index can answer comes back from one
+/// [`mnema_index::Db::read_snapshot`]; the `stat` that decides `freshness`
+/// happens outside it and outside [`AppState::with_index`], for the reason
+/// [`source_around`] gives.
+///
+/// A `chunk_id` without its `ord` and `text` is not refused. It is ignored:
+/// the file still opens, unhighlighted, and a client that sent half the pair
+/// gets no highlight rather than one on a passage it may not have meant.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(async)]
+pub fn open_document(
+    state: State<'_, AppState>,
+    document_id: String,
+    root_id: Option<i64>,
+    relative_path: Option<String>,
+    chunk_id: Option<i64>,
+    cited_ord: Option<i64>,
+    cited_text: Option<String>,
+) -> Result<DocumentView, Error> {
+    let focus = match (chunk_id, cited_ord, cited_text.as_deref()) {
+        (Some(chunk_id), Some(ord), Some(text)) => Some((chunk_id, ord, text)),
+        _ => None,
+    };
+    let composed = state.with_index(|db| {
+        db.read_snapshot(|db| {
+            build_document_view(
+                db,
+                &document_id,
+                root_id,
+                relative_path.as_deref(),
+                focus,
+                MAX_BLOCKS,
+            )
+        })
+    })?;
+    Ok(match composed {
+        ComposedView::Settled(view) => view,
+        ComposedView::Pending { file, occupant } => {
+            let freshness = decide_freshness(occupant.as_ref(), &document_id);
+            file.with(freshness)
+        }
+    })
+}
+
 /// One level of a watched folder's tree as the exclusion screen needs it.
 ///
 /// **A struct rather than a bare `Vec`, because of `unnameable`.** Entries
