@@ -28,9 +28,14 @@
   const errorText = $derived.by(() => {
     void $locale;
     if (launcherState.kind !== 'error') return '';
-    if (launcherState.reason === 'tooLong') return t('query_too_long', { limit: MAX_ASK_QUERY });
-    if (launcherState.reason === 'historyUnreadable') return t('history_unreadable');
-    return t('query_failed'); // askFailed, historyFailed
+    // An open that failed was clicked in the sidebar, and it is said there
+    // (`Recents.svelte`), not under a composer the person did not touch.
+    if (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') return '';
+    if (launcherState.reason === 'tooLong') {
+      // A too-long message belongs to the line that was too long: stale once emptied.
+      return value.trim() === '' ? '' : t('query_too_long', { limit: MAX_ASK_QUERY });
+    }
+    return t('query_failed'); // askFailed
   });
   const refusalMessage = $derived.by(() => {
     void $locale;
@@ -76,8 +81,7 @@
     <button type="button" class="composer-send" aria-label={sendLabel} disabled={!canSend} onclick={() => onSubmit(value)}>↵</button>
   </div>
   <p class="composer-hint">{hint}</p>
-  <!-- A too-long message belongs to the line that was too long: stale once emptied. -->
-  {#if launcherState.kind === 'error' && !(launcherState.reason === 'tooLong' && value.trim() === '')}
+  {#if errorText}
     <p class="guard" role="alert">{errorText}</p>
   {:else if launcherState.kind === 'refused'}
     <p class="refusal" role="status">{refusalMessage}</p>

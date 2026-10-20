@@ -24,6 +24,8 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string) =>
     cmd === 'list_tree'
       ? Promise.resolve({ roots: [] })
+      : cmd === 'list_history'
+      ? Promise.resolve([])
       : cmd === 'provider_status'
         ? Promise.resolve({ kind: 'ok' })
         : Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false } }),

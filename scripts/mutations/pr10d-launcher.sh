@@ -7,7 +7,7 @@ case_ "launcher: current row loses its state selector" \
   ui/src/styles/launcher.css \
   's~\.tree \[aria-current="true"\]~.tree [aria-current="never"]~' \
   '.tree [aria-current="never"]' \
-  src/launcher/styles.test.ts 'real tree marks current file and recent while leaving neighbours plain' runner=vitest
+  src/launcher/styles.test.ts 'real tree marks the current file while leaving neighbours plain' runner=vitest
 
 case_ "launcher: primary source highlight loses its outline" \
   ui/src/styles/launcher.css \
@@ -33,11 +33,11 @@ case_ "launcher: the transcript cannot scroll" \
   '.centre-body > .transcript { flex: 1 1 auto; min-height: 0; }' \
   src/launcher/Launcher.test.ts 'the shell is one row of tracks and the transcript is the only scroller' runner=vitest
 
-case_ "launcher: the selected tab looks inactive" \
+case_ "launcher: the conversation on screen looks inactive" \
   ui/src/styles/launcher.css \
-  's~\.tree \.tabs button\[aria-pressed="true"\]~.tree .tabs button[aria-pressed="never"]~' \
-  '.tree .tabs button[aria-pressed="never"]' \
-  src/launcher/styles.test.ts 'real tree marks current file and recent while leaving neighbours plain' runner=vitest
+  's~\.history-row\[aria-current="true"\] \{~.history-row[aria-current="never"] {~' \
+  '.history-row[aria-current="never"]' \
+  src/launcher/styles.test.ts 'real recents marks the conversation on screen with --select' runner=vitest
 
 case_ "launcher: entry omits its stylesheet" \
   ui/src/launcher/main.ts \

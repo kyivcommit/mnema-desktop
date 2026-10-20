@@ -1807,7 +1807,7 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
         "the scan job's own embedding phase did not reach the provider: {scan_embed}"
     );
 
-    let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
+    let answer = ask_q(&webview, "fox");
     assert_eq!(
         answer["kind"],
         json!("citationsOnly"),
@@ -1871,8 +1871,7 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     )
     .unwrap();
 
-    let answer =
-        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    let answer = ask_q(&webview, "nothing indexed");
     assert_eq!(answer["kind"], json!("refused"), "{answer}");
     assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
 
@@ -1968,8 +1967,7 @@ fn ask_maps_each_anchor_to_the_right_citation_and_generates() {
         })
         .unwrap();
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let answer = ask_q(&webview, "quantum entanglement");
     assert_eq!(
         answer["kind"],
         json!("generated"),
@@ -2050,8 +2048,7 @@ fn ask_with_an_empty_completion_refuses_as_empty_completion() {
         .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &"c".repeat(64), BODY)))
         .unwrap();
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let answer = ask_q(&webview, "quantum entanglement");
     assert_eq!(
         answer["kind"],
         json!("refused"),
@@ -2103,8 +2100,7 @@ fn a_chat_call_the_provider_refuses_keeps_the_passages_and_says_why() {
     let app = app_with_provider(dir.path(), server.base());
     let webview = ask_ready_with_one_passage(&app);
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("a failed chat call must not reject the ask");
+    let answer = ask_q(&webview, "quantum entanglement"); // a failed chat call must not reject the ask
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(
         answer["citations"].as_array().map(Vec::len),
@@ -2132,8 +2128,7 @@ fn a_chat_call_that_cannot_connect_keeps_the_passages_and_says_offline() {
     state.store_provider_status(epoch, mnema_desktop::provider_status::ProviderStatus::Ok);
 
     let started = std::time::Instant::now();
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("a chat call with no network must not reject the ask");
+    let answer = ask_q(&webview, "quantum entanglement"); // a chat call with no network must not reject the ask
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(
         answer["citations"].as_array().map(Vec::len),
@@ -2165,8 +2160,7 @@ fn a_chat_model_that_goes_silent_keeps_the_passages_and_says_no_reply() {
     let webview = ask_ready_with_one_passage(&app);
 
     let started = std::time::Instant::now();
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("a silent chat model must not reject the ask");
+    let answer = ask_q(&webview, "quantum entanglement"); // a silent chat model must not reject the ask
     let waited = started.elapsed();
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(answer["why"], json!({ "kind": "noReply" }), "{answer}");
@@ -2211,8 +2205,7 @@ fn a_query_embedding_with_no_network_says_offline_ahead_of_no_candidates() {
         "the probe's premise"
     );
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("an embedding with no network must not reject the ask");
+    let answer = ask_q(&webview, "quantum entanglement"); // an embedding with no network must not reject the ask
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(answer["why"], json!({ "kind": "offline" }), "{answer}");
     assert_eq!(answer["citations"], json!([]), "{answer}");
@@ -2251,8 +2244,7 @@ fn a_query_embedding_with_no_reply_skips_the_chat_call_and_says_so() {
     .unwrap();
 
     let started = std::time::Instant::now();
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("an embedding with no reply must not reject the ask");
+    let answer = ask_q(&webview, "quantum entanglement"); // an embedding with no reply must not reject the ask
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(
         answer["why"],
@@ -12748,7 +12740,7 @@ fn mnema_chat_gets_the_local_timeout() {
     let dir = tempfile::tempdir().unwrap();
     let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_CHAT_MS", "20000")]);
     scan_to_completion(fx.app.handle());
-    let answer = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    let answer = ask_q(&fx.webview, "synthetic topic");
     assert_eq!(answer["kind"], json!("generated"), "{answer}");
 }
 
@@ -12769,11 +12761,11 @@ fn passages_with_a_reason(answer: &Result<Value, Value>, why: &str, passages: &V
         v.as_str()
             .is_none_or(|r| !r.is_empty() && !r.contains("fake-mlx"))
     };
-    matches!(answer, Ok(a) if a["kind"] == json!("citationsOnly")
-        && a["why"]["kind"] == json!(why)
-        && no_stderr(&a["why"]["reason"])
-        && no_stderr(&a["content"]["reason"])
-        && a["citations"] == *passages)
+    matches!(answer, Ok(a) if a["answer"]["kind"] == json!("citationsOnly")
+        && a["answer"]["why"]["kind"] == json!(why)
+        && no_stderr(&a["answer"]["why"]["reason"])
+        && no_stderr(&a["answer"]["content"]["reason"])
+        && a["answer"]["citations"] == *passages)
 }
 
 /// The text arm's passages for `query`, as a text-only search returns them —
@@ -12803,7 +12795,7 @@ fn a_local_process_that_cannot_start_still_gives_the_passages() {
     let dir = tempfile::tempdir().unwrap();
     let fx = mnema_app(dir.path(), 1, &[]);
     scan_to_completion(fx.app.handle());
-    let healthy = call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+    let healthy = ask_q(&fx.webview, "synthetic topic");
     assert_eq!(healthy["kind"], json!("generated"), "{healthy}");
     let passages = text_arm_passages(&fx.webview, "synthetic topic");
 
@@ -12830,7 +12822,7 @@ fn a_local_process_that_cannot_start_still_gives_the_passages() {
         );
         if content {
             assert_eq!(
-                answer.as_ref().unwrap()["content"]["kind"],
+                answer.as_ref().unwrap()["answer"]["content"]["kind"],
                 json!("failed"),
                 "{answer:?}"
             );
@@ -13486,6 +13478,34 @@ fn history_rows(webview: &WebviewWindow<MockRuntime>) -> Vec<Value> {
         .clone()
 }
 
+/// The launcher marks the conversation a fresh answer belongs to, and it needs
+/// the row's id to do it: matching on the query text would mark whichever
+/// conversation happens to start with the same words.
+#[test]
+fn ask_returns_the_id_of_the_row_it_wrote() {
+    let completion = json!({
+        "choices": [{ "message": { "content": "The source answers <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let reply = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
+        .expect("ask was rejected");
+    let rows = history_rows(&webview);
+    assert_eq!(rows.len(), 1, "one generated ask is one row: {rows:?}");
+    assert_eq!(
+        reply["historyId"], rows[0]["id"],
+        "ask must answer the id of the row it wrote: {reply:?}"
+    );
+    // The answer keeps its own shape: the id is beside it, not inside it — the
+    // answer is also what `query_history` stores, field for field.
+    assert_eq!(reply["answer"]["kind"], json!("generated"), "{reply:?}");
+    assert!(reply["answer"].get("historyId").is_none(), "{reply:?}");
+}
+
 #[test]
 fn a_generated_ask_is_recorded_and_reopens_identically() {
     let completion = json!({
@@ -13497,8 +13517,7 @@ fn a_generated_ask_is_recorded_and_reopens_identically() {
     let app = app_with_provider(dir.path(), server.base());
     let webview = ask_ready_with_one_passage(&app);
 
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let answer = ask_q(&webview, "quantum entanglement");
     assert_eq!(answer["kind"], json!("generated"), "{answer}");
 
     let rows = history_rows(&webview);
@@ -13547,8 +13566,7 @@ fn a_citations_only_ask_is_recorded() {
     text_arm_only(&webview);
 
     // No chat model is set, so the answer is citations-only and no model is asked.
-    let answer = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let answer = ask_q(&webview, "quantum entanglement");
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
     assert_eq!(answer["why"]["kind"], json!("notAsked"), "{answer}");
 
@@ -13581,8 +13599,7 @@ fn a_failed_ask_does_not_replace_a_generated_answer_in_history() {
     let app = app_with_provider(dir.path(), server.base());
     let webview = ask_ready_with_one_passage(&app);
 
-    let generated = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let generated = ask_q(&webview, "quantum entanglement");
     assert_eq!(generated["kind"], json!("generated"), "{generated}");
     let rows = history_rows(&webview);
     assert_eq!(rows.len(), 1, "the generated answer is recorded: {rows:?}");
@@ -13590,8 +13607,7 @@ fn a_failed_ask_does_not_replace_a_generated_answer_in_history() {
     let before =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
 
-    let failed = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("a failed chat call must not reject the ask");
+    let failed = ask_q(&webview, "quantum entanglement"); // a failed chat call must not reject the ask
     assert_eq!(failed["kind"], json!("citationsOnly"), "{failed}");
     assert_eq!(failed["why"]["kind"], json!("failed"), "{failed}");
 
@@ -13621,8 +13637,7 @@ fn a_refused_ask_is_not_recorded() {
     let webview = main_webview(&app);
     text_arm_only(&webview);
 
-    let answer =
-        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    let answer = ask_q(&webview, "nothing indexed");
     assert_eq!(answer["kind"], json!("refused"), "{answer}");
     assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
 
@@ -13645,7 +13660,7 @@ fn asking_the_same_query_with_spaces_keeps_one_row() {
     call(&webview, "ask", json!({ "query": "q" })).expect("ask was rejected");
     assert_eq!(history_rows(&webview).len(), 1, "the first ask is recorded");
 
-    let answer = call(&webview, "ask", json!({ "query": "  q  " })).expect("ask was rejected");
+    let answer = ask_q(&webview, "  q  ");
     assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
 
     let rows = history_rows(&webview);
@@ -13731,7 +13746,7 @@ fn history_survives_removing_the_watched_folder() {
     scan_to_completion(app.handle());
 
     // No chat model: citations-only, but the citation is a real document.
-    let answer = call(&webview, "ask", json!({ "query": "fox" })).expect("ask was rejected");
+    let answer = ask_q(&webview, "fox");
     assert!(
         answer["citations"]
             .as_array()
@@ -13793,8 +13808,7 @@ fn a_failed_history_write_does_not_fail_the_ask() {
     call(&webview, "set_chat_tools", json!({ "on": false })).unwrap();
 
     // A is written while the table is healthy, so its row is the baseline.
-    let first = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("ask was rejected");
+    let first = ask_q(&webview, "quantum entanglement");
     assert_eq!(first["kind"], json!("generated"), "{first}");
     let rows = history_rows(&webview);
     assert_eq!(rows.len(), 1, "A is recorded before the fault: {rows:?}");
@@ -13816,8 +13830,7 @@ fn a_failed_history_write_does_not_fail_the_ask() {
 
     // A asked again under the trigger: its delete-before-insert must roll back
     // with the refused insert, so A keeps its id and its stored answer.
-    let again = call(&webview, "ask", json!({ "query": "quantum entanglement" }))
-        .expect("a history write that fails must not fail the ask");
+    let again = ask_q(&webview, "quantum entanglement"); // a history write that fails must not fail the ask
     assert_eq!(again["kind"], json!("generated"), "{again}");
     let rows = history_rows(&webview);
     assert_eq!(rows.len(), 1, "A's delete was rolled back: {rows:?}");
@@ -13829,8 +13842,7 @@ fn a_failed_history_write_does_not_fail_the_ask() {
         "a refused re-ask must not touch A's stored answer"
     );
 
-    let second = call(&webview, "ask", json!({ "query": "quantum resonance" }))
-        .expect("a history write that fails must not fail the ask");
+    let second = ask_q(&webview, "quantum resonance"); // a history write that fails must not fail the ask
     assert_eq!(second["kind"], json!("generated"), "{second}");
 
     let rows = history_rows(&webview);
@@ -13854,8 +13866,7 @@ fn a_failed_history_write_does_not_fail_the_ask() {
             Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
-    let third =
-        call(&webview, "ask", json!({ "query": "quantum resonance" })).expect("ask was rejected");
+    let third = ask_q(&webview, "quantum resonance");
     assert_eq!(third["kind"], json!("generated"), "{third}");
     let queries: Vec<Value> = history_rows(&webview)
         .iter()
@@ -13913,8 +13924,10 @@ fn dialogue_ready(app: &tauri::App<MockRuntime>) -> (WebviewWindow<MockRuntime>,
     (webview, ids)
 }
 
+/// `ask` answers the answer and the history row it wrote; these tests read the
+/// answer alone. The wrapper has its own test, `ask_returns_the_id_of_the_row_it_wrote`.
 fn ask_q(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
-    call(webview, "ask", json!({ "query": query })).expect("ask was rejected")
+    call(webview, "ask", json!({ "query": query })).expect("ask was rejected")["answer"].clone()
 }
 
 const FIRST_Q: &str = "quantum entanglement";

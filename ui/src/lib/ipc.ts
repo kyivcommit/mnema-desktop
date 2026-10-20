@@ -79,7 +79,7 @@ export type TreeFile = { relativePath: string; documentId: string };
 export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[] };
 export type TreeListing = { roots: TreeRoot[] };
 
-// One question the person asked, as the launcher's Recents tab lists it
+// One question the person asked, as the sidebar's conversation list shows it
 // (`bridge.rs` `HistoryEntry`). `askedAt` is SECONDS since the epoch, newest first.
 export type HistoryEntry = { id: number; query: string; askedAt: number };
 
@@ -227,10 +227,16 @@ export type DocumentView =
   // a prefix of it, not the file — retry after the scan rather than show it.
   | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'rebuilding' | 'tooLarge' };
 
+// What `ask` answers with (`bridge.rs` `AskReply`): the answer, and the id of the
+// history row it was written to. The id is beside the answer, never inside it —
+// `AskAnswer` is also the JSON stored in `query_history`. Null when nothing was
+// recorded: a refusal, a failed chat call, or a write that failed.
+export type AskReply = { answer: AskAnswer; historyId: number | null };
+
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
-export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
+export const ask = (query: string) => invoke<AskReply>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const listHistory = () => invoke<HistoryEntry[]>('list_history');
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });

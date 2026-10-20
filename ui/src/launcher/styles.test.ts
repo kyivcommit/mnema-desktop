@@ -5,6 +5,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
 import Tree from './Tree.svelte';
+import Recents from './Recents.svelte';
 import Source from './Source.svelte';
 import {
   citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excerptSpanB, historyTwoQuestions,
@@ -26,7 +27,7 @@ beforeEach(() => {
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
-    if (cmd === 'ask') return Promise.resolve(generated);
+    if (cmd === 'ask') return Promise.resolve({ answer: generated, historyId: null });
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
     if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
@@ -83,25 +84,26 @@ test('real launcher places the three areas with the tree inside the right one', 
   expect(screen.getAllByTestId('turn')).toHaveLength(1);
 });
 
-test('real tree marks current file and recent while leaving neighbours plain', async () => {
-  render(Tree, { selected: citationA, historyId: 1 });
+test('real tree marks the current file while leaving neighbours plain', async () => {
+  render(Tree, { selected: citationA });
   const selected = await screen.findByTestId('tree-file-doc-1');
   const other = screen.getByTestId('tree-file-doc-2');
-  function check(on: Element, off: Element) {
-    expect(on.getAttribute('aria-current')).toBe('true');
-    expect(off.hasAttribute('aria-current')).toBe(false);
-    expect(getComputedStyle(on).background).toBe('var(--cite-wash)');
-    expect(getComputedStyle(on).borderColor).toBe('var(--cite-line)');
-    expect(getComputedStyle(off).background).not.toBe('var(--cite-wash)');
-    expect(getComputedStyle(off).borderColor).not.toBe('var(--cite-line)');
-  }
-  check(selected, other);
-  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
-  check(await screen.findByTestId('tree-history-1'), screen.getByTestId('tree-history-2'));
-  const on = getComputedStyle(screen.getByTestId('tree-tab-recents'));
-  const off = getComputedStyle(screen.getByTestId('tree-tab-files'));
-  expect(on.background).toBe('var(--surface)');
-  expect(off.background).not.toBe(on.background);
+  expect(selected.getAttribute('aria-current')).toBe('true');
+  expect(other.hasAttribute('aria-current')).toBe(false);
+  expect(getComputedStyle(selected).background).toBe('var(--cite-wash)');
+  expect(getComputedStyle(selected).borderColor).toBe('var(--cite-line)');
+  expect(getComputedStyle(other).background).not.toBe('var(--cite-wash)');
+  expect(getComputedStyle(other).borderColor).not.toBe('var(--cite-line)');
+});
+
+// §4: the conversation on screen is `--select`, not the file tree's
+// `--cite-wash` — the two selection meanings stay apart on screen.
+test('real recents marks the conversation on screen with --select', async () => {
+  render(Recents, { activeId: 1, gen: 0, onOpen: () => {} });
+  const on = await screen.findByTestId('recents-row-1');
+  const off = screen.getByTestId('recents-row-2');
+  expect(getComputedStyle(on).background).toBe('var(--select)');
+  expect(getComputedStyle(off).background).not.toBe('var(--select)');
 });
 
 test('real source distinguishes primary highlight from its sibling', async () => {

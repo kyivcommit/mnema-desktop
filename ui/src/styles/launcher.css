@@ -128,37 +128,34 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .tree li > span > span { display: block; }
 .tree li > span > span + span { font-size: 11px; color: var(--ink-soft); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
-/* A question row: the open button takes the width, the remove button sits at its
-   right. Text is one line with an ellipsis; the full query is in the DOM. */
-.tree .history-row { display: flex; align-items: center; gap: 4px; padding: 0; }
-.tree .history-open {
-  flex: 1; min-width: 0; padding: 4px 7px; border: 0; background: transparent;
-  color: var(--ink); text-align: left; font: inherit;
+/* §4: the conversations. The pane is the scroll container; a row is one line,
+   the × shows on hover and on focus. The active row is `--select`, not the
+   file tree's `--cite-wash`: "the conversation on screen" and "the file in the
+   tree" are different selections. */
+.recents-body { flex: 1 1 auto; min-height: 0; overflow: auto; font-size: 13px; }
+.recents-body ul { list-style: none; margin: 0; padding: 0; }
+.history-row { display: flex; align-items: center; gap: 4px; padding: 0; border-radius: 6px; }
+.history-row[aria-current="true"] { background: var(--select); color: var(--on-select); }
+.history-open {
+  flex: 1; min-width: 0; padding: 4px 7px; border: 0; border-radius: 6px; background: transparent;
+  color: inherit; text-align: left; font: inherit;
 }
-.tree .history-query, .tree .history-asked {
+.history-query, .history-asked {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tree .history-asked { font-size: 11px; color: var(--ink-soft); }
+.history-asked { font-size: 11px; color: var(--ink-soft); }
+.history-row[aria-current="true"] .history-asked { color: inherit; }
 /* Opacity, not visibility: a hidden control cannot take focus. */
-.tree .history-remove {
+.history-remove {
   flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
-  background: transparent; color: var(--ink-soft); font-size: 14px; line-height: 1; opacity: 0;
+  background: transparent; color: inherit; font-size: 14px; line-height: 1; opacity: 0;
 }
-.tree .history-row:hover .history-remove, .tree .history-row:focus-within .history-remove { opacity: 1; }
+.history-row:hover .history-remove, .history-row:focus-within .history-remove { opacity: 1; }
 .tree h4 {
   margin: 10px 0 4px; overflow-wrap: anywhere;
   font-family: var(--sans); font-weight: 500; font-style: normal;
 }
-.tree .tabs { display: flex; gap: 5px; padding: 3px; border-radius: 9px; background: var(--surface-3); margin-bottom: 11px; }
-.tree .tabs button {
-  flex: 1; min-width: 0; padding: 5px 2px; border: 0; border-radius: 6px;
-  font-size: 12.5px; background: transparent; color: var(--ink-soft); overflow-wrap: anywhere;
-}
-.tree .tabs button[aria-pressed="true"] {
-  background: var(--surface); color: var(--ink);
-  font-family: var(--sans); font-weight: 600; font-style: normal;
-}
-.answer-card, .passages-card { display: flex; flex-direction: column; gap: 13px; }
+
 .umsg {
   align-self: flex-end; max-width: 88%; padding: 9px 13px;
   border-radius: 13px 13px 5px 13px; background: var(--accent-soft);

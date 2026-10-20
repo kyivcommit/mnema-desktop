@@ -41,11 +41,17 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
-    if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply);
+    if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply).then(wrapAsk);
     return Promise.resolve();
   });
 }
 const askCalls = () => invoke.mock.calls.filter((c) => c[0] === 'ask');
+// `ask` answers `{ answer, historyId }`; a mock that names only the answer gets
+// "nothing was recorded", which is what a refusal or a failed write says.
+function wrapAsk(reply: unknown) {
+  if (reply && typeof reply === 'object' && 'historyId' in reply) return reply;
+  return { answer: reply, historyId: null };
+}
 const listTreeCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_tree');
 
 // Answers each `ask` in turn, so one test can drive two questions with different
@@ -64,7 +70,7 @@ function mockAsks(...replies: unknown[]) {
     // attribute whatever it then asserts to the wrong cause.
     if (cmd === 'ask') {
       if (next >= replies.length) throw new Error(`mockAsks: no reply for ask #${next + 1}`);
-      return Promise.resolve(replies[next++]);
+      return Promise.resolve(wrapAsk(replies[next++]));
     }
     return Promise.resolve();
   });
@@ -181,7 +187,7 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
-    if (cmd === 'ask') return pending;
+    if (cmd === 'ask') return pending.then(wrapAsk);
     return Promise.resolve();
   });
   render(Launcher);
@@ -218,7 +224,7 @@ function mockAsksThenReject(first: unknown) {
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
     if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
-    if (cmd === 'ask') return n++ === 0 ? Promise.resolve(first) : Promise.reject('offline');
+    if (cmd === 'ask') return n++ === 0 ? Promise.resolve(wrapAsk(first)) : Promise.reject('offline');
     return Promise.resolve();
   });
 }
@@ -578,7 +584,7 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
       if (opts.ask) return opts.ask;
       if (next >= (opts.asks ?? []).length) throw new Error(`mockRecents: no reply for ask #${next + 1}`);
       const reply = opts.asks![next++];
-      return reply instanceof Promise ? reply : Promise.resolve(reply);
+      return reply instanceof Promise ? reply.then(wrapAsk) : Promise.resolve(wrapAsk(reply));
     }
     return Promise.resolve();
   });
@@ -588,8 +594,7 @@ const listHistoryCalls = () => invoke.mock.calls.filter((c) => c[0] === 'list_hi
 const OPENED_OLD = { kind: 'dialogue', turns: [{ query: 'old q', answer: generated }] };
 
 async function openRecent(id: number) {
-  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
-  await fireEvent.click(await screen.findByTestId(`history-open-${id}`));
+  await fireEvent.click(await screen.findByTestId(`recents-open-${id}`));
 }
 
 test('opening a question draws its snapshot without asking', async () => {
@@ -606,7 +611,7 @@ test('opening a question draws its snapshot without asking', async () => {
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('old q'));
   expect(historyEntryCalls()).toEqual([['history_entry', { id: 7 }]]);
   expect(askCalls()).toHaveLength(asks);
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true');
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBe('true');
   expect(box.value).toBe('a draft');
 });
 
@@ -630,7 +635,7 @@ test('an unreadable entry keeps the answer on screen and says so', async () => {
   expect(screen.getByRole('alert').textContent).toMatch(/cannot be opened|не відкривається/);
   expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first');
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
 test('a gone entry rereads the list and changes nothing else', async () => {
@@ -644,7 +649,7 @@ test('a gone entry rereads the list and changes nothing else', async () => {
   expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(screen.getByTestId('query-echo').textContent).toBe('first');
   expect(screen.queryByRole('alert')).toBeNull();
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
 test('a rejected open keeps the answer and says the query failed', async () => {
@@ -671,9 +676,9 @@ test('deleting the question on screen keeps the answer and removes only its row'
   const before = screen.getByTestId('transcript').textContent;
   const asks = askCalls().length;
 
-  await fireEvent.click(screen.getByTestId('history-remove-7'));
+  await fireEvent.click(screen.getByTestId('recents-remove-7'));
 
-  await waitFor(() => expect(screen.queryByTestId('tree-history-7')).toBeNull());
+  await waitFor(() => expect(screen.queryByTestId('recents-row-7')).toBeNull());
   expect(screen.getByTestId('transcript').textContent).toBe(before);
   expect(askCalls()).toHaveLength(asks);
   // The × does not open the row it sits in: only the first open read an entry.
@@ -691,16 +696,32 @@ test('a recorded answer bumps the history list; a refusal does not', async () =>
   expect(listHistoryCalls()).toHaveLength(2);
 });
 
-test('a new recorded answer clears the mark on the question that was opened', async () => {
-  mockRecents({ asks: [generated, generated], opened: OPENED_OLD });
+test('a fresh answer marks the conversation the backend wrote it to', async () => {
+  // The backend answers the row's id, so the mark moves to the new conversation
+  // rather than staying on the opened one or going out entirely.
+  const NEW = { id: 9, query: 'second', askedAt: 1_700_000_200 };
+  mockRecents({ asks: [generated, { answer: generated, historyId: 9 }], opened: OPENED_OLD, list: [NEW, OLD] });
   render(Launcher);
   await submit('first');
   await screen.findByTestId('turn');
   await openRecent(7);
-  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  await waitFor(() => expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBe('true'));
   await submit('second');
   await waitFor(() => expect(askCalls()).toHaveLength(2));
-  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull());
+  await waitFor(() => expect(screen.getByTestId('recents-row-9').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
+});
+
+test('deleting the conversation on screen drops its mark and keeps the answer', async () => {
+  mockRecents({ asks: [generated], opened: OPENED_OLD });
+  render(Launcher);
+  await submit('first');
+  await screen.findByTestId('turn');
+  await openRecent(7);
+  await waitFor(() => expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBe('true'));
+  await fireEvent.click(screen.getByTestId('recents-remove-7'));
+  await waitFor(() => expect(screen.queryByTestId('recents-row-7')).toBeNull());
+  expect(screen.getByTestId('query-echo').textContent).toBe('old q');
 });
 
 test('an opened answer without citations draws its turn and no alert', async () => {
@@ -710,7 +731,7 @@ test('an opened answer without citations draws its turn and no alert', async () 
   await submit('first');
   await screen.findByTestId('turn');
   await openRecent(7);
-  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  await waitFor(() => expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBe('true'));
   expect(screen.getByTestId('turn')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(err).not.toHaveBeenCalled();
@@ -730,7 +751,7 @@ test('a search started while an entry is read is not overwritten by the entry', 
   await new Promise((r) => setTimeout(r, 0));
   expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBe('true');
   expect(screen.queryByTestId('query-echo')).toBeNull();
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
 test('a refused search takes the mark off the opened question and does not reread Recents', async () => {
@@ -739,13 +760,13 @@ test('a refused search takes the mark off the opened question and does not rerea
   await submit('first');
   await screen.findByTestId('turn');
   await openRecent(7);
-  await waitFor(() => expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBe('true'));
+  await waitFor(() => expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBe('true'));
   const reads = listHistoryCalls().length;
 
   await submit('second');
   await screen.findByRole('status');
 
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
   expect(listHistoryCalls()).toHaveLength(reads);
 });
 
@@ -764,7 +785,7 @@ test('an entry read that lands after a search has answered is dropped, not drawn
   await new Promise((r) => setTimeout(r, 0));
 
   expect(screen.getByTestId('query-echo').textContent).toBe('second');
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
 test('two opens that resolve out of order: the later click wins', async () => {
@@ -783,9 +804,8 @@ test('two opens that resolve out of order: the later click wins', async () => {
   render(Launcher);
   await submit('first');
   await screen.findByTestId('turn');
-  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
-  await fireEvent.click(await screen.findByTestId('history-open-7'));
-  await fireEvent.click(await screen.findByTestId('history-open-8'));
+  await fireEvent.click(await screen.findByTestId('recents-open-7'));
+  await fireEvent.click(await screen.findByTestId('recents-open-8'));
 
   resolveSecond(NEWER_ANSWER);
   await waitFor(() => expect(screen.getByTestId('query-echo').textContent).toBe('newer q'));
@@ -793,8 +813,8 @@ test('two opens that resolve out of order: the later click wins', async () => {
   await new Promise((r) => setTimeout(r, 0));
 
   expect(screen.getByTestId('query-echo').textContent).toBe('newer q');
-  expect(screen.getByTestId('tree-history-8').getAttribute('aria-current')).toBe('true');
-  expect(screen.getByTestId('tree-history-7').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('recents-row-8').getAttribute('aria-current')).toBe('true');
+  expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
 // Task 8: the launcher draws a conversation. `chat_tools_enabled` is the «Tool
@@ -973,9 +993,8 @@ test('of two overlapping opens only the one drawn continues the backend session'
   await screen.findByTestId('new-chat');
   await submit('warm');
   await screen.findByTestId('turn');
-  await fireEvent.click(await screen.findByTestId('tree-tab-recents'));
-  await fireEvent.click(await screen.findByTestId('history-open-7'));
-  await fireEvent.click(await screen.findByTestId('history-open-8'));
+  await fireEvent.click(await screen.findByTestId('recents-open-7'));
+  await fireEvent.click(await screen.findByTestId('recents-open-8'));
   await waitFor(() => expect(echoes()).toEqual(['second q']));
   slow(OPENED_OLD); // the stale read lands after the newer open is drawn
   await waitFor(() => expect(historyEntryCalls()).toHaveLength(2));

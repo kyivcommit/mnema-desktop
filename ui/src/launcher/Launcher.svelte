@@ -7,6 +7,7 @@
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';
   import Tree from './Tree.svelte';
+  import Recents from './Recents.svelte';
   import Shell from './Shell.svelte';
   import { loadLayout, type PanelState } from './layout';
 
@@ -20,10 +21,10 @@
   // was none.
   let previous = $state.raw<LauncherState | null>(null);
   // Recents: bumped whenever the list of questions may have changed (a recorded
-  // answer, a gone entry); the tree re-reads the list on each change.
+  // answer, a gone entry); the sidebar re-reads the list on each change.
   let historyGen = $state(0);
-  // The row of the question on screen, when it was opened from Recents. Null for
-  // a question asked from the composer.
+  // The conversation on screen: the row an opened entry names, or the row `ask`
+  // reports it wrote. Null for a refusal and for a fresh chat.
   let historyId = $state<number | null>(null);
   // What the transcript draws. The composer always gets `launcherState` itself.
   const shownState = $derived(
@@ -135,13 +136,16 @@
     if (!dialogue) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
     try {
-      const answer = await inSession(() => ask(check.query));
+      const reply = await inSession(() => ask(check.query));
+      const answer = reply.answer;
       launcherState = stateFromAnswer(check.query, answer);
       turns = turnsAfter(turns, check.query, answer);
-      // Whatever answer lands, it is not an opened question, refusals included.
-      historyId = null;
+      // The row this answer was written to, straight from the backend: a refusal
+      // (or a write that failed) reports none, and then nothing is marked.
+      historyId = reply.historyId;
       // The backend records a generated or citations-only answer inside `ask`, so
-      // the list has a new row. A refusal records nothing, so it does not reread it.
+      // the list may have a new row. A refusal records nothing, so it does not
+      // reread it.
       if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
       // §7: line clears on ready — but only if it still holds the submitted
       // query. A draft typed while the ask was in flight is kept, not wiped
@@ -213,8 +217,13 @@
     <Transcript {turns} state={shownState} />
     <Composer bind:value={query} state={launcherState} onSubmit={runSearch} />
   {/snippet}
+  {#snippet recents()}
+    <Recents activeId={historyId} gen={historyGen} onOpen={openHistory}
+      onDelete={(id) => { if (id === historyId) historyId = null; }}
+      error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
+  {/snippet}
   {#snippet tree()}
-    <Tree selected={null} {historyId} {historyGen} onOpenHistory={openHistory} />
+    <Tree selected={null} />
   {/snippet}
   {#snippet tools()}
     {#if dialogue}

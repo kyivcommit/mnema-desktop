@@ -39,8 +39,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
-  | 'history_empty' | 'history_remove' | 'history_unreadable'
+  | 'tree_empty' | 'tree_failed'
+  | 'history_empty' | 'history_remove' | 'history_unreadable' | 'recents_failed'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
@@ -384,11 +384,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader cannot see the contradiction and correct for it.
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
-    tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
+    recents_failed: 'Не вдалося завантажити бесіди.',
     fresh_current: 'Актуально',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
@@ -1251,11 +1251,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
-    tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',
+    recents_failed: 'The conversations could not be loaded.',
     fresh_current: 'Up to date',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',

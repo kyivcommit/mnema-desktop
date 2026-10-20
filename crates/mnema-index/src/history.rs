@@ -29,7 +29,10 @@ impl Db {
     /// The replacement is a delete and an insert, not an upsert: an upsert keeps
     /// the old `id`, and with two records in the same second the `id DESC`
     /// tie-break would then sort the repeated question below newer ones.
-    pub fn history_record(&self, query: &str, answer_json: &str) -> Result<(), Error> {
+    ///
+    /// Answers the id of the row it wrote: the window marks the conversation a
+    /// fresh answer belongs to, and the row's own id is what names it.
+    pub fn history_record(&self, query: &str, answer_json: &str) -> Result<i64, Error> {
         let query = query.trim();
         debug_assert!(
             !query.is_empty(),
@@ -46,6 +49,7 @@ impl Db {
                      COALESCE((SELECT max(asked_at) FROM query_history), 0)))",
                 params![query, answer_json],
             )?;
+            let id = tx.last_insert_rowid();
             tx.execute(
                 "DELETE FROM query_history WHERE id NOT IN (
                     SELECT id FROM query_history
@@ -53,7 +57,7 @@ impl Db {
                      LIMIT ?1)",
                 params![HISTORY_LIMIT],
             )?;
-            Ok(())
+            Ok(id)
         })
     }
 

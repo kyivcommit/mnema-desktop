@@ -38,43 +38,19 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { formatIndexedAt } from '../i18n/recency';
-  import { deleteHistoryEntry, listHistory, listTree } from '../lib/ipc';
-  import type { AskCitation, Hit, HistoryEntry, TreeListing } from '../lib/ipc';
+  import { listTree } from '../lib/ipc';
+  import type { AskCitation, Hit, TreeListing } from '../lib/ipc';
 
   // Ruling O: Task 8b holds the selection as exactly this union, so pinning
   // the narrower type here would force a signature change one task later.
   // Both members carry `documentId`, which is all this card reads.
-  //
-  // The Recents tab lists the person's questions, not documents, so the card
-  // needs to know which question is on screen (`historyId`, the launcher's
-  // answer) and when a question was asked since it last read the list
-  // (`historyGen`). Both default to "none", so a card with no history wired
-  // still draws; `onOpenHistory` is the launcher's to supply.
-  let {
-    selected,
-    historyId = null,
-    historyGen = 0,
-    onOpenHistory,
-  }: {
-    selected: AskCitation | Hit | null;
-    historyId?: number | null;
-    historyGen?: number;
-    onOpenHistory?: (id: number) => void;
-  } = $props();
+  let { selected }: { selected: AskCitation | Hit | null } = $props();
 
   let listing = $state<TreeListing | null>(null);
   let failed = $state(false);
-  let tab = $state<'files' | 'recents'>('files');
   // Folders the person opened or shut by hand, keyed per root: two roots may
   // hold the same folder path and must not share one open flag.
   let toggled = $state<Record<string, boolean>>({});
-  // `null` until the first read lands, so an empty list is not drawn before the
-  // question of whether it is empty has been answered.
-  let history = $state<HistoryEntry[] | null>(null);
-  // A first read that failed, while nothing is on screen: the Recents tab says so.
-  // A read that fails after a list is already shown keeps the list, as list_tree does.
-  let historyFailed = $state(false);
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -144,50 +120,8 @@
 
   onMount(load);
 
-  // The questions, newest first, as `list_history` sends them. Read on mount, on
-  // focus, and whenever `historyGen` moves (see the effect below). Two reads can
-  // be in flight at once, and the one that started last is the one that counts:
-  // a reply to an older read is not applied over a newer answer, but a read that
-  // is still on the wire does not stop a newer one from being asked for.
-  let historyAsked = 0;
-  let historyApplied = 0;
-  function loadHistory() {
-    const mine = ++historyAsked;
-    listHistory()
-      .then((h) => {
-        if (mine > historyApplied) { historyApplied = mine; history = h; historyFailed = false; }
-      })
-      .catch((e) => {
-        console.error('list_history failed', e);
-        if (history === null) historyFailed = true;
-      });
-  }
-
-  // A question's remove button deletes the entry. The row goes once the delete has
-  // resolved and the list has been read again, so a delete that fails leaves the
-  // row where it was. Nothing is confirmed and nothing is opened.
-  function removeHistory(id: number) {
-    deleteHistoryEntry(id)
-      .then(loadHistory)
-      .catch((e) => console.error('delete_history_entry failed', e));
-  }
-
-  // `historyGen` is the launcher's signal that a question was just answered. The
-  // effect depends on the number, not on the prop read: a parent that re-sets its
-  // props (a new selection) must not read the questions again, and an equal value
-  // does not propagate through a `$derived`. It runs once on mount, which is the
-  // first read; the read itself is inside `untrack`.
-  const generation = $derived(historyGen);
-  $effect(() => {
-    void generation;
-    untrack(loadHistory);
-  });
-
-  const filesLabel = $derived.by(() => { void $locale; return t('tree_tab_files'); });
-  const recentsLabel = $derived.by(() => { void $locale; return t('tree_tab_recents'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
-  const historyEmptyLabel = $derived.by(() => { void $locale; return t('history_empty'); });
 
   // Ruling P: selection is by documentId, never by relativePath — two roots
   // can hold the same relative path under different documents.
@@ -196,30 +130,6 @@
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
   );
-  // Review Minor 5: each question says HOW LONG AGO it was asked. The whole list
-  // is rebuilt inside one `$derived.by` that reads `$locale` — `formatIndexedAt`
-  // goes through `t()` and is not reactive on its own, the house pattern
-  // (`Answer.svelte:40-43`, `Passages.svelte:62-69`).
-  //
-  // The clock is read here rather than ticked: these labels do not update on
-  // their own, they are recomputed when the list changes, when the language
-  // changes, and every time the launcher is raised, which is the only moment a
-  // person is reading them. A timer would redraw the card behind a person who
-  // is not looking at it.
-  const historyRows = $derived.by(() => {
-    void $locale;
-    const now = Date.now();
-    return (history ?? []).map((entry) => ({
-      entry,
-      asked: formatIndexedAt(entry.askedAt, now),
-      // Named for its own question: a screen reader hears the row, not a count.
-      removeName: t('history_remove', { query: entry.query }),
-    }));
-  });
-
-  // The Files tab is empty when there are no roots, and only then. Questions do
-  // not count: an index with nothing indexed can still have been asked things,
-  // and the Recents tab says so for itself.
   const isEmpty = $derived(listing !== null && listing.roots.length === 0);
 
   // NUL as the separator because no path component can contain one, so no two
@@ -377,64 +287,19 @@
   </ul>
 {/snippet}
 
-<svelte:window onfocus={() => { load(); loadHistory(); }} />
+<svelte:window onfocus={load} />
 
 <div class="tree" data-testid="tree-body">
-  <div class="tabs">
-    <button
-      type="button"
-      data-testid="tree-tab-files"
-      aria-pressed={tab === 'files'}
-      onclick={() => (tab = 'files')}>{filesLabel}</button>
-    <button
-      type="button"
-      data-testid="tree-tab-recents"
-      aria-pressed={tab === 'recents'}
-      onclick={() => (tab = 'recents')}>{recentsLabel}</button>
-  </div>
-
-  {#if tab === 'files'}
-    {#if failed}
-      <p data-testid="tree-failed">{failedLabel}</p>
-    {:else if isEmpty}
-      <p data-testid="tree-empty">{emptyLabel}</p>
-    {:else}
-      {#each roots as { root, nodes } (root.rootId)}
-        <section data-testid={`tree-root-${root.rootId}`}>
-          <h4>{root.name}</h4>
-          {@render branch(nodes, root.rootId)}
-        </section>
-      {/each}
-    {/if}
-  {:else if history === null && historyFailed}
-    <p data-testid="history-failed">{failedLabel}</p>
-  {:else if history !== null && history.length === 0}
-    <p data-testid="history-empty">{historyEmptyLabel}</p>
+  {#if failed}
+    <p data-testid="tree-failed">{failedLabel}</p>
+  {:else if isEmpty}
+    <p data-testid="tree-empty">{emptyLabel}</p>
   {:else}
-    <ul>
-      {#each historyRows as { entry, asked, removeName } (entry.id)}
-        <li>
-          <!-- The row is a span, not a button: its two buttons are the actions.
-               `tree-history-*` is the row namespace, so the parts inside carry
-               ids that do not start with it — the rule `Passages` and `Answer`
-               follow. `aria-current` sits on the row because the style keys on
-               it there, and the row is what the launcher's `historyId` marks. -->
-          <span data-testid={`tree-history-${entry.id}`} class="history-row"
-            aria-current={entry.id === historyId ? 'true' : undefined}>
-            <button type="button" class="history-open" data-testid={`history-open-${entry.id}`}
-              onclick={() => onOpenHistory?.(entry.id)}>
-              <span data-testid="history-query" class="history-query">{entry.query}</span>
-              <span data-testid="history-asked" class="history-asked">{asked}</span>
-            </button>
-            <!-- Shown on hover and on focus, through opacity and never through
-                 `visibility`: a hidden control cannot take focus, and this one must
-                 always be reachable from a keyboard. -->
-            <button type="button" class="history-remove" data-testid={`history-remove-${entry.id}`}
-              aria-label={removeName}
-              onclick={() => removeHistory(entry.id)}>×</button>
-          </span>
-        </li>
-      {/each}
-    </ul>
+    {#each roots as { root, nodes } (root.rootId)}
+      <section data-testid={`tree-root-${root.rootId}`}>
+        <h4>{root.name}</h4>
+        {@render branch(nodes, root.rootId)}
+      </section>
+    {/each}
   {/if}
 </div>
