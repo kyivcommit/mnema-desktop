@@ -301,10 +301,10 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 
 /// The launcher is in front of the person: load what it will need. One path
 /// for the hotkey, the tray and a return of focus. `on_show` bumps `shown`,
-/// which voids every clock armed before it — except one already past its
-/// check and about to fire: that clock unloads, and the next focus-in loads
-/// again. The window is microseconds wide. `try_state`: the shell tests build
-/// no `AppState`.
+/// which voids every clock armed before it; the check and a clock's mark are
+/// one step against a show (`provider::phase`), so a clock can no longer unload
+/// what a show has already loaded. `try_state`: the shell tests build no
+/// `AppState`.
 fn launcher_shown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(state) = app.try_state::<state::AppState>() {
         drop(provider::on_show(&state));

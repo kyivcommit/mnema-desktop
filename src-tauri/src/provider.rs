@@ -114,6 +114,12 @@ pub struct Local {
     binary: PathBuf,
     env: Vec<(String, String)>,
     sidecar: Mutex<Option<Arc<Sidecar>>>,
+    /// Serialises the two transitions that decide whether the models belong in
+    /// memory: a show ([`on_show`]) and a cold clock firing ([`on_cold`],
+    /// [`cold_if_still_hidden`]). A leaf, and never held across a request to
+    /// the process. Lock order is `phase` → `wanted`; nothing takes `wanted`
+    /// and then `phase`.
+    phase: Mutex<()>,
     /// The launcher went cold and has not been shown since. A scan that ends
     /// now finishes the unloading [`on_cold`] left half done.
     cold: AtomicBool,
@@ -150,6 +156,7 @@ impl Local {
             binary,
             env: Vec::new(),
             sidecar: Mutex::new(None),
+            phase: Mutex::new(()),
             cold: AtomicBool::new(false),
             shown: AtomicU64::new(0),
             want: AtomicBool::new(false),
@@ -362,6 +369,22 @@ impl Local {
             st = done.wait(st).unwrap_or_else(PoisonError::into_inner);
         }
         st.loaded = 0;
+    }
+
+    /// The models are no longer wanted, and the process must give the memory
+    /// back. The caller holds `phase`: this is half of the transition against
+    /// [`on_show`], and the decision to unload must not outlive a show.
+    /// [`Local::forget_loaded`] is inside it too, so a load a show started
+    /// after this decided is never marked as unloaded. Returns the process to
+    /// unload, if one was started; the request itself blocks and runs outside.
+    fn go_cold(&self) -> Option<Arc<Sidecar>> {
+        self.cold.store(true, Ordering::SeqCst);
+        self.want.store(false, Ordering::SeqCst);
+        let sidecar = self.started();
+        if sidecar.is_some() {
+            self.forget_loaded();
+        }
+        sidecar
     }
 
     /// Whether a process this provider already started still answers —
@@ -900,39 +923,84 @@ pub(crate) fn after_role_change(state: &crate::state::AppState, before: Roles) {
     }
 }
 
+/// What a cold mark owes the process: give the memory back. Outside `phase`,
+/// which is a decision lock and not a request lock.
+fn unload_for_cold(state: &crate::state::AppState, sidecar: &Sidecar) {
+    // Best effort: a process that will not answer holds no memory worth
+    // waiting for, and the next show asks again.
+    // bge-m3 stays while a scan runs on Mnema: it is what the scan embeds with.
+    let keep_embed = scan_running(state) && state.roles().embed == Some(ProviderChoice::Mnema);
+    let _ = sidecar.unload(keep_embed.then_some(ModelId::Chat));
+}
+
 /// The launcher went cold (hidden long enough): give the memory back.
 pub fn on_cold(state: &crate::state::AppState) {
     let local = state.local();
-    local.cold.store(true, Ordering::SeqCst);
-    local.want.store(false, Ordering::SeqCst);
-    if let Some(sidecar) = local.started() {
-        local.forget_loaded();
-        // Best effort: a process that will not answer holds no memory worth
-        // waiting for, and the next show asks again.
-        // bge-m3 stays while a scan runs on Mnema: it is what the scan embeds with.
-        let keep_embed = scan_running(state) && state.roles().embed == Some(ProviderChoice::Mnema);
-        let _ = sidecar.unload(keep_embed.then_some(ModelId::Chat));
+    let sidecar = {
+        let _phase = local.phase.lock().unwrap_or_else(PoisonError::into_inner);
+        local.go_cold()
+    };
+    if let Some(sidecar) = sidecar {
+        unload_for_cold(state, &sidecar);
     }
+}
+
+/// The clock [`start_cold_timer`] armed, firing: `hidden` and `shown` are what
+/// it captured. The check and the mark are one step under `phase`, so a show
+/// landing between them either wins — it bumps `shown`, and this refuses — or
+/// is ordered after it, and clears `cold` and sets `want` again. A clock that
+/// saw no show unloads; the decision cannot be turned into an unload of what a
+/// show that already ran has loaded. `false` changes nothing.
+fn cold_if_still_hidden(
+    state: &crate::state::AppState,
+    hidden_at: &HiddenAt,
+    hidden: Option<SystemTime>,
+    shown: u64,
+) -> bool {
+    let local = state.local();
+    let sidecar = {
+        let _phase = local.phase.lock().unwrap_or_else(PoisonError::into_inner);
+        // A later focus loss has its own clock; a show since this one ends it.
+        if hidden_at.get() != hidden || local.shown.load(Ordering::SeqCst) != shown {
+            return false;
+        }
+        local.go_cold()
+    };
+    if let Some(sidecar) = sidecar {
+        unload_for_cold(state, &sidecar);
+    }
+    true
 }
 
 /// The launcher is being shown: load what it will need, off the caller's
 /// thread. The handle is for tests; production drops it.
 pub fn on_show(state: &crate::state::AppState) -> std::thread::JoinHandle<()> {
     let provider = state.provider();
-    provider.local.cold.store(false, Ordering::SeqCst);
-    provider.local.shown.fetch_add(1, Ordering::SeqCst);
     let which = provider.mnema_models();
-    // An empty set sets nothing and loads nothing: with no role on Mnema no
-    // `endpoint` reaches the process, so `want` alone does no harm.
-    if !which.is_empty() {
-        *provider
+    {
+        // Against a cold clock firing: either it unloaded before this, and the
+        // load below brings the models back, or it sees the bumped `shown` and
+        // stands down. Released before the load: `go_cold` waits on a load in
+        // flight while it holds `phase`.
+        let _phase = provider
             .local
-            .wanted
+            .phase
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = which.clone();
+            .unwrap_or_else(PoisonError::into_inner);
+        provider.local.cold.store(false, Ordering::SeqCst);
+        provider.local.shown.fetch_add(1, Ordering::SeqCst);
+        // An empty set sets nothing and loads nothing: with no role on Mnema no
+        // `endpoint` reaches the process, so `want` alone does no harm.
+        if !which.is_empty() {
+            *provider
+                .local
+                .wanted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = which.clone();
+        }
+        // After `wanted`: a caller that sees `want` must see the set it loads.
+        provider.local.want.store(true, Ordering::SeqCst);
     }
-    // After `wanted`: a caller that sees `want` must see the set it loads.
-    provider.local.want.store(true, Ordering::SeqCst);
     if which.is_empty() {
         return std::thread::spawn(|| {});
     }
@@ -976,9 +1044,10 @@ impl HiddenAt {
 }
 
 /// Starts the clock that unloads the local models: after `after` out of focus,
-/// if the window has not lost focus again or been shown since, [`on_cold`].
-/// Called at every focus loss and at a close. Its own timer, and the only one —
-/// the window is a normal one now, so nothing is "forgotten" at a show (§1).
+/// if the window has not lost focus again or been shown since,
+/// [`cold_if_still_hidden`]. Called at every focus loss and at a close. Its own
+/// timer, and the only one — the window is a normal one now, so nothing is
+/// "forgotten" at a show (§1).
 pub fn start_cold_timer<R: tauri::Runtime>(app: &tauri::AppHandle<R>, after: Duration) {
     use tauri::Manager as _;
     let Some(state) = app.try_state::<crate::state::AppState>() else {
@@ -990,12 +1059,7 @@ pub fn start_cold_timer<R: tauri::Runtime>(app: &tauri::AppHandle<R>, after: Dur
     std::thread::spawn(move || {
         std::thread::sleep(after);
         let state = app.state::<crate::state::AppState>();
-        // A later focus loss has its own clock; a show since this one ends it.
-        if app.state::<HiddenAt>().get() == hidden
-            && state.local().shown.load(Ordering::SeqCst) == shown
-        {
-            on_cold(&state);
-        }
+        cold_if_still_hidden(&state, &app.state::<HiddenAt>(), hidden, shown);
     });
 }
 
@@ -1829,6 +1893,100 @@ mod lifecycle {
             app.state::<HiddenAt>().mark();
         };
         assert_eq!(unloads_after(rehidden), 0, "a later hide owns the clock");
+    }
+
+    /// A clock that fires with the state it captured still true: the models go,
+    /// and a show after it brings them back. Takes the hide and the captured
+    /// `shown` as [`start_cold_timer`] would.
+    fn armed_clock(state: &AppState) -> (HiddenAt, Option<SystemTime>, u64) {
+        let hidden_at = HiddenAt::default();
+        hidden_at.mark();
+        let shown = state.local().shown.load(Ordering::SeqCst);
+        let hidden = hidden_at.get();
+        (hidden_at, hidden, shown)
+    }
+
+    fn started_process(state: &AppState) {
+        state
+            .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
+            .expect("the process starts");
+    }
+
+    /// The check and the mark are one step against a show: a show landing
+    /// between them wins, and nothing is unloaded on a launcher the person is
+    /// looking at (`endpoint_within` loads only while `want` is set).
+    #[test]
+    fn a_show_before_the_clock_fires_keeps_the_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        started_process(&state);
+        let (hidden_at, hidden, shown) = armed_clock(&state);
+
+        on_show(&state).join().unwrap();
+
+        assert!(
+            !cold_if_still_hidden(&state, &hidden_at, hidden, shown),
+            "a show since the snapshot voids the clock"
+        );
+        assert!(!state.local().cold.load(Ordering::SeqCst), "not cold");
+        assert!(state.local().want.load(Ordering::SeqCst), "still wanted");
+        assert_eq!(
+            count(&log, "start POST /mnema/unload"),
+            0,
+            "{}",
+            logged(&log)
+        );
+    }
+
+    #[test]
+    fn a_clock_that_fires_with_no_show_marks_cold_and_a_show_undoes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        started_process(&state);
+        let (hidden_at, hidden, shown) = armed_clock(&state);
+
+        assert!(cold_if_still_hidden(&state, &hidden_at, hidden, shown));
+        assert!(state.local().cold.load(Ordering::SeqCst), "cold");
+        assert!(!state.local().want.load(Ordering::SeqCst), "not wanted");
+        assert_eq!(
+            count(&log, "start POST /mnema/unload"),
+            1,
+            "{}",
+            logged(&log)
+        );
+
+        on_show(&state).join().unwrap();
+        assert!(!state.local().cold.load(Ordering::SeqCst), "warm again");
+        assert!(state.local().want.load(Ordering::SeqCst), "wanted again");
+    }
+
+    /// A later hide owns the clock: the older one refuses and changes nothing.
+    #[test]
+    fn a_re_mark_before_the_clock_fires_refuses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        started_process(&state);
+        // A mark a minute old, so the real mark below is certainly another
+        // instant and the wall clock need not move.
+        let hidden_at = HiddenAt::default();
+        *hidden_at.0.lock().unwrap() = Some(SystemTime::now() - Duration::from_secs(60));
+        let hidden = hidden_at.get();
+        let shown = state.local().shown.load(Ordering::SeqCst);
+
+        hidden_at.mark();
+
+        assert!(!cold_if_still_hidden(&state, &hidden_at, hidden, shown));
+        assert!(
+            !state.local().cold.load(Ordering::SeqCst),
+            "not marked cold"
+        );
+        assert!(!state.local().want.load(Ordering::SeqCst), "unchanged");
+        assert_eq!(
+            count(&log, "start POST /mnema/unload"),
+            0,
+            "{}",
+            logged(&log)
+        );
     }
 
     /// The half the window's `Focused(true)` arm adds (§1): losing focus arms
