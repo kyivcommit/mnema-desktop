@@ -235,6 +235,30 @@ test('at 900px the conversations pane waits for room, and its toggle still bring
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
 });
 
+// The press used to be read from the state before it: turning the pane back on
+// in a narrow window wrote the preference while leaving `pinned` false, so the
+// button read pressed and `layoutFor` still drew no track — the pane appeared
+// only on a second press. One press each way is what the toggle promises.
+test('at 900px a conversations pane turned off comes back drawn on one press', async () => {
+  setWindowWidth(900);
+  storage.setItem('mnema.window', JSON.stringify({ ...DEFAULTS, left: false }));
+  render(Shell, { fileOpen: true });
+  expect(screen.queryByTestId('col-recents')).toBeNull();
+
+  await fireEvent.click(toggle('left'));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('col-recents')).toBeTruthy();
+
+  await fireEvent.click(toggle('left'));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.queryByTestId('col-recents')).toBeNull();
+
+  await fireEvent.click(toggle('left'));
+  expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('col-recents')).toBeTruthy();
+  expect(drawn().left).toBe(DEFAULTS.L);
+});
+
 test('a drag writes only the pane it moved, and stops at the transcript wall', async () => {
   // 1240 is exactly L + 520 + W: the recents pane has no room to grow, so a
   // drag leaves BOTH widths as the person set them — no squeezed copy lands in

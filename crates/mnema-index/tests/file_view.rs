@@ -69,6 +69,60 @@ fn blocks_come_back_in_page_then_reading_order() {
     assert!(!view.truncated);
 }
 
+/// The query is driven from `page` rather than from `block` (`file_view.rs`
+/// says why), so the one document sent is the page's own: a block on a page of a
+/// NEIGHBOURING document must not reach the pane, whatever its reading order.
+/// The rest is what the caller already counted on — page-then-order, `block.type`
+/// verbatim, and `limit + 1` rows to tell "exactly the limit" from "more".
+#[test]
+fn the_page_driven_join_keeps_one_documents_blocks_in_order() {
+    let db = support::temp_db();
+    let doc = db
+        .insert_document(&"7".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let other = db
+        .insert_document(&"8".repeat(64), "text/plain", 1, SourceKind::Document)
+        .unwrap();
+
+    let other_page = db.insert_page(&other, 1, "native:txt", None).unwrap();
+    db.insert_block(other_page, &paragraph(0, "чужий")).unwrap();
+
+    let page_two = db.insert_page(&doc, 2, "native:txt", None).unwrap();
+    let second_page = db
+        .insert_block(page_two, &paragraph(0, "друга сторінка"))
+        .unwrap();
+    let page_one = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let second = db.insert_block(page_one, &paragraph(1, "другий")).unwrap();
+    let first = db
+        .insert_block(
+            page_one,
+            &Block {
+                block_type: BlockType::Headline,
+                ..paragraph(0, "## перший")
+            },
+        )
+        .unwrap();
+
+    let view = db
+        .document_view(&doc, 10)
+        .unwrap()
+        .expect("the document exists");
+    let ids: Vec<i64> = view.blocks.iter().map(|b| b.block_id).collect();
+    assert_eq!(ids, vec![first, second, second_page]);
+    assert_eq!(
+        view.blocks[0].kind, "headline",
+        "the pane decides what to draw from `block.type`, so it stays verbatim"
+    );
+
+    let over = db.document_view(&doc, 2).unwrap().unwrap();
+    assert!(over.truncated);
+    assert_eq!(
+        over.blocks.len(),
+        2,
+        "the extra row only says there is more"
+    );
+}
+
 #[test]
 fn a_document_without_blocks_is_some_but_empty() {
     let db = support::temp_db();

@@ -16,8 +16,8 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, RoleCatalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
-  ScanState, ThemeChoice, TreeListing,
+  AppPrefs, AskAnswer, Catalogue, RoleCatalogue, DocumentView, HistoryEntry, IndexRead, KeyState, LocaleChoice,
+  ModelRole, ScanState, ThemeChoice, TreeListing,
 } from '../src/lib/ipc';
 
 // The history as `list_history` keeps it, with the answer each question got.
@@ -309,7 +309,10 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         { id: s.nextHistoryId++, query, askedAt: Math.floor(Date.now() / 1000), answer: generated },
         ...s.history.filter((h) => h.query !== query),
       ];
-      return generated;
+      // `AskReply`, not the bare answer: the launcher reads `reply.answer` and
+      // marks `reply.historyId`, and `history_entry` below keeps the bare answer
+      // because that is what a `StoredTurn` holds.
+      return { answer: generated, historyId: s.history[0].id };
     },
     list_history: () => s.history.map(({ id, query, askedAt }) => ({ id, query, askedAt })),
     history_entry: (a) => {
@@ -318,16 +321,24 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
     continue_history: (a) => s.history.some((h) => h.id === a.id),
     delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
-    open_document: () => ({
-      kind: 'file',
-      blocks: [
-        { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
-        { blockId: 2, kind: 'paragraph', text: 'The whole file, rendered by the pane.', pageNo: 1, sectionTitle: null },
-      ],
-      focusBlockIds: [],
-      spans: [],
-      freshness: { kind: 'current' },
-    }),
+    // The two shapes beside the blocks are what a citation click reads: the
+    // block an answer points at, and a span inside it. Empty ones made every
+    // click say "the passage is gone" instead of lighting the passage up, so
+    // this points at the demo paragraph the way a real citation would.
+    open_document: () => {
+      const paragraph = 'The whole file, rendered by the pane.';
+      return {
+        kind: 'file',
+        blocks: [
+          { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
+          { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 1, sectionTitle: null },
+        ],
+        focusBlockIds: [2],
+        spans: [{ blockId: 2, blockStart: 0, length: paragraph.length, primary: true }],
+        relativePath: 'notes/demo.md',
+        freshness: { kind: 'current' },
+      } satisfies DocumentView;
+    },
 
     'plugin:dialog|open': () => '/Users/demo/Documents/Projects',
   };

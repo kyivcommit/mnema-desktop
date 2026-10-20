@@ -65,11 +65,16 @@ impl Db {
         // `LIMIT -1` means *no limit* in SQLite, so a `usize` that does not fit
         // an `i64` must not wrap round to a negative number here.
         let fetch = i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1);
+        // Driven from `page`, not from `block`: `block` carries only
+        // `ix_block_page (page_id, reading_order)`, so filtering on
+        // `block.document_id` scans it end to end, while `page` has the unique
+        // `(document_id, page_no)` lookup that finds one document's pages — and
+        // each page's blocks then come out of `ix_block_page`.
         let mut stmt = self.conn().prepare(
             "SELECT b.id, b.type, b.text, p.page_no, p.section_title
-               FROM block b
-               JOIN page p ON p.id = b.page_id
-              WHERE b.document_id = ?1
+               FROM page p
+               JOIN block b ON b.page_id = p.id
+              WHERE p.document_id = ?1
               ORDER BY p.page_no, b.reading_order
               LIMIT ?2",
         )?;

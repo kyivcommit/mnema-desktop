@@ -70,8 +70,14 @@
     // A pane the window took, not the person: the press brings it back, and the
     // file panel yields for it (§2: transcript > file panel > conversations).
     if (autoLeft) { pinned = true; return; }
-    panels = { ...panels, left: !panels.left };
-    pinned = false;
+    const next = { ...panels, left: !panels.left };
+    // Decided from what THIS press produces, not from the state before it. A
+    // press that turns the preference on at a width where the pane still has no
+    // `share` would otherwise store a choice `layoutFor` does not draw: the
+    // toggle would read pressed with no pane beside it, and a second press would
+    // clear the choice again. Pin it, so one press always shows what it asked for.
+    pinned = next.left && layoutFor(next, windowWidth, false).left === 0;
+    panels = next;
   }
   function toggleRight() {
     // Same reading from the other side, where the file panel has priority: the
