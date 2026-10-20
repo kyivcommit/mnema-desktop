@@ -1811,9 +1811,10 @@ mod lifecycle {
         };
         assert_eq!(unloads_after(hide), 1, "hidden, and left alone");
 
-        // Shown again before it fires.
+        // Shown again before it fires. No mark here: the mark would be part of
+        // what the clock captured, and `on_show`'s `shown` bump is the only
+        // thing that may end this clock.
         let shown = |state: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(400));
             on_show(state).join().unwrap();
         };

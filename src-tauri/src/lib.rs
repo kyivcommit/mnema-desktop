@@ -301,9 +301,10 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 
 /// The launcher is in front of the person: load what it will need. One path
 /// for the hotkey, the tray and a return of focus. `on_show` bumps `shown`,
-/// which is what voids every clock armed before it — so the focus coming back
-/// cancels the clock the focus loss started, instead of being unloaded behind
-/// by it. `try_state`: the shell tests build no `AppState`.
+/// which voids every clock armed before it — except one already past its
+/// check and about to fire: that clock unloads, and the next focus-in loads
+/// again. The window is microseconds wide. `try_state`: the shell tests build
+/// no `AppState`.
 fn launcher_shown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(state) = app.try_state::<state::AppState>() {
         drop(provider::on_show(&state));
@@ -735,9 +736,9 @@ pub fn run() -> anyhow::Result<()> {
                 launcher_hidden(window.app_handle());
             }
             // The window is in front again: load what that clock would take
-            // away. The `shown` bump in `on_show` voids the clock the arm
-            // above armed, so a return of focus is never unloaded behind by a
-            // timer started before it.
+            // away. The `shown` bump in `on_show` voids the clock the arm above
+            // armed before it wakes; a clock already past its check can still
+            // unload once, which the next focus-in pays back as one reload.
             tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
                 launcher_shown(window.app_handle());
             }

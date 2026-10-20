@@ -92,7 +92,9 @@ pub enum Error {
     #[error("{0}")]
     Autostart(String),
     /// `set_cold_after(0)`: the threshold is at least one minute.
-    #[error("the launcher needs at least one minute before it forgets the last answer")]
+    #[error(
+        "the launcher needs at least one minute out of focus before the local model is unloaded"
+    )]
     ColdAfterTooShort,
     #[error("index: {0}")]
     Index(#[from] mnema_index::Error),

@@ -9549,7 +9549,7 @@ fn set_cold_after_refuses_zero_and_leaves_the_stored_value() {
 
     assert_eq!(
         error_text(&rejected),
-        "the launcher needs at least one minute before it forgets the last answer"
+        "the launcher needs at least one minute out of focus before the local model is unloaded"
     );
     assert_eq!(
         prefs::cold_after_minutes(dir.path()),

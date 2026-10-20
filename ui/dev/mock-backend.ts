@@ -281,7 +281,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       return s.prefs.autostart;
     },
     set_cold_after: (a) => {
-      if (a.minutes === 0) throw 'the launcher needs at least one minute before it forgets the last answer';
+      if (a.minutes === 0) throw 'the launcher needs at least one minute out of focus before the local model is unloaded';
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
     },

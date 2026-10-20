@@ -3032,7 +3032,7 @@ test.each(['', '-3', '2.5', '4294967296', '1e20'])('%j is never sent, and the fi
 });
 
 test('a refused threshold shows the command\'s sentence, links it, and shows the stored value', async () => {
-  setColdAfter.mockRejectedValue(new Error('the launcher needs at least one minute before it forgets the last answer'));
+  setColdAfter.mockRejectedValue(new Error('the launcher needs at least one minute out of focus before the local model is unloaded'));
   appPrefs.mockResolvedValue(prefs({ coldAfterMinutes: 9 }));
   renderSection();
   await shown('application-launcher-cold-label');
@@ -3041,7 +3041,7 @@ test('a refused threshold shows the command\'s sentence, links it, and shows the
 
   expect(setColdAfter).toHaveBeenCalledWith(0);
   expect(await shown('application-launcher-cold-error'))
-    .toBe('the launcher needs at least one minute before it forgets the last answer');
+    .toBe('the launcher needs at least one minute out of focus before the local model is unloaded');
   await waitFor(() => expect(coldField().value).toBe('9'));
   const ids = describedByIds(coldField());
   expect(ids).toContain('application-launcher-cold-error');
