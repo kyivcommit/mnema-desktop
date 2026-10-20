@@ -92,6 +92,21 @@ test('below the sum the right area becomes an overlay', () => {
   expect(isOverlay({ ...DEFAULTS, right: false }, 900)).toBe(false);
 });
 
+test('an overlay wider than the room keeps the recents pane uncovered', () => {
+  // The recents pane's splitter is the only way back from an overlay that grew
+  // too wide, so the overlay paints `min(W, window − L)`, never over the pane.
+  const wide = { ...DEFAULTS, L: 380, W: 600 };
+  expect(maxWidth(wide, 'W', 900)).toBe(900 - 380);
+  expect(clampLayout(wide, 900).W).toBe(900 - 380);
+  // Under the cap the person's W is what is painted: min(600, 900 − 240) is 600.
+  expect(maxWidth({ ...DEFAULTS, W: 600 }, 'W', 900)).toBe(600);
+  // The floor is the pane minimum, not zero.
+  expect(maxWidth({ ...DEFAULTS, W: 600 }, 'W', 900)).toBeGreaterThanOrEqual(MIN.W);
+  // Once the window has room, the stored width is back — the cap is display
+  // only.
+  expect(clampLayout(wide, 1600).W).toBe(600);
+});
+
 test('double-click restores the default width for that pane', () => {
   expect(defaultWidth('L')).toBe(DEFAULTS.L);
   expect(defaultWidth('W')).toBe(DEFAULTS.W);

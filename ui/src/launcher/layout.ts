@@ -31,17 +31,22 @@ export function isOverlay(s: PanelState, windowWidth: number): boolean {
 }
 
 // The widest a pane may get. The transcript keeps its 520 and the file stripe
-// its 200; the overlay is not a column, so it is not bounded by the transcript.
-// `clampLayout`, `Shell`'s splitter writes and `aria-valuemax` all read this
-// one rule, so the wall a drag stops at and the wall a screen reader announces
-// cannot differ.
+// its 200; the overlay is not a column, so it is not bounded by the transcript
+// — but it IS bounded by the recents pane, because that pane's splitter is the
+// only way back from an overlay that grew too wide. So an overlay paints
+// `min(W, window − L)`, floored at the pane minimum, and that capped value is
+// the one `aria-valuemax` announces. `clampLayout`, `Shell`'s splitter writes
+// and every `aria-valuemax` read this one rule, so the wall a drag stops at and
+// the wall a screen reader hears cannot differ.
 export function maxWidth(s: PanelState, pane: 'L' | 'W' | 'T', windowWidth: number): number {
   const overlay = isOverlay(s, windowWidth);
   switch (pane) {
     case 'L':
       return Math.max(MIN.L, windowWidth - MIN.TRANSCRIPT - (s.right && !overlay ? s.W : 0));
     case 'W':
-      return Math.max(MIN.W, overlay ? s.W : windowWidth - MIN.TRANSCRIPT - (s.left ? s.L : 0));
+      return overlay
+        ? Math.max(MIN.W, Math.min(s.W, windowWidth - (s.left ? s.L : 0)))
+        : Math.max(MIN.W, windowWidth - MIN.TRANSCRIPT - (s.left ? s.L : 0));
     case 'T':
       return Math.max(MIN.T, s.W - MIN.FILE);
   }

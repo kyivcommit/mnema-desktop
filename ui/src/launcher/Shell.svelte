@@ -44,7 +44,8 @@
 
   // The overlay keeps the transcript's 520 by not being a column at all: the
   // third track collapses to 0 and the right area paints over the transcript
-  // at the person's W.
+  // at the person's W — capped by `maxWidth` to the room beside the recents
+  // pane, whose splitter is the only way back from an overlay grown too wide.
   const trackW = $derived(view.right && !overlay ? view.W : 0);
   const treeW = $derived(view.tree ? (fileOpen ? view.T : view.W) : 0);
   // Written as inline tracks rather than as custom properties: the stylesheet

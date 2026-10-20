@@ -170,6 +170,20 @@ test('a drag writes back only the pane it moved, never the clamped neighbour', a
   expect(tracks()).toContain(`grid-template-columns: ${DEFAULTS.L + 8}px minmax(0, 1fr) ${DEFAULTS.W}px`);
 });
 
+test('an overlay wider than the room never covers the conversations pane', () => {
+  // 380 + 600 + 520 > 900: the overlay paints min(600, 900 − 380) and stops at
+  // the recents pane's edge, so its splitter stays reachable.
+  storage.setItem('mnema.window', JSON.stringify({ ...DEFAULTS, L: 380, W: 600 }));
+  setWindowWidth(900);
+  render(Shell);
+  expect(screen.getByTestId('shell').getAttribute('data-overlay')).toBe('true');
+  expect(tracks()).toContain(`grid-template-columns: 380px minmax(0, 1fr) 0px`);
+  expect(screen.getByTestId('col-right').getAttribute('style')).toContain(`width: ${900 - 380}px`);
+  // Only the recents splitter exists while the overlay is open, and it is on
+  // screen, not under the overlay.
+  expect(screen.getAllByRole('separator')).toHaveLength(1);
+});
+
 test('the header is the drag handle, and it is the only one', () => {
   const { container } = render(Shell);
   const handles = container.querySelectorAll('[data-tauri-drag-region]');
