@@ -152,6 +152,40 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 }
 .answer-card .via { margin-top: -9px; font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 11px; color: var(--ink-soft); }
 .results .turn + .turn { margin-top: 22px; }
+/* §5: the conversation. Role is told by alignment, so nothing here names a
+   speaker: the question sits right (`.umsg`, drawn by `Answer`), the answer is
+   the plain text column on the left, without a bubble. */
+.transcript { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.transcript .exchange { display: flex; flex-direction: column; min-width: 0; }
+/* §5: the composer. The box grows with its text to five rows and then scrolls;
+   Enter sends, Shift+Enter is a newline, and the hint below says so. */
+.composer {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface);
+}
+.composer:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.composer textarea {
+  flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; resize: none;
+  max-height: calc(1.5em * 5); overflow-y: auto;
+  font-family: var(--sans); font-weight: 400; font-style: normal; font-size: 15px;
+  line-height: 1.5; color: var(--ink);
+}
+.composer textarea::placeholder { color: var(--ink-soft); }
+.composer-send {
+  flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent); font-size: 15px;
+}
+.composer-send:disabled { background: transparent; color: var(--ink-soft); }
+.composer-hint {
+  margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
+  font-size: 11px; color: var(--ink-soft);
+}
+.composer :is(.guard, .refusal) { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.composer .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
+.composer .refusal { color: var(--ink-soft); }
 .new-chat { flex: none; font-size: 12.5px; padding: 3px 9px; }
 .answer-card h3 {
   margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;

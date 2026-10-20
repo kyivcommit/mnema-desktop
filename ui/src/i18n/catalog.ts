@@ -33,6 +33,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
+  | 'composer_send' | 'composer_hint'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
@@ -349,6 +350,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
+    // §5: the send button's own name (its visible mark is «↵»), and the one line
+    // under the field that says what the two Enter keys do.
+    composer_send: 'Надіслати',
+    composer_hint: '↵ надсилати · ⇧+↵ новий рядок',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
@@ -1219,6 +1224,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
+    composer_send: 'Send',
+    composer_hint: '↵ to send · ⇧+↵ for a new line',
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
