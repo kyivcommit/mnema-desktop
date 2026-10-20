@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, screen, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import Transcript from './Transcript.svelte';
 import { generated } from '../lib/fixtures';
-import type { AskAnswer } from '../lib/ipc';
+import type { AskAnswer, AskCitation, Hit } from '../lib/ipc';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -42,4 +42,23 @@ test('a_turn_shows_the_question_right_and_the_answer_left_without_labels', () =>
   // Role is told by alignment alone: no speaker labels anywhere in the turn.
   expect(container.textContent).not.toMatch(/Асистент|Assistant/);
   expect(container.textContent).not.toContain('Ви');
+});
+
+// Task 7: this is the wire the launcher's panel listens on. A press on a
+// preview reports THAT citation, which is what moves the panel; mounting the
+// turn reports nothing (a stored answer opened from Recents must not move a
+// pane the person was reading).
+test('a_turn_reports_the_card_that_was_pressed', async () => {
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  const seen: Array<AskCitation | Hit | null> = [];
+  render(Transcript, {
+    turns: [{ query: 'how much?', answer }],
+    state: { kind: 'idle' },
+    onSelected: (selection) => seen.push(selection),
+  });
+  const reported = () => (seen.at(-1) as { chunkId: number } | null)?.chunkId;
+
+  expect(seen).toHaveLength(0);
+  await fireEvent.click(screen.getByTestId('preview-7'));
+  await waitFor(() => expect(reported()).toBe(43)); // citationB, the pressed one
 });

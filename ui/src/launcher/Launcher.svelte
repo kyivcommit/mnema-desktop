@@ -2,17 +2,17 @@
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
   import { ask, chatTools, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
-  import { checkQuery, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
+  import { checkQuery, firstCard, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';
   import Tree from './Tree.svelte';
-  import type { TreePick } from './Tree.svelte';
+  import type { TreePick, TreeSelection } from './Tree.svelte';
   import FilePane from './FilePane.svelte';
   import Recents from './Recents.svelte';
   import Shell from './Shell.svelte';
   import { loadLayout, type PanelState } from './layout';
-  import type { DocumentFocus, DocumentLocation } from '../lib/ipc';
+  import type { AskCitation, DocumentFocus, DocumentLocation, Hit } from '../lib/ipc';
 
   let query = $state('');
   // `$state.raw`, here and for `previous`: the transcript finds a turn by the
@@ -35,16 +35,31 @@
   // and drops it through `onFocusHandled`, so it is scrolled to once.
   let openFile = $state<DocumentLocation | null>(null);
   let openFocus = $state<DocumentFocus | null>(null);
-  const selected = $derived(
-    openFile === null || openFile.rootId === null || openFile.relativePath === null
-      ? null
-      : { rootId: openFile.rootId, relativePath: openFile.relativePath },
-  );
+  // The tree's mark is the (root, path) pair, never `documentId` (spec §3):
+  // one document can sit at several paths, and a key on the id would mark
+  // every row that names it.
+  let selected = $state<TreeSelection | null>(null);
 
   // A click in the tree opens the file at its start: no highlight, no scroll.
   function openAtStart(pick: TreePick) {
     openFile = { documentId: pick.documentId, rootId: pick.rootId, relativePath: pick.relativePath };
     openFocus = null;
+    selected = { rootId: pick.rootId, relativePath: pick.relativePath };
+  }
+
+  // A citation — the answer's first one, or the card the person pressed —
+  // opens the whole file with its passage marked (§3). The right area opens
+  // itself; a TREE the person shut stays shut, so `panels.tree` is untouched.
+  function showCitation(citation: AskCitation | Hit | null) {
+    if (citation === null) return;
+    openFile = { documentId: citation.documentId, rootId: citation.rootId, relativePath: citation.relativePath };
+    openFocus = { chunkId: citation.chunkId, ord: citation.ord, text: citation.text };
+    // A citation with no place on disk has no row to move to, and the mark it
+    // would replace with nothing is left where it is.
+    if (citation.rootId !== null && citation.relativePath !== null) {
+      selected = { rootId: citation.rootId, relativePath: citation.relativePath };
+    }
+    panels = { ...panels, right: true };
   }
 
   // What the transcript draws. The composer always gets `launcherState` itself.
@@ -161,6 +176,11 @@
       const answer = reply.answer;
       launcherState = stateFromAnswer(check.query, answer);
       turns = turnsAfter(turns, check.query, answer);
+      // §3, "when the answer arrived": an answer with citations opens the right
+      // panel on the FIRST one — the smallest `anchor`, not the model's own
+      // list order. No citations: the panel keeps exactly what it was showing.
+      const first = firstCard(answer);
+      if (first !== null) showCitation(first);
       // The row this answer was written to, straight from the backend: a refusal
       // (or a write that failed) reports none, and then nothing is marked.
       historyId = reply.historyId;
@@ -235,7 +255,7 @@
 
 <Shell bind:panels fileOpen={openFile !== null}>
   {#snippet transcript()}
-    <Transcript {turns} state={shownState} />
+    <Transcript {turns} state={shownState} onSelected={showCitation} />
     <Composer bind:value={query} state={launcherState} onSubmit={runSearch} />
   {/snippet}
   {#snippet recents()}

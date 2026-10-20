@@ -10,8 +10,9 @@
   let { turns = [], state, onSelected = () => {} }: {
     turns?: Turn[];
     state: LauncherState;
-    // Reported upward for the file pane (Task 7); `Selection` needs a listener
-    // today, and a turn drawn on its own reports into nothing.
+    // Reported upward for the file pane (Task 7): a pressed source card moves
+    // the panel to its citation. `Selection` needs a listener today, and a turn
+    // drawn on its own reports into nothing.
     onSelected?: (selection: AskCitation | Hit | null) => void;
   } = $props();
 

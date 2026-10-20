@@ -6,11 +6,15 @@ import { roleReady } from './state';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
+import { refusedNoCandidates, citationA, citationB, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
+import type { TreeListing } from '../lib/ipc';
 import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const invoke = vi.fn();
+// jsdom has no layout and no scroller: `FilePane` scrolls the cited block into
+// view, and every answer with a citation now opens it.
+Element.prototype.scrollIntoView = vi.fn();
 // What `provider_status` answers; a test swaps it to drive the cloud.
 const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;
@@ -227,6 +231,7 @@ function mockAsksThenReject(first: unknown) {
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
+    if (cmd === 'open_document') return Promise.resolve(OPEN_DOCUMENT);
     if (cmd === 'ask') return n++ === 0 ? Promise.resolve(wrapAsk(first)) : Promise.reject('offline');
     return Promise.resolve();
   });
@@ -373,6 +378,150 @@ test('clicking a file in the tree opens it in the right pane at its start', asyn
   expect(screen.getByTestId('col-file')).toBeTruthy();
   // The tree marks the row the pane is showing.
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
+});
+
+// --- Task 7: an answer opens the panel on its first citation -----------------
+//
+// Every citation fixture names root 7, and the default `list_tree` fixture is
+// root 1 — a mark keyed on the (root, path) pair could then never be seen to
+// move. This listing holds the same files under the root the fixtures use.
+const TREE_AT_SEVEN: TreeListing = {
+  roots: [{
+    rootId: 7,
+    absolutePath: '/home/u/docs',
+    name: 'docs',
+    files: [
+      { relativePath: 'notes/a.md', documentId: 'doc-1' },
+      { relativePath: 'notes/b.md', documentId: 'doc-2' },
+      { relativePath: 'archive/old.md', documentId: 'doc-3' },
+    ],
+  }],
+};
+
+// The pane reads back the passage it was asked for: one block holding it, with
+// one span over it. A pane still showing the previous file is therefore visible
+// as the previous text rather than as a state two fixtures could share.
+function answeredPane(args: Record<string, unknown>) {
+  const text = typeof args.citedText === 'string' ? args.citedText : '';
+  const focused = typeof args.chunkId === 'number';
+  return {
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text, pageNo: 1, sectionTitle: null }],
+    focusBlockIds: focused ? [1] : [],
+    spans: focused ? [{ blockId: 1, blockStart: 0, length: [...text].length, primary: true }] : [],
+    freshness: { kind: 'current' },
+  };
+}
+
+// Drives `ask` with one reply per question, like `mockAsks`, and answers
+// `open_document` from `answeredPane`.
+function mockCited(...replies: unknown[]) {
+  let next = 0;
+  invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
+    if (cmd === 'list_tree') return Promise.resolve(TREE_AT_SEVEN);
+    if (cmd === 'list_history') return Promise.resolve([]);
+    if (cmd === 'open_document') return Promise.resolve(answeredPane(args ?? {}));
+    if (cmd === 'ask') {
+      if (next >= replies.length) throw new Error(`mockCited: no reply for ask #${next + 1}`);
+      return Promise.resolve(wrapAsk(replies[next++]));
+    }
+    return Promise.resolve();
+  });
+}
+const openDocumentCalls = () => invoke.mock.calls.filter((c) => c[0] === 'open_document');
+
+// §3 «Коли відповідь прийшла»: the panel opens on the FIRST citation — the
+// smallest `anchor`, which is not the list's order. The fixture reverses the
+// two on purpose: in list order `citationB` (anchor 7) comes first, and only a
+// sort reaches `citationA` (anchor 3). One call: the answer opens the pane, and
+// mounting the transcript does not open it a second time.
+test('an_answer_with_citations_opens_the_panel_on_the_first_one', async () => {
+  mockCited({ ...generated, citations: [citationB, citationA] });
+  render(Launcher);
+  // §3: the panel opens even if the person had collapsed the right area.
+  await fireEvent.click(toggle('right'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+
+  await submit('q');
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
+  expect(openDocumentCalls()[0][1]).toMatchObject({
+    documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md',
+    chunkId: 42, citedOrd: 0, citedText: 'A cited passage.',
+  });
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  expect((await screen.findByTestId('hl')).textContent).toBe('A cited passage.');
+});
+
+test('an_answer_with_an_already_open_panel_switches_to_the_new_citation', async () => {
+  mockCited(generated, generatedOther);
+  render(Launcher);
+  await submit('one');
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+
+  await submit('two');
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(2));
+  expect(openDocumentCalls()[1][1]).toMatchObject({
+    documentId: 'doc-2', rootId: 7, relativePath: 'notes/b.md',
+    chunkId: 61, citedOrd: 0, citedText: 'A passage the second answer cites.',
+  });
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A passage the second answer cites.'));
+});
+
+// The tree was open, with a folder the person opened by hand: the answer opens
+// the panel BESIDE it and the mark follows the file the panel now shows.
+test('the_tree_stays_open_and_follows_the_open_file', async () => {
+  mockCited(generated, generatedOther);
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await submit('one');
+  await waitFor(() => expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true'));
+
+  await submit('two');
+
+  await waitFor(() => expect(screen.getByTestId('tree-file-doc-2').getAttribute('aria-current')).toBe('true'));
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBeNull();
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(false);
+  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+});
+
+// «Цитат немає → панель не відкривається й не чіпає те, що в ній було»: the
+// pane keeps its file, and a right area the person had collapsed stays shut.
+test('an_answer_without_citations_leaves_the_panel_untouched', async () => {
+  mockCited(generated, emptyCitationsOnly);
+  render(Launcher);
+  await submit('one');
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+  await fireEvent.click(toggle('right'));
+  const opened = openDocumentCalls().length;
+
+  await submit('two');
+  await screen.findByTestId('citations-banner');
+
+  expect(openDocumentCalls()).toHaveLength(opened);
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+  await fireEvent.click(toggle('right'));
+  expect(screen.getByTestId('hl').textContent).toBe('A cited passage.');
+});
+
+// «Клік по картці джерела … переводить її на цю цитату»: the same pane moves,
+// with the pressed passage highlighted — no second view beside it.
+test('clicking_a_source_card_moves_the_panel_to_that_citation', async () => {
+  mockCited(generated);
+  render(Launcher);
+  await submit('q');
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+  const opened = openDocumentCalls().length;
+
+  await fireEvent.click(screen.getByTestId('preview-7'));
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(opened + 1));
+  expect(openDocumentCalls().at(-1)![1]).toMatchObject({ chunkId: 43, citedOrd: 1, citedText: 'A second cited passage.' });
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A second cited passage.'));
+  expect(screen.getAllByTestId('file-body')).toHaveLength(1);
 });
 
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
@@ -592,6 +741,9 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
+    // Every answered question opens the pane, so a command left unmocked would
+    // be read as nothing and fail the pane's read (`Ruling Y`'s reason).
+    if (cmd === 'open_document') return Promise.resolve(OPEN_DOCUMENT);
     if (cmd === 'chat_tools_enabled') return Promise.resolve(opts.chatTools ?? false);
     if (cmd === 'new_chat' && opts.newChatReject) return Promise.reject('boom');
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
@@ -713,7 +865,9 @@ test('a recorded answer bumps the history list; a refusal does not', async () =>
   await screen.findByTestId('turn');
   await waitFor(() => expect(listHistoryCalls()).toHaveLength(2));
   await submit('two');
-  await screen.findByRole('status');
+  // The refusal itself: `role=status` now also matches the open pane's
+  // freshness badge.
+  await screen.findByText(/Nothing was found/i);
   expect(listHistoryCalls()).toHaveLength(2);
 });
 
@@ -785,7 +939,7 @@ test('a refused search takes the mark off the opened question and does not rerea
   const reads = listHistoryCalls().length;
 
   await submit('second');
-  await screen.findByRole('status');
+  await screen.findByText(/Nothing was found/i);
 
   expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
   expect(listHistoryCalls()).toHaveLength(reads);

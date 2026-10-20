@@ -72,9 +72,14 @@ export function turnsAfter(turns: Turn[], query: string, a: AskAnswer): Turn[] {
   return turns;
 }
 
-// The card the file pane opens on. The transcript lists previews (generated) or
-// ranked passages (citations only) in `citations` order, so the first of that
-// list is the first card it draws; `Selection` starts on it.
-export function firstCard(a: CardAnswer): AskCitation | Hit | null {
-  return a.citations[0] ?? null;
+// The citation the file pane opens on: the SMALLEST `anchor` of a generated
+// answer (spec §3 — the smallest anchor, which is not the list's order: the
+// model numbers the passages it cites, and its list need not be sorted), and
+// the first of a citations-only list, whose `Hit`s carry no anchor at all.
+// `Launcher` opens it when the answer arrives, and `Selection` starts on it, so
+// pressing the card the pane already shows has nothing to move.
+export function firstCard(a: AskAnswer): AskCitation | Hit | null {
+  if (a.kind === 'generated') return [...a.citations].sort((x, y) => x.anchor - y.anchor)[0] ?? null;
+  if (a.kind === 'citationsOnly') return a.citations[0] ?? null;
+  return null; // a refusal cites nothing
 }
