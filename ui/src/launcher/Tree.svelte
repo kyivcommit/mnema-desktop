@@ -71,12 +71,16 @@
   // mount-time snapshot goes stale: §7.3 keeps the window alive across a hide,
   // so one launcher outlives many index changes and keeps listing rows that are
   // no longer there. The trigger below is the window regaining focus, and it is
-  // chosen rather than invented — `Launcher.svelte:65` already treats window
-  // BLUR as "the person has left" and hides the launcher on it, so focus is the
-  // same signal in reverse: the launcher is in front of the person again, which
-  // is the moment its listing is about to be read. It costs nothing while the
-  // window is hidden and it is not tied to the answer state, so the toggles,
-  // which are component state, are untouched by it.
+  // chosen rather than invented — it is the moment the launcher is in front of
+  // the person again, which is when its listing is about to be read. It costs
+  // nothing while the window is hidden and it is not tied to the answer state,
+  // so the toggles, which are component state, are untouched by it.
+  //
+  // (The earlier version of this note justified the trigger from a blur handler
+  // in `Launcher.svelte` that hides the launcher. There is none, and there was
+  // not: a window close hides the launcher in Rust (`CloseRequested` →
+  // `hide_launcher`), and the `Focused(false)` arm there only arms the cold
+  // timer. Focus is this card's own signal, not half of a pair.)
   //
   // And the shell really does focus this window: every path that raises the
   // launcher goes through `focus_launcher` — the tray item, the second-instance

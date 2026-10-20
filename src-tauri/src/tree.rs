@@ -567,6 +567,11 @@ pub enum DocumentView {
         focus_block_ids: Vec<i64>,
         /// The exact slice to paint inside those blocks.
         spans: Vec<PaneSpan>,
+        /// The path this view was resolved for: the caller's own when it named
+        /// one, the document's sole `path` row when it named none. `None` when
+        /// neither exists — the same case `Freshness::NoPath` reports, and the
+        /// pane titles itself from it rather than staying blank.
+        relative_path: Option<String>,
         freshness: Freshness,
     },
     /// The document cannot be shown whole, and a partial one never is.
@@ -620,6 +625,10 @@ struct FileFields {
     blocks: Vec<ViewBlock>,
     focus_block_ids: Vec<i64>,
     spans: Vec<PaneSpan>,
+    /// The path the view was resolved for, already picked by
+    /// [`build_document_view`] — the pane's title, and the only place a
+    /// citation that named no place on disk can get one.
+    relative_path: Option<String>,
 }
 
 impl FileFields {
@@ -628,6 +637,7 @@ impl FileFields {
             blocks: self.blocks,
             focus_block_ids: self.focus_block_ids,
             spans: self.spans,
+            relative_path: self.relative_path,
             freshness,
         }
     }
@@ -757,6 +767,9 @@ fn build_document_view(
                 .collect(),
             focus_block_ids,
             spans,
+            // Read off the occupant freshness is decided for, so the title and
+            // the badge can never name two different places.
+            relative_path: occupant.as_ref().map(|o| o.relative_path.clone()),
         },
         occupant,
     })
@@ -1544,6 +1557,7 @@ mod tests {
                 length: 5,
                 primary: true,
             }],
+            relative_path: Some("notes/a.md".into()),
             freshness: Freshness::FileChanged,
         }
     }
@@ -1584,6 +1598,10 @@ mod tests {
         assert!(span.get("block_id").is_none());
         assert!(span.get("block_start").is_none());
 
+        // The pane's title, when the citation named no path on disk.
+        assert_eq!(v["relativePath"], "notes/a.md");
+        assert!(v.get("relative_path").is_none());
+
         // The refusal carries its reason as a bare tag — the window switches on
         // the string, not on an object.
         let refused = serde_json::to_value(DocumentView::Unavailable {
@@ -1604,6 +1622,7 @@ mod tests {
             blocks,
             focus_block_ids,
             spans,
+            relative_path,
             freshness,
         } = sample_view()
         else {
@@ -1619,6 +1638,7 @@ mod tests {
                 .collect(),
             focus_block_ids,
             spans,
+            relative_path,
             freshness,
         })
         .unwrap();

@@ -42,21 +42,28 @@
   }
 
   // A markdown headline's text is the file's literal slice, so it arrives with
-  // its own `#` marker (spec §3) — and only a markdown ATX marker is stripped.
-  // `headline` also comes from the HTML and docx readers, where the text IS the
-  // heading and `#1 Priority` is the document's own line: markdown requires a
-  // space (or the line's end) after the hashes, and that is what the pattern
-  // insists on. Markers are stripped for display only; the span offsets count
-  // from the stored text, so they move by exactly the stripped prefix, and a
-  // span that starts inside the marker keeps its end where it was.
+  // its own marker (spec §3). `headline` also comes from the HTML and docx
+  // readers, where the text IS the heading and `#1 Priority` is the document's
+  // own line — so only what markdown itself put there is stripped:
+  //   - an ATX marker, `## Heading`, and its optional closing run,
+  //     `## Heading ##`, which counts as one only when the leading marker
+  //     already proved the text is ATX.
+  //   - a Setext underline, the `====`/`----` line under a multi-line heading.
+  // The stored text is never touched: this is a display copy. Span offsets
+  // count from the stored text, so they move by exactly the stripped prefix,
+  // and a span that starts inside the marker keeps its end where it was.
   export function heading(text: string, spans: PaneSpan[]): { text: string; spans: PaneSpan[] } {
-    const shown = text.replace(/^ {0,3}#{1,6}(?:[ \t]+|$)/, '');
-    const cut = [...text].length - [...shown].length;
+    const atx = /^ {0,3}#{1,6}(?:[ \t]+|$)/.exec(text);
+    const shown = atx
+      ? text.slice(atx[0].length).replace(/[ \t]+#+[ \t]*$/, '')
+      : text.replace(/\n {0,3}(?:=+|-+)[ \t]*$/, '');
+    const lead = [...(atx?.[0] ?? '')].length;
+    const length = [...shown].length;
     return {
       text: shown,
       spans: spans.map((s) => {
-        const start = Math.max(0, s.blockStart - cut);
-        const end = Math.max(start, s.blockStart + s.length - cut);
+        const start = Math.max(0, Math.min(s.blockStart - lead, length));
+        const end = Math.max(start, Math.min(s.blockStart + s.length - lead, length));
         return { ...s, blockStart: start, length: end - start };
       }),
     };
@@ -92,34 +99,78 @@
   // The location on screen. A cleared `focus` is the caller acknowledging the
   // one just handled, not a request to read the same file again.
   let loadedFor: DocumentLocation | null = null;
+  // The citation being painted, kept after the caller acknowledges it: a
+  // refresh must re-read WITH it, or the highlight the person is looking at
+  // disappears under them.
+  let shownFocus: DocumentFocus | null = null;
+  // A focus was sent and the backend accepted none of it — a reindex or a
+  // reused chunk id leaves a citation pointing at a passage that is gone. The
+  // pane says so instead of showing the file as if that were the citation.
+  let focusGone = $state(false);
+
+  // The card's parent is the pane's scroller (`.pane-body`), the only thing a
+  // refresh has to put back. shortcut: one level up, revisit if the card moves.
+  const scroller = () => card?.parentElement ?? null;
+
+  // `reveal` is the person's own open: clear the card, then scroll the cited
+  // block in and acknowledge the focus. A refresh keeps both — the text on
+  // screen stays up while the read is in flight, and the scroll is theirs.
+  async function read(place: DocumentLocation, at: DocumentFocus | null, reveal: boolean) {
+    const id = ++request;
+    if (reveal) {
+      view = null;
+      failed = false;
+    }
+    const box = scroller();
+    const scroll = box?.scrollTop ?? 0;
+    let got: DocumentView;
+    try {
+      got = await openDocument(place, at);
+    } catch (e) {
+      if (id !== request) return;
+      console.error('open_document failed', e);
+      // A failed refresh keeps the file it already has: the read failed, not
+      // the text on screen (Tree.svelte's rule for the same event).
+      if (reveal) failed = true;
+      return;
+    }
+    if (id !== request) return;
+    view = got;
+    loadedFor = place;
+    shownFocus = at;
+    focusGone = at !== null && got.kind === 'file' && got.focusBlockIds.length === 0;
+    await tick();
+    if (id !== request) return;
+    if (!reveal) {
+      if (box !== null) box.scrollTop = scroll;
+      return;
+    }
+    const first = got.kind === 'file' ? got.focusBlockIds[0] : undefined;
+    if (first !== undefined) {
+      // A read that worked is painted even where there is no scrolling to do
+      // (a DOM without layout); the file must never be called failed for it.
+      card?.querySelector<HTMLElement>(`[data-block-id="${first}"]`)
+        ?.scrollIntoView?.({ block: 'center' });
+    }
+    if (at !== null) onFocusHandled();
+  }
 
   $effect(() => {
     const place = location;
     const at = focus;
     if (at === null && place === loadedFor) return;
-    const id = ++request;
-    view = null;
-    failed = false;
-    openDocument(place, at)
-      .then(async (got) => {
-        if (id !== request) return;
-        view = got;
-        loadedFor = place;
-        await tick();
-        if (id !== request) return;
-        const first = got.kind === 'file' ? got.focusBlockIds[0] : undefined;
-        if (first !== undefined) {
-          card?.querySelector<HTMLElement>(`[data-block-id="${first}"]`)
-            ?.scrollIntoView({ block: 'center' });
-        }
-        if (at !== null) onFocusHandled();
-      })
-      .catch((e) => {
-        if (id !== request) return;
-        console.error('open_document failed', e);
-        failed = true;
-      });
+    void read(place, at, true);
   });
+
+  // §7.3: the window is hidden, not closed, so the file the pane shows may have
+  // been edited in another application while it was out of sight. Re-read it
+  // when the window comes back — the same location and the same citation. Not
+  // while a read is in flight: that one is the newer answer, and dropping it
+  // would drop the focus acknowledgement it owes the caller.
+  function onWindowFocus() {
+    if (loadedFor === null || view === null) return;
+    void read(loadedFor, shownFocus, false);
+  }
 
   // Everything is a paragraph unless its `block.type` says otherwise — page
   // headers and footers included: the pane is the file, and hiding parts of it
@@ -140,6 +191,14 @@
 
   const loadingLabel = $derived.by(() => { void $locale; return t('file_loading'); });
   const failedLabel = $derived.by(() => { void $locale; return t('file_failed'); });
+  const focusGoneLabel = $derived.by(() => { void $locale; return t('file_focus_gone'); });
+  // The header names the place on disk. A citation may carry none — the backend
+  // resolves the document's sole `path` row for freshness either way, and the
+  // view answers with the path it was resolved for — so the title follows that
+  // instead of staying blank.
+  const title = $derived(
+    location.relativePath ?? (view?.kind === 'file' ? view.relativePath : null),
+  );
   const badge = $derived.by(() => {
     void $locale;
     const got = view;
@@ -176,9 +235,11 @@
   }
 </script>
 
+<svelte:window onfocus={onWindowFocus} />
+
 <div class="file-card" data-testid="file-body" bind:this={card}>
-  {#if location.relativePath !== null}
-    <h3 data-testid="file-header">{location.relativePath}</h3>
+  {#if title !== null}
+    <h3 data-testid="file-header">{title}</h3>
   {/if}
 
   {#if failed}
@@ -190,6 +251,9 @@
   {:else}
     {#if badge !== ''}
       <p role="status" data-testid="file-badge">{badge}</p>
+    {/if}
+    {#if focusGone}
+      <p role="status" data-testid="file-focus-gone">{focusGoneLabel}</p>
     {/if}
     {#each painted as block (block.blockId)}
       <svelte:element this={block.tag} data-testid="file-block" data-block-id={block.blockId}

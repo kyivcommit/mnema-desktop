@@ -34,6 +34,7 @@ beforeEach(() => {
       blocks: [{ blockId: 1, kind: 'paragraph', text: 'A cited passage. And more.', pageNo: 1, sectionTitle: null }],
       focusBlockIds: [1],
       spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
+      relativePath: 'notes/a.md',
       freshness: { kind: 'current' },
     });
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);

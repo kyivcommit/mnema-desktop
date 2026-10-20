@@ -41,6 +41,7 @@ const OPEN_DOCUMENT = {
   blocks: [{ blockId: 1, kind: 'paragraph', text: 'The whole file, opened from the tree.', pageNo: 1, sectionTitle: null }],
   focusBlockIds: [],
   spans: [],
+  relativePath: 'notes/a.md',
   freshness: { kind: 'current' },
 };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
@@ -107,6 +108,16 @@ async function askAndOpenAFolder() {
 // Default so the retained PR 2 tests (which just render) never hit an unmocked
 // command; each ask test overrides with its own reply.
 beforeEach(() => { providerReply = okStatus; invoke.mockReset(); mockBackend(undefined); });
+
+// jsdom's window is 1024 wide by default, and the default layout (240 + 520 +
+// 480) is already an overlay at that width. The shell reads the width once, as
+// a real window does when it is raised, so a test that cares says which window
+// it is in; the others get the same default the suite always had.
+function setWindowWidth(width: number) {
+  Object.defineProperty(window, 'innerWidth', { value: width, configurable: true });
+}
+const WIDE = 1440; // a column window for the default layout
+beforeEach(() => setWindowWidth(1024));
 
 async function submit(value: string) {
   const box = screen.getByRole('textbox');
@@ -409,6 +420,7 @@ function answeredPane(args: Record<string, unknown>) {
     blocks: [{ blockId: 1, kind: 'paragraph', text, pageNo: 1, sectionTitle: null }],
     focusBlockIds: focused ? [1] : [],
     spans: focused ? [{ blockId: 1, blockStart: 0, length: [...text].length, primary: true }] : [],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   };
 }
@@ -438,9 +450,12 @@ const openDocumentCalls = () => invoke.mock.calls.filter((c) => c[0] === 'open_d
 // sort reaches `citationA` (anchor 3). One call: the answer opens the pane, and
 // mounting the transcript does not open it a second time.
 test('an_answer_with_citations_opens_the_panel_on_the_first_one', async () => {
+  setWindowWidth(WIDE); // a column window: opening the area covers nothing
   mockCited({ ...generated, citations: [citationB, citationA] });
   render(Launcher);
-  // §3: the panel opens even if the person had collapsed the right area.
+  // §3: in a column window the panel opens even if the person had collapsed
+  // the right area — it takes its own track and covers nothing. In an overlay
+  // it stays shut (the test below).
   await fireEvent.click(toggle('right'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
 
@@ -526,6 +541,28 @@ test('an_answer_without_citations_does_not_reopen_a_collapsed_panel', async () =
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
 });
 
+// §2 and §3 together: in an overlay window the right area is painted OVER the
+// transcript at 480px plus a scrim, so an answer that opened it would cover the
+// answer it came with. An answer switches the FILE inside the area and leaves
+// the opening to the person; a click — a source card — opens it as before.
+test('an answer does not open a closed overlay over itself, and a click still does', async () => {
+  mockCited(generated); // 1024 is an overlay for the default 240 + 520 + 480
+  render(Launcher);
+  await fireEvent.click(toggle('right'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+
+  await submit('q');
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
+  expect(openDocumentCalls()[0][1]).toMatchObject({ chunkId: 42, citedOrd: 0 });
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
+
+  // The person asks to see it: the same pane, now on screen.
+  await fireEvent.click(screen.getByTestId('preview-7'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  expect((await screen.findByTestId('hl')).textContent).toBe('A second cited passage.');
+});
+
 // «Дерево, якщо було відкрите, лишається відкритим» — and one the person hid
 // stays hidden: the answer opens the FILE area and never the tree.
 test('a_hidden_tree_stays_hidden_as_the_answer_opens_the_panel', async () => {
@@ -592,6 +629,30 @@ test('clicking_a_source_card_moves_the_panel_to_that_citation', async () => {
   expect(screen.getAllByTestId('file-body')).toHaveLength(1);
 });
 
+// The same card again, with another open in between. The pane must be ASKED
+// again rather than the citation compared to the one it painted: `$state` hands
+// the component a proxy, and "same values" is not "the read that painted it".
+test('the same source card twice, with a tree click between, highlights it again', async () => {
+  setWindowWidth(WIDE);
+  mockCited(generated);
+  render(Launcher);
+  await submit('q');
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A cited passage.'));
+
+  await fireEvent.click(screen.getByTestId('preview-7'));
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A second cited passage.'));
+
+  await fireEvent.click(await screen.findByTestId('tree-file-doc-1'));
+  await waitFor(() => expect(screen.queryByTestId('hl')).toBeNull());
+
+  const opened = openDocumentCalls().length;
+  await fireEvent.click(screen.getByTestId('preview-7'));
+
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(opened + 1));
+  expect(openDocumentCalls().at(-1)![1]).toMatchObject({ chunkId: 43, citedOrd: 1 });
+  await waitFor(() => expect(screen.getByTestId('hl').textContent).toBe('A second cited passage.'));
+});
+
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
 //
 // The transition the ruling was argued from — a person with an answer on screen
@@ -635,13 +696,31 @@ test('the launcher renders a search input', () => {
   expect(screen.getByRole('textbox')).toBeTruthy();
 });
 
-test('the launcher gaining focus puts the cursor in the search line', async () => {
+// §7.3: the window is hidden, not closed. Bringing it back must not pull the
+// cursor out of whatever the person was in — the tree here, and the same rule
+// covers the conversation list, a splitter and the file.
+test('window focus leaves the focus where the person had it', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  const row = screen.getByTestId('tree-file-doc-1');
+  row.focus();
+  expect(document.activeElement).toBe(row);
+
+  await fireEvent.focus(window);
+
+  expect(document.activeElement).toBe(row);
+});
+
+// The other direction, and the one the old code got right by accident: a window
+// with no focus inside it gets the cursor in the field.
+test('window focus puts the cursor in the search line when nothing had it', async () => {
   render(Launcher);
   const input = screen.getByRole('textbox');
-  // Start from somewhere else, so a focus that was already there cannot pass.
-  screen.getByTestId('settings').focus();
-  expect(document.activeElement).not.toBe(input);
+  (document.activeElement as HTMLElement | null)?.blur();
+  expect(document.activeElement).toBe(document.body);
+
   await fireEvent.focus(window);
+
   expect(document.activeElement).toBe(input);
 });
 

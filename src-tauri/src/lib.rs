@@ -415,6 +415,45 @@ pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     back
 }
 
+/// The window the app menu's ⌘Q hides: the one in front, when it is a window
+/// this build owns. §6 makes the tray's «Вийти» the only exit, so this answers
+/// a hide and never a quit — and it answers by FOCUS, because the item is one
+/// key-equivalent whatever window is up. A label that is neither is not this
+/// item's to hide.
+fn cmd_q_target(focused: Option<&str>) -> Option<&'static str> {
+    match focused {
+        Some("launcher") => Some("launcher"),
+        Some("settings") => Some("settings"),
+        _ => None,
+    }
+}
+
+/// §6: ⌘Q hides the window in front — the launcher while it has focus, the
+/// settings window while that one has it — and quits nothing. The tray's
+/// «Вийти» stays the only exit.
+///
+/// `false` when no window of ours has focus. The key equivalent only fires
+/// while the application is active, so that is a window nobody can be looking
+/// at rather than a case to guess at.
+pub fn hide_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let focused = app
+        .webview_windows()
+        .into_iter()
+        .find(|(_, window)| window.is_focused().unwrap_or(false))
+        .map(|(label, _)| label);
+    match cmd_q_target(focused.as_deref()) {
+        Some("settings") => {
+            hide_settings(app);
+            true
+        }
+        Some("launcher") => {
+            hide_launcher(app);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The launcher's ⌘, (Ctrl+, off macOS). Synchronous on purpose: Tauri runs a
 /// non-async command on the main thread, where AppKit wants the activation
 /// policy changed. A `section` is sent to the settings window alone, after the
@@ -429,12 +468,13 @@ fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, section: Option<St
     }
 }
 
-/// Keeps the macOS activation policy at `Regular`: a Dock icon, the standard
-/// menu bar and ⌘Q, whether the settings window is up or not. The launcher is a
-/// normal window now (§1), not a menu-bar popup, so there is no Accessory state
-/// left to switch back to — this replaced the policy that followed the settings
-/// window. A no-op off macOS, where the method does not exist; OS-level, so it
-/// is verified by the live run, not a headless test.
+/// Keeps the macOS activation policy at `Regular`: a Dock icon and the standard
+/// menu bar (its ⌘Q included, as a hide), whether the settings window is up or
+/// not. The launcher is a normal window now (§1), not a menu-bar popup, so
+/// there is no Accessory state left to switch back to — this replaced the
+/// policy that followed the settings window. A no-op off macOS, where the
+/// method does not exist; OS-level, so it is verified by the live run, not a
+/// headless test.
 pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
@@ -442,17 +482,17 @@ pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let _ = app;
 }
 
-/// The app menu's ⌘Q item id: it closes the settings window instead of quitting.
-const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
+/// The app menu's ⌘Q item id: it hides the window in front instead of quitting.
+const CMD_Q_HIDE_WINDOW: &str = "cmd_q_hide_window";
 
 /// The application menu on macOS — the standard items MINUS the native Quit.
 /// `PredefinedMenuItem::quit` maps to AppKit `terminate:`, which cannot be vetoed
 /// (tao has no `applicationShouldTerminate`), so it would quit the app past the
 /// ExitRequested guard and past §6 — even from a hidden menu bar, since a menu
-/// key-equivalent stays live. In its place ⌘Q is a custom item that hides the
-/// settings window; the app is quit ONLY from the tray's «Вийти» (§6). The menu
-/// bar is up whenever the application is (§1: `sync_activation_policy` keeps it
-/// `Regular`).
+/// key-equivalent stays live. In its place ⌘Q is a custom item that HIDES the
+/// window in front (the launcher or the settings window); the app is quit ONLY
+/// from the tray's «Вийти» (§6). The menu bar is up whenever the application is
+/// (§1: `sync_activation_policy` keeps it `Regular`).
 #[cfg(target_os = "macos")]
 pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -473,12 +513,12 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
         ..Default::default()
     };
 
-    // ⌘Q → close the settings window, never quit. Custom (not the predefined
+    // ⌘Q → hide the window in front, never quit. Custom (not the predefined
     // Quit), so it runs our handler instead of `terminate:`.
-    let close_settings = MenuItem::with_id(
+    let hide_window = MenuItem::with_id(
         app,
-        CMD_Q_CLOSE_SETTINGS,
-        locale::t(lang, Key::CloseSettings),
+        CMD_Q_HIDE_WINDOW,
+        locale::t(lang, Key::HideWindow),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
@@ -495,7 +535,7 @@ pub(crate) fn build_app_menu<R: tauri::Runtime>(
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::hide_others(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &close_settings,
+            &hide_window,
         ],
     )?;
 
@@ -633,10 +673,11 @@ pub fn run() -> anyhow::Result<()> {
         // would need re-attaching on every language change's `set_menu` (Task
         // 6). The tray builder therefore keeps only `on_tray_icon_event`.
         .on_menu_event(|app, event| match event.id().as_ref() {
-            // §6: ⌘Q closes the settings window (hide, keep state) and never
-            // quits the app; the tray's «Вийти» is the only quit.
-            id if id == CMD_Q_CLOSE_SETTINGS => {
-                hide_settings(app);
+            // §6: ⌘Q hides the window in front — the launcher or the settings
+            // window, whichever has focus — and never quits the app; the tray's
+            // «Вийти» is the only quit.
+            id if id == CMD_Q_HIDE_WINDOW => {
+                hide_focused_window(app);
             }
             // §6: show, not unminimize — the launcher is hidden. The bool it
             // returns (window found) has no meaning off a live window manager.
@@ -927,6 +968,42 @@ mod tests {
             "http://127.0.0.1:0".to_string(),
             "mnema-desktop-boot-files-test".to_string(),
         )
+    }
+
+    /// The ⌘Q item's whole rule: it hides the window that has focus, and the
+    /// two windows are told apart by label — the defect this replaces hid the
+    /// settings window even when the launcher was the one in front, so ⌘Q was a
+    /// no-op with settings closed. A label that is neither hides nothing.
+    ///
+    /// A unit test on the rule rather than on the handler: the mock runtime's
+    /// `is_focused` is a constant `false`, so no test can put a window in front
+    /// of the mock and drive the real lookup.
+    #[test]
+    fn cmd_q_hides_the_window_in_front_and_never_quits() {
+        assert_eq!(cmd_q_target(Some("launcher")), Some("launcher"));
+        assert_eq!(cmd_q_target(Some("settings")), Some("settings"));
+        assert_eq!(cmd_q_target(Some("main")), None);
+        assert_eq!(cmd_q_target(None), None);
+        // The id it is wired to is a hide, and says so. The arm runs up to the
+        // next menu item, which is the only stable end marker there is.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        let src = std::fs::read_to_string(&path).expect("lib.rs reads");
+        let production = &src[..src.find("#[cfg(test)]").expect("no #[cfg(test)] marker")];
+        let at = production
+            .find("id if id == CMD_Q_HIDE_WINDOW")
+            .expect("the ⌘Q arm is gone");
+        let rest = &production[at..];
+        let arm = &rest[..rest
+            .find("\"show_search\"")
+            .expect("the menu item after ⌘Q is gone")];
+        assert!(
+            arm.contains("hide_focused_window"),
+            "the ⌘Q arm no longer hides the focused window: {arm}"
+        );
+        assert!(
+            !arm.contains("exit("),
+            "the ⌘Q arm now quits, and §6 says the tray is the only exit: {arm}"
+        );
     }
 
     /// The pair `boot_files` exists to tell apart: an index that already

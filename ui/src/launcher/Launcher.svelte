@@ -11,7 +11,7 @@
   import FilePane from './FilePane.svelte';
   import Recents from './Recents.svelte';
   import Shell from './Shell.svelte';
-  import { loadLayout, type PanelState } from './layout';
+  import { loadLayout, isOverlay, type PanelState } from './layout';
   import type { AskCitation, DocumentFocus, DocumentLocation, Hit } from '../lib/ipc';
 
   let query = $state('');
@@ -49,8 +49,12 @@
 
   // A citation — the answer's first one, or the card the person pressed —
   // opens the whole file with its passage marked (§3). The right area opens
-  // itself; a TREE the person shut stays shut, so `panels.tree` is untouched.
-  function showCitation(citation: AskCitation | Hit | null) {
+  // itself on a CLICK; a TREE the person shut stays shut, so `panels.tree` is
+  // untouched. An ANSWER switches the file inside the area without opening it
+  // when opening would paint an overlay over the answer it came with (§2): a
+  // 480px pane plus its scrim over the transcript and the composer hides the
+  // thing the person just read, so there the person opens it.
+  function showCitation(citation: AskCitation | Hit | null, fromAnswer = false) {
     if (citation === null) return;
     openFile = { documentId: citation.documentId, rootId: citation.rootId, relativePath: citation.relativePath };
     openFocus = { chunkId: citation.chunkId, ord: citation.ord, text: citation.text };
@@ -59,7 +63,11 @@
     if (citation.rootId !== null && citation.relativePath !== null) {
       selected = { rootId: citation.rootId, relativePath: citation.relativePath };
     }
-    panels = { ...panels, right: true };
+    // `isOverlay` answers about an area that is OPEN, so the question is asked
+    // of the layout as if it were.
+    if (!fromAnswer || !isOverlay({ ...panels, right: true }, window.innerWidth)) {
+      panels = { ...panels, right: true };
+    }
   }
 
   // What the transcript draws. The composer always gets `launcherState` itself.
@@ -180,7 +188,7 @@
       // panel on the FIRST one — the smallest `anchor`, not the model's own
       // list order. No citations: the panel keeps exactly what it was showing.
       const first = firstCard(answer);
-      if (first !== null) showCitation(first);
+      if (first !== null) showCitation(first, true);
       // The row this answer was written to, straight from the backend: a refusal
       // (or a write that failed) reports none, and then nothing is marked.
       historyId = reply.historyId;

@@ -43,7 +43,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
-  | 'file_loading' | 'file_failed'
+  | 'file_loading' | 'file_failed' | 'file_focus_gone'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
   | 'card_passages'
@@ -403,6 +403,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     fresh_no_path: 'Розташування на диску невідоме',
     file_loading: 'Завантаження файла…',
     file_failed: 'Не вдалося завантажити файл.',
+    // A citation from a stored conversation outlives the chunks it names: a
+    // reindex or a reused chunk id leaves it pointing at nothing, and the pane
+    // otherwise shows the whole file with no highlight and no word about it.
+    file_focus_gone: 'Уривка, на який вказувала цитата, більше немає в цьому файлі.',
     // §3: a document that cannot be shown whole is never shown short, so each
     // reason gets its own sentence rather than a blank pane.
     file_unavailable_no_such_document: 'Цього документа більше немає в індексі.',
@@ -1271,6 +1275,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     fresh_no_path: 'The location on disk is unknown',
     file_loading: 'Loading the file…',
     file_failed: 'The file could not be loaded.',
+    file_focus_gone: 'The passage this citation pointed at is no longer in this file.',
     file_unavailable_no_such_document: 'This document is no longer in the index.',
     file_unavailable_no_blocks: 'This document has no text.',
     file_unavailable_rebuilding: 'This document is being reindexed — try again after the scan.',

@@ -165,6 +165,27 @@ fn a_second_shortcut_focuses_and_does_not_hide() {
     assert_eq!(hidden_at.get(), None, "the second press hid the launcher");
 }
 
+// §6: ⌘Q hides the window in front and quits nothing. The mock's `is_focused`
+// is a constant false, so this pins the "no window in front" direction only —
+// nothing is hidden — and the label-to-window mapping itself is the unit test
+// `cmd_q_hides_the_window_in_front_and_never_quits` in lib.rs.
+#[test]
+fn cmd_q_with_no_focused_window_hides_nothing() {
+    use tauri::Manager;
+    let app = app_with_both_windows();
+    let hidden_at = app.state::<mnema_desktop::provider::HiddenAt>();
+
+    assert!(
+        !mnema_desktop::hide_focused_window(app.handle()),
+        "⌘Q acted with no window in front"
+    );
+    assert_eq!(
+        hidden_at.get(),
+        None,
+        "⌘Q hid a window nobody was looking at"
+    );
+}
+
 // §6 is unchanged by the normal window: a close hides, it does not quit. The
 // mock has no window manager to raise the event on, so this reads the arm that
 // implements the rule — the same text-guard shape `lib.rs`'s own tests use.

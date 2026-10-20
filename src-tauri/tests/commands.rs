@@ -4759,6 +4759,12 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
         "the sole path must be the one freshness is decided for; `noPath` here would mean \
          the fallback never found it: {v}"
     );
+    assert_eq!(
+        v["relativePath"],
+        json!("notes/a.txt"),
+        "the sole path the verdict was decided for is also the pane's title — a citation \
+         that names no place on disk has nowhere else to get one: {v}"
+    );
 
     // Half a focus is no focus: the file still opens, and nothing is painted.
     let unhighlighted = call(

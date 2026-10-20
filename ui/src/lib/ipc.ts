@@ -213,10 +213,14 @@ export type Freshness =
 export type DocumentLocation = { documentId: string; rootId: number | null; relativePath: string | null };
 export type DocumentFocus = { chunkId: number; ord: number; text: string };
 export type PaneSpan = { blockId: number; blockStart: number; length: number; primary: boolean };
+// `relativePath` is the path the view was resolved for: the caller's own when
+// it named one, and the document's sole `path` row when it named none — the
+// same row freshness is decided for. Null when neither exists, which is
+// `noPath`'s other half and not something the pane may invent.
 export type DocumentView =
   | { kind: 'file';
       blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
-      focusBlockIds: number[]; spans: PaneSpan[]; freshness: Freshness }
+      focusBlockIds: number[]; spans: PaneSpan[]; relativePath: string | null; freshness: Freshness }
   // `rebuilding`: the document is being rewritten right now, so the index holds
   // a prefix of it, not the file — retry after the scan rather than show it.
   | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'rebuilding' | 'tooLarge' };

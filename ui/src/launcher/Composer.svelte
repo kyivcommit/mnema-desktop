@@ -63,11 +63,20 @@
     event.preventDefault();
     if (canSend) onSubmit(value);
   }
+
+  // §7.3: the window is hidden, not closed. Bringing it back must not pull the
+  // cursor out of the tree, the conversation list, a splitter or the file the
+  // person was reading — only a window with no focus inside it gets the field.
+  function onWindowFocus() {
+    const active = document.activeElement;
+    if (active === null || active === document.body) box?.focus();
+  }
 </script>
 
-<!-- Every show of the window ends in `set_focus`; the cursor goes to the field,
-     so the person can type without a click first. -->
-<svelte:window onfocus={() => box?.focus()} />
+<!-- Every show of the window ends in `set_focus`, and a window that had no
+     focus inside it gets the cursor in the field, so the person can type
+     without a click first. -->
+<svelte:window onfocus={onWindowFocus} />
 
 <div class="composer">
   <div class="composer-row">

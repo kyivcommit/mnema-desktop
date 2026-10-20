@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import FilePane from './FilePane.svelte';
 import { setLocale } from '../i18n';
@@ -31,6 +31,7 @@ beforeEach(() => {
     ],
     focusBlockIds: [],
     spans: [],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
 });
@@ -51,6 +52,7 @@ test('blocks render in document order, each in the element its kind names', asyn
     ],
     focusBlockIds: [],
     spans: [],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -76,6 +78,7 @@ test('the highlight is placed by code points, not UTF-16 units', async () => {
     // Code points [2, 18) = 'Ціна оцифрування'; `text.slice(2, 18)` would start
     // one character late and end one early.
     spans: [{ blockId: 1, blockStart: 2, length: 16, primary: true }],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -93,6 +96,7 @@ test('a cited span is highlighted inside its block, and the rest is plain', asyn
     ],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -119,6 +123,7 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
     ],
     focusBlockIds: [2],
     spans: [{ blockId: 2, blockStart: 0, length: 6, primary: true }],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -144,6 +149,7 @@ test('clearing the handled focus neither refetches nor drops the highlight', asy
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   const { rerender } = render(FilePane, {
@@ -168,6 +174,7 @@ test('a headline from a reader that is not markdown keeps its leading hash', asy
     blocks: [{ blockId: 1, kind: 'headline', text: '#1 Priority', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -184,6 +191,7 @@ test('a span that starts inside the heading marker keeps its end', async () => {
     blocks: [{ blockId: 1, kind: 'headline', text: '##   Heading text', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 2, length: 10, primary: true }],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -198,6 +206,7 @@ test('a gone file shows the badge and keeps its text', async () => {
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст, який усе ще в індексі.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
+    relativePath: 'notes/a.md',
     freshness: { kind: 'fileMissing' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -213,6 +222,7 @@ test('a file without a path opens without a badge', async () => {
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Без шляху.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
+    relativePath: null,
     freshness: { kind: 'noPath' },
   });
   render(FilePane, {
@@ -236,4 +246,165 @@ test('an unavailable document says why instead of drawing an empty file', async 
     'This document is being reindexed — try again after the scan.',
   );
   expect(screen.queryByTestId('file-block')).toBeNull();
+});
+
+// Markdown's own noise, and nothing else's: a Setext underline is the file's
+// own line, and a closing `##` is a marker only when the leading one proved the
+// text is ATX. An HTML/docx heading's `Chapter ##` is the document's own text.
+test('a setext heading loses its underline and an ATX closing run its hashes', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [
+      { blockId: 1, kind: 'headline', text: 'Заголовок\n=========', pageNo: 1, sectionTitle: null },
+      { blockId: 2, kind: 'headline', text: '## Розділ ##', pageNo: 1, sectionTitle: null },
+      { blockId: 3, kind: 'headline', text: 'Chapter ##', pageNo: 1, sectionTitle: null },
+    ],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, { location, focus: null, onFocusHandled: () => {} });
+
+  await screen.findAllByTestId('file-block');
+  expect(blocks()).toEqual(['Заголовок', 'Розділ', 'Chapter ##']);
+});
+
+// A citation with no place on disk still names a document, and the backend
+// resolves that document's sole `path` row for freshness — the same row is the
+// title, so the header is not blank over a file the pane can place exactly.
+test('a citation with no path is titled from the path the backend resolved', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Без шляху в цитаті.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, {
+    location: { documentId: 'doc-1', rootId: null, relativePath: null },
+    focus: null,
+    onFocusHandled: () => {},
+  });
+
+  expect((await screen.findByTestId('file-header')).textContent).toBe('notes/a.md');
+});
+
+// A stored citation outlives the chunks it names: a reindex or a reused chunk
+// id leaves the focus pointing at nothing, and an empty `focusBlockIds` is the
+// backend's answer. The whole file is still shown — and said to be the whole
+// file, not the citation.
+test('a focus the backend rejected says the passage is gone', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без того уривка.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, {
+    location,
+    focus: { chunkId: 9, ord: 0, text: 'зниклий уривок' },
+    onFocusHandled: () => {},
+  });
+
+  expect((await screen.findByTestId('file-focus-gone')).textContent).toBe(
+    'The passage this citation pointed at is no longer in this file.',
+  );
+  expect(screen.queryByTestId('hl')).toBeNull();
+  expect(blocks()).toEqual(['Текст без того уривка.']);
+});
+
+// The other branch: a focus that was accepted says nothing at all.
+test('an accepted focus draws no gone-passage line', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [1],
+    spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, {
+    location,
+    focus: { chunkId: 42, ord: 0, text: 'Ціна' },
+    onFocusHandled: () => {},
+  });
+
+  await screen.findByTestId('hl');
+  expect(screen.queryByTestId('file-focus-gone')).toBeNull();
+});
+
+// §7.3: the window is hidden, not closed, so the file may have been edited in
+// another application meanwhile. A focus refresh re-reads it — and it is not a
+// new open: the citation is re-sent (so the highlight stays where the person
+// left it) and the scroll offset is theirs, not reset by the repaint.
+test('a window focus refreshes the file and keeps the highlight and the scroll', async () => {
+  const focused = {
+    kind: 'file' as const,
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [1],
+    spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' as const },
+  };
+  mockView(focused);
+  render(FilePane, {
+    location,
+    focus: { chunkId: 42, ord: 0, text: 'Ціна' },
+    onFocusHandled: () => {},
+  });
+  await screen.findByTestId('hl');
+
+  // jsdom has no layout, so the scroller's offset is a plain property: this
+  // reads and writes the same one the component does, and the mock read moves
+  // it to the top the way a repaint over changed text does. Without the
+  // restore, the assertion below reads 0.
+  const scroller = screen.getByTestId('file-body').parentElement!;
+  let offset = 0;
+  Object.defineProperty(scroller, 'scrollTop', {
+    get: () => offset,
+    set: (v: number) => { offset = v; },
+    configurable: true,
+  });
+  scroller.scrollTop = 120;
+
+  const refreshed = { ...focused, freshness: { kind: 'fileChanged' as const } };
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd !== 'open_document') return Promise.resolve();
+    scroller.scrollTop = 0;
+    return Promise.resolve(refreshed);
+  });
+  await fireEvent.focus(window);
+
+  await waitFor(() => expect(screen.getByTestId('file-badge').textContent).toBe('The file changed after indexing'));
+  expect(openCalls()).toHaveLength(2);
+  expect(openCalls()[1][1]).toMatchObject({ chunkId: 42, citedOrd: 0, citedText: 'Ціна' });
+  expect(screen.getByTestId('hl').textContent).toBe('Ціна');
+  expect(scroller.scrollTop).toBe(120);
+});
+
+// A focus that lands while the first read is still on the wire is not a second
+// read: the answer already coming is the newer one, and dropping it would drop
+// the focus acknowledgement the caller is owed.
+test('a window focus during the first read does not start a second one', async () => {
+  let answer!: (v: DocumentView) => void;
+  invoke.mockReturnValue(new Promise((r) => { answer = r; }));
+  render(FilePane, { location, focus: { chunkId: 42, ord: 0, text: 'Ціна' }, onFocusHandled: () => {} });
+  await screen.findByTestId('file-loading');
+
+  await fireEvent.focus(window);
+  expect(openCalls()).toHaveLength(1);
+
+  answer({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [1],
+    spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  expect((await screen.findByTestId('hl')).textContent).toBe('Ціна');
 });
