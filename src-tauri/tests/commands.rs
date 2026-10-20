@@ -5062,11 +5062,47 @@ fn a_wrong_ord_yields_no_focus() {
     assert_eq!(v["spans"], json!([]), "{v}");
 }
 
+/// The third arm of the same guard, and the one a rebuild makes reachable:
+/// the id and `ord` both still match and the **text** does not. `chunk.id` is
+/// reused, so without this arm the pane would highlight whatever now sits at
+/// the old occurrence.
+#[test]
+fn a_wrong_text_yields_no_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "b".repeat(64);
+    let (chunk, text, _blocks) = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(two_block_chunk(db, &doc)))
+        .unwrap();
+
+    // A chunk id, its own ord, and another passage's text.
+    let wrong = format!("{text} — інша редакція");
+    assert_ne!(wrong, text);
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "chunkId": chunk, "citedOrd": 0, "citedText": wrong }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("file"), "the file still opens: {v}");
+    assert_eq!(
+        v["focusBlockIds"],
+        json!([]),
+        "an id whose text is not this passage's must not highlight anything: {v}"
+    );
+    assert_eq!(v["spans"], json!([]), "{v}");
+}
+
 /// A click while a rebuild is rewriting the document. `clear_document_content`
-/// returns the row to `pending` before the pages go (`write.rs:1221`) and
-/// ingest writes the file back a slice at a time, so `pending` **with blocks
-/// present** is a prefix of the file — answering it would be a partial file
-/// that claims to be whole.
+/// deletes the pages and then writes `pending` in the same transaction
+/// (`write.rs:1220-1221`), and ingest writes the file back a slice at a time,
+/// so `pending` **with blocks present** is a prefix of the file — answering it
+/// would be a partial file that claims to be whole.
 #[test]
 fn a_document_mid_rebuild_is_refused() {
     let dir = tempfile::tempdir().unwrap();

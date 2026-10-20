@@ -974,11 +974,12 @@ fn build_document_view(
     // The status gate, and why it is not optional: ingest records a rebuild and
     // then writes the document back **a slice at a time** (`STATUS_REBUILDING`,
     // `mnema-ingest/src/lib.rs:530`, written through before the first slice),
-    // while `clear_document_content_in` returns the row to `pending` before the
-    // pages go (`write.rs:1221`). A `pending` document that still holds blocks
-    // is therefore a file being rewritten, and answering with those blocks
-    // would be a partial file that claims to be whole — the one failure this
-    // pane exists to avoid. `failed`/`skipped` have no corpus text to show.
+    // while `clear_document_content_in` deletes the pages and then writes
+    // `pending`, both in one transaction (`write.rs:1220-1221`). A `pending`
+    // document that still holds blocks is therefore a file being rewritten, and
+    // answering with those blocks would be a partial file that claims to be
+    // whole — the one failure this pane exists to avoid. `failed`/`skipped`
+    // have no corpus text to show.
     match db.document_status(document_id)? {
         DocumentStatus::Pending => {
             return Ok(ComposedView::Settled(DocumentView::Unavailable {
