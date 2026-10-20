@@ -109,6 +109,25 @@ async function askAndOpenAFolder() {
 // command; each ask test overrides with its own reply.
 beforeEach(() => { providerReply = okStatus; invoke.mockReset(); mockBackend(undefined); });
 
+// The panels live in `localStorage` (`layout.ts`). jsdom's own is an opaque
+// origin with no working methods, while Node 24+ exposes a *working* global of
+// its own — so on CI's Node the state a test wrote reached the next test, and
+// the suite passed only on the Node whose global throws. Pin a fresh in-memory
+// store per test instead: the layout still persists across a remount inside one
+// test, and nothing crosses the boundary. `defineProperty`, not `stubGlobal`,
+// because Node 26's own getter warns when touched.
+function memoryStorage() {
+  const map = new Map<string, string>();
+  return {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => { map.set(k, v); },
+    removeItem: (k: string) => { map.delete(k); },
+  };
+}
+beforeEach(() => {
+  Object.defineProperty(globalThis, 'localStorage', { value: memoryStorage(), configurable: true });
+});
+
 // The suite lays out in a 1440 window, where the default 240 + 520 + 480 fits
 // as three columns. A test that cares which pane a narrow window takes says so
 // itself; the shell reads the width once, as a real window does when it is
