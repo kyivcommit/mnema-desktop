@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
 import Tree from './Tree.svelte';
@@ -104,6 +104,51 @@ test('real recents marks the conversation on screen with --select', async () => 
   const off = screen.getByTestId('recents-row-2');
   expect(getComputedStyle(on).background).toBe('var(--select)');
   expect(getComputedStyle(off).background).not.toBe('var(--select)');
+});
+
+// The card is a column with one gap between its parts, and `Answer` relies on
+// it: the header, paragraph, citations and the via line all carry `margin: 0`,
+// and `.answer-card .via` pulls up by -9 px. Without this rule the paragraph
+// and the via line sit on each other. Pinned by reading the sheet, as the cloud
+// colours below are: no jsdom render computes the gap (review, Important 1).
+test('the answer card keeps the column gap its parts depend on', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(
+    /\.answer-card,\s*\.passages-card\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*13px/,
+  );
+});
+
+// §4: one line — the question, the time to its right, the × after it. The
+// question clips to make room and the time never takes a line of its own.
+test('a conversation row is one line: question, time right, then ×', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
+  const row = await screen.findByTestId('recents-row-1');
+  const open = within(row).getByTestId('recents-open-1');
+  const query = within(row).getByTestId('recents-query');
+  const asked = within(row).getByTestId('recents-asked');
+  expect(query.parentElement).toBe(open); // both parts inside the row's one button
+  expect(asked.parentElement).toBe(open);
+  expect(getComputedStyle(open).display).toBe('flex');
+  expect(getComputedStyle(query).flexGrow).toBe('1'); // the question takes the room left over
+  expect(getComputedStyle(asked).flexGrow).toBe('0'); // the time does not shrink or wrap
+});
+
+// The open-failure alert sits beside the list and carried only `.composer`'s
+// rule before the fix round, so it drew as bare text (review, minor). The frame
+// is read from the sheet as well as the render: jsdom drops a `background` and
+// a `border` written as a `var(…)` shorthand, so the computed colour cannot
+// answer for it.
+test('the conversation alert is the same framed message as the composer guard', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {}, error: 'historyFailed' });
+  const alert = await screen.findByTestId('recents-error');
+  expect(alert.getAttribute('role')).toBe('alert');
+  const computed = getComputedStyle(alert);
+  expect(computed.fontSize).toBe('12px'); // the rule reaches this element…
+  expect(computed.margin).toBe('0px 0px 8px 0px');
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(
+    /\.recents-body \.guard\s*\{[^}]*background:\s*var\(--surface-2\);[^}]*border:\s*1px solid var\(--line\)/,
+  );
 });
 
 test('real source distinguishes primary highlight from its sibling', async () => {

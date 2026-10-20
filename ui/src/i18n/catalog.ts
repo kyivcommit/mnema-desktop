@@ -40,7 +40,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_empty' | 'tree_failed'
-  | 'history_empty' | 'history_remove' | 'history_unreadable' | 'recents_failed'
+  | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
   | 'gone_no_such_chunk' | 'gone_id_reused'
@@ -388,6 +388,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
+    history_open_failed: 'Не вдалося відкрити цю бесіду.',
     recents_failed: 'Не вдалося завантажити бесіди.',
     fresh_current: 'Актуально',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
@@ -1255,6 +1256,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',
+    history_open_failed: 'This conversation could not be opened.',
     recents_failed: 'The conversations could not be loaded.',
     fresh_current: 'Up to date',
     fresh_reindexed: 'This path now names another document',

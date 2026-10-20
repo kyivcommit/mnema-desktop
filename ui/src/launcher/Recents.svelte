@@ -77,7 +77,7 @@
   const failedLabel = $derived.by(() => { void $locale; return t('recents_failed'); });
   const errorLabel = $derived.by(() => {
     void $locale;
-    return error === 'historyUnreadable' ? t('history_unreadable') : error === 'historyFailed' ? t('query_failed') : '';
+    return error === 'historyUnreadable' ? t('history_unreadable') : error === 'historyFailed' ? t('history_open_failed') : '';
   });
 
   // Each row says HOW LONG AGO it was asked. The whole list is rebuilt inside

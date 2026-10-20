@@ -13506,6 +13506,44 @@ fn ask_returns_the_id_of_the_row_it_wrote() {
     assert!(reply["answer"].get("historyId").is_none(), "{reply:?}");
 }
 
+/// Nothing recorded means no id. A refusal is an answer, not a conversation, and
+/// the window clears its mark rather than point at a row nobody wrote.
+#[test]
+fn a_refusal_answers_with_no_history_id() {
+    const KEY: &str = "test-key-ask-refusal-id";
+    // Only set_key's /credits is expected; any request past it is a surplus (599).
+    let server = MockServer::new(vec![Reply::ok(ASK_CREDITS)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    // The key first, and then the index — the order `ask_with_a_model_but_no_candidates…`
+    // needs, and for the same reason: `set_key` on an open index chooses models
+    // and spends requests the reply queue below does not hold.
+    set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+
+    let reply =
+        call(&webview, "ask", json!({ "query": "nothing indexed" })).expect("ask was rejected");
+    assert_eq!(reply["answer"]["kind"], json!("refused"), "{reply:?}");
+    assert_eq!(
+        reply["historyId"],
+        json!(null),
+        "a refusal records nothing, so it numbers nothing: {reply:?}"
+    );
+    assert!(
+        history_rows(&webview).is_empty(),
+        "a refusal wrote a row: {reply:?}"
+    );
+}
+
 #[test]
 fn a_generated_ask_is_recorded_and_reopens_identically() {
     let completion = json!({

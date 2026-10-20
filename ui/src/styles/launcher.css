@@ -139,11 +139,14 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .history-open {
   flex: 1; min-width: 0; padding: 4px 7px; border: 0; border-radius: 6px; background: transparent;
   color: inherit; text-align: left; font: inherit;
+  /* One line: the question clips to make room, the time never wraps below it. */
+  display: flex; align-items: baseline; gap: 6px;
 }
 .history-query, .history-asked {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.history-asked { font-size: 11px; color: var(--ink-soft); }
+.history-query { flex: 1 1 auto; min-width: 0; }
+.history-asked { flex: none; font-size: 11px; color: var(--ink-soft); }
 .history-row[aria-current="true"] .history-asked { color: inherit; }
 /* Opacity, not visibility: a hidden control cannot take focus. */
 .history-remove {
@@ -151,11 +154,16 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   background: transparent; color: inherit; font-size: 14px; line-height: 1; opacity: 0;
 }
 .history-row:hover .history-remove, .history-row:focus-within .history-remove { opacity: 1; }
+.recents-body .guard {
+  margin: 0 0 8px; padding: 8px; overflow-wrap: anywhere; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
+}
 .tree h4 {
   margin: 10px 0 4px; overflow-wrap: anywhere;
   font-family: var(--sans); font-weight: 500; font-style: normal;
 }
 
+.answer-card, .passages-card { display: flex; flex-direction: column; gap: 13px; }
 .umsg {
   align-self: flex-end; max-width: 88%; padding: 9px 13px;
   border-radius: 13px 13px 5px 13px; background: var(--accent-soft);

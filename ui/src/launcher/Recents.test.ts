@@ -115,16 +115,13 @@ test('the recency follows a live language switch, through both plural arms', asy
   expect(rowPart(2, 'recents-asked')).toBe('4 minutes ago');
 });
 
-// The hazard the row ids are a namespace against: a second id inside a row would
-// be counted as a row by anything querying `/^recents-row-/`, so the row's parts
-// carry ids that do not start with that prefix.
-test('the row namespace holds one id per question and nothing else', async () => {
+test('two questions draw two rows, each carrying its own question', async () => {
   mockHistory(historyTwoQuestions);
   render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
 
   expect(await screen.findByTestId('recents-row-1')).toBeTruthy();
-  expect(screen.getAllByTestId(/^recents-row-/).map((el) => el.dataset.testid))
-    .toEqual(['recents-row-2', 'recents-row-1']);
+  expect(screen.getAllByTestId('recents-query').map((el) => el.textContent))
+    .toEqual(['when does the lease renew', 'invoice payment terms']);
 });
 
 // The conversation on screen is the one `historyId` names — the row a fresh
@@ -227,6 +224,19 @@ test('the list is read on mount, again on focus, and again when gen changes', as
 
 // An open that failed was clicked here, and it is said here rather than under a
 // composer the person did not touch.
+// The list is read for `gen` and for nothing else: a parent that re-sets its
+// other props (a new active row) must not send another read.
+test('a changed active row does not read the list again', async () => {
+  mockHistory(historyTwoQuestions);
+  const { rerender } = render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
+  expect(await screen.findByTestId('recents-row-2')).toBeTruthy();
+  expect(historyCalls()).toHaveLength(1);
+
+  await rerender({ activeId: 2, gen: 0, onOpen: () => {} });
+  await tick();
+  expect(historyCalls()).toHaveLength(1);
+});
+
 test('a failed open says so beside the list', async () => {
   const { rerender } = render(Recents, { activeId: null, gen: 0, onOpen: () => {}, error: null });
   expect(screen.queryByTestId('recents-error')).toBeNull();
@@ -235,7 +245,7 @@ test('a failed open says so beside the list', async () => {
   expect((await screen.findByTestId('recents-error')).textContent).toBe('This entry cannot be opened.');
 
   await rerender({ activeId: null, gen: 0, onOpen: () => {}, error: 'historyFailed' });
-  expect((await screen.findByTestId('recents-error')).textContent).toBe('The query could not be run.');
+  expect((await screen.findByTestId('recents-error')).textContent).toBe('This conversation could not be opened.');
 
   await rerender({ activeId: null, gen: 0, onOpen: () => {}, error: null });
   await tick();
