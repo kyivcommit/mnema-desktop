@@ -71,7 +71,7 @@ test('the preview namespace holds one id per citation and nothing else', () => {
   //
   // 🔴 This test is the ONLY thing that catches the collision — measured, by
   // putting `preview-label` back in the component AND in every query in this
-  // file: 1 failed, 169 passed, and the one is this test. `Cards.test.ts` has a
+  // file: 1 failed, 169 passed, and the one is this test. The deleted `Cards.test.ts` had a
   // `/^preview-/` count of its own, but it is in state E, where
   // `Selection.svelte:87-90` mounts `Passages` and not this component, so that
   // namespace is empty there whatever the label is called. It cannot witness

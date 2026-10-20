@@ -488,11 +488,12 @@ test('turning the files panel off hides the right area and leaves the recents on
   render(Launcher);
   await submit('q');
   await screen.findByTestId('turn');
-  expect(screen.getByTestId('col-right')).toBeTruthy();
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
   await fireEvent.click(toggle('right'));
   expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
   expect(toggle('left').getAttribute('aria-pressed')).toBe('true');
-  expect(screen.queryByTestId('col-right')).toBeNull();
+  // Hidden, not unmounted: the tree keeps its fetch and its folders.
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
   expect(screen.getByTestId('col-recents')).toBeTruthy();
 });
 

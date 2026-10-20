@@ -23,8 +23,8 @@ case_ "launcher: the right area loses its own track" \
 
 case_ "launcher: the tree toggle stops hiding the tree" \
   ui/src/launcher/Shell.svelte \
-  's~\{#if view\.tree\}~{#if true}~' \
-  '{#if true}' \
+  's~hidden=\{!view\.tree\}~hidden={false}~' \
+  'hidden={false}' \
   src/launcher/Shell.test.ts 'the tree toggle does not change the transcript width' runner=vitest
 
 case_ "launcher: the transcript cannot scroll" \

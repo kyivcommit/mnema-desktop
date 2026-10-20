@@ -3,10 +3,14 @@
   // visible handle, so the flat header of the sheet is not argued with. The
   // drag is reported as a delta; the caller owns the width and its minimums,
   // because every pane's cap depends on the other panes, not on this line.
-  let { label, value, min, onResize, onReset }: {
+  //
+  // The reset is on the keyboard too (Enter, Home): a double-click is
+  // mouse-only, and the affordance exists for everyone.
+  let { label, value, min, max, onResize, onReset }: {
     label: string;
     value: number;
     min: number;
+    max: number;
     onResize: (delta: number) => void;
     onReset: () => void;
   } = $props();
@@ -36,6 +40,11 @@
   }
 
   function key(event: KeyboardEvent) {
+    if (event.key === 'Enter' || event.key === 'Home') {
+      event.preventDefault();
+      onReset();
+      return;
+    }
     const step = event.key === 'ArrowLeft' ? -8 : event.key === 'ArrowRight' ? 8 : 0;
     if (step === 0) return;
     event.preventDefault();
@@ -54,6 +63,7 @@
   aria-label={label}
   aria-valuenow={Math.round(value)}
   aria-valuemin={min}
+  aria-valuemax={Math.round(max)}
   tabindex="0"
   onpointerdown={down}
   onpointermove={move}

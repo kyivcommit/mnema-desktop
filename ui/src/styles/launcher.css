@@ -45,6 +45,10 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
   display: flex; flex-direction: column; min-width: 0; min-height: 0;
   background: var(--surface); border-left: 1px solid var(--line);
 }
+/* The panel is hidden, not unmounted (the tree must keep its folders and its
+ * fetch), and `display: flex` above would otherwise beat the UA `[hidden]`
+ * rule and leave it on screen. */
+.shell > .right[hidden], .tree-pane[hidden] { display: none; }
 /* Narrower than L + 520 + W: the right area stops taking a track and paints
  * over the transcript instead, at the same width W. */
 .shell > .right.overlay {
@@ -57,9 +61,12 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 }
 .head, .right-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; }
 /* macOS draws its traffic lights over the content (`titleBarStyle: Overlay`,
- * `tauri.conf.json`): the recents toggle starts after them, and this row is the
- * window's drag handle — the buttons inside it are excluded by tag. */
-.head { padding: 0 10px 0 78px; }
+ * `tauri.conf.json`). The row is the window's drag handle — the buttons inside
+ * it are excluded by tag — and while the sidebar is shut this row is under the
+ * lights, so it keeps clear of them; with the sidebar open the lights sit over
+ * the sidebar and this header carries no empty inset. */
+.head { padding: 0 10px; }
+main.shell[data-left="false"] .head { padding-left: 78px; }
 .right-head { padding: 0 10px; }
 .centre-body {
   flex: 1 1 auto; min-height: 0;
@@ -72,18 +79,20 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
   flex: 1 1 auto; min-height: 0;
   display: grid;
 }
-.tree-pane, .file-pane {
-  position: relative; min-width: 0; min-height: 0; overflow: auto; padding: 0 12px 12px;
-}
+/* The pane itself does not scroll: its body does. A splitter is absolutely
+ * positioned on the pane's edge, and inside a scroll container it would scroll
+ * with the content and widen the scrollable area by its own hit target. */
+.tree-pane, .file-pane { position: relative; min-width: 0; min-height: 0; }
+.pane-body { height: 100%; overflow: auto; padding: 0 12px 12px; }
 .file-pane { border-left: 1px solid var(--line); }
-/* §2: a 1px line with a 5px hit target and no visible handle. It sits on its
+/* §2: a 1px line with a 4px hit target and no visible handle. It sits on its
  * pane's inner edge, so it takes no track of its own and the widths in
  * `layout.ts` are the widths on screen. */
 .splitter {
   position: absolute; top: 0; bottom: 0; width: 1px; z-index: 3;
   background: var(--line); cursor: col-resize; touch-action: none; outline: none;
 }
-.splitter::before { content: ''; position: absolute; inset: 0 -2px; }
+.splitter::before { content: ''; position: absolute; inset: 0 -1.5px; }
 .splitter:hover, .splitter:focus-visible { background: var(--accent); }
 .recents > .splitter, .tree-pane > .splitter { right: -1px; }
 .right > .splitter { left: -1px; }

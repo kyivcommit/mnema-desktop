@@ -20,34 +20,43 @@ export const MIN = { L: 180, W: 360, T: 160, FILE: 200, TRANSCRIPT: 520 };
 
 const KEY = 'mnema.window';
 
-// The transcript never shrinks below 520 (§2): a splitter drag stops at that
-// wall instead of pushing through it, on either side. The cap only applies
-// while the pane is on screen — a hidden pane takes nothing from the transcript.
-//
-// `keep` is the pane the person is moving: it stops at its own wall and the
-// other pane keeps the width it had. Without it (a layout read back from
-// storage) both are capped, W first, so a too-wide W cannot squeeze L below
-// its minimum on the way in.
-export function clampLayout(s: PanelState, windowWidth: number, keep?: 'L' | 'W'): PanelState {
-  const L0 = Math.max(MIN.L, s.L);
-  const W0 = Math.max(MIN.W, s.W);
-  const fitW = windowWidth - MIN.TRANSCRIPT - (s.left ? L0 : 0);
-  const W = s.right
-    ? Math.max(MIN.W, Math.min(W0, keep === 'L' ? W0 : fitW))
-    : W0;
-  const fitL = windowWidth - MIN.TRANSCRIPT - (s.right ? W : 0);
-  const L = s.left
-    ? Math.max(MIN.L, Math.min(L0, keep === 'W' ? L0 : fitL))
-    : L0;
-  const T = Math.min(Math.max(MIN.T, s.T), Math.max(MIN.T, W - MIN.FILE));
-  return { ...s, L, W, T };
-}
-
-// §2: below the sum of the current widths the right area stops being a column
-// and becomes an overlay of the same width W over the transcript. Current
-// widths, not constants — a dragged W moves the threshold with it.
+// §2: below the sum of the widths the person chose, the right area stops being
+// a column and becomes an overlay of the same width W over the transcript.
+// Read from the STORED widths, never from a clamped layout: the clamped one has
+// already been squeezed to fit, so a decision taken from it would always be
+// 180 + 520 + 360 = 1060 whatever the person set, and the overlay would be as
+// wide as the squeeze rather than as wide as the pane.
 export function isOverlay(s: PanelState, windowWidth: number): boolean {
   return s.right && windowWidth < (s.left ? s.L : 0) + MIN.TRANSCRIPT + s.W;
+}
+
+// The widest a pane may get. The transcript keeps its 520 and the file stripe
+// its 200; the overlay is not a column, so it is not bounded by the transcript.
+// `clampLayout`, `Shell`'s splitter writes and `aria-valuemax` all read this
+// one rule, so the wall a drag stops at and the wall a screen reader announces
+// cannot differ.
+export function maxWidth(s: PanelState, pane: 'L' | 'W' | 'T', windowWidth: number): number {
+  const overlay = isOverlay(s, windowWidth);
+  switch (pane) {
+    case 'L':
+      return Math.max(MIN.L, windowWidth - MIN.TRANSCRIPT - (s.right && !overlay ? s.W : 0));
+    case 'W':
+      return Math.max(MIN.W, overlay ? s.W : windowWidth - MIN.TRANSCRIPT - (s.left ? s.L : 0));
+    case 'T':
+      return Math.max(MIN.T, s.W - MIN.FILE);
+  }
+}
+
+// What is drawn. In a column window the stored widths already fit (otherwise
+// `isOverlay` would be true), so this only lifts a width past the minimums and
+// caps the tree against the file's 200 — it never makes a decision about the
+// overlay, and its result is never written back to storage.
+export function clampLayout(s: PanelState, windowWidth: number): PanelState {
+  const base = { ...s, L: Math.max(MIN.L, s.L), W: Math.max(MIN.W, s.W) };
+  const L = base.left ? Math.min(base.L, maxWidth(base, 'L', windowWidth)) : base.L;
+  const W = base.right ? Math.min(base.W, maxWidth({ ...base, L }, 'W', windowWidth)) : base.W;
+  const T = Math.min(Math.max(MIN.T, s.T), maxWidth({ ...base, L, W }, 'T', windowWidth));
+  return { ...base, L, W, T };
 }
 
 // A saved layout belongs to the window that wrote it; the window may have
@@ -82,8 +91,9 @@ export function saveLayout(s: PanelState): void {
   }
 }
 
-// A splitter's double-click returns its pane to the default width (§2), still
-// inside the minimums and the transcript's wall.
-export function resetPane(s: PanelState, pane: 'L' | 'W' | 'T', windowWidth: number): PanelState {
-  return clampLayout({ ...s, [pane]: DEFAULTS[pane] }, windowWidth, pane === 'T' ? undefined : pane);
+// A splitter's double-click — or Enter, so the reset is not mouse-only — returns
+// its pane to the default width (§2). The write that follows is clamped like a
+// drag, by `maxWidth`.
+export function defaultWidth(pane: 'L' | 'W' | 'T'): number {
+  return DEFAULTS[pane];
 }

@@ -71,7 +71,10 @@ test('real launcher places the three areas with the tree inside the right one', 
   const tree = screen.getByTestId('col-tree');
   expect(tree.contains(screen.getByTestId('tree-body'))).toBe(true);
   expect(screen.getByTestId('col-right').contains(tree)).toBe(true);
-  expect(getComputedStyle(tree).overflow).toBe('auto');
+  // The pane itself does not scroll — its splitter lives on its edge and would
+  // scroll with the content — the body inside it does.
+  expect(getComputedStyle(tree).overflow).toBe('');
+  expect(getComputedStyle(tree.querySelector('.pane-body')!).overflow).toBe('auto');
 
   const box = screen.getByRole('textbox');
   await fireEvent.input(box, { target: { value: 'question' } });

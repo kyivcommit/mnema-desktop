@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from 'vitest';
 import {
-  DEFAULTS, MIN, clampLayout, isOverlay, loadLayout, resetPane, saveLayout, type PanelState,
+  DEFAULTS, MIN, clampLayout, defaultWidth, isOverlay, loadLayout, maxWidth, saveLayout,
+  type PanelState,
 } from './layout';
 
 // The window the specs are written against: 1440 wide (§1).
@@ -50,43 +51,59 @@ test('toggle left hands its width to the transcript, not to the window', () => {
 });
 
 test('the transcript never goes below 520 while dragging the left splitter', () => {
-  // 1440 − 520 − 480: the wall, not the window's minimum.
-  expect(clampLayout({ ...DEFAULTS, L: 900 }, WINDOW, 'L').L).toBe(WINDOW - MIN.TRANSCRIPT - DEFAULTS.W);
-  // The same drag with the right area hidden may go further: W is not taking room.
-  expect(clampLayout({ ...DEFAULTS, right: false, L: 900 }, WINDOW, 'L').L).toBe(900);
-  // The right splitter stops at the same wall: a real drag (steps of 8 from the
-  // current widths) leaves the transcript at exactly 520 and does not touch L.
+  // The drag wall, read from the same function `Shell` writes the pane with.
+  expect(maxWidth(DEFAULTS, 'L', WINDOW)).toBe(WINDOW - MIN.TRANSCRIPT - DEFAULTS.W);
+  // The same drag with the right area hidden may go further: W takes no room.
+  expect(maxWidth({ ...DEFAULTS, right: false }, 'L', WINDOW)).toBe(WINDOW - MIN.TRANSCRIPT);
+  // A real drag is steps of 8 from the current widths, each one clamped: the
+  // transcript ends at exactly 520 and the W pane does not move.
+  let s = DEFAULTS;
+  for (let i = 0; i < 200; i += 1) s = { ...s, L: Math.min(s.L + 8, maxWidth(s, 'L', WINDOW)) };
+  expect(s.L).toBe(WINDOW - MIN.TRANSCRIPT - DEFAULTS.W);
+  expect(s.W).toBe(DEFAULTS.W);
+  expect(WINDOW - s.L - s.W).toBe(MIN.TRANSCRIPT);
+  // The right splitter stops at the same wall from its own side.
   let w = DEFAULTS;
-  for (let i = 0; i < 200; i += 1) w = clampLayout({ ...w, W: w.W + 8 }, WINDOW, 'W');
+  for (let i = 0; i < 200; i += 1) w = { ...w, W: Math.min(w.W + 8, maxWidth(w, 'W', WINDOW)) };
   expect(w.W).toBe(WINDOW - MIN.TRANSCRIPT - DEFAULTS.L);
   expect(w.L).toBe(DEFAULTS.L);
   expect(WINDOW - w.L - w.W).toBe(MIN.TRANSCRIPT);
-  // A splitter's keyboard step is clamped like a drag: eight presses past the
-  // wall leave the transcript at exactly 520.
-  let s = DEFAULTS;
-  for (let i = 0; i < 200; i += 1) s = clampLayout({ ...s, L: s.L + 8 }, WINDOW, 'L');
-  expect(WINDOW - s.L - s.W).toBeGreaterThanOrEqual(MIN.TRANSCRIPT);
-  expect(WINDOW - s.L - s.W).toBeLessThan(MIN.TRANSCRIPT + 8);
+  // The tree wall leaves the file stripe its 200.
+  expect(maxWidth(DEFAULTS, 'T', WINDOW)).toBe(DEFAULTS.W - MIN.FILE);
 });
 
 test('below the sum the right area becomes an overlay', () => {
   const overlayAt = DEFAULTS.L + MIN.TRANSCRIPT + DEFAULTS.W; // 1240
-  expect(isOverlay(DEFAULTS, 900)).toBe(true);
-  expect(isOverlay(DEFAULTS, overlayAt - 1)).toBe(true);
+  // The widths the person chose, at the widths a real window can be: the
+  // decision and the overlay's W both survive the window being too narrow,
+  // instead of collapsing to the minimums (180 + 520 + 360 = 1060).
+  for (const narrow of [900, 1100, overlayAt - 1]) {
+    expect(isOverlay(DEFAULTS, narrow), String(narrow)).toBe(true);
+    const drawn = clampLayout(DEFAULTS, narrow);
+    expect(drawn.L, String(narrow)).toBe(DEFAULTS.L);
+    expect(drawn.W, String(narrow)).toBe(DEFAULTS.W);
+    // The overlay is the person's W, not the squeezed one.
+    expect(maxWidth(drawn, 'W', narrow), String(narrow)).toBe(DEFAULTS.W);
+  }
   expect(isOverlay(DEFAULTS, overlayAt)).toBe(false);
   // The threshold follows the widths the person dragged, not the constants.
-  const wide = clampLayout({ ...DEFAULTS, W: 600 }, WINDOW);
-  expect(isOverlay(wide, overlayAt)).toBe(true);
+  expect(isOverlay({ ...DEFAULTS, W: 600 }, overlayAt)).toBe(true);
   // A hidden right area is never an overlay, however narrow the window.
   expect(isOverlay({ ...DEFAULTS, right: false }, 900)).toBe(false);
 });
 
 test('double-click restores the default width for that pane', () => {
-  const dragged = clampLayout({ ...DEFAULTS, L: 300, W: 520, T: 240 }, WINDOW);
-  expect(resetPane(dragged, 'L', WINDOW).L).toBe(DEFAULTS.L);
-  expect(resetPane(dragged, 'W', WINDOW).W).toBe(DEFAULTS.W);
-  expect(resetPane(dragged, 'T', WINDOW).T).toBe(DEFAULTS.T);
+  expect(defaultWidth('L')).toBe(DEFAULTS.L);
+  expect(defaultWidth('W')).toBe(DEFAULTS.W);
+  expect(defaultWidth('T')).toBe(DEFAULTS.T);
+  // The write that follows a reset is clamped like a drag: a window where the
+  // panes are already at their minimums has only 400 for the right area, so
+  // the default 480 cannot come back at that width.
+  const narrow = { ...DEFAULTS, L: MIN.L, W: MIN.W }; // 1060, fits a 1100 window
+  const wall = maxWidth(narrow, 'W', 1100);
+  expect(wall).toBe(1100 - MIN.TRANSCRIPT - MIN.L);
+  expect(Math.min(defaultWidth('W'), wall)).toBe(wall);
   // A round trip through storage keeps the widths and the flags.
-  saveLayout(dragged);
-  expect(loadLayout()).toEqual(dragged);
+  saveLayout({ ...DEFAULTS, L: 300, W: 520, T: 240 });
+  expect(loadLayout()).toEqual({ ...DEFAULTS, L: 300, W: 520, T: 240 });
 });

@@ -2,7 +2,7 @@
   import { locale, t } from '../i18n';
   import Splitter from './Splitter.svelte';
   import {
-    MIN, clampLayout, isOverlay, loadLayout, resetPane, saveLayout, type PanelState,
+    MIN, clampLayout, defaultWidth, isOverlay, loadLayout, maxWidth, saveLayout, type PanelState,
   } from './layout';
   import type { Snippet } from 'svelte';
 
@@ -12,7 +12,8 @@
   // its width to its neighbour instead of shrinking the window.
   //
   // `panels` is bindable because a later answer opens the right area from
-  // outside (Task 7), and because the layout is remembered across runs.
+  // outside (Task 7), and because the layout is remembered across runs. It
+  // holds the person's widths, never a layout squeezed to fit the window.
   let {
     panels = $bindable(loadLayout()),
     fileOpen = false,
@@ -34,15 +35,16 @@
     file?: Snippet;
   } = $props();
 
-  // The window can be resized at any moment (minimum 900×600), so a saved width
-  // is read through the clamp on every render — never written back on a resize.
+  // The window can be resized at any moment (minimum 900×600). `view` is what is
+  // drawn inside the room available; `overlay` is decided by the widths the
+  // person chose, so resizing cannot silently rewrite them.
   let windowWidth = $state(window.innerWidth);
   const view = $derived(clampLayout(panels, windowWidth));
-  const overlay = $derived(isOverlay(view, windowWidth));
+  const overlay = $derived(isOverlay(panels, windowWidth));
 
   // The overlay keeps the transcript's 520 by not being a column at all: the
   // third track collapses to 0 and the right area paints over the transcript
-  // at the same width W.
+  // at the person's W.
   const trackW = $derived(view.right && !overlay ? view.W : 0);
   const treeW = $derived(view.tree ? (fileOpen ? view.T : view.W) : 0);
   // Written as inline tracks rather than as custom properties: the stylesheet
@@ -53,8 +55,12 @@
   );
   const rightStyle = $derived(`grid-template-columns: ${treeW}px minmax(0, 1fr)`);
 
-  function resize(pane: 'L' | 'W' | 'T', value: number) {
-    panels = clampLayout({ ...view, [pane]: value }, windowWidth, pane === 'T' ? undefined : pane);
+  // A drag writes the pane it moved and nothing else. Clamping the neighbour is
+  // the layout's business; storing the squeezed copy would lose the person's
+  // width for good the first time they drag in a narrow window.
+  function write(pane: 'L' | 'W' | 'T', value: number) {
+    const widest = maxWidth(panels, pane, windowWidth);
+    panels = { ...panels, [pane]: Math.max(MIN[pane], Math.min(value, widest)) };
   }
   function toggle(pane: 'left' | 'right' | 'tree') {
     panels = { ...panels, [pane]: !view[pane] };
@@ -76,7 +82,7 @@
 
 <svelte:window onresize={() => (windowWidth = window.innerWidth)} onkeydown={onKeydown} />
 
-<main class="shell" data-testid="shell" data-overlay={overlay} style={shellStyle}>
+<main class="shell" data-testid="shell" data-overlay={overlay} data-left={view.left} style={shellStyle}>
   {#if view.left}
     <aside class="recents" data-testid="col-recents" aria-label={labels.recents}>
       {@render recents?.()}
@@ -84,15 +90,17 @@
         label={labels.recents}
         value={view.L}
         min={MIN.L}
-        onResize={(d) => resize('L', view.L + d)}
-        onReset={() => (panels = resetPane(view, 'L', windowWidth))} />
+        max={maxWidth(panels, 'L', windowWidth)}
+        onResize={(d) => write('L', view.L + d)}
+        onReset={() => write('L', defaultWidth('L'))} />
     </aside>
   {/if}
 
   <section class="centre" data-testid="col-transcript">
     <!-- The drag handle, and the place the recents toggle stands beside the
          traffic lights. macOS draws those over the content
-         (`titleBarStyle: Overlay`), so the header is theirs on the left. -->
+         (`titleBarStyle: Overlay`): when the sidebar is shut this row is under
+         them and keeps clear of them (`main.shell[data-left="false"]`). -->
     <header class="head" data-tauri-drag-region="deep">
       <button type="button" class="tb" data-testid="toggle-left"
         aria-pressed={view.left} aria-label={labels.recents} title={labels.recents}
@@ -111,48 +119,51 @@
     </div>
   </section>
 
-  {#if view.right}
-    {#if overlay}
-      <!-- Clicking anywhere beside the overlay closes it; Esc is the keyboard
-           path and the reason this is not in the tab order. -->
-      <button type="button" class="scrim" data-testid="overlay-scrim" tabindex="-1"
-        aria-hidden="true" onclick={() => (panels = { ...panels, right: false })}></button>
-    {/if}
-    <aside class="right" class:overlay style:width={overlay ? `${view.W}px` : undefined}
-      data-testid="col-right" aria-label={labels.files}>
-      {#if !overlay}
-        <Splitter
-          label={labels.files}
-          value={view.W}
-          min={MIN.W}
-          onResize={(d) => resize('W', view.W - d)}
-          onReset={() => (panels = resetPane(view, 'W', windowWidth))} />
-      {/if}
-      <div class="right-head">
-        <button type="button" class="tb" data-testid="toggle-tree"
-          aria-pressed={view.tree} aria-label={labels.tree} title={labels.tree}
-          onclick={() => toggle('tree')}>
-          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h4M3 8h7M3 12h5"/></svg>
-        </button>
-      </div>
-      <div class="right-body" style={rightStyle}>
-        {#if view.tree}
-          <div class="tree-pane" data-testid="col-tree">
-            {@render tree?.()}
-            {#if fileOpen}
-              <Splitter
-                label={labels.tree}
-                value={view.T}
-                min={MIN.T}
-                onResize={(d) => resize('T', view.T + d)}
-                onReset={() => (panels = resetPane(view, 'T', windowWidth))} />
-            {/if}
-          </div>
-        {/if}
-        {#if fileOpen}
-          <div class="file-pane" data-testid="col-file">{@render file?.()}</div>
-        {/if}
-      </div>
-    </aside>
+  {#if overlay}
+    <!-- Clicking anywhere beside the overlay closes it; Esc is the keyboard
+         path and the reason this is not in the tab order. -->
+    <button type="button" class="scrim" data-testid="overlay-scrim" tabindex="-1"
+      aria-hidden="true" onclick={() => (panels = { ...panels, right: false })}></button>
   {/if}
+
+  <!-- Hidden, never unmounted: `Tree` refetches on mount and drops the folders
+       the person opened, and the overlay below 1060 is closed constantly.
+       The track goes to 0 and `[hidden]` takes it out of the layout. -->
+  <aside class="right" class:overlay hidden={!view.right}
+    style:width={overlay ? `${view.W}px` : undefined}
+    data-testid="col-right" aria-label={labels.files}>
+    {#if !overlay}
+      <Splitter
+        label={labels.files}
+        value={view.W}
+        min={MIN.W}
+        max={maxWidth(panels, 'W', windowWidth)}
+        onResize={(d) => write('W', view.W - d)}
+        onReset={() => write('W', defaultWidth('W'))} />
+    {/if}
+    <div class="right-head">
+      <button type="button" class="tb" data-testid="toggle-tree"
+        aria-pressed={view.tree} aria-label={labels.tree} title={labels.tree}
+        onclick={() => toggle('tree')}>
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h4M3 8h7M3 12h5"/></svg>
+      </button>
+    </div>
+    <div class="right-body" style={rightStyle}>
+      <div class="tree-pane" data-testid="col-tree" hidden={!view.tree}>
+        <div class="pane-body">{@render tree?.()}</div>
+        {#if fileOpen}
+          <Splitter
+            label={labels.tree}
+            value={view.T}
+            min={MIN.T}
+            max={maxWidth(panels, 'T', windowWidth)}
+            onResize={(d) => write('T', view.T + d)}
+            onReset={() => write('T', defaultWidth('T'))} />
+        {/if}
+      </div>
+      {#if fileOpen}
+        <div class="file-pane" data-testid="col-file"><div class="pane-body">{@render file?.()}</div></div>
+      {/if}
+    </div>
+  </aside>
 </main>
