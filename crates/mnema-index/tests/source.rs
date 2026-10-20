@@ -60,7 +60,7 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
     // `ord = 4`, not 0: every other assertion on `ChunkAnchor.ord` in the
     // repository used to be `assert_eq!(anchor.ord, 0)`, on a fixture that
     // could not tell "read the column" apart from "return a hardcoded 0" —
-    // 27 of 28 `source_around` fixtures through the IPC also cite `ord: 0`.
+    // Every IPC fixture that cites a passage sends `ord: 0` as well.
     // Non-zero here closes that gap at the layer that reads the column
     // directly.
     let chunk_id = db

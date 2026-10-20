@@ -165,11 +165,11 @@ pub struct RecentDocRow {
 }
 
 /// The chunk's own identity and where it sits in the document's reading
-/// order — PR 5's identity pin plus the anchor `source_around` windows
-/// around (§12).
+/// order — the identity pin `open_document` checks before accepting a focus,
+/// and the blocks that citation covers (§12).
 pub struct ChunkAnchor {
     pub document_id: String,
-    /// `chunk.ord` — the other half of the occurrence identity `source_around`
+    /// `chunk.ord` — the other half of the occurrence identity `open_document`
     /// pins against, beside `document_id`. Closes the intra-document
     /// duplicate: the same paragraph twice in one file reuses `document_id`
     /// but not `ord` (`UNIQUE(document_id, ord)`, `schema.sql:168`).
@@ -590,7 +590,7 @@ impl Db {
     /// The earlier doc comment here called this acceptable *because* it was the
     /// fallback branch, reached only after a document-side lookup missed. That
     /// branch is gone (see `cited_occupant`), so the condition the acceptance
-    /// rested on is gone with it: this now runs for every `source_around`
+    /// rested on is gone with it: this now runs for every `open_document`
     /// that gets **past the identity pin** with a cited path — a refused citation
     /// returns before reaching it. **Still accepted for v1** — a personal corpus, one
     /// scan per click on a citation — but accepted knowingly, as a decision

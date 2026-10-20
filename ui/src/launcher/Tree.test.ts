@@ -9,10 +9,9 @@ import {
   twoRootsSameRelativePath,
   oneDocumentTwoRoots,
   emptyListing,
-  generated,
 } from '../lib/fixtures';
 import { setLocale } from '../i18n';
-import type { AskCitation, TreeListing } from '../lib/ipc';
+import type { TreeListing } from '../lib/ipc';
 
 // The house pattern for the bridge (`lib/ipc.test.ts:14-15`): one shared spy,
 // the module mocked once at file scope.
@@ -56,13 +55,15 @@ function withNewFile(): TreeListing {
   };
 }
 
-// A citation is only ever read for its `documentId` here (Ruling P), but the
-// prop is the real `AskCitation | Hit | null` union (Ruling O), so build one
-// from the shipped fixture rather than from a hand-written literal that could
-// drift from the wire type.
-function citationFor(documentId: string, relativePath: string | null = 'notes/a.md'): AskCitation {
-  if (generated.kind !== 'generated') throw new Error('fixture drifted');
-  return { ...generated.citations[0], documentId, relativePath };
+// The selection is the file's place on disk — a `{ rootId, relativePath }`
+// pair (spec §3) — and a click hands that pair plus the document id to the
+// caller. Paths are written out rather than looked up by document id: a
+// selection that stops naming a row has to be visible in the test.
+const SELECTED = { rootId: 1, relativePath: 'notes/a.md' };
+const SELECTED_B = { rootId: 1, relativePath: 'notes/b.md' };
+const pick = vi.fn();
+function mount(selected: { rootId: number; relativePath: string } | null) {
+  return render(Tree, { selected, onPick: pick });
 }
 
 // Everything in the card that a keyboard can reach or that claims a role, in
@@ -85,6 +86,7 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(route);
   treeReply = () => Promise.resolve(emptyListing);
+  pick.mockReset();
 });
 
 // Mirrors Answer.test.ts: `locale` is a module-level store
@@ -150,27 +152,34 @@ test('buildFolderTree mixes the three depths in one root and shares one node per
 
 // --- the rendered card ------------------------------------------------------
 
-// 🔴 Owner review on PR #24, P5. File rows were `<button>`s with no `onclick`:
-// click, Enter and Space all did nothing, and they carried `role="treeitem"` with
-// no enclosing tree. Rows that promise an action they do not have are the finding.
-//
-// The assertion enumerates every focusable or role-bearing element in the card, in
-// document order, so it is a closed statement. The Files tab's rows are not in it
-// (inert); the two folders and the two tabs are (each has a real action). The
-// Recents tab's rows are not in it either, but each question's own open and remove
-// buttons are: those are the actions the row has.
+// File rows are actions now — clicking one opens the file in the pane (spec
+// §2) — so the closed enumeration below counts them. The folders come first
+// (document order), then the files of the folder the selection opened.
 test('the controls are exactly the ones with a real action', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: citationFor('doc-1') }); // notes/ is open, so its files are on screen
+  mount(SELECTED); // notes/ is open, so its files are on screen
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
-  // The files are inert; the two folders are the actions (P5).
-  expect(controls()).toEqual(['tree-folder-notes', 'tree-folder-archive']);
+  expect(controls()).toEqual([
+    'tree-folder-notes', 'tree-file-doc-1', 'tree-file-doc-2', 'tree-folder-archive',
+  ]);
+});
+
+// The row's whole job: hand the pair and the document id to the caller, so the
+// pane opens the file at the path that was pressed — one document can sit at
+// several paths, and only one of them was clicked.
+test('a file row hands the caller its (root, path) pair and document id', async () => {
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+
+  await fireEvent.click(await screen.findByTestId('tree-file-doc-2'));
+  expect(pick).toHaveBeenCalledTimes(1);
+  expect(pick).toHaveBeenLastCalledWith({ rootId: 1, relativePath: 'notes/b.md', documentId: 'doc-2' });
 });
 
 test('the tree nests files under their folders instead of listing flat paths', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-folder-notes')).toBeTruthy();
   expect(screen.getByTestId('tree-folder-archive')).toBeTruthy();
@@ -197,7 +206,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
       },
     ],
   });
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-folder-Договори')).toBeTruthy();
   expect(screen.queryByText('Договори/dohov-01.md')).toBeNull();
@@ -205,7 +214,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
 
 test('the folder holding the selected file is open; the others are not', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: citationFor('doc-1') }); // notes/a.md
+  mount(SELECTED); // notes/a.md
 
   // Ruling I: `toBeVisible()` is not available in this project (no
   // `@testing-library/jest-dom`), and the claim lives in the second line
@@ -230,7 +239,7 @@ test('two roots holding a folder of the same name open and shut independently', 
       { rootId: 2, absolutePath: '/home/u/two', name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
     ],
   });
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findAllByTestId('tree-folder-notes')).toHaveLength(2);
   expect(screen.queryByTestId('tree-file-doc-one')).toBeNull();
@@ -252,44 +261,40 @@ test('two roots holding a folder of the same name open and shut independently', 
   expect(screen.getByTestId('tree-file-doc-two')).toBeTruthy();
 });
 
-test('the selected citation selects its file by documentId, not by path string', async () => {
+test('two roots holding the same path mark only the root that was opened', async () => {
   mockTree(twoRootsSameRelativePath); // two roots, both holding README.md
-  const { rerender } = render(Tree, { selected: null });
+  const { rerender } = mount(null);
   expect(await screen.findByTestId('tree-file-doc-a')).toBeTruthy();
 
-  // The citation's own path is 'README.md' — the path BOTH roots hold. An
-  // implementation keyed on the path string marks both rows, and it is the
-  // doc-a assertion below that catches it; a citation with a non-matching path
-  // would only prove that a wrong lookup finds nothing.
-  await rerender({ selected: citationFor('doc-b', 'README.md') });
-  // Enumerated, not two spot checks: `aria-selected` used to be asserted here
-  // as the second statement that could contradict the first, and P5 removed it
-  // with the `treeitem` role it belonged to. What replaces it is the closed
-  // list — exactly one row in the whole card is current, and it is doc-b.
+  // Both roots hold 'README.md'; the pair says which one was opened. A key on
+  // the path string alone would mark both rows, and the doc-a assertion below
+  // is what catches it — a path that matches nothing would only prove that a
+  // wrong lookup finds nothing.
+  await rerender({ selected: { rootId: 2, relativePath: 'README.md' } });
   expect(currentRows()).toEqual(['tree-file-doc-b']);
   expect(screen.getByTestId('tree-file-doc-a').getAttribute('aria-current')).toBeNull();
 });
 
 // The decision, and its reason. `toggled` wins over `openByDefault` so that
 // folders do not snap shut on every question — that is Ruling M's point and it
-// stands. But "a new citation is now selected" is a different event from "an
-// answer arrived": it is the person's own click on a citation, and its whole
-// purpose is to be shown where the passage came from. So a NEW selection clears
-// the hand-toggle on the folders along its own path, and only on those.
+// stands. But "a file was opened" is a different event from "an answer
+// arrived": it is the person's own click, and its whole purpose is to be shown
+// in the tree. So a NEW selection clears the hand-toggle on the folders along
+// its own path, and only on those.
 //
-// What is deliberately NOT undone: a person who shuts the folder of the passage
-// already on screen keeps it shut. They acted on a row they could see, no new
-// event has happened since, and re-opening it under their hands would be the
+// What is deliberately NOT undone: a person who shuts the folder of the file
+// already open keeps it shut. They acted on a row they could see, no new event
+// has happened since, and re-opening it under their hands would be the
 // snapping-shut defect with the sign flipped.
-test('a folder the person shut opens again when the next citation lands inside it', async () => {
+test('a folder the person shut opens again when the next file lands inside it', async () => {
   mockTree(oneRootTwoFolders);
-  const { rerender } = render(Tree, { selected: citationFor('doc-1') }); // notes/ opens
+  const { rerender } = mount(SELECTED); // notes/ opens
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
   expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
 
-  await rerender({ selected: citationFor('doc-2', 'notes/b.md') }); // a new citation, same folder
+  await rerender({ selected: SELECTED_B }); // a new citation, same folder
   await tick();
 
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
@@ -315,7 +320,7 @@ test('a folder the person shut opens again when the next citation lands inside i
 // does not touch them, which is what the second half of this test measures.
 test('the tree refreshes when the launcher comes back, keeping the folders the person opened', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: null });
+  mount(null);
 
   await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
   expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
@@ -338,7 +343,7 @@ test('the tree refreshes when the launcher comes back, keeping the folders the p
 // that has nothing to show; a card that has something keeps showing it.
 test('a refresh that fails leaves the listing that worked on screen', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: null });
+  mount(null);
   expect(await screen.findByTestId('tree-folder-notes')).toBeTruthy();
 
   mockTreeFailure();
@@ -356,7 +361,7 @@ test('a refresh that fails leaves the listing that worked on screen', async () =
 // class of defect as removing a listing for a message.
 test('a refresh that succeeds after a failed mount replaces the message with the listing', async () => {
   mockTreeFailure();
-  render(Tree, { selected: null });
+  mount(null);
   expect(await screen.findByTestId('tree-failed')).toBeTruthy();
 
   mockTree(oneRootTwoFolders);
@@ -372,7 +377,7 @@ test('a refresh that succeeds after a failed mount replaces the message with the
 // above only ever happens once.
 test('a launcher focused while the first listing is still on the wire does not ask twice', async () => {
   const pending = mockTreePending();
-  render(Tree, { selected: null });
+  mount(null);
 
   await fireEvent.focus(window);
   expect(treeCalls()).toHaveLength(1);
@@ -392,12 +397,12 @@ test('a launcher focused while the first listing is still on the wire does not a
 // `selected` changes twice per question and its own rule still holds.
 test('list_tree does not run again when the selection changes', async () => {
   mockTree(twoRootsSameRelativePath);
-  const { rerender } = render(Tree, { selected: null });
+  const { rerender } = mount(null);
   expect(await screen.findByTestId('tree-file-doc-a')).toBeTruthy();
   expect(treeCalls()).toHaveLength(1);
   expect(invoke).toHaveBeenCalledWith('list_tree');
 
-  await rerender({ selected: citationFor('doc-b') });
+  await rerender({ selected: { rootId: 2, relativePath: 'README.md' } });
   await tick();
   expect(treeCalls()).toHaveLength(1);
 });
@@ -405,50 +410,39 @@ test('list_tree does not run again when the selection changes', async () => {
 // Ruling J, the positive control. Without it the negative test below is
 // satisfied by zero, and it is THIS one that must redden when the selection
 // logic breaks.
-//
-// M1 (review round 1): this test used to be called "marks exactly one row
-// current", which reads as a general contract and is not one — `toHaveLength(1)`
-// is true here only because `oneRoot` holds ONE root with ONE file, so one is
-// the only count the fixture can produce. A document named from two roots has
-// two rows and both are current; that is the real contract, pinned by
-// `a document present under two roots marks every row that shows it` below.
-// The name now says which claim this test actually makes.
-test('a citation whose document IS in the listing marks its only copy current', async () => {
+test('a selection that names a row marks it current', async () => {
   mockTree(oneRoot);
-  render(Tree, { selected: citationFor('doc-1') });
+  mount({ rootId: 3, relativePath: 'a.md' });
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
-  // The role assertion this test used to carry went with the role (P5): the
-  // rows are not `treeitem`s any more, and `only the controls with a real
-  // action are controls` is where that is now stated, positively and for the
-  // whole card. What survives here is the claim this test is named for.
   expect(currentRows()).toEqual(['tree-file-doc-1']);
 });
 
-// M1 (review round 1): `tree-file-{documentId}` is NOT unique. One document can
-// be named from two watched roots (`mnema-index/src/write.rs:700-722`), so the
-// same id renders twice and `getByTestId` throws "Found multiple elements" —
-// the id Task 8b selects on. Marking both is the right behaviour: it is one
-// document, cited once, present twice on disk. Nothing pinned it.
-test('a document present under two roots marks every row that shows it', async () => {
+// §3's review focus: one document can be named from two watched roots
+// (`mnema-index/src/write.rs:700-722`), so `tree-file-{documentId}` renders
+// twice. The selection is the (root, path) pair, so exactly ONE of the two
+// rows is marked — the one that was opened, not every row showing the id.
+test('a document present under two roots marks only the row that was opened', async () => {
   mockTree(oneDocumentTwoRoots);
-  render(Tree, { selected: citationFor('doc-shared', 'notes/shared.md') });
+  const { rerender } = mount(null);
+  // Both folders open, or only one of the two rows exists: the selection can
+  // open only the root it names.
+  await fireEvent.click((await screen.findAllByTestId('tree-folder-notes'))[0]);
+  await rerender({ selected: { rootId: 2, relativePath: 'notes/shared.md' } });
 
   const rows = await screen.findAllByTestId('tree-file-doc-shared');
   expect(rows).toHaveLength(2); // one row per path, under alpha and under beta
-  expect(rows.map((r) => r.getAttribute('aria-current'))).toEqual(['true', 'true']);
+  expect(rows.filter((r) => r.getAttribute('aria-current') === 'true')).toHaveLength(1);
+  expect(currentRows()).toEqual(['tree-file-doc-shared']);
 
   // Both directions: the neighbouring document in the same open folder is not
-  // swept up, so "every row" means every row OF THAT DOCUMENT, not every row.
-  // The enumeration says both halves at once — two current rows, both the
-  // shared document's.
-  expect(currentRows()).toEqual(['tree-file-doc-shared', 'tree-file-doc-shared']);
+  // swept up either.
   expect(screen.getByTestId('tree-file-doc-other').getAttribute('aria-current')).toBeNull();
 });
 
-test('a citation whose document is no longer in the listing selects nothing and says nothing false', async () => {
+test('a selection whose pair is not in the listing marks nothing and says nothing false', async () => {
   mockTree(oneRoot);
-  render(Tree, { selected: citationFor('doc-gone') });
+  mount({ rootId: 3, relativePath: 'gone.md' });
 
   // The row that IS in the listing is on screen either way — the difference
   // between this test and its control is `aria-current`, not an empty tree.
@@ -466,24 +460,21 @@ test('a citation whose document is no longer in the listing selects nothing and 
 // tab happened to be showing and no folder had been touched — the two states
 // where the card was already right.
 
-// The other side of the same rule, and the one the comment in `Tree.svelte`
-// claimed before anything held it (controller, after the review): the stamp is
-// `[selectedId, folders on its way]`, so a SECOND CITATION OF THE SAME DOCUMENT
-// does not move it — the effect does not re-fire and the hand-shut folder stays
-// shut. That is not a gap in the invariant: the mark says WHICH DOCUMENT the
-// source card is showing, and the document did not change. The person shut that
-// folder while this same document was selected, and nothing has happened since
-// that they did not do themselves.
-test('a second citation of the same document leaves the folder the person shut alone', async () => {
+// The other side of the same rule: the stamp is the selection key plus the
+// folders on its way, so the SAME pair selected again does not move it — the
+// effect does not re-fire and the hand-shut folder stays shut. That is not a
+// gap in the invariant: the mark names the file the pane is showing, and the
+// file did not change.
+test('the same selection again leaves the folder the person shut alone', async () => {
   mockTree(oneRootTwoFolders);
-  const { rerender } = render(Tree, { selected: citationFor('doc-1') }); // notes/ opens
+  const { rerender } = mount(SELECTED); // notes/ opens
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
   expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
 
-  // A different passage of the SAME document — what clicking [7] after [3] does.
-  await rerender({ selected: { ...citationFor('doc-1'), chunkId: 43, ord: 1 } });
+  // The same file, handed over again as a fresh object.
+  await rerender({ selected: { ...SELECTED } });
   await tick();
 
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
@@ -496,14 +487,14 @@ test('a second citation of the same document leaves the folder the person shut a
 // person opened somewhere else is none of the new selection's business. Without
 // this, "clear all the toggles on a new selection" passes the test above and
 // takes Ruling M's defect back.
-test('a new citation leaves the folders the person opened elsewhere exactly as they were', async () => {
+test('a new selection leaves the folders the person opened elsewhere exactly as they were', async () => {
   mockTree(oneRootTwoFolders);
-  const { rerender } = render(Tree, { selected: null });
+  const { rerender } = mount(null);
 
   await fireEvent.click(await screen.findByTestId('tree-folder-archive')); // opened by hand
   expect(screen.getByTestId('tree-file-doc-3')).toBeTruthy();
 
-  await rerender({ selected: citationFor('doc-1') }); // lands in notes/, not in archive/
+  await rerender({ selected: { ...SELECTED } }); // lands in notes/, not in archive/
   await tick();
 
   expect(screen.getByTestId('tree-folder-archive').getAttribute('aria-expanded')).toBe('true');
@@ -511,42 +502,11 @@ test('a new citation leaves the folders the person opened elsewhere exactly as t
   expect(currentRows()).toEqual(['tree-file-doc-1']);
 });
 
-// 🔴 Review Minor 4: the one case where a hand-shut folder DOES re-open on an
-// event the person did not cause. The stamp holds the folders on the selected
-// document's way, so a refresh that reshapes that chain — the file moved — is a
-// change of stamp and the effect re-fires. It is defensible: the chain really
-// did change, so "which row it came from" changed with it, and the effect can
-// only ever write `false → true`, so no refresh can snap a folder shut. It is
-// pinned here because the rule's comment used to promise more than this, and
-// because nothing else in the suite reaches the state.
-//
-// Passes on `9095fd7`: this is what the code already did, written down.
-test('a refresh that moves the selected file re-opens the folder the person shut', async () => {
-  mockTree(oneRootTwoFolders);
-  render(Tree, { selected: citationFor('doc-1') }); // notes/a.md — notes/ opens
-
-  expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
-  await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
-  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('false');
-
-  const [root] = oneRootTwoFolders.roots;
-  mockTree({ // the same document, one folder deeper
-    roots: [{ ...root, files: [{ relativePath: 'notes/deep/a.md', documentId: 'doc-1' }] }],
-  });
-  await fireEvent.focus(window);
-
-  expect(await screen.findByTestId('tree-folder-notes/deep')).toBeTruthy();
-  expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
-  expect(currentRows()).toEqual(['tree-file-doc-1']);
-});
-
-// The control, and the half that makes the case above narrow rather than
-// general: a refresh returning the SAME listing leaves the shut folder shut,
-// because the stamp did not move. Without this, "a refresh re-opens folders"
-// would read as the rule instead of the exception.
+// The control for the rule above: a refresh returning the SAME listing leaves
+// the shut folder shut, because the stamp did not move.
 test('a refresh that changes nothing leaves the folder the person shut alone', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: citationFor('doc-1') });
+  mount(SELECTED);
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   await fireEvent.click(screen.getByTestId('tree-folder-notes')); // shut by hand
@@ -565,16 +525,16 @@ test('a refresh that changes nothing leaves the folder the person shut alone', a
 // reached the long way round. The fix sets a shut folder open instead of
 // forgetting what the person did, and this test is what says so. It passes on
 // `14ab473` too: it is the property that had to survive the fix, not a defect.
-test('a folder the person opened stays open after the citation inside it goes away', async () => {
+test('a folder the person opened stays open after the selection goes away', async () => {
   mockTree(oneRootTwoFolders);
-  const { rerender } = render(Tree, { selected: null });
+  const { rerender } = mount(null);
 
   await fireEvent.click(await screen.findByTestId('tree-folder-notes')); // opened by hand
-  await rerender({ selected: citationFor('doc-1') }); // a citation lands inside it
+  await rerender({ selected: { ...SELECTED } }); // a file there is opened
   await tick();
   expect(currentRows()).toEqual(['tree-file-doc-1']);
 
-  await rerender({ selected: null }); // the answer goes away
+  await rerender({ selected: null }); // the pane closes or moves to a file elsewhere
   await tick();
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
   expect(screen.getByTestId('tree-file-doc-1')).toBeTruthy();
@@ -585,7 +545,7 @@ test('a folder the person opened stays open after the citation inside it goes aw
 // different. Each must show its own message and not the other's.
 test('an empty but successful listing says the index is empty, not that the listing failed', async () => {
   mockTree(emptyListing);
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-empty')).toBeTruthy();
   expect(screen.getByTestId('tree-empty').textContent).toBe('Nothing is indexed yet.');
@@ -594,7 +554,7 @@ test('an empty but successful listing says the index is empty, not that the list
 
 test('a failed list_tree leaves a visible message, never an empty card that looks like an empty index', async () => {
   mockTreeFailure();
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-failed')).toBeTruthy();
   expect(screen.getByTestId('tree-failed').textContent).toBe('The tree could not be loaded.');
@@ -607,7 +567,7 @@ test('a failed list_tree leaves a visible message, never an empty card that look
 test('the messages follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   mockTree(emptyListing);
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-empty')).toBeTruthy();
   expect(screen.getByTestId('tree-empty').textContent).toBe('Nothing is indexed yet.');
@@ -624,7 +584,7 @@ test('the messages follow a live language switch', async () => {
 test('the failure message follows a live language switch too', async () => {
   setLocale('en'); // seed, do not inherit
   mockTreeFailure();
-  render(Tree, { selected: null });
+  mount(null);
 
   expect((await screen.findByTestId('tree-failed')).textContent).toBe('The tree could not be loaded.');
 
@@ -639,7 +599,7 @@ test('the failure message follows a live language switch too', async () => {
 test('the tree says the index is empty only when it has no roots', async () => {
   setLocale('en'); // seed, do not inherit
   mockTree(emptyListing);
-  render(Tree, { selected: null });
+  mount(null);
 
   expect(await screen.findByTestId('tree-empty')).toBeTruthy();
   expect(screen.getByTestId('tree-empty').textContent).toBe('Nothing is indexed yet.');
@@ -651,7 +611,7 @@ test('the tree says the index is empty only when it has no roots', async () => {
 // opposite and stay green — the shape already caught once on `aria-selected`.
 test('aria-expanded on a folder says what the folder is actually doing', async () => {
   mockTree(oneRootTwoFolders);
-  render(Tree, { selected: citationFor('doc-1') }); // notes/a.md — opens notes/
+  mount(SELECTED); // notes/a.md — opens notes/
 
   // The auto-opened folder and its shut sibling, both directions, and each
   // cross-checked against whether the children are really there.

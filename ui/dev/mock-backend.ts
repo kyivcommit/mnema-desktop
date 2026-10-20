@@ -14,7 +14,7 @@
 // live state and `mnemaMock.emit(event, payload)` fires a backend event.
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
-import { excerptSpanA, generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
+import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, AskAnswer, Catalogue, RoleCatalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
   ScanState, ThemeChoice, TreeListing,
@@ -318,7 +318,16 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
     continue_history: (a) => s.history.some((h) => h.id === a.id),
     delete_history_entry: (a) => { s.history = s.history.filter((h) => h.id !== a.id); },
-    source_around: () => excerptSpanA,
+    open_document: () => ({
+      kind: 'file',
+      blocks: [
+        { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
+        { blockId: 2, kind: 'paragraph', text: 'The whole file, rendered by the pane.', pageNo: 1, sectionTitle: null },
+      ],
+      focusBlockIds: [],
+      spans: [],
+      freshness: { kind: 'current' },
+    }),
 
     'plugin:dialog|open': () => '/Users/demo/Documents/Projects',
   };

@@ -204,18 +204,12 @@ export const removeMask = (pattern: string) => invoke<boolean>('remove_mask', { 
 export type Freshness =
   | { kind: 'current' } | { kind: 'reindexed' } | { kind: 'fileChanged' }
   | { kind: 'fileMissing' } | { kind: 'noPath' };
-export type SourceBlock = { blockId: number; kind: string; text: string; pageNo: number; readingOrder: number };
-export type WireSegment = { blockId: number; start: number; end: number; blockStart: number };
-export type SourceAround =
-  | { kind: 'excerpt'; blocks: SourceBlock[]; spans: WireSegment[]; documentId: string;
-      sectionTitle: string | null; hasMoreBefore: boolean; hasMoreAfter: boolean; freshness: Freshness }
-  | { kind: 'gone'; reason: { kind: 'noSuchChunk' } | { kind: 'idReused' } };
 
 // The whole of one document, from `open_document`. `blocks` is the file itself,
 // not a window around a citation: the pane scrolls it from beginning to end.
 // `kind` is `block.type` verbatim, so the caller decides what it draws as a
-// heading. `spans` measure into `blockId` in Unicode scalar values, exactly as
-// `WireSegment` documents — `length` is the slice, `primary` the clicked one.
+// heading. `spans` measure into `blockId` in Unicode scalar values — `length`
+// is the slice, `primary` the clicked one.
 export type DocumentLocation = { documentId: string; rootId: number | null; relativePath: string | null };
 export type DocumentFocus = { chunkId: number; ord: number; text: string };
 export type PaneSpan = { blockId: number; blockStart: number; length: number; primary: boolean };
@@ -252,16 +246,10 @@ export const addWatchedFolder = (path: string) => invoke<number>('add_watched_fo
 // the compare would check nothing.
 export const removeWatchedFolder = (rootId: number, path: string) =>
   invoke<number>('remove_watched_folder', { rootId, path });
-export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
-  invoke<SourceAround>('source_around', {
-    chunkId: c.chunkId, passageText: c.text,
-    citedDocumentId: c.documentId, citedOrd: c.ord, citedRootId: c.rootId,
-    citedRelativePath: c.relativePath, radius,
-  });
 // A citation opens the whole file with its passage highlighted; the tree opens
 // the same file with no focus. A partial `focus` is ignored by the backend —
 // `chunk.id` is reused, so an id is only meaningful with the full `ord` + `text`
-// pair `source_around` pins.
+// pair the backend's focus pin compares.
 export const openDocument = (location: DocumentLocation, focus: DocumentFocus | null = null) =>
   invoke<DocumentView>('open_document', {
     documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath,

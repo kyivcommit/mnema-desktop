@@ -115,15 +115,27 @@ test('the files toggle hides the right area without unmounting the tree', async 
 });
 
 test('the layout survives a remount', async () => {
-  const first = render(Shell);
+  const first = render(Shell, { fileOpen: true });
   await fireEvent.click(toggle('left'));
   await fireEvent.click(toggle('tree'));
   expect(tracks()).toContain('grid-template-columns: 0px');
   first.unmount();
 
-  render(Shell);
+  render(Shell, { fileOpen: true });
   expect(tracks()).toContain('grid-template-columns: 0px');
   expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
+});
+
+// Carried finding from Task 4: with no file open, hiding the tree left a 480 px
+// panel holding a single button. The tree is the area's content then, so it
+// stays; its toggle has nothing to hand the width to and says so.
+test('with no file open the tree stays on screen and its toggle is inert', async () => {
+  render(Shell);
+  expect(toggle('tree').getAttribute('aria-pressed')).toBe('true');
+  expect(toggle('tree').hasAttribute('disabled')).toBe(true);
+  await fireEvent.click(toggle('tree'));
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(false);
+  expect(rightTracks()).toContain(`grid-template-columns: ${DEFAULTS.W}px`);
 });
 
 test('at 900px the right area is an overlay of the person\'s width; Esc and a click beside it close it', async () => {

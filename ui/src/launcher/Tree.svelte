@@ -5,6 +5,13 @@
     | { kind: 'folder'; name: string; path: string; children: TreeNode[] }
     | { kind: 'file'; name: string; path: string; documentId: string };
 
+  // The selection is the (root, path) PAIR, not `documentId`: one document can
+  // sit at several paths (`schema.sql`'s `path` table), and a key on the id
+  // would mark every row that shows it instead of the one that was opened.
+  export type TreeSelection = { rootId: number; relativePath: string };
+  // What a click carries: the selection plus the id the pane is opened by.
+  export type TreePick = TreeSelection & { documentId: string };
+
   // Decision 6: the folder tree is a split of `relativePath` on `/`, and
   // nothing else — the backend hands over flat paths per root. Pure and
   // exported so the depth cases (no slash at all, two levels deep, both mixed
@@ -39,12 +46,15 @@
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { listTree } from '../lib/ipc';
-  import type { AskCitation, Hit, TreeListing } from '../lib/ipc';
+  import type { TreeListing } from '../lib/ipc';
 
-  // Ruling O: Task 8b holds the selection as exactly this union, so pinning
-  // the narrower type here would force a signature change one task later.
-  // Both members carry `documentId`, which is all this card reads.
-  let { selected }: { selected: AskCitation | Hit | null } = $props();
+  // Ruling O, restated for the pair: the selection is the file's place on
+  // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
+  // as well, which is what the backend is asked to open.
+  let { selected, onPick }: {
+    selected: TreeSelection | null;
+    onPick: (pick: TreePick) => void;
+  } = $props();
 
   let listing = $state<TreeListing | null>(null);
   let failed = $state(false);
@@ -123,9 +133,11 @@
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
 
-  // Ruling P: selection is by documentId, never by relativePath — two roots
-  // can hold the same relative path under different documents.
-  const selectedId = $derived(selected?.documentId ?? null);
+  // Ruling P, reversed on purpose: the key is the (root, path) pair, never
+  // `documentId` — two roots can hold the same relative path under different
+  // documents, and one document can be named from several paths. Only the row
+  // that was opened is marked.
+  const selectedKey = $derived(selected === null ? null : key(selected.rootId, selected.relativePath));
 
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
@@ -142,15 +154,15 @@
   }
 
   // Folders start expanded along the path to the selected file and collapsed
-  // everywhere else. Derived from `selected`, so a new citation opens its
+  // everywhere else. Derived from `selected`, so a new selection opens its
   // folder without a refetch; `toggled` still wins, so an opened folder the
   // person is reading does not shut itself on the next answer.
   const openByDefault = $derived.by(() => {
     const open = new Set<string>();
-    if (selectedId === null || listing === null) return open;
+    if (selectedKey === null || listing === null) return open;
     for (const root of listing.roots) {
       for (const file of root.files) {
-        if (file.documentId !== selectedId) continue;
+        if (key(root.rootId, file.relativePath) !== selectedKey) continue;
         const parts = file.relativePath.split('/');
         parts.pop();
         let path = '';
@@ -211,7 +223,7 @@
   // effect depends on the selection and the listing, never on what it sets.
   let lastSelection = '';
   $effect(() => {
-    const id = selectedId;
+    const id = selectedKey;
     const l = listing;
     const onTheWay = openByDefault;
     const stamp = JSON.stringify([id, [...onTheWay].sort()]);
@@ -260,27 +272,17 @@
             {@render branch(node.children, rootId)}
           {/if}
         {:else}
-          <!-- 🔴 Owner review on PR #24, P5. This row was a `<button>` with no
-               `onclick` and a `role="treeitem"` with no enclosing tree, group
-               or keyboard model: click, Enter and Space all did nothing, and a
-               keyboard reached it only to find that out. It is a row, so it is
-               rendered as one.
-
-               The other option — wire the promised action — is not reachable
-               from this card: opening a document needs a command that takes a
-               `documentId` and the bridge has none (`lib/ipc.ts:81-107`;
-               `source_around` needs a chunk, which only a citation carries).
-               A row that says "activate me" and cannot is the finding itself.
-
-               `aria-current` stays: it is a global attribute, valid on any
-               element, and it is what says which row the source card is
-               showing. `aria-selected` goes with the role — it is defined only
-               inside a listbox/grid/tree, and on a bare row it states a
-               membership that no longer exists. -->
-          <span
+          <!-- The row is a real action now: clicking it opens the file in the
+               pane at its start (spec §2, §3). The selection — and therefore
+               `aria-current` — is the (root, path) pair, so two rows naming the
+               same document are not both marked; only the one that was opened
+               is. -->
+          <button
+            type="button"
             data-testid={`tree-file-${node.documentId}`}
-            aria-current={node.documentId === selectedId ? 'true' : undefined}
-            >{node.name}</span>
+            aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
+            onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}
+            >{node.name}</button>
         {/if}
       </li>
     {/each}

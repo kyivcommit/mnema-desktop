@@ -627,53 +627,6 @@ fn write_one_document(db: &mnema_index::Db, id: &str, text: &str) -> i64 {
     rebuild_one_chunk(db, id, text)
 }
 
-/// Like [`rebuild_one_chunk`], but at a caller-chosen `ord` and
-/// `reading_order`, on a `page` the caller already opened.
-///
-/// `rebuild_one_chunk` hardcodes `ord = 0`, which cannot build Task 2's
-/// intra-document duplicate: two occurrences of identical text need two
-/// different `ord`s (`UNIQUE(document_id, ord)`, `schema.sql:168`), and two
-/// different blocks to sit in (`ix_block_page` needs distinct
-/// `reading_order`s on one page).
-fn insert_chunk_at(
-    db: &mnema_index::Db,
-    doc: &str,
-    page: i64,
-    ord: i64,
-    reading_order: i64,
-    text: &str,
-) -> i64 {
-    let block = db
-        .insert_block(
-            page,
-            &Block {
-                block_type: BlockType::Paragraph,
-                reading_order,
-                language: None,
-                text: text.to_string(),
-                line_start: None,
-                line_end: None,
-            },
-        )
-        .unwrap();
-    db.insert_chunk(
-        doc,
-        ord,
-        text,
-        &Locator {
-            spans: vec![Segment {
-                block_id: block,
-                start: 0,
-                end: text.chars().count() as u32,
-                block_start: 0,
-            }],
-            coordinate: Coordinate::None,
-        },
-        SourceKind::Document,
-    )
-    .unwrap()
-}
-
 /// Round-2 review, F1: nothing pinned that `bridge::search` itself wraps
 /// its own work in `Db::read_snapshot`, only that the mechanism works
 /// (`crates/mnema-search/tests/snapshot_boundary.rs`) — removing that call
@@ -4992,6 +4945,67 @@ fn a_wrong_text_yields_no_focus() {
     assert_eq!(v["spans"], json!([]), "{v}");
 }
 
+/// `chunk.id` is reused across documents (`schema.sql:149`, no `AUTOINCREMENT`),
+/// so a *different* document's chunk can carry the same `ord` and byte-identical
+/// text. The `document_id` half of the focus pin is what refuses it; the text
+/// and `ord` halves agree here on purpose, so removing only the document
+/// comparison highlights another file's paragraph inside the right one.
+#[test]
+fn a_chunk_from_another_document_yields_no_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "d".repeat(64);
+    let other = "e".repeat(64);
+    let (chunk, passage) = state
+        .with_index(|db| {
+            write_paragraph_document(
+                db,
+                &doc,
+                &PARAGRAPHS,
+                1,
+                0,
+                PARAGRAPHS[1].chars().count() as u32,
+            );
+            // A second document with the same paragraphs: same `ord`, same text
+            // for its chunk, and a different id — the reused-id state. Its
+            // chunk is the one the call below names.
+            let other_chunk = write_paragraph_document(
+                db,
+                &other,
+                &PARAGRAPHS,
+                1,
+                0,
+                PARAGRAPHS[1].chars().count() as u32,
+            );
+            Ok::<_, mnema_index::Error>(other_chunk)
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({
+            "documentId": doc,
+            "chunkId": chunk,
+            "citedOrd": 0,
+            "citedText": passage,
+        }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("file"), "{v}");
+    assert_eq!(
+        v["focusBlockIds"],
+        json!([]),
+        "the chunk belongs to another document; its passage must not highlight this one: {v}"
+    );
+    assert_eq!(v["spans"], json!([]), "{v}");
+}
+
 /// A click while a rebuild is rewriting the document. `clear_document_content`
 /// deletes the pages and then writes `pending` in the same transaction
 /// (`write.rs:1220-1221`), and ingest writes the file back a slice at a time,
@@ -5138,562 +5152,11 @@ fn seed_indexed_file(db: &mnema_index::Db, root: i64, id: &str, relative_path: &
     .expect("seed: insert_path");
 }
 
-/// Hazard (1) of PR 5's "what disappears" pass, and what makes
-/// `source_around` different from every read before it: `ask` and
-/// `source_around` are **two IPC calls seconds apart**. The client holds a
-/// `chunkId` from the first and sends it to the second, and no snapshot can
-/// span them — they are two transactions by construction. `chunk.id` is
-/// `INTEGER PRIMARY KEY` *without* `AUTOINCREMENT` (`schema.sql:149`), so
-/// SQLite derives the next id as `max(id) + 1` and hands the ids of deleted
-/// rows out again; a rebuild of the most recently indexed document deletes
-/// exactly the top of that space. Answering with the new chunk's
-/// neighbourhood under the citation the user clicked is precisely "answer
-/// with text the file no longer contains", so the command refuses instead.
-#[test]
-fn source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text() {
-    const ORIGINAL: &str = "Ціна оцифрування одного аркуша становить дві гривні.";
-    const REBUILT: &str = "Ставка залишається незмінною протягом усього строку.";
+// ------------------------------------------------- open_document, the whole file
 
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "7".repeat(64);
-    let (before, after) = state
-        .with_index(|db| {
-            let before = write_one_document(db, &doc, ORIGINAL);
-            db.clear_document_content(&doc)?;
-            let after = rebuild_one_chunk(db, &doc, REBUILT);
-            Ok::<_, mnema_index::Error>((before, after))
-        })
-        .unwrap();
-
-    // The fixture is the hazard only if SQLite really handed the id back.
-    // Asserted loudly rather than skipped with a `return`: a quiet skip
-    // leaves the test satisfied by a state it never reached. And on the
-    // **chunk** rowid specifically — `block.id` and `chunk.id` are separate
-    // rowid spaces, both reused, and `rebuild_one_chunk` mints one of each,
-    // so a fixture that compared block ids would pass while proving nothing.
-    assert_eq!(
-        after, before,
-        "SQLite did not hand the chunk rowid back, so this fixture never reached the id-reuse \
-         hazard it is named for"
-    );
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": before,
-            "passageText": ORIGINAL,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "the id now carries different text, and the command answered with something other than \
-         a refusal: {v}"
-    );
-    assert_eq!(
-        v["reason"]["kind"],
-        json!("idReused"),
-        "a chunk does carry that id — it is simply not this passage — so the refusal must say \
-         which of the two causes it was: {v}"
-    );
-    // Both directions. A `Gone` that still shipped the new chunk's
-    // neighbourhood would satisfy a `kind`-only assertion, and the whole
-    // point of the refusal is that no text comes back.
-    assert!(
-        v.get("blocks").is_none(),
-        "a refusal must carry no text at all; this one shipped the other passage's blocks: {v}"
-    );
-}
-
-/// Task 2's own reproduction of owner-Codex **P1** on PR #22, which the test
-/// above cannot reach: that fixture reuses a chunk id inside *one* document,
-/// so the TEXT pin alone already refuses it. `chunk.id` is reused across
-/// DOCUMENTS just as readily (`schema.sql:149`, no `AUTOINCREMENT`), and two
-/// documents whose middle paragraph happens to be byte-identical make the
-/// text pin powerless: the reused id's text still matches, so it would let
-/// the wrong document's neighbourhood through under the user's citation.
-/// `documentId`/`ord` (Task 1) are what the identity pin now compares beside
-/// the text.
-#[test]
-fn source_around_refuses_a_reused_id_whose_text_is_byte_identical() {
-    const SHARED: &str = "The identical middle paragraph.";
-    const NEIGHBOUR_B_BEFORE: &str = "Before B, only in doc_b.";
-    const NEIGHBOUR_B_AFTER: &str = "After B, only in doc_b.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc_a = "a".repeat(64);
-    let doc_b = "b".repeat(64);
-    let (cited_chunk, cited_ord, reused) = state
-        .with_index(|db| {
-            let before = write_one_document(db, &doc_a, SHARED);
-            let ord = db.citation(before)?.unwrap().ord;
-            db.delete_document(&doc_a)?;
-
-            // doc_b's SHARED paragraph is inserted FIRST, so it — not one of
-            // its neighbours — is the chunk that receives the id doc_a's
-            // deletion just freed: `chunk.id` is `max(rowid) + 1`
-            // (`schema.sql:149`), so whichever chunk is written next gets it,
-            // regardless of where it sits in reading order. The neighbours
-            // exist so a leaked answer has something of doc_b's own to be
-            // caught carrying.
-            db.insert_document(&doc_b, "text/plain", 1, SourceKind::Document)?;
-            let page = db.insert_page(&doc_b, 1, "native:txt", None)?;
-            // `ord = 0` here, matching `cited_ord` (doc_a's SHARED chunk is its
-            // only one, so `write_one_document` gives it ord 0 too): the two
-            // documents now agree on BOTH the text and the ord, so only
-            // `document_id` tells them apart. Reused id + matching text +
-            // matching ord used to make this fixture prove nothing about the
-            // `document_id` half of the pin — dropping that half entirely left
-            // 71 tests green, because every other fixture in the file also
-            // varies `ord` alongside `document_id`.
-            let reused = insert_chunk_at(db, &doc_b, page, 0, 2, SHARED);
-            insert_chunk_at(db, &doc_b, page, 1, 1, NEIGHBOUR_B_BEFORE);
-            insert_chunk_at(db, &doc_b, page, 2, 3, NEIGHBOUR_B_AFTER);
-            db.set_document_status(&doc_b, mnema_index::DocumentStatus::Indexed)?;
-
-            Ok::<_, mnema_index::Error>((before, ord, reused))
-        })
-        .unwrap();
-
-    // The fixture is the hazard only if the id really came back — asserted
-    // loudly, never skipped (the idiom at `commands.rs:2905-2915`).
-    assert_eq!(
-        reused, cited_chunk,
-        "SQLite did not reuse the chunk id, so this fixture proves nothing"
-    );
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": cited_chunk,
-            "passageText": SHARED,
-            "citedDocumentId": doc_a,
-            "citedOrd": cited_ord,
-            "citedRootId": null,
-            "citedRelativePath": null,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "the text is byte-identical, but the reused id now belongs to another document — only \
-         the identity pin can refuse this, the text pin cannot: {v}"
-    );
-    assert_eq!(v["reason"]["kind"], json!("idReused"), "{v}");
-    assert!(
-        v.get("blocks").is_none(),
-        "a Gone answer must carry no text at all: {v}"
-    );
-    let rendered = v.to_string();
-    assert!(
-        !rendered.contains(NEIGHBOUR_B_BEFORE) && !rendered.contains(NEIGHBOUR_B_AFTER),
-        "the other document's paragraphs must not appear anywhere in the answer: {rendered}"
-    );
-}
-
-/// Step 5's second red: `documentId` alone cannot see a duplicate INSIDE one
-/// document. The same paragraph twice at different `ord`s reuses neither
-/// `chunk.id` (`schema.sql:149`) nor `document_id` when the id is handed back
-/// to the OTHER occurrence — only `ord` (`UNIQUE(document_id, ord)`,
-/// `schema.sql:168`) tells the two apart, and the text is identical too, so
-/// the text pin cannot catch this one either.
-#[test]
-fn source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord() {
-    const SAME: &str = "Boilerplate paragraph repeated twice.";
-    const THROWAWAY: &str = "A throwaway paragraph, wasting one id.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "d".repeat(64);
-    let (cited_chunk, after) = state
-        .with_index(|db| {
-            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
-            let page = db.insert_page(&doc, 1, "native:txt", None)?;
-            insert_chunk_at(db, &doc, page, 0, 1, SAME);
-            // The SECOND occurrence — `ord = 1` — is the one the client cites.
-            let second = insert_chunk_at(db, &doc, page, 1, 2, SAME);
-            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
-
-            // A rebuild: everything under `doc` is cleared and rewritten. One
-            // throwaway chunk consumes the id the FIRST occurrence held, so
-            // the next chunk written — at `ord = 0`, the first occurrence's
-            // own ord — is the one that lands on the SECOND occurrence's old
-            // (cited) id.
-            db.clear_document_content(&doc)?;
-            let page2 = db.insert_page(&doc, 1, "native:txt", None)?;
-            insert_chunk_at(db, &doc, page2, 9, 1, THROWAWAY);
-            let after = insert_chunk_at(db, &doc, page2, 0, 2, SAME);
-            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
-
-            Ok::<_, mnema_index::Error>((second, after))
-        })
-        .unwrap();
-
-    // The fixture is the hazard only if the rebuild really landed the cited
-    // id on the ord=0 occurrence — asserted loudly, never assumed.
-    assert_eq!(
-        after, cited_chunk,
-        "the rebuild did not hand the cited id to the ord=0 occurrence, so this fixture does \
-         not reach the case it is named for"
-    );
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": cited_chunk,
-            "passageText": SAME,
-            "citedDocumentId": doc,
-            "citedOrd": 1,
-            "citedRootId": null,
-            "citedRelativePath": null,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "the document and the text both match, but the ord does not — only ord tells this \
-         document's two identical paragraphs apart: {v}"
-    );
-    assert_eq!(v["reason"]["kind"], json!("idReused"), "{v}");
-    assert!(v.get("blocks").is_none(), "{v}");
-}
-
-/// The pin is **exact** equality, and this is the test that says so.
-///
-/// The plan forbids `contains`, trimming and normalising alike, but only the
-/// empty-`passageText` case is red against `contains` — a pin rewritten as
-/// `a.text.trim() != passage_text.trim()` passed every other test in this
-/// file, which the controller's mutation run caught. A rebuild that adds or
-/// drops surrounding whitespace produces exactly that state: the chunk at this
-/// id is a *different* chunk, and a trimming comparison calls it the same one
-/// and then hands back the neighbourhood of the wrong passage.
-///
-/// **The other direction is
-/// [`source_around_admits_a_byte_identical_passage_text`], directly below.**
-/// It is what stops this test being satisfied by a pin that refuses
-/// everything, and it could not be written under Task 5.2: the excerpt arm was
-/// `todo!()` then, and a panic inside a command reaches `call` as a
-/// `RecvError` panic rather than a value, so there was no result to assert on.
-/// Task 5.3 built the arm and paid the debt; the two tests are one pair and
-/// neither is coverage alone.
-#[test]
-fn source_around_refuses_a_passage_that_differs_only_in_surrounding_whitespace() {
-    const STORED: &str = "Ставка залишається незмінною протягом усього строку.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "9".repeat(64);
-    let chunk = state
-        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &doc, STORED)))
-        .unwrap();
-
-    let padded = format!("  {STORED}\n");
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": padded,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "the stored text and the echoed passage differ, and only trimming makes them equal — \
-         the pin must refuse rather than answer about a chunk it was not asked about: {v}"
-    );
-    // The cause matters as much as the refusal. A chunk *does* carry this id,
-    // so `idReused` is the only honest answer; a regression reporting
-    // `noSuchChunk` would satisfy a `kind`-only assertion while the message
-    // above told whoever read it the wrong story.
-    assert_eq!(
-        v["reason"]["kind"],
-        json!("idReused"),
-        "a chunk carries that id — it is simply not this passage — so the refusal must name \
-         which of the two causes it was: {v}"
-    );
-    assert!(
-        v.get("blocks").is_none(),
-        "a refusal must carry no text at all: {v}"
-    );
-}
-
-/// The debt Task 5.2 booked and Task 5.3 owed: the pin's **other** direction.
-///
-/// Every other test about the pin asserts a refusal, so a pin rewritten as
-/// `true` — refuse everything — satisfies all of them and the suite stays
-/// green while the command has become useless. This is the only test that can
-/// tell that mutant from a correct pin, and the same fixture as the whitespace
-/// test above with the padding removed is what makes the pair a pair: one
-/// character of difference decides between an excerpt and a refusal.
-#[test]
-fn source_around_admits_a_byte_identical_passage_text() {
-    const STORED: &str = "Ставка залишається незмінною протягом усього строку.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "a".repeat(64);
-    let chunk = state
-        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &doc, STORED)))
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": STORED,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("excerpt"),
-        "the echoed passage is byte-identical to the stored chunk, so the pin must let it \
-         through — a pin that refuses everything passes every other test in this file: {v}"
-    );
-    assert!(
-        v.get("reason").is_none(),
-        "an excerpt carries no refusal reason: {v}"
-    );
-    assert_eq!(
-        v["blocks"][0]["text"],
-        json!(STORED),
-        "the excerpt must carry the passage's own paragraph: {v}"
-    );
-    // The false direction of both flags, which no other test through the IPC
-    // asserts: this document is one block, so there is nothing either side. A
-    // flag hardcoded `true` passes the happy path above and only this.
-    assert_eq!(v["hasMoreBefore"], json!(false), "{v}");
-    assert_eq!(v["hasMoreAfter"], json!(false), "{v}");
-}
-
-/// The pin's `ord` half must ADMIT a genuine match, not merely refuse a
-/// mismatch — the gap the two tests above cannot see. Before this test, the
-/// only assertion on `ChunkAnchor.ord` anywhere in the repository was
-/// `assert_eq!(anchor.ord, 0)` (`crates/mnema-index/tests/source.rs`), and 27
-/// of the 28 `source_around` fixtures in this file send `citedOrd: 0`; the
-/// sole exception,
-/// [`source_around_refuses_a_reused_id_within_the_same_document_at_a_different_ord`],
-/// sends a non-zero `citedOrd` expecting a REFUSAL. A `chunk_anchor` that
-/// mapped the `ord` column to a hardcoded `0` would satisfy every one of
-/// those: the 27 zero-citing calls would still match, and the one non-zero
-/// call would still mismatch (`0 != 1`) — refusing for the wrong reason. This
-/// test cites a chunk whose real `ord` is 1 and asks for it back, so only a
-/// build that reads the actual column can pass.
-#[test]
-fn source_around_admits_a_passage_at_a_nonzero_ord() {
-    const FIRST: &str = "Перший абзац, не той, що цитують.";
-    const CITED: &str = "Другий абзац, саме той, що цитують.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "c".repeat(64);
-    let cited_chunk = state
-        .with_index(|db| {
-            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
-            let page = db.insert_page(&doc, 1, "native:txt", None)?;
-            insert_chunk_at(db, &doc, page, 0, 1, FIRST);
-            let cited = insert_chunk_at(db, &doc, page, 1, 2, CITED);
-            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
-            Ok::<_, mnema_index::Error>(cited)
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": cited_chunk,
-            "passageText": CITED,
-            "citedDocumentId": doc,
-            "citedOrd": 1,
-            "citedRootId": null,
-            "citedRelativePath": null,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("excerpt"),
-        "citedOrd 1 matches the cited chunk's real ord, so the pin must admit it — a \
-         chunk_anchor that hardcodes ord to 0 would refuse this call even though it \
-         should pass: {v}"
-    );
-    assert!(
-        v.get("reason").is_none(),
-        "an excerpt carries no refusal reason: {v}"
-    );
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().expect("a block text"))
-        .collect();
-    assert_eq!(
-        texts,
-        vec![FIRST, CITED],
-        "the excerpt must contain the cited passage's own text, not merely some text: {v}"
-    );
-}
-
-/// The other cause, and without it `GoneReason::NoSuchChunk` is a variant
-/// nothing produces. `clear_document_content` cascades the document's pages,
-/// blocks and chunks away (`Db::clear_document_content_in`) and a rebuild has not landed
-/// yet — the gap a watcher's re-index leaves open between two IPC calls.
-#[test]
-fn source_around_reports_no_such_chunk_when_nothing_carries_the_id() {
-    const ORIGINAL: &str = "Обсяг зібрання становить дванадцять тисяч аркушів.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "8".repeat(64);
-    let chunk = state
-        .with_index(|db| {
-            let chunk = write_one_document(db, &doc, ORIGINAL);
-            db.clear_document_content(&doc)?;
-            Ok::<_, mnema_index::Error>(chunk)
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": ORIGINAL,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("gone"), "nothing carries that id: {v}");
-    assert_eq!(
-        v["reason"]["kind"],
-        json!("noSuchChunk"),
-        "no chunk carries that id at all, which is a different cause from an id handed to other \
-         text — collapsing the two loses the only thing that tells a rebuild-in-flight from a \
-         reused id: {v}"
-    );
-    assert!(
-        v.get("blocks").is_none(),
-        "a refusal must carry no text at all: {v}"
-    );
-}
-
-/// [assert-both-directions] at the level of the pin itself. A pin written as
-/// "the stored text *contains* the passage" would accept `""` and match every
-/// chunk in the index — an id-reuse check satisfied by absence. The
-/// comparison is exact equality, so an empty passage against a live chunk
-/// with non-empty text is a refusal, not an excerpt.
-#[test]
-fn source_around_refuses_an_empty_passage_text_rather_than_matching_anything() {
-    const LIVE: &str = "Загальна ціна обчислюється множенням ставки і кількості аркушів.";
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "9".repeat(64);
-    let chunk = state
-        .with_index(|db| Ok::<_, mnema_index::Error>(write_one_document(db, &doc, LIVE)))
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": "",
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "an empty passage matched a live chunk, so the pin is satisfied by absence: {v}"
-    );
-    assert_eq!(
-        v["reason"]["kind"],
-        json!("idReused"),
-        "the chunk is there and its text is not the empty passage, which is the reused-id \
-         cause, not the missing-chunk one: {v}"
-    );
-    assert!(
-        v.get("blocks").is_none(),
-        "a refusal must carry no text at all: {v}"
-    );
-}
-
-// ------------------------------------------------- source_around, the excerpt
-
-/// The five paragraphs the launcher's right card paints around a citation,
-/// Cyrillic because the product is (`…launcher-mockup.html:289-294`). Index 2
-/// is the anchor, so a radius of 1 leaves exactly one paragraph over on each
-/// side and both `hasMore` flags must be true.
+/// The five paragraphs the file pane paints, Cyrillic because the product is.
+/// Index 2 is the one a citation's chunk covers, so a fixture that reads the
+/// wrong block is visible rather than plausible.
 const PARAGRAPHS: [&str; 5] = [
     "Обсяг зібрання становить дванадцять тисяч аркушів.",
     "Ціна оцифрування одного аркуша становить дві гривні.",
@@ -5701,42 +5164,6 @@ const PARAGRAPHS: [&str; 5] = [
     "Ставка залишається незмінною протягом усього строку договору.",
     "Сторони узгоджують графік передавання матеріалів окремо.",
 ];
-
-/// A second document, written **before** the one under test, and it is not
-/// decoration: it is what makes `reading_window`'s document term falsifiable
-/// through the IPC.
-///
-/// The `mnema-index` suite learned this the expensive way — with one document
-/// in the fixture, `WHERE b.document_id = ?1` and `(… OR 1 = 1)` select the
-/// same rows, and the mutant that survives is literally "return another
-/// document's paragraphs under the user's citation", the hazard this whole
-/// command exists to refuse. Its `reading_order` values collide with the real
-/// document's, so a window that forgot the document term interleaves them
-/// rather than quietly returning the same list.
-///
-/// Written first for a second reason: pages inserted first take the low
-/// `page.id` values, so the real document's page ids stop coinciding with its
-/// page numbers and `p.page_no` swapped for `p.id` stops being invisible.
-fn write_decoy_document(db: &mnema_index::Db) {
-    let decoy = "d".repeat(64);
-    db.insert_document(&decoy, "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let page = db.insert_page(&decoy, 1, "native:txt", None).unwrap();
-    for i in 1..=6 {
-        db.insert_block(
-            page,
-            &Block {
-                block_type: BlockType::Paragraph,
-                reading_order: i,
-                language: None,
-                text: format!("ПІДСТАВНИЙ АБЗАЦ {i}"),
-                line_start: None,
-                line_end: None,
-            },
-        )
-        .unwrap();
-    }
-}
 
 /// One page of paragraphs with a chunk pinned to a slice of one of them.
 ///
@@ -5804,543 +5231,6 @@ fn write_paragraph_document(
     (chunk, passage)
 }
 
-/// The right card's own shape (`…launcher-mockup.html:289-294`): the paragraph
-/// before, the passage's paragraph, and the paragraph after.
-///
-/// Asserted on **content**, not on length — three blocks of the wrong three
-/// paragraphs is the failure this command exists to prevent, and a
-/// `blocks.len() == 3` assertion cannot tell the two apart. The `hasMore`
-/// flags are asserted true here and false in the clamp test below; a flag
-/// hardcoded either way passes one of that pair.
-///
-/// The camelCase assertions are not the wire test (that is Task 5.4's) but
-/// they reach the same fact from the first excerpt anything constructs:
-/// `rename_all` on an *enum* renames variants only, so without
-/// `rename_all_fields` this ships `document_id` and `has_more_before` inside a
-/// camelCase payload.
-/// The passage is on page 2 of three, and the window crosses both boundaries.
-///
-/// Every other fixture that reaches `source_around` puts its document on a
-/// single page, so the seam `chunk_anchor.page_no` → `reading_window(?2)` was
-/// only ever exercised with a page number handed in by a unit test. This is the
-/// sixth instance of the cycle's one recurring gap — the fixture not building
-/// the state the code branches on — and the one the branch review predicted.
-#[test]
-fn source_around_crosses_page_boundaries_on_a_real_multi_page_document() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "8".repeat(64);
-    let passage = PARAGRAPHS[0].to_string();
-    let chunk = state
-        .with_index(|db| {
-            // The decoy first, so the real document's page ids are nowhere near
-            // its page numbers.
-            write_decoy_document(db);
-            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
-            let mut anchor = None;
-            for page_no in 1..=3 {
-                let page = db.insert_page(&doc, page_no, "native:txt", None)?;
-                for i in 1..=2 {
-                    let text = format!("p{page_no}b{i}");
-                    let block = db.insert_block(
-                        page,
-                        &Block {
-                            block_type: BlockType::Paragraph,
-                            reading_order: i,
-                            language: None,
-                            text: if page_no == 2 && i == 1 {
-                                passage.clone()
-                            } else {
-                                text
-                            },
-                            line_start: None,
-                            line_end: None,
-                        },
-                    )?;
-                    if page_no == 2 && i == 1 {
-                        anchor = Some(block);
-                    }
-                }
-            }
-            let chunk = db.insert_chunk(
-                &doc,
-                0,
-                &passage,
-                &Locator {
-                    spans: vec![Segment {
-                        block_id: anchor.expect("the anchor block"),
-                        start: 0,
-                        end: passage.chars().count() as u32,
-                        block_start: 0,
-                    }],
-                    coordinate: Coordinate::Page { number: 2 },
-                },
-                SourceKind::Document,
-            )?;
-            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
-            Ok::<_, mnema_index::Error>(chunk)
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 2,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    // Two blocks back reaches page 1; two forward reaches page 3.
-    let pages: Vec<i64> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["pageNo"].as_i64().expect("a pageNo"))
-        .collect();
-    assert_eq!(
-        pages,
-        vec![1, 1, 2, 2, 3],
-        "the window must cross both page boundaries in document reading order: {v}"
-    );
-    assert_eq!(v["blocks"][2]["text"], json!(passage), "{v}");
-    assert_eq!(v["hasMoreBefore"], json!(false), "{v}");
-    assert_eq!(v["hasMoreAfter"], json!(true), "p3b2 is beyond: {v}");
-}
-
-/// An **asymmetric** window: nothing before the passage, more after it.
-///
-/// Every other IPC fixture in this file returns the two `hasMore` flags with
-/// the same value — `(false, false)`, `(true, true)`, `(true, true)` — so
-/// swapping the two fields where the excerpt is assembled survived the whole
-/// suite. The index-level test that *is* asymmetric never crosses the mapping
-/// in `tree.rs`, so it cannot catch it either.
-///
-/// The loss is not abstract: the mockup's leading "…" is drawn from these
-/// flags, and a swap paints it on the side where there is nothing more.
-#[test]
-fn source_around_reports_more_after_but_not_before_at_the_start_of_a_document() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "7".repeat(64);
-    // Anchor on paragraph 1 — nothing precedes it — with a radius of 1 while
-    // three paragraphs follow.
-    let (chunk, passage) = state
-        .with_index(|db| {
-            write_decoy_document(db);
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                0,
-                0,
-                PARAGRAPHS[0].chars().count() as u32,
-            ))
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    assert_eq!(
-        v["hasMoreBefore"],
-        json!(false),
-        "the anchor is the document's first block, so there is nothing before it: {v}"
-    );
-    assert_eq!(
-        v["hasMoreAfter"],
-        json!(true),
-        "paragraphs 3..5 are beyond a radius of 1: {v}"
-    );
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().unwrap())
-        .collect();
-    assert_eq!(texts, vec![PARAGRAPHS[0], PARAGRAPHS[1]], "{v}");
-}
-
-#[test]
-fn source_around_returns_the_paragraphs_around_a_cited_passage() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "1".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            write_decoy_document(db);
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                2,
-                0,
-                PARAGRAPHS[2].chars().count() as u32,
-            ))
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().expect("a block text"))
-        .collect();
-    assert_eq!(
-        texts,
-        vec![PARAGRAPHS[1], PARAGRAPHS[2], PARAGRAPHS[3]],
-        "the card must paint the passage's own paragraph with one either side, \
-         in document reading order: {v}"
-    );
-    assert_eq!(
-        v["hasMoreBefore"],
-        json!(true),
-        "paragraph 1 is beyond: {v}"
-    );
-    assert_eq!(v["hasMoreAfter"], json!(true), "paragraph 5 is beyond: {v}");
-    assert_eq!(v["documentId"], json!(doc), "{v}");
-    assert_eq!(v["sectionTitle"], json!("Розділ перший"), "{v}");
-
-    // camelCase, both directions. Every one of these is snake_case in Rust and
-    // would cross unrenamed without `rename_all_fields` on the enum.
-    assert!(v.get("document_id").is_none(), "{v}");
-    assert!(v.get("has_more_before").is_none(), "{v}");
-    assert!(v.get("has_more_after").is_none(), "{v}");
-    assert!(v.get("section_title").is_none(), "{v}");
-    let block = &v["blocks"][0];
-    assert!(block["blockId"].is_i64(), "{v}");
-    assert_eq!(block["kind"], json!("paragraph"), "{v}");
-    assert_eq!(block["pageNo"], json!(1), "{v}");
-    // The VALUE, not merely the type. `readingOrder` is what PR 6 may sort or
-    // label by, and nothing else in the tree asserted it: returning `block.id`
-    // in its place compiles, leaves the order, the texts and `pageNo` correct,
-    // and ships rowids as reading order.
-    let orders: Vec<i64> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["readingOrder"].as_i64().expect("an integer readingOrder"))
-        .collect();
-    assert_eq!(
-        orders,
-        vec![2, 3, 4],
-        "the window is paragraphs 2..4 of one page, so these are their reading orders: {v}"
-    );
-    assert!(block.get("block_id").is_none(), "{v}");
-    assert!(block.get("page_no").is_none(), "{v}");
-    assert!(block.get("reading_order").is_none(), "{v}");
-}
-
-/// A chunk that spans **two** blocks — the state no fixture in this cycle
-/// built through the IPC, and two mutants lived in the gap.
-///
-/// The chunker can end a chunk mid-paragraph and carry it into the next, so
-/// `char_span` holds one `Segment` per source block (`mnema-core/src/locator.rs`)
-/// and `ChunkAnchor` reports a `first_reading_order`/`last_reading_order`
-/// **range**. Every other `source_around` test uses a single-segment chunk,
-/// where first == last and one span is all there is — so collapsing the range
-/// to its first block, or truncating `spans` to its first element, changed
-/// nothing any test could see. Both are real losses: the first drops the
-/// paragraph the passage ends in, the second drops a highlight the card is
-/// supposed to paint.
-///
-/// The schema pins both anchor blocks to one page (`chunk_span_blocks_bi`), so
-/// this is the widest anchor the index can hold, not an invented one.
-#[test]
-fn source_around_covers_every_block_a_multi_block_chunk_spans() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    // Blocks 2 and 4 of PARAGRAPHS, joined, with a **whitespace-only block
-    // between them**: the chunk starts inside block 2 and runs to the end of
-    // block 4, so `chunk_anchor` reports the range 2..4 and the anchor query's
-    // own `BETWEEN` covers the blank row in the middle.
-    //
-    // 🔴 That blank row is why the anchor query carries the whitespace
-    // predicate too, and until this fixture nothing exercised it: every other
-    // test anchors on a single block, where `BETWEEN 3 AND 3` cannot contain a
-    // neighbour of any kind. The chunker skips blank blocks
-    // (`mnema-chunk/src/lib.rs`), so a chunk legitimately spans *across* one —
-    // and without the predicate the excerpt would show it inside the quotation
-    // itself.
-    let head: String = PARAGRAPHS[1].chars().skip(17).collect();
-    let tail = PARAGRAPHS[3].to_string();
-    let passage = format!("{head}{tail}");
-    let head_chars = head.chars().count() as u32;
-    let tail_chars = tail.chars().count() as u32;
-
-    let doc = "6".repeat(64);
-    let chunk = state
-        .with_index(|db| {
-            write_decoy_document(db);
-            db.insert_document(&doc, "text/plain", 1, SourceKind::Document)?;
-            let page = db.insert_page(&doc, 1, "native:txt", Some("Розділ перший"))?;
-            // PARAGRAPHS, but with the third row replaced by a blank line —
-            // what the text reader stores for exactly that input.
-            //
-            // ⚠️ A tab among the spaces, deliberately: SQLite's one-argument
-            // `trim` strips spaces only, so a spaces-only row is excluded even
-            // by the broken predicate and this fixture would measure nothing.
-            let rows: Vec<&str> = vec![
-                PARAGRAPHS[0],
-                PARAGRAPHS[1],
-                " \t ",
-                PARAGRAPHS[3],
-                PARAGRAPHS[4],
-            ];
-            let blocks: Vec<i64> = rows
-                .iter()
-                .enumerate()
-                .map(|(i, text)| {
-                    db.insert_block(
-                        page,
-                        &Block {
-                            block_type: BlockType::Paragraph,
-                            reading_order: i as i64 + 1,
-                            language: None,
-                            text: (*text).to_string(),
-                            line_start: None,
-                            line_end: None,
-                        },
-                    )
-                })
-                .collect::<Result<_, _>>()?;
-            let chunk = db.insert_chunk(
-                &doc,
-                0,
-                &passage,
-                &Locator {
-                    spans: vec![
-                        Segment {
-                            block_id: blocks[1],
-                            start: 0,
-                            end: head_chars,
-                            block_start: 17,
-                        },
-                        Segment {
-                            block_id: blocks[3],
-                            start: head_chars,
-                            end: head_chars + tail_chars,
-                            block_start: 0,
-                        },
-                    ],
-                    coordinate: Coordinate::None,
-                },
-                SourceKind::Document,
-            )?;
-            db.set_document_status(&doc, mnema_index::DocumentStatus::Indexed)?;
-            Ok::<_, mnema_index::Error>(chunk)
-        })
-        .unwrap();
-
-    // radius 1: one block either side of the anchor's TWO blocks.
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-
-    // Both anchor blocks are in the window, and so is one block either side.
-    // Asserted as an exact list: "contains paragraph 3" is satisfied by a
-    // window that dropped paragraph 2, which is the mutant.
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("blocks")
-        .iter()
-        .map(|b| b["text"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        texts,
-        vec![PARAGRAPHS[0], PARAGRAPHS[1], PARAGRAPHS[3], PARAGRAPHS[4]],
-        "the window must span both of the anchor's blocks and skip the blank row between \
-         them — a blank inside the quotation is the anchor query's own predicate: {v}"
-    );
-
-    // One span per source block, each measuring into its OWN block.
-    let spans = v["spans"].as_array().expect("spans");
-    assert_eq!(
-        spans.len(),
-        2,
-        "a chunk over two blocks needs two spans, or the card paints one \
-         highlight where the passage has two: {v}"
-    );
-    assert_eq!(spans[0]["blockStart"], json!(17), "{v}");
-    assert_eq!(spans[1]["blockStart"], json!(0), "{v}");
-    assert_eq!(spans[0]["end"], json!(head_chars), "{v}");
-    assert_eq!(spans[1]["end"], json!(head_chars + tail_chars), "{v}");
-
-    // And the slices they name, in characters, reassemble the passage.
-    let slice_of = |ix: usize, block_ix: usize| -> String {
-        let sp = &spans[ix];
-        let start = sp["blockStart"].as_u64().unwrap() as usize;
-        let len = (sp["end"].as_u64().unwrap() - sp["start"].as_u64().unwrap()) as usize;
-        v["blocks"][block_ix]["text"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .skip(start)
-            .take(len)
-            .collect()
-    };
-    assert_eq!(
-        format!("{}{}", slice_of(0, 1), slice_of(1, 2)),
-        passage,
-        "the two spans must reassemble the passage out of their own blocks: {v}"
-    );
-}
-
-/// 🔴 The span that reaches the wire is measured in **characters**, and this
-/// test is red against a byte implementation rather than silently green.
-///
-/// `&str[a..b]` indexes bytes; every offset this pipeline emits is a character
-/// offset — `mnema-chunk` says so in the words of a defect already paid for
-/// once, "a byte-offset implementation passes every test written over ASCII
-/// and then shows itself as a citation quoting the wrong slice of the first
-/// Ukrainian chunk" (`crates/mnema-chunk/src/view.rs:5-9`). The paragraph here
-/// is Cyrillic, so every character before the passage is two bytes and the two
-/// readings cannot coincide.
-///
-/// The assertion is not "the number came back": it is that the slice
-/// `blockStart` names inside the block's own text **is** the passage. That is
-/// what the highlight is painted from, and a number nothing is measured with
-/// is not evidence.
-#[test]
-fn source_around_spans_measure_into_the_block_in_characters() {
-    // "Ціна оцифрування " is 17 characters and 32 bytes, so a byte reading of
-    // `blockStart` lands in the middle of a letter rather than at "одного".
-    const BLOCK_START: u32 = 17;
-    const N_CHARS: u32 = 13;
-
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "2".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                1,
-                BLOCK_START,
-                N_CHARS,
-            ))
-        })
-        .unwrap();
-    assert_eq!(
-        passage, "одного аркуша",
-        "the fixture must cut the passage out of the middle of its paragraph, \
-         or `blockStart` is zero and measures nothing"
-    );
-    assert_ne!(
-        BLOCK_START as usize,
-        PARAGRAPHS[1]
-            .char_indices()
-            .nth(BLOCK_START as usize)
-            .unwrap()
-            .0,
-        "the character offset must differ from the byte offset, or this test \
-         is green against a byte implementation"
-    );
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    let span = &v["spans"][0];
-    assert_eq!(span["blockStart"], json!(BLOCK_START), "{v}");
-    assert_eq!(span["start"], json!(0), "{v}");
-    assert_eq!(span["end"], json!(N_CHARS), "{v}");
-    // The wire mirror, both directions: `Segment` itself is persisted and
-    // crosses as `block_start`, which is why `WireSegment` exists.
-    assert!(span.get("block_start").is_none(), "{v}");
-    assert!(span.get("block_id").is_none(), "{v}");
-
-    // The span names the anchor's own block, and the slice it names inside
-    // that block's text is the passage — in characters.
-    let anchor = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .find(|b| b["blockId"] == span["blockId"])
-        .expect("the span must name a block the excerpt actually returned");
-    let text = anchor["text"].as_str().unwrap();
-    let start = span["blockStart"].as_u64().unwrap() as usize;
-    let len = (span["end"].as_u64().unwrap() - span["start"].as_u64().unwrap()) as usize;
-    let painted: String = text.chars().skip(start).take(len).collect();
-    assert_eq!(
-        painted, passage,
-        "the highlight `blockStart` paints is not the passage: {text:?}"
-    );
-}
-
 /// A watched root that is a real directory, with a real file in it and a
 /// `path` row recorded from a **real** `mnema_walk::stat`.
 ///
@@ -6377,14 +5267,14 @@ fn watched_corpus(db: &mnema_index::Db, dir: &std::path::Path) -> (PathBuf, i64)
     (corpus, root)
 }
 
-/// The ordinary case: the cited path still names this document and the file on
-/// disk still measures the way it did when it was indexed.
+/// The ordinary case: the path still names this document and the file on disk
+/// still measures the way it did when it was indexed.
 ///
 /// The cheap arm's own comparison, not a new one —
 /// `recorded.size_bytes == disk.size_bytes && recorded.mtime == disk.mtime`
 /// is what `mnema-ingest` already asks (`mnema-ingest/src/lib.rs:295-296`).
 #[test]
-fn source_around_reports_current_when_the_file_still_matches_what_was_indexed() {
+fn open_document_reports_current_when_the_file_still_matches_what_was_indexed() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -6392,10 +5282,10 @@ fn source_around_reports_current_when_the_file_still_matches_what_was_indexed() 
     let webview = main_webview(&app);
 
     let doc = "3".repeat(64);
-    let (chunk, passage) = state
+    let root = state
         .with_index(|db| {
             let (corpus, root) = watched_corpus(db, dir.path());
-            let seeded = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -6411,25 +5301,18 @@ fn source_around_reports_current_when_the_file_still_matches_what_was_indexed() 
                 &doc,
                 &PARAGRAPHS.join("\n\n"),
             );
-            Ok::<_, mnema_index::Error>(seeded)
+            Ok::<_, mnema_index::Error>(root)
         })
         .unwrap();
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("current"),
@@ -6439,13 +5322,13 @@ fn source_around_reports_current_when_the_file_still_matches_what_was_indexed() 
 
 /// The document has no `path` row at all — indexed from inside an archive, or
 /// its last copy on disk was deleted (`write.rs:76-79`). There is nothing to
-/// compare against, and inventing a comparison is how a stale excerpt gets
-/// shown as fresh.
+/// compare against, and inventing a comparison is how a stale file gets shown
+/// as fresh.
 ///
-/// Both directions on the same fixture: the excerpt still carries its text,
+/// Both directions on the same fixture: the pane still carries its text,
 /// because "no path" is a statement about provenance, not a refusal.
 #[test]
-fn source_around_reports_no_path_when_the_document_has_none() {
+fn open_document_reports_no_path_when_the_document_has_none() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -6453,124 +5336,44 @@ fn source_around_reports_no_path_when_the_document_has_none() {
     let webview = main_webview(&app);
 
     let doc = "4".repeat(64);
-    let (chunk, passage) = state
+    state
         .with_index(|db| {
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
                 2,
                 0,
                 PARAGRAPHS[2].chars().count() as u32,
-            ))
+            );
+            Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
 
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
+    let v = call(&webview, "open_document", json!({ "documentId": doc }))
+        .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(v["freshness"]["kind"], json!("noPath"), "{v}");
     assert_eq!(
-        v["blocks"][1]["text"],
+        v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
         "an unknown provenance is not a refusal — the indexed text still comes back: {v}"
-    );
-    // The excerpt deliberately carries no `relativePath`: no read method can
-    // produce one for it, so the field could only echo the caller's own input
-    // back and disagree with nothing.
-    assert!(v.get("relativePath").is_none(), "{v}");
-    assert!(v.get("relative_path").is_none(), "{v}");
-}
-
-/// The `path` row still names this document, but nothing is at that location
-/// any more — a delete no walk has caught up with yet. The excerpt is honest
-/// about what it cannot measure rather than reporting the last thing it knew.
-#[test]
-fn source_around_reports_file_missing_when_the_file_is_gone_from_disk() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "5".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            let (corpus, root) = watched_corpus(db, dir.path());
-            let seeded = write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                2,
-                0,
-                PARAGRAPHS[2].chars().count() as u32,
-            );
-            record_real_file(
-                db,
-                &corpus,
-                root,
-                "dohov-01.md",
-                &doc,
-                &PARAGRAPHS.join("\n\n"),
-            );
-            // Indexed, then deleted. The `path` row survives until a walk
-            // notices, which is the state this verdict is for.
-            std::fs::remove_file(corpus.join("dohov-01.md")).expect("remove the corpus file");
-            Ok::<_, mnema_index::Error>(seeded)
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    assert_eq!(
-        v["freshness"]["kind"],
-        json!("fileMissing"),
-        "nothing is at that path, so the file cannot be measured at all: {v}"
-    );
-    assert_eq!(
-        v["blocks"][1]["text"],
-        json!(PARAGRAPHS[2]),
-        "an unmeasurable file is not a refusal — the indexed text still comes back: {v}"
     );
 }
 
 /// One document, a real watched corpus, and the real file the `path` row was
-/// recorded from. Returns the chunk id, the passage a citation would echo
-/// back, the corpus directory and the `OnDisk` numbers the index now holds —
-/// all measured, none written by hand.
-fn seed_excerpt_with_file(
+/// recorded from. Returns the corpus directory, its watched root and the
+/// `OnDisk` numbers the index now holds — all measured, none written by hand.
+fn seed_document_with_file(
     state: &AppState,
     dir: &std::path::Path,
     doc: &str,
-) -> (i64, String, PathBuf, mnema_core::OnDisk) {
+) -> (PathBuf, i64, mnema_core::OnDisk) {
     state
         .with_index(|db| {
             let (corpus, root) = watched_corpus(db, dir);
-            let (chunk, passage) = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 doc,
                 &PARAGRAPHS,
@@ -6586,7 +5389,7 @@ fn seed_excerpt_with_file(
                 doc,
                 &PARAGRAPHS.join("\n\n"),
             );
-            Ok::<_, mnema_index::Error>((chunk, passage, corpus, disk))
+            Ok::<_, mnema_index::Error>((corpus, root, disk))
         })
         .unwrap()
 }
@@ -6624,7 +5427,7 @@ fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
 /// indexed text still comes back. A test asserting only the marker leaves the
 /// more important half unpinned.
 #[test]
-fn source_around_reports_file_changed_when_only_the_size_moved() {
+fn open_document_reports_file_changed_when_only_the_size_moved() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -6632,7 +5435,7 @@ fn source_around_reports_file_changed_when_only_the_size_moved() {
     let webview = main_webview(&app);
 
     let doc = "6".repeat(64);
-    let (chunk, passage, corpus, recorded) = seed_excerpt_with_file(&state, dir.path(), &doc);
+    let (corpus, root, recorded) = seed_document_with_file(&state, dir.path(), &doc);
 
     let full = corpus.join("dohov-01.md");
     let indexed_at = std::fs::metadata(&full).unwrap().modified().unwrap();
@@ -6655,26 +5458,19 @@ fn source_around_reports_file_changed_when_only_the_size_moved() {
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("fileChanged"),
         "the file is a different size from the one that was indexed: {v}"
     );
     assert_eq!(
-        v["blocks"][1]["text"],
+        v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
         "§12 asks for the indexed text *and* the marker; this dropped the text: {v}"
     );
@@ -6690,7 +5486,7 @@ fn source_around_reports_file_changed_when_only_the_size_moved() {
 /// left to the clock, so the test does not depend on the filesystem's
 /// timestamp granularity.
 #[test]
-fn source_around_reports_file_changed_when_only_the_mtime_moved() {
+fn open_document_reports_file_changed_when_only_the_mtime_moved() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -6698,7 +5494,7 @@ fn source_around_reports_file_changed_when_only_the_mtime_moved() {
     let webview = main_webview(&app);
 
     let doc = "7".repeat(64);
-    let (chunk, passage, corpus, recorded) = seed_excerpt_with_file(&state, dir.path(), &doc);
+    let (corpus, root, recorded) = seed_document_with_file(&state, dir.path(), &doc);
 
     let full = corpus.join("dohov-01.md");
     let original = PARAGRAPHS.join("\n\n");
@@ -6729,26 +5525,19 @@ fn source_around_reports_file_changed_when_only_the_mtime_moved() {
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("fileChanged"),
         "the file was written after it was indexed, at the same length: {v}"
     );
     assert_eq!(
-        v["blocks"][1]["text"],
+        v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
         "§12 asks for the indexed text *and* the marker; this dropped the text: {v}"
     );
@@ -6773,7 +5562,7 @@ fn source_around_reports_file_changed_when_only_the_mtime_moved() {
 /// and went straight to the filesystem would answer `Current` — this test is
 /// red against exactly that, rather than only against a missing variant.
 #[test]
-fn source_around_reports_reindexed_when_the_cited_path_now_names_another_document() {
+fn open_document_reports_reindexed_when_the_cited_path_now_names_another_document() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -6782,10 +5571,10 @@ fn source_around_reports_reindexed_when_the_cited_path_now_names_another_documen
 
     let doc = "8".repeat(64);
     let edited_doc = "b".repeat(64);
-    let (chunk, passage) = state
+    let root = state
         .with_index(|db| {
             let (corpus, root) = watched_corpus(db, dir.path());
-            let seeded = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -6815,252 +5604,28 @@ fn source_around_reports_reindexed_when_the_cited_path_now_names_another_documen
                 &edited_doc,
                 &format!("{original}\n\nДодано абзац."),
             );
-            Ok::<_, mnema_index::Error>(seeded)
+            Ok::<_, mnema_index::Error>(root)
         })
         .unwrap();
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("reindexed"),
         "the cited location names a different document now — a walk has already re-indexed it: {v}"
     );
     assert_eq!(
-        v["documentId"],
-        json!(doc),
-        "the excerpt's provenance is the document the blocks came from, not the one the path \
-         names now: {v}"
-    );
-    assert_eq!(
-        v["blocks"][1]["text"],
+        v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
         "what is shown is what was indexed; the marker says so rather than the text vanishing: {v}"
     );
-}
-
-/// The other half of the pair, and the case users actually hit: **one** copy,
-/// edited. `Reindexed` must NOT be the answer — the chunk is already gone.
-///
-/// Without this the test above proves only that some fixture reaches the
-/// variant, not that the ordinary case is classified correctly.
-///
-/// ⚠️ `delete_path` + `insert_path` do not remove the chunk by themselves.
-/// What removes it is `forget_if_unnamed` calling `delete_document` when no
-/// path is left (`mnema-ingest/src/lib.rs:862`) — and this test drives
-/// `mnema-index` directly, with `mnema-ingest` not in the loop and that
-/// function private, so the fixture calls `delete_document` itself. Omit it
-/// and the anchor survives, the path names the new document, and the command
-/// answers `Reindexed` — the test would fail against a correct implementation.
-#[test]
-fn source_around_reports_gone_when_the_single_copy_of_a_file_is_re_indexed() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "9".repeat(64);
-    let edited_doc = "c".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            let (corpus, root) = watched_corpus(db, dir.path());
-            let seeded = write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                2,
-                0,
-                PARAGRAPHS[2].chars().count() as u32,
-            );
-            let original = PARAGRAPHS.join("\n\n");
-            record_real_file(db, &corpus, root, "dohov-01.md", &doc, &original);
-
-            db.insert_document(&edited_doc, "text/plain", 1, SourceKind::Document)?;
-            db.set_document_status(&edited_doc, mnema_index::DocumentStatus::Indexed)?;
-            db.delete_path(root, "dohov-01.md")?;
-            record_real_file(
-                db,
-                &corpus,
-                root,
-                "dohov-01.md",
-                &edited_doc,
-                &format!("{original}\n\nДодано абзац."),
-            );
-            // Standing in for `forget_if_unnamed`: no path names `doc` any
-            // more, so the pipeline deletes it, cascading its pages, blocks
-            // and chunks away.
-            db.delete_document(&doc)?;
-            Ok::<_, mnema_index::Error>(seeded)
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("gone"),
-        "the ordinary single-copy edit deletes the displaced document outright, so there is no \
-         passage left to be fresh or stale about: {v}"
-    );
-    assert_eq!(v["reason"]["kind"], json!("noSuchChunk"), "{v}");
-    assert!(
-        v.get("freshness").is_none(),
-        "a refusal carries no freshness verdict — it has nothing to be a verdict about: {v}"
-    );
-}
-
-/// A radius of zero is a bad argument, not a reason to show the user nothing:
-/// it is clamped up to 1 and an excerpt comes back with a paragraph either
-/// side.
-///
-/// Asserted as an **effect** — which paragraphs came back — rather than as
-/// "a clamp function was called". Without the clamp the window is the anchor
-/// block alone, which is a visibly different answer rather than an error.
-#[test]
-fn source_around_clamps_a_zero_radius_up_to_one_rather_than_returning_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let doc = "e".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
-                db,
-                &doc,
-                &PARAGRAPHS,
-                2,
-                0,
-                PARAGRAPHS[2].chars().count() as u32,
-            ))
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 0,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(
-        v["kind"],
-        json!("excerpt"),
-        "a bad radius is not an error: {v}"
-    );
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        texts,
-        vec![PARAGRAPHS[1], PARAGRAPHS[2], PARAGRAPHS[3]],
-        "radius 0 must be read as 1 — one paragraph either side, not the passage's own alone: {v}"
-    );
-}
-
-/// The other end: a client must not be able to ask for a whole book. The
-/// window is bounded by `MAX_RADIUS`, and the bound is asserted by counting
-/// what came back and naming its edges — unclamped, this document would come
-/// back entire.
-#[test]
-fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app_in(dir.path());
-    let state = app.state::<AppState>();
-    state.open_index().expect("the index opens");
-    let webview = main_webview(&app);
-
-    let paragraphs: Vec<String> = (1..=60)
-        .map(|i| format!("Абзац номер {i} цього договору."))
-        .collect();
-    let refs: Vec<&str> = paragraphs.iter().map(String::as_str).collect();
-    let anchor_ix = 29;
-
-    let doc = "f".repeat(64);
-    let (chunk, passage) = state
-        .with_index(|db| {
-            Ok::<_, mnema_index::Error>(write_paragraph_document(
-                db,
-                &doc,
-                &refs,
-                anchor_ix,
-                0,
-                refs[anchor_ix].chars().count() as u32,
-            ))
-        })
-        .unwrap();
-
-    let v = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 10_000,
-        }),
-    )
-    .expect("source_around was rejected");
-
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
-    let texts: Vec<&str> = v["blocks"]
-        .as_array()
-        .expect("a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().unwrap())
-        .collect();
-    // MAX_RADIUS = 20: twenty before, the passage's own, twenty after.
-    assert_eq!(
-        texts.len(),
-        41,
-        "the window must be bounded however large a radius is asked for: {} blocks came back",
-        texts.len()
-    );
-    assert_eq!(texts[0], refs[anchor_ix - 20], "the near edge of the clamp");
-    assert_eq!(texts[40], refs[anchor_ix + 20], "the far edge of the clamp");
-    // Both flags true: the clamp cut the window short on each side, and the
-    // response must say so rather than let the card claim it has the whole
-    // document.
-    assert_eq!(v["hasMoreBefore"], json!(true), "{v}");
-    assert_eq!(v["hasMoreAfter"], json!(true), "{v}");
 }
 
 /// Two roots share the cited path, and the answer is `noPath` **even though
@@ -7076,10 +5641,10 @@ fn source_around_clamps_an_enormous_radius_to_a_bounded_window() {
 /// from the index, so the blunt rule is the honest one.
 ///
 /// What it costs is this test: a verdict that *could* have been right is now
-/// withheld. The excerpt is still returned; only the freshness tag degrades to
+/// withheld. The file is still returned; only the freshness tag degrades to
 /// "cannot tell".
 #[test]
-fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs() {
+fn open_document_reports_no_path_when_two_roots_share_the_path_even_if_the_document_differs() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -7088,9 +5653,9 @@ fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_docum
 
     let doc = "3".repeat(64);
     let other = "4".repeat(64);
-    let (chunk, passage) = state
+    state
         .with_index(|db| {
-            let seeded = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -7128,26 +5693,18 @@ fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_docum
                 &other,
                 "зовсім інший текст",
             );
-
-            Ok::<_, mnema_index::Error>(seeded)
+            Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("noPath"),
@@ -7161,10 +5718,10 @@ fn source_around_reports_no_path_when_two_roots_share_the_path_even_if_the_docum
 ///
 /// The everyday shape of it is a row that vanished between the two IPC calls.
 /// Nothing covered it — the neighbouring test named "no path" does not build
-/// this state, it simply omits `citedRelativePath` — so the empty-fallback
-/// arm had no oracle at all.
+/// this state, it simply omits `relativePath` — so the empty-fallback arm had
+/// no oracle at all.
 #[test]
-fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
+fn open_document_reports_no_path_when_no_row_holds_the_cited_path() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -7172,9 +5729,9 @@ fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
     let webview = main_webview(&app);
 
     let doc = "5".repeat(64);
-    let (chunk, passage) = state
+    let root = state
         .with_index(|db| {
-            let seeded = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -7191,25 +5748,18 @@ fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
                 &doc,
                 &PARAGRAPHS.join("\n\n"),
             );
-            Ok::<_, mnema_index::Error>(seeded)
+            Ok::<_, mnema_index::Error>(root)
         })
         .unwrap();
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "nowhere.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "nowhere.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("noPath"),
@@ -7224,8 +5774,8 @@ fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
 ///
 /// `NoPath`, never a guess. A guessed root produces a **confident verdict
 /// about the wrong file**, which is worse than admitting the lookup could not
-/// be resolved: the card would draw "актуально" over a passage whose cited
-/// copy had been edited an hour ago.
+/// be resolved: the pane would draw "актуально" over text whose cited copy had
+/// been edited an hour ago.
 ///
 /// This fixture is here because the `mnema-index` suite learned the lesson the
 /// expensive way — three mutants survived Task 5.1 for no reason other than
@@ -7234,7 +5784,7 @@ fn source_around_reports_no_path_when_no_row_holds_the_cited_path() {
 /// ambiguity branch is unfalsifiable: `candidates.first()` would pass every
 /// other test here.
 #[test]
-fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
+fn open_document_reports_no_path_when_two_roots_hold_the_cited_path() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -7242,9 +5792,9 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
     let webview = main_webview(&app);
 
     let doc = "0".repeat(64);
-    let (chunk, passage) = state
+    state
         .with_index(|db| {
-            let seeded = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -7259,28 +5809,21 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
                 let root = db.insert_watched_root(corpus.to_str().unwrap())?;
                 // Same bytes under both roots: with content addressing that is
                 // one document, so both `path` rows legally name it and the
-                // first resolution branch returns two candidates.
+                // fallback returns two candidates.
                 record_real_file(db, &corpus, root, "dohov-01.md", &doc, &original);
             }
-            Ok::<_, mnema_index::Error>(seeded)
+            Ok::<_, mnema_index::Error>(())
         })
         .unwrap();
 
     let v = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRelativePath": "dohov-01.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "relativePath": "dohov-01.md" }),
     )
-    .expect("source_around was rejected");
+    .expect("open_document was rejected");
 
-    assert_eq!(v["kind"], json!("excerpt"), "{v}");
+    assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(
         v["freshness"]["kind"],
         json!("noPath"),
@@ -7289,7 +5832,7 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
          cited: {v}"
     );
     assert_eq!(
-        v["blocks"][1]["text"],
+        v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
         "an unresolvable location is not a refusal — the indexed text still comes back: {v}"
     );
@@ -7301,7 +5844,7 @@ fn source_around_reports_no_path_when_two_roots_hold_the_cited_path() {
 /// real verdict, and the same call without one still gets the honest `NoPath`
 /// the test above pins — Task 2 must not have narrowed that fallback.
 #[test]
-fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold_the_path() {
+fn open_document_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold_the_path() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let state = app.state::<AppState>();
@@ -7310,9 +5853,9 @@ fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
 
     let doc = "1".repeat(64);
     let other = "2".repeat(64);
-    let (chunk, passage, root_a) = state
+    let root_a = state
         .with_index(|db| {
-            let (chunk, passage) = write_paragraph_document(
+            write_paragraph_document(
                 db,
                 &doc,
                 &PARAGRAPHS,
@@ -7348,8 +5891,7 @@ fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
                 &other,
                 "інший документ у корені B",
             );
-
-            Ok::<_, mnema_index::Error>((chunk, passage, root_a))
+            Ok::<_, mnema_index::Error>(root_a)
         })
         .unwrap();
 
@@ -7357,19 +5899,11 @@ fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
     // never has to be resolved.
     let named = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRootId": root_a,
-            "citedRelativePath": "README.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "rootId": root_a, "relativePath": "README.md" }),
     )
-    .expect("source_around was rejected");
-    assert_eq!(named["kind"], json!("excerpt"), "{named}");
+    .expect("open_document was rejected");
+    assert_eq!(named["kind"], json!("file"), "{named}");
     assert_eq!(
         named["freshness"]["kind"],
         json!("current"),
@@ -7381,257 +5915,16 @@ fn source_around_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
     // Task 2 must leave exactly as honest as it already was.
     let unnamed = call(
         &webview,
-        "source_around",
-        json!({
-            "chunkId": chunk,
-            "passageText": passage,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "citedRootId": null,
-            "citedRelativePath": "README.md",
-            "radius": 1,
-        }),
+        "open_document",
+        json!({ "documentId": doc, "relativePath": "README.md" }),
     )
-    .expect("source_around was rejected");
-    assert_eq!(unnamed["kind"], json!("excerpt"), "{unnamed}");
+    .expect("open_document was rejected");
+    assert_eq!(unnamed["kind"], json!("file"), "{unnamed}");
     assert_eq!(
         unnamed["freshness"]["kind"],
         json!("noPath"),
         "with no root on the citation, two roots hold this path and nothing may be guessed: \
          {unnamed}"
-    );
-}
-
-/// The excerpt is coherent with the pin that let it through, or it is a
-/// refusal. That is the whole oracle, and it is deliberately not an *order*.
-///
-/// [`assert_coherent_or_absent`]'s Round-3 reasoning applies verbatim one level
-/// up. Which state a racing call reflects is the race's business: a call that
-/// loses it outright and answers `Gone` has seen one coherent moment and is not
-/// a defect, and demanding a particular winner would false-red on exactly that.
-/// What can never be true is an `Excerpt` whose own blocks do not contain the
-/// passage it was pinned to — the assertion is conditioned on the same fact
-/// that made the response possible, since an excerpt exists *only* because
-/// `chunk.text == passageText` at the moment the pin read it, so a window read
-/// from that same moment must hold that text. If it does not, two statements
-/// inside one command read two different moments and the user is looking at
-/// another passage's paragraphs under their own citation.
-///
-/// ⚠️ **The blocks are compared joined, not one by one.** "Some block contains
-/// the passage" is only equivalent for a single-block chunk; a passage spanning
-/// two blocks is contained in neither alone, and a future multi-block fixture
-/// would silently invert an oracle written the other way.
-fn assert_excerpt_holds_its_passage(v: &Value, passage: &str) {
-    if v["kind"] != json!("excerpt") {
-        return;
-    }
-    let joined = v["blocks"]
-        .as_array()
-        .expect("an excerpt carries a blocks array")
-        .iter()
-        .map(|b| b["text"].as_str().expect("a block text"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        joined.contains(passage),
-        "the excerpt exists only because the pin read {passage:?} as this chunk's text, but the \
-         window returned beside it does not contain that passage — two statements in one command \
-         read two different moments, and these are another passage's paragraphs: {joined:?}"
-    );
-
-    // The second half of coherence, and the text check alone cannot see it.
-    // The writer rebuilds the ORIGINAL text every other round, so a torn read
-    // can return a *new* block carrying the *same* text: `joined` then contains
-    // the passage and this looked green, while `spans` still named the block
-    // that was deleted. PR 6 would paint the highlight nowhere, or into the
-    // wrong paragraph.
-    //
-    // Never falsely red: in any coherent slice every span's block is in the
-    // window by construction — `reading_window` takes the anchor blocks as
-    // `reading_order BETWEEN first AND last`, and those two are the MIN and MAX
-    // over exactly the blocks the spans name.
-    let block_ids: Vec<i64> = v["blocks"]
-        .as_array()
-        .expect("an excerpt carries a blocks array")
-        .iter()
-        .map(|b| b["blockId"].as_i64().expect("a blockId"))
-        .collect();
-    for span in v["spans"].as_array().expect("an excerpt carries spans") {
-        let named = span["blockId"].as_i64().expect("a span blockId");
-        assert!(
-            block_ids.contains(&named),
-            "a span names block {named}, which is not among the blocks returned beside it \
-             ({block_ids:?}) — the spans and the window read two different moments"
-        );
-    }
-}
-
-/// Hazard (1) with the rebuild landing *during* the command rather than before
-/// it — the last thing the deterministic pin tests cannot reach.
-///
-/// [`source_around_refuses_a_chunk_id_a_rebuild_has_handed_to_other_text`]
-/// proves the pin against a rebuild that has already committed. It says nothing
-/// about a rebuild that commits *between* the pin's own `chunk_anchor` read and
-/// the `reading_window` read that follows it. Under one
-/// [`mnema_index::Db::read_snapshot`] those two statements see one moment and
-/// the excerpt carries the paragraphs of the passage the pin let through;
-/// without it they can see two, and the answer is the new chunk's
-/// neighbourhood under the user's citation. See
-/// [`assert_excerpt_holds_its_passage`] for why the oracle is coherence.
-///
-/// **Two fixture constraints, both found by review before this was written.**
-///
-/// 1. The writer must not rebuild the *same* text every round. Rebuild with the
-///    original and the pin passes every single time, `Gone` never occurs, and
-///    the "both outcomes" requirement then fails for a reason that has nothing
-///    to do with the code. It alternates instead — the original text, then a
-///    replacement unique to its round — so consecutive rounds always differ and
-///    both outcomes stay reachable for the whole run.
-/// 2. The oracle is valid only for a single-block chunk, and
-///    [`rebuild_one_chunk`] mints exactly one block and one single-`Segment`
-///    chunk. The joined-blocks comparison keeps that from being a hidden
-///    premise.
-///
-/// **The distribution is recorded, not asserted, and that is deliberate.** This
-/// is an unsynchronised thread race: how it falls is machine-dependent, and a
-/// fast runner can win or lose every round. So the assertion fails *only* on an
-/// incoherent excerpt, never on the distribution — a one-sided run is not a red
-/// build, it is a silent loss of coverage, which is why the counts are printed
-/// for a person to read into the ledger rather than asserted here
-/// ([gate-reached-by-accident]).
-#[test]
-fn a_rebuild_racing_the_ipc_source_around_never_returns_another_passages_paragraphs() {
-    const ORIGINAL: &str = "Ціна оцифрування одного аркуша становить дві гривні.";
-    // The reader's calls. Fixed here rather than tuned when it flakes.
-    const ROUNDS: usize = 200;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("index.sqlite");
-    let app = app_in(dir.path());
-    let webview = main_webview(&app);
-    call(&webview, "open_index", json!({})).expect("open_index was rejected");
-
-    // The window and this writer are two connections on one file — the running
-    // indexing job's shape, the same arrangement the search and `list_tree`
-    // race fixtures rely on.
-    let writer = mnema_index::open(&path).unwrap();
-    let doc = "3".repeat(64);
-    let target = write_one_document(&writer, &doc, ORIGINAL);
-
-    // The fixture is the hazard only if SQLite hands the chunk rowid back after
-    // a rebuild. If it did not, every call below would answer `noSuchChunk`,
-    // the excerpt arm would never run, and a green race would mean nothing.
-    // Asserted loudly rather than skipped with a `return`.
-    writer.clear_document_content(&doc).unwrap();
-    let again = rebuild_one_chunk(&writer, &doc, ORIGINAL);
-    assert_eq!(
-        again, target,
-        "SQLite did not hand the chunk rowid back, so this fixture cannot reach the id-reuse \
-         hazard it races against"
-    );
-
-    // Control, before the writer thread exists to race against: the command
-    // answers with a coherent excerpt on its own, so anything below can only be
-    // the race.
-    let control = call(
-        &webview,
-        "source_around",
-        json!({
-            "chunkId": target,
-            "passageText": ORIGINAL,
-            "citedDocumentId": doc,
-            "citedOrd": 0,
-            "radius": 1,
-        }),
-    )
-    .expect("source_around was rejected");
-    assert_eq!(
-        control["kind"],
-        json!("excerpt"),
-        "the fixture must answer with an excerpt before anything races it: {control}"
-    );
-    assert_excerpt_holds_its_passage(&control, ORIGINAL);
-
-    // The writer runs until the reader is done rather than for a fixed count:
-    // two DB writes are far cheaper than a full IPC round trip, so a
-    // fixed-count writer would finish early and leave most of the reader's
-    // calls running against a settled index — a green run with no race in it.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer_stop = std::sync::Arc::clone(&stop);
-    let writer_doc = doc.clone();
-    let writer_handle = std::thread::spawn(move || {
-        let mut round = 0usize;
-        while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
-            let text = if round.is_multiple_of(2) {
-                ORIGINAL.to_string()
-            } else {
-                // Unique to the round, so no two consecutive rebuilds write the
-                // same text and the pin has something to refuse.
-                format!("Ставка залишається незмінною, редакція {round}.")
-            };
-            writer
-                .clear_document_content(&writer_doc)
-                .expect("clear the target document");
-            rebuild_one_chunk(&writer, &writer_doc, &text);
-            round += 1;
-        }
-        round
-    });
-
-    let mut excerpts = 0usize;
-    let mut refusals = 0usize;
-    // Split, because the two refusals are two different racing states and one
-    // number cannot say which was reached: `idReused` means the reader landed
-    // on a *rebuilt* chunk, `noSuchChunk` that it landed in the gap between
-    // `clear_document_content` and the rebuild. Lumping them is the
-    // [two-truths-one-message] shape at the level of the record itself.
-    let mut reused = 0usize;
-    for _ in 0..ROUNDS {
-        let v = call(
-            &webview,
-            "source_around",
-            json!({
-                "chunkId": target,
-                "passageText": ORIGINAL,
-                "citedDocumentId": doc,
-                "citedOrd": 0,
-                "radius": 1,
-            }),
-        )
-        .expect("source_around was rejected");
-        match v["kind"].as_str().expect("a kind tag") {
-            "excerpt" => excerpts += 1,
-            "gone" => {
-                refusals += 1;
-                if v["reason"]["kind"] == json!("idReused") {
-                    reused += 1;
-                }
-            }
-            other => panic!("source_around answered with an unknown variant {other:?}: {v}"),
-        }
-        assert_excerpt_holds_its_passage(&v, ORIGINAL);
-    }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let rebuilds = writer_handle.join().expect("the writer thread panicked");
-
-    // The one fact about this run that is NOT machine-dependent, so it is the
-    // one thing asserted rather than printed: the writer stops only after all
-    // 200 IPC round-trips are done, so zero rebuilds means the writer never
-    // ran and these were 200 uncontended calls — a green that proves nothing.
-    // The excerpt/gone split genuinely does depend on timing, which is why it
-    // is printed for a person to read instead.
-    assert!(
-        rebuilds > 0,
-        "the writer never rebuilt once, so nothing raced and this run is not evidence"
-    );
-
-    // Read with `-- --nocapture`. Both counts non-zero is what says the fixture
-    // reached a racing state at all; one-sided means the guard is decoration
-    // this run, and that goes in the ledger rather than passing as a green.
-    eprintln!(
-        "source_around race: {ROUNDS} calls -> excerpt={excerpts} gone={refusals} \
-         (idReused={reused}, noSuchChunk={}); writer rebuilt {rebuilds} times",
-        refusals - reused
     );
 }
 

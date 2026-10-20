@@ -6,7 +6,7 @@ import { roleReady } from './state';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
-import { refusedNoCandidates, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders, excerptSpanA } from '../lib/fixtures';
+import { refusedNoCandidates, generated, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
 import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -24,15 +24,20 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // (§2: the tree is the entry point), and `Tree` calls `list_tree` on mount.
 // Every test goes through it, and a bare `Promise.resolve()` for unknown
 // commands made it read `.roots` off `undefined`.
-//
-// `source_around` is still stubbed for the tests that drive the old `Source`
-// path by hand (`styles.test.ts`); the launcher mounts no source panel until
-// the file pane lands (Task 6), so a launcher test never reaches it.
 const READY_INDEX = { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: 'emb', chatModel: 'chat', searchTextArm: true, searchContentArm: false };
 // Both roles on OpenRouter with a key and a chosen model each: the cloud may say `ok`.
 const SETTINGS_READY = {
   key: { kind: 'present' }, index: READY_INDEX, roles: { embed: 'openRouter', chat: 'openRouter' },
   configured: { openRouter: true, mnemaEmbed: false, mnemaChat: false },
+};
+// What `open_document` answers when a tree click opens a file: one block, no
+// focus, so a click has no highlight to paint.
+const OPEN_DOCUMENT = {
+  kind: 'file',
+  blocks: [{ blockId: 1, kind: 'paragraph', text: 'The whole file, opened from the tree.', pageNo: 1, sectionTitle: null }],
+  focusBlockIds: [],
+  spans: [],
+  freshness: { kind: 'current' },
 };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
   invoke.mockImplementation((cmd: string) => {
@@ -40,7 +45,7 @@ function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'open_document') return Promise.resolve(OPEN_DOCUMENT);
     if (cmd === 'ask') return opts.reject ? Promise.reject(askReply) : Promise.resolve(askReply).then(wrapAsk);
     return Promise.resolve();
   });
@@ -64,7 +69,7 @@ function mockAsks(...replies: unknown[]) {
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
+    if (cmd === 'open_document') return Promise.resolve(OPEN_DOCUMENT);
     // Loud past the end, never a silent repeat (M2): a test that asks once
     // more than its author intended would get the previous answer back and
     // attribute whatever it then asserts to the wrong cause.
@@ -186,7 +191,6 @@ test('a draft typed while an ask is in flight survives the ready-clear (Codex #3
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return pending.then(wrapAsk);
     return Promise.resolve();
   });
@@ -223,7 +227,6 @@ function mockAsksThenReject(first: unknown) {
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve([]);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') return n++ === 0 ? Promise.resolve(wrapAsk(first)) : Promise.reject('offline');
     return Promise.resolve();
   });
@@ -351,6 +354,25 @@ test('a freshly mounted window shows the tree and no answer', () => {
   render(Launcher);
   expect(screen.getByTestId('tree-body')).toBeTruthy();
   expect(screen.queryByTestId('turn')).toBeNull();
+});
+
+// §2/§3: a click in the tree opens the file in the right pane, at its start and
+// with no highlight — the pane's own read of the whole file, not a citation's
+// passage. The pair, not the document id, is what the pane is asked for.
+test('clicking a file in the tree opens it in the right pane at its start', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+
+  expect(await screen.findByTestId('file-block')).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith('open_document', {
+    documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md',
+    chunkId: null, citedOrd: null, citedText: null,
+  });
+  expect(screen.queryByTestId('hl')).toBeNull();
+  expect(screen.getByTestId('col-file')).toBeTruthy();
+  // The tree marks the row the pane is showing.
+  expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
 });
 
 // --- ruling I-C: `error` is taken whole, and both halves are defended --------
@@ -579,7 +601,6 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
       return opened instanceof Promise ? opened : Promise.resolve(opened);
     }
     if (cmd === 'continue_history') return opts.continued ?? Promise.resolve(true);
-    if (cmd === 'source_around') return Promise.resolve(excerptSpanA);
     if (cmd === 'ask') {
       if (opts.ask) return opts.ask;
       if (next >= (opts.asks ?? []).length) throw new Error(`mockRecents: no reply for ask #${next + 1}`);

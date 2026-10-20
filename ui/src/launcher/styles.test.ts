@@ -1,14 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
+import Shell from './Shell.svelte';
 import Tree from './Tree.svelte';
 import Recents from './Recents.svelte';
-import Source from './Source.svelte';
+import FilePane from './FilePane.svelte';
 import {
-  citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excerptSpanB, historyTwoQuestions,
+  generated, oneRootTwoFolders, historyTwoQuestions,
 } from '../lib/fixtures';
 
 const invoke = vi.fn();
@@ -19,7 +20,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 beforeEach(() => {
   invoke.mockReset();
-  invoke.mockImplementation((cmd: string, args?: { chunkId: number }) => {
+  invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve({
       key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0,
         embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
@@ -28,8 +29,13 @@ beforeEach(() => {
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
     if (cmd === 'ask') return Promise.resolve({ answer: generated, historyId: null });
-    if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
-    if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
+    if (cmd === 'open_document') return Promise.resolve({
+      kind: 'file',
+      blocks: [{ blockId: 1, kind: 'paragraph', text: 'A cited passage. And more.', pageNo: 1, sectionTitle: null }],
+      focusBlockIds: [1],
+      spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
+      freshness: { kind: 'current' },
+    });
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
     throw new Error(`unexpected command ${cmd}`);
   });
@@ -85,7 +91,7 @@ test('real launcher places the three areas with the tree inside the right one', 
 });
 
 test('real tree marks the current file while leaving neighbours plain', async () => {
-  render(Tree, { selected: citationA });
+  render(Tree, { selected: { rootId: 1, relativePath: 'notes/a.md' }, onPick: () => {} });
   const selected = await screen.findByTestId('tree-file-doc-1');
   const other = screen.getByTestId('tree-file-doc-2');
   expect(selected.getAttribute('aria-current')).toBe('true');
@@ -151,18 +157,27 @@ test('the conversation alert is the same framed message as the composer guard', 
   );
 });
 
-test('real source distinguishes primary highlight from its sibling', async () => {
-  render(Source, { selected: citationA, siblings: [citationA, citationB] });
-  await waitFor(() => expect(screen.getByTestId('source-body').getAttribute('data-pending')).toBe('0'));
-  const marks = screen.getAllByTestId('hl');
-  const primary = marks.filter((m) => m.getAttribute('data-primary') === 'true');
-  const secondary = marks.filter((m) => !m.hasAttribute('data-primary'));
-  expect(primary).toHaveLength(1);
-  expect(secondary).toHaveLength(1);
-  for (const mark of marks) expect(getComputedStyle(mark).background).toBe('var(--cite-wash)');
-  expect(getComputedStyle(primary[0]).outline).toBe('1px solid var(--cite-line)');
-  expect(getComputedStyle(secondary[0]).outline).toBe('none');
-  expect(screen.getByTestId('freshness').textContent?.length).toBeGreaterThan(0);
+test('real file pane paints the cited span and keeps its badge on screen', async () => {
+  render(FilePane, {
+    location: { documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md' },
+    focus: null,
+    onFocusHandled: () => {},
+  });
+  const mark = await screen.findByTestId('hl');
+  expect(mark.getAttribute('data-primary')).toBe('true');
+  expect(getComputedStyle(mark).background).toBe('var(--cite-wash)');
+  expect(getComputedStyle(mark).outline).toBe('1px solid var(--cite-line)');
+  expect(screen.getByTestId('file-badge').textContent?.length).toBeGreaterThan(0);
+});
+
+// The carried finding from the shell: with the tree hidden its track is 0 px,
+// and a file pane placed by auto-flow lands in that track and is invisible.
+// Both panes name their column, so the file stays in the second one in both
+// modes.
+test('the file pane keeps the second track when the tree is hidden', async () => {
+  render(Shell, { fileOpen: true });
+  expect(getComputedStyle(screen.getByTestId('col-tree')).gridColumn).toBe('1');
+  expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
 });
 
 test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {

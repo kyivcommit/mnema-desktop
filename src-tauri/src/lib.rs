@@ -80,7 +80,6 @@ pub fn invoke_handler<R: tauri::Runtime>()
         tree::list_tree,
         tree::mask_preview,
         tree::open_document,
-        tree::source_around,
         models::provider_models,
         models::key_present,
         models::set_key,

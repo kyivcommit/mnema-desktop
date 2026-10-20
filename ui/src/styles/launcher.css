@@ -83,6 +83,11 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
  * positioned on the pane's edge, and inside a scroll container it would scroll
  * with the content and widen the scrollable area by its own hit target. */
 .tree-pane, .file-pane { position: relative; min-width: 0; min-height: 0; }
+/* Explicit columns: with the tree hidden its track is 0 px, and a file pane
+ * placed by auto-flow would land in that track and be 0 px wide. Column 2 is
+ * the file's place in both modes. */
+.tree-pane { grid-column: 1; }
+.file-pane { grid-column: 2; }
 .pane-body { height: 100%; overflow: auto; padding: 0 12px 12px; }
 .file-pane { border-left: 1px solid var(--line); }
 /* §2: a 1px line with a 4px hit target and no visible handle. It sits on its
@@ -125,8 +130,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 }
 .tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
 .tree li > button[aria-expanded="true"]::before { content: '▾'; }
-.tree li > span > span { display: block; }
-.tree li > span > span + span { font-size: 11px; color: var(--ink-soft); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
 /* §4: the conversations. The pane is the scroll container; a row is one line,
    the × shows on hover and on focus. The active row is `--select`, not the
@@ -237,17 +240,19 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   padding: 11px 13px; border: 1px solid var(--cite-line); border-radius: 10px;
   background: var(--cite-wash); font-size: 13px; line-height: 1.55;
 }
-.source-card { display: flex; flex-direction: column; gap: 10px; }
-.source-card h3 {
+.file-card { display: flex; flex-direction: column; gap: 10px; }
+.file-card h3 {
   margin: 0; padding-bottom: 9px; border-bottom: 1px solid var(--line);
   font-family: var(--mono); font-weight: 400; font-style: normal;
   font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere;
 }
-.source-card p { margin: 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
-.source-card [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
-.source-card mark {
+.file-card p, .file-card h4, .file-card pre { margin: 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
+.file-card h4 { font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 13px; color: var(--ink); }
+.file-card pre { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; }
+.file-card [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
+.file-card mark {
   background: var(--cite-wash); color: var(--ink); padding: 1px 3px; border-radius: 3px;
   outline: none; box-decoration-break: clone; -webkit-box-decoration-break: clone;
 }
-.source-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
+.file-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
 

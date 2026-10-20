@@ -43,8 +43,9 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
   | 'fresh_file_missing' | 'fresh_no_path'
-  | 'gone_no_such_chunk' | 'gone_id_reused'
-  | 'source_loading' | 'source_failed' | 'source_wrong_document'
+  | 'file_loading' | 'file_failed'
+  | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
+  | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
@@ -398,13 +399,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // (`src-tauri/src/tree.rs:226-241`), so this says the location is unknown
     // and never that the file is gone.
     fresh_no_path: 'Розташування на диску невідоме',
-    gone_no_such_chunk: 'Цього фрагмента більше немає в індексі',
-    gone_id_reused: 'Цей ідентифікатор тепер вказує на інший фрагмент',
-    source_loading: 'Завантаження джерела…',
-    source_failed: 'Не вдалося завантажити джерело.',
-    // M2: shown instead of a freshness verdict when the excerpt names a
-    // different document than the citation does.
-    source_wrong_document: 'Цей уривок походить з іншого документа, ніж цитата',
+    file_loading: 'Завантаження файла…',
+    file_failed: 'Не вдалося завантажити файл.',
+    // §3: a document that cannot be shown whole is never shown short, so each
+    // reason gets its own sentence rather than a blank pane.
+    file_unavailable_no_such_document: 'Цього документа більше немає в індексі.',
+    file_unavailable_no_blocks: 'У цьому документі немає тексту.',
+    file_unavailable_rebuilding: 'Документ зараз переіндексовується — спробуйте після сканування.',
+    file_unavailable_too_large: 'Файл завеликий, щоб показати його повністю.',
     // 🔴 Ruling AF: `bridge.rs:536-540` opens state E for any non-`Ready`
     // readiness, `bridge.rs:293-302` gives that three variants, and the wire
     // shape at `bridge.rs:476-480` carries none of them. So this sentence says
@@ -1263,11 +1265,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     fresh_file_changed: 'The file changed after indexing',
     fresh_file_missing: 'The file is missing from disk',
     fresh_no_path: 'The location on disk is unknown',
-    gone_no_such_chunk: 'This passage is no longer in the index',
-    gone_id_reused: 'This identifier now points to another passage',
-    source_loading: 'Loading the source…',
-    source_failed: 'The source could not be loaded.',
-    source_wrong_document: 'This excerpt came from a different document than the citation',
+    file_loading: 'Loading the file…',
+    file_failed: 'The file could not be loaded.',
+    file_unavailable_no_such_document: 'This document is no longer in the index.',
+    file_unavailable_no_blocks: 'This document has no text.',
+    file_unavailable_rebuilding: 'This document is being reindexed — try again after the scan.',
+    file_unavailable_too_large: 'The file is too large to show in full.',
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',

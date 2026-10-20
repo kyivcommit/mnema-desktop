@@ -869,7 +869,7 @@ pub struct Hit {
     pub section_title: Option<String>,
     pub coordinate: Coordinate,
     /// The occurrence identity a re-index can invalidate but `chunk_id` alone
-    /// cannot reveal — carried so a later `source_around` call can be pinned
+    /// cannot reveal — carried so a later `open_document` call can be pinned
     /// against it (owner-Codex P1 on PR #22; `mnema_index::Citation`'s own
     /// doc comment explains each field).
     pub document_id: String,

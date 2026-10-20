@@ -36,7 +36,7 @@
   // `t()` and `formatLocator()`) but is not reactive on its own, so the whole
   // preview list is rebuilt inside one $derived.by that reads $locale — the
   // house pattern (Arms.svelte:11-12, Shell.svelte).
-  // Ruling S: the rule itself lives in `i18n/label.ts` and `Source.svelte`
+  // Ruling S: the rule itself lives in `i18n/label.ts` and `Passages.svelte`
   // calls the same function — one rule, one place. What stays here is the
   // reactivity, which is per-component.
   const previews = $derived.by(() => {

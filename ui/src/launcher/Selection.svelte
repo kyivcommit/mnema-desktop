@@ -18,9 +18,10 @@
   //
   // 🔴 Ruling AJ — this is also the whole of state E's selection. A passage
   // click IS a citation click: same component, same `{#key}`, same state tag,
-  // and `Source` already takes `AskCitation | Hit` (`Source.svelte:83-86`) so a
-  // `Hit` needs no adaptation. A second selection path would be a second copy of
-  // the reset rule above, and the two would drift.
+  // and both carry `documentId`/`chunkId`/`ord`/`text`, which is everything the
+  // pane is opened from (`DocumentLocation`/`DocumentFocus`). A second
+  // selection path would be a second copy of the reset rule above, and the two
+  // would drift.
   let { answer, query, onSelected }: {
     answer: CardAnswer;
     query: string;

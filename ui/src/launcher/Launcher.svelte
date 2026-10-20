@@ -7,9 +7,12 @@
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';
   import Tree from './Tree.svelte';
+  import type { TreePick } from './Tree.svelte';
+  import FilePane from './FilePane.svelte';
   import Recents from './Recents.svelte';
   import Shell from './Shell.svelte';
   import { loadLayout, type PanelState } from './layout';
+  import type { DocumentFocus, DocumentLocation } from '../lib/ipc';
 
   let query = $state('');
   // `$state.raw`, here and for `previous`: the transcript finds a turn by the
@@ -26,6 +29,24 @@
   // The conversation on screen: the row an opened entry names, or the row `ask`
   // reports it wrote. Null for a refusal and for a fresh chat.
   let historyId = $state<number | null>(null);
+  // §2/§3: the file the right pane shows. `rootId`/`relativePath` may be null
+  // (a citation with no place on disk); the tree marks a row only when both
+  // name one. `openFocus` is one citation's passage — the pane scrolls to it
+  // and drops it through `onFocusHandled`, so it is scrolled to once.
+  let openFile = $state<DocumentLocation | null>(null);
+  let openFocus = $state<DocumentFocus | null>(null);
+  const selected = $derived(
+    openFile === null || openFile.rootId === null || openFile.relativePath === null
+      ? null
+      : { rootId: openFile.rootId, relativePath: openFile.relativePath },
+  );
+
+  // A click in the tree opens the file at its start: no highlight, no scroll.
+  function openAtStart(pick: TreePick) {
+    openFile = { documentId: pick.documentId, rootId: pick.rootId, relativePath: pick.relativePath };
+    openFocus = null;
+  }
+
   // What the transcript draws. The composer always gets `launcherState` itself.
   const shownState = $derived(
     launcherState.kind === 'error' && previous
@@ -212,7 +233,7 @@
 
 <svelte:window onfocus={refreshAll} onkeydown={onKeydown} />
 
-<Shell bind:panels>
+<Shell bind:panels fileOpen={openFile !== null}>
   {#snippet transcript()}
     <Transcript {turns} state={shownState} />
     <Composer bind:value={query} state={launcherState} onSubmit={runSearch} />
@@ -223,7 +244,12 @@
       error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
   {/snippet}
   {#snippet tree()}
-    <Tree selected={null} />
+    <Tree {selected} onPick={openAtStart} />
+  {/snippet}
+  {#snippet file()}
+    {#if openFile !== null}
+      <FilePane location={openFile} focus={openFocus} onFocusHandled={() => (openFocus = null)} />
+    {/if}
   {/snippet}
   {#snippet tools()}
     {#if dialogue}

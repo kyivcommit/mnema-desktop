@@ -21,12 +21,12 @@ import type {
   ScanState,
   HistoryEntry,
   HistoryOpen,
+  DocumentView,
   Roles,
   Configured,
   RoleModel,
   RoleStatuses,
   ProviderStatus,
-  SourceAround,
   StoredExclusion,
   SubfolderListing,
   SubfolderState,
@@ -211,28 +211,14 @@ test('forgetKey invokes forget_key with no arguments', async () => {
   expect(invoke).toHaveBeenCalledWith('forget_key');
 });
 
-test('sourceAround echoes the whole identity, not just the id', async () => {
-  if (generated.kind !== 'generated') throw new Error('fixture drifted');
-  invoke.mockResolvedValue({ kind: 'gone', reason: { kind: 'noSuchChunk' } });
-
-  await ipc.sourceAround(generated.citations[0]);
-
-  expect(invoke).toHaveBeenCalledWith('source_around', {
-    chunkId: 42, passageText: 'A cited passage.',
-    citedDocumentId: 'doc-1', citedOrd: 0, citedRootId: 7,
-    citedRelativePath: 'notes/a.md', radius: 3,
-  });
-});
-
-test('SourceAround rejects Rust snake_case wire fields', () => {
-  const source: SourceAround = {
-    kind: 'excerpt', blocks: [], spans: [], documentId: 'doc-1', sectionTitle: null,
-    hasMoreBefore: false, hasMoreAfter: false, freshness: { kind: 'current' },
+test('DocumentView rejects Rust snake_case wire fields', () => {
+  const view: DocumentView = {
+    kind: 'file', blocks: [], focusBlockIds: [], spans: [], freshness: { kind: 'current' },
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
-    has_more_before: false,
+    focus_block_ids: [],
   };
 
-  expect(source.kind).toBe('excerpt');
+  expect(view.kind).toBe('file');
 });
 
 test('openDocument sends the location and the full citation pair, nulls included', async () => {

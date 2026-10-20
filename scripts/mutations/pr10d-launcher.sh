@@ -13,7 +13,7 @@ case_ "launcher: primary source highlight loses its outline" \
   ui/src/styles/launcher.css \
   's~mark\[data-primary="true"\]~mark[data-primary="never"]~' \
   'mark[data-primary="never"]' \
-  src/launcher/styles.test.ts 'real source distinguishes primary highlight from its sibling' runner=vitest
+  src/launcher/styles.test.ts 'real file pane paints the cited span and keeps its badge on screen' runner=vitest
 
 case_ "launcher: the right area loses its own track" \
   ui/src/launcher/Shell.svelte \
@@ -23,7 +23,7 @@ case_ "launcher: the right area loses its own track" \
 
 case_ "launcher: the tree toggle stops hiding the tree" \
   ui/src/launcher/Shell.svelte \
-  's~hidden=\{!view\.tree\}~hidden={false}~' \
+  's~hidden=\{!treeVisible\}~hidden={false}~' \
   'hidden={false}' \
   src/launcher/Shell.test.ts 'the tree toggle does not change the transcript width' runner=vitest
 
