@@ -153,15 +153,16 @@ test('buildFolderTree mixes the three depths in one root and shares one node per
 // --- the rendered card ------------------------------------------------------
 
 // File rows are actions now — clicking one opens the file in the pane (spec
-// §2) — so the closed enumeration below counts them. The folders come first
-// (document order), then the files of the folder the selection opened.
+// §2) — so the closed enumeration below counts them. The root's disclosure row
+// comes first (document order), then the folders, then the files of the folder
+// the selection opened.
 test('the controls are exactly the ones with a real action', async () => {
   mockTree(oneRootTwoFolders);
   mount(SELECTED); // notes/ is open, so its files are on screen
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   expect(controls()).toEqual([
-    'tree-folder-notes', 'tree-file-doc-1', 'tree-file-doc-2', 'tree-folder-archive',
+    'tree-root-toggle-1', 'tree-folder-notes', 'tree-file-doc-1', 'tree-file-doc-2', 'tree-folder-archive',
   ]);
 });
 
@@ -298,6 +299,44 @@ test('a folder the person shut opens again when the next file lands inside it', 
   await tick();
 
   expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true');
+  expect(currentRows()).toEqual(['tree-file-doc-2']);
+});
+
+// Owner, 2026-10-20: the root itself is a disclosure row like the folders
+// below it — a bare heading over a flat list read as a pile with no way to
+// fold it. The default is EXPANDED; collapsing is the person's option.
+test('the root is a disclosure row, expanded by default, folding the whole root', async () => {
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+
+  const root = await screen.findByTestId('tree-root-toggle-1');
+  expect(root.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-folder-notes')).toBeTruthy();
+
+  await fireEvent.click(root);
+  expect(root.getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('tree-folder-notes')).toBeNull();
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+
+  await fireEvent.click(root);
+  expect(root.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByTestId('tree-folder-notes')).toBeTruthy();
+});
+
+// The same rule the folders live by (P4): a NEW selection re-opens what the
+// person shut on its way, and the root is the outermost folder on every path.
+// The mark must be findable; a shut root would hide it.
+test('a root the person shut opens again when the next file lands inside it', async () => {
+  mockTree(oneRootTwoFolders);
+  const { rerender } = mount(SELECTED);
+
+  await fireEvent.click(await screen.findByTestId('tree-root-toggle-1')); // shut by hand
+  expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
+
+  await rerender({ selected: SELECTED_B }); // a new citation, same root
+  await tick();
+
+  expect(screen.getByTestId('tree-root-toggle-1').getAttribute('aria-expanded')).toBe('true');
   expect(currentRows()).toEqual(['tree-file-doc-2']);
 });
 

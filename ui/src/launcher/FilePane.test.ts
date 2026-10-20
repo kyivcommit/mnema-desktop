@@ -216,6 +216,26 @@ test('a gone file shows the badge and keeps its text', async () => {
   expect(blocks()).toEqual(['Текст, який усе ще в індексі.']);
 });
 
+// Owner, 2026-10-20: «Up to date» is not news. The badge speaks only when it
+// carries some — changed, reindexed, missing — and an unchanged file draws
+// none.
+test('an unchanged file draws no badge', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без змін.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/a.md',
+    freshness: { kind: 'current' },
+  });
+  render(FilePane, { location, focus: null, onFocusHandled: () => {} });
+
+  await screen.findByTestId('file-block');
+  expect(screen.queryByTestId('file-badge')).toBeNull();
+  // The file really is open: this is not an empty card.
+  expect(blocks()).toEqual(['Текст без змін.']);
+});
+
 test('a file without a path opens without a badge', async () => {
   mockView({
     kind: 'file',

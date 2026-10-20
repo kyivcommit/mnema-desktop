@@ -39,10 +39,9 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_empty' | 'tree_failed' | 'tree_hidden' | 'tree_show'
+  | 'tree_empty' | 'tree_failed'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
-  | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
-  | 'fresh_file_missing' | 'fresh_no_path'
+  | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
@@ -386,21 +385,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
-    tree_hidden: 'Дерево приховане.',
-    tree_show: 'Показати дерево',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
     history_open_failed: 'Не вдалося відкрити цю бесіду.',
     recents_failed: 'Не вдалося завантажити бесіди.',
-    fresh_current: 'Актуально',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
     fresh_file_missing: 'Файла немає на диску',
-    // Ruling X: `noPath` has three causes and deletion is only one of them
-    // (`src-tauri/src/tree.rs:226-241`), so this says the location is unknown
-    // and never that the file is gone.
-    fresh_no_path: 'Розташування на диску невідоме',
     file_loading: 'Завантаження файла…',
     file_failed: 'Не вдалося завантажити файл.',
     // A citation from a stored conversation outlives the chunks it names: a
@@ -1261,18 +1253,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
-    tree_hidden: 'The tree is hidden.',
-    tree_show: 'Show the tree',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',
     history_open_failed: 'This conversation could not be opened.',
     recents_failed: 'The conversations could not be loaded.',
-    fresh_current: 'Up to date',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',
     fresh_file_missing: 'The file is missing from disk',
-    fresh_no_path: 'The location on disk is unknown',
     file_loading: 'Loading the file…',
     file_failed: 'The file could not be loaded.',
     file_focus_gone: 'The passage this citation pointed at is no longer in this file.',

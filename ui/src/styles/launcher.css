@@ -50,14 +50,15 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
  * rule and leave it on screen. */
 .shell > .right[hidden], .tree-pane[hidden] { display: none; }
 /* Narrower than L + 520 + W: the right area stops taking a track and paints
- * over the transcript instead, at the same width W. */
+ * over the transcript instead, at the same width W. It is not modal (owner,
+ * 2026-10-20): no scrim — the transcript keeps taking keys, clicks and scroll
+ * beside it. It starts below the 38px header, so the «Файли» toggle and the
+ * drag handle stay clickable; Esc is the keyboard way out (`Shell.onKeydown`).
+ * The shadow is plain: the earlier tinted-glow layer read as a blue defect
+ * bleeding off the panel's left edge. */
 .shell > .right.overlay {
-  position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
-  box-shadow: -24px 0 50px -20px var(--glow), -6px 0 16px -8px var(--shadow);
-}
-.scrim {
-  position: absolute; inset: 0; z-index: 10; padding: 0; border: 0;
-  background: var(--shadow); opacity: .22; cursor: default;
+  position: absolute; top: 38px; right: 0; bottom: 0; z-index: 20;
+  box-shadow: -6px 0 16px -8px var(--shadow);
 }
 .head, .right-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; }
 /* macOS draws its traffic lights over the content (`titleBarStyle: Overlay`,
@@ -162,19 +163,7 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   margin: 0 0 8px; padding: 8px; overflow-wrap: anywhere; font-size: 12px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
 }
-.right-empty {
-  grid-column: 1 / -1; align-self: start; padding: 12px;
-  font-size: 12.5px; color: var(--ink-soft);
-}
-.right-empty button {
-  margin-left: 8px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px;
-  background: transparent; color: inherit; cursor: pointer;
-  font-family: var(--sans); font-weight: 400; font-style: normal; font-size: 12.5px;
-}
-.tree h4 {
-  margin: 10px 0 4px; overflow-wrap: anywhere;
-  font-family: var(--sans); font-weight: 500; font-style: normal;
-}
+.tree section + section { margin-top: 8px; }
 
 .answer-card, .passages-card { display: flex; flex-direction: column; gap: 13px; }
 .umsg {
@@ -202,6 +191,9 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   max-height: calc(1.5em * 5); overflow-y: auto;
   font-family: var(--sans); font-weight: 400; font-style: normal; font-size: 15px;
   line-height: 1.5; color: var(--ink);
+  /* One focus ring, on the box (`.composer:focus-within` above) — the field's
+   * own UA ring inside it read as a double outline (owner, 2026-10-20). */
+  outline: none;
 }
 .composer textarea::placeholder { color: var(--ink-soft); }
 .composer-send {

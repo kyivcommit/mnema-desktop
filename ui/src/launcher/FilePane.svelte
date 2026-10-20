@@ -202,21 +202,23 @@
   const badge = $derived.by(() => {
     void $locale;
     const got = view;
-    // No badge when the location is unknown: `noPath` has three causes and
-    // deletion is only one of them (spec §3), so there is nothing honest to
-    // say and the file still opens.
-    return got?.kind === 'file' && got.freshness.kind !== 'noPath' ? freshnessText(got.freshness) : '';
+    return got?.kind === 'file' ? freshnessText(got.freshness) : '';
   });
 
+  // The badge speaks only when it carries news (owner, 2026-10-20): `current`
+  // is silence, not «Up to date» — nothing happened and nobody needs telling.
+  // `noPath` stays silent too: it has three causes and deletion is only one
+  // of them (spec §3), so there is nothing honest to say and the file still
+  // opens.
   function freshnessText(f: Freshness): string {
     switch (f.kind) {
-      case 'current': return t('fresh_current');
+      case 'current': return '';
+      case 'noPath': return '';
       case 'reindexed': return t('fresh_reindexed');
       case 'fileChanged': return t('fresh_file_changed');
       case 'fileMissing': return t('fresh_file_missing');
-      case 'noPath': return t('fresh_no_path');
     }
-    // 🔴 No default: a pane that draws `Current` for an unmatched variant is how
+    // 🔴 No default: a pane that draws a badge for an unmatched variant is how
     // a stale file gets shown as fresh. Add a sixth variant and this line stops
     // compiling.
     const unreachable: never = f;

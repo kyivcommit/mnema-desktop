@@ -35,7 +35,9 @@ beforeEach(() => {
       focusBlockIds: [1],
       spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
       relativePath: 'notes/a.md',
-      freshness: { kind: 'current' },
+      // `fileChanged`, not `current`: the badge speaks only when it carries
+      // news (owner, 2026-10-20), and the pin below needs one on screen.
+      freshness: { kind: 'fileChanged' },
     });
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
     throw new Error(`unexpected command ${cmd}`);
@@ -198,6 +200,27 @@ test('the file pane keeps the second track when the tree is hidden', async () =>
   await fireEvent.click(screen.getByTestId('toggle-tree'));
   expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
   expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
+});
+
+// Owner, 2026-10-20: one focus ring on the composer — the box's
+// `:focus-within` outline — and never a second, UA-drawn one on the field
+// inside it. Read from the sheet: jsdom's UA stylesheet draws no ring, so a
+// computed style cannot see the doubling.
+test('the composer draws one focus ring: the box, never the field inside it', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.composer:focus-within\s*\{\s*outline:\s*2px solid var\(--accent\)/);
+  expect(css).toMatch(/\.composer textarea\s*\{[^}]*outline:\s*none/);
+});
+
+// Owner, 2026-10-20: the narrow overlay is not modal — no scrim may sit
+// between the person and the transcript — and it starts below the header, so
+// the «Файли» toggle and the drag handle stay clickable. No blue glow: the
+// earlier --glow layer read as a defect bleeding off the panel's left edge.
+test('the narrow overlay leaves the header free and blocks nothing', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.shell > \.right\.overlay\s*\{[^}]*top:\s*38px/);
+  expect(css).not.toMatch(/\.scrim/);
+  expect(css).not.toMatch(/--glow/);
 });
 
 test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {

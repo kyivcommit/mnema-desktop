@@ -59,7 +59,8 @@
   let listing = $state<TreeListing | null>(null);
   let failed = $state(false);
   // Folders the person opened or shut by hand, keyed per root: two roots may
-  // hold the same folder path and must not share one open flag.
+  // hold the same folder path and must not share one open flag. The root row
+  // itself lives in the same map under its root's `''` path.
   let toggled = $state<Record<string, boolean>>({});
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
@@ -158,15 +159,18 @@
   }
 
   // Folders start expanded along the path to the selected file and collapsed
-  // everywhere else. Derived from `selected`, so a new selection opens its
-  // folder without a refetch; `toggled` still wins, so an opened folder the
-  // person is reading does not shut itself on the next answer.
+  // everywhere else; the root holding it joins the set, so a root row the
+  // person shut is re-opened by a new selection exactly like a folder on the
+  // way. Derived from `selected`, so a new selection opens its folder without
+  // a refetch; `toggled` still wins, so an opened folder the person is reading
+  // does not shut itself on the next answer.
   const openByDefault = $derived.by(() => {
     const open = new Set<string>();
     if (selectedKey === null || listing === null) return open;
     for (const root of listing.roots) {
       for (const file of root.files) {
         if (key(root.rootId, file.relativePath) !== selectedKey) continue;
+        open.add(key(root.rootId, ''));
         const parts = file.relativePath.split('/');
         parts.pop();
         let path = '';
@@ -181,7 +185,9 @@
 
   function isOpen(rootId: number, path: string) {
     const k = key(rootId, path);
-    return k in toggled ? toggled[k] : openByDefault.has(k);
+    // The root row (path '') starts EXPANDED (owner, 2026-10-20): collapsing
+    // is the person's option, never the default.
+    return k in toggled ? toggled[k] : path === '' || openByDefault.has(k);
   }
 
   function toggle(rootId: number, path: string) {
@@ -190,7 +196,8 @@
   }
 
   // Folders on the selected file's path that the person had shut are set open
-  // when a NEW selection lands there. `toggled` still wins over `openByDefault`
+  // when a NEW selection lands there — and the root row with them, since it is
+  // the outermost folder on every path inside it. `toggled` still wins over `openByDefault`
   // everywhere else (Ruling M): a folder the person opened or shut somewhere
   // else is none of this selection's business, and clearing those would snap
   // every folder shut on each click.
@@ -283,8 +290,21 @@
   {:else}
     {#each roots as { root, nodes } (root.rootId)}
       <section data-testid={`tree-root-${root.rootId}`}>
-        <h4>{root.name}</h4>
-        {@render branch(nodes, root.rootId)}
+        <ul>
+          <li>
+            <!-- The root is a disclosure row like the folders below it (owner,
+                 2026-10-20): a flat list under a bare heading read as a pile
+                 with no way to fold it. -->
+            <button
+              type="button"
+              data-testid={`tree-root-toggle-${root.rootId}`}
+              aria-expanded={isOpen(root.rootId, '')}
+              onclick={() => toggle(root.rootId, '')}>{root.name}</button>
+            {#if isOpen(root.rootId, '')}
+              {@render branch(nodes, root.rootId)}
+            {/if}
+          </li>
+        </ul>
       </section>
     {/each}
   {/if}

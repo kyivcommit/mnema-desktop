@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
+import { createRawSnippet } from 'svelte';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import Shell from './Shell.svelte';
 import { DEFAULTS, MIN } from './layout';
@@ -95,12 +96,15 @@ test('the tree toggle does not change the transcript width', async () => {
   expect(tracks()).toContain(`${DEFAULTS.L}px minmax(0, 1fr) ${DEFAULTS.W}px`);
 });
 
-test('with no file open the tree fills the whole right area', () => {
+// Owner, 2026-10-20: with no file open the tree is constrained as if the file
+// were there — its own T, the file stripe reserved empty — so the list never
+// sprawls across the whole W.
+test('with no file open the tree keeps its own width and the file stripe is reserved', () => {
   render(Shell);
-  // §2: no file open means no file stripe at all — the tree is W wide and its
-  // splitter is not rendered.
-  expect(rightTracks()).toContain(`grid-template-columns: ${DEFAULTS.W}px`);
-  expect(screen.getAllByRole('separator')).toHaveLength(2); // recents | transcript, transcript | right
+  expect(rightTracks()).toContain(`grid-template-columns: ${DEFAULTS.T}px minmax(0, 1fr)`);
+  expect(rightTracks()).not.toContain(`${DEFAULTS.W}px`);
+  // recents | transcript, transcript | right, tree | reserved file stripe
+  expect(screen.getAllByRole('separator')).toHaveLength(3);
 });
 
 test('the files toggle hides the right area without unmounting the tree', async () => {
@@ -126,20 +130,19 @@ test('the layout survives a remount', async () => {
   expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
 });
 
-// Carried finding from Task 4, resolved the other way round: with no file open
-// and the tree hidden the area would be blank, so it says so and offers the
-// only way back. The toggle itself is honest — hidden means hidden.
-test('hiding the tree with no file open leaves a way back', async () => {
+// Owner, 2026-10-20: the «tree is hidden» placeholder is gone. The way back is
+// the tree toggle in the pane's own header, which is always rendered — file or
+// no file, tree open or shut.
+test('hiding the tree with no file open leaves the pane header toggle as the way back', async () => {
   render(Shell);
   await fireEvent.click(toggle('tree'));
 
   expect(toggle('tree').getAttribute('aria-pressed')).toBe('false');
   expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
-  const empty = screen.getByTestId('tree-hidden');
-  expect(empty.textContent).toContain('The tree is hidden.');
+  expect(screen.queryByTestId('tree-hidden')).toBeNull();
   expect(screen.queryByTestId('col-file')).toBeNull();
 
-  await fireEvent.click(screen.getByTestId('show-tree'));
+  await fireEvent.click(toggle('tree'));
   expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(false);
   expect(toggle('tree').getAttribute('aria-pressed')).toBe('true');
 });
@@ -163,9 +166,14 @@ test('a file opened while the tree is hidden does not bring the tree back', asyn
   expect(screen.queryByTestId('tree-hidden')).toBeNull();
 });
 
-test('at 900px the right area is an overlay of the person\'s width; Esc and a click beside it close it', async () => {
+// Owner, 2026-10-20: the overlay is not modal — no scrim blocks the centre, so
+// the transcript keeps typing and scrolling beside the panel, and the person
+// keeps their cursor. The ways out: Esc, and the «Файли» toggle the panel no
+// longer covers (it starts below the header — `launcher.css`'s `top: 38px`).
+test('at 900px the right area floats over a transcript that stays usable; Esc and «Файли» close it', async () => {
   setWindowWidth(900);
-  render(Shell);
+  const probe = createRawSnippet(() => ({ render: () => '<textarea data-testid="probe"></textarea>' }));
+  render(Shell, { transcript: probe });
   const shell = screen.getByTestId('shell');
   expect(shell.getAttribute('data-overlay')).toBe('true');
   // Same width W, painted over the transcript instead of squeezing it — and
@@ -173,19 +181,27 @@ test('at 900px the right area is an overlay of the person\'s width; Esc and a cl
   expect(screen.getByTestId('col-right').className).toContain('overlay');
   expect(screen.getByTestId('col-right').getAttribute('style')).toContain(`width: ${DEFAULTS.W}px`);
   expect(tracks()).toContain(`grid-template-columns: ${DEFAULTS.L}px minmax(0, 1fr) 0px`);
+  // No scrim: nothing sits between the person and the centre.
+  expect(screen.queryByTestId('overlay-scrim')).toBeNull();
 
+  // Typing in the composer beside the panel works, and Esc takes the cursor
+  // from nowhere: it stays in the field the person was typing in.
+  const box = screen.getByTestId('probe') as HTMLTextAreaElement;
+  box.focus();
+  await fireEvent.input(box, { target: { value: 'draft' } });
+  expect(box.value).toBe('draft');
   const area = screen.getByTestId('col-right');
   await fireEvent.keyDown(window, { key: 'Escape' });
   // Closed means hidden: the tree stays mounted for the next open.
   expect(screen.getByTestId('col-right')).toBe(area);
   expect(area.hasAttribute('hidden')).toBe(true);
   expect(toggle('right').getAttribute('aria-pressed')).toBe('false');
+  expect(document.activeElement).toBe(box);
 
-  // And the other way out: a click anywhere beside the overlay.
-  cleanup();
-  stubStorage();
-  render(Shell);
-  await fireEvent.click(screen.getByTestId('overlay-scrim'));
+  // The pointer way out is the header's own «Файли» toggle.
+  await fireEvent.click(toggle('right'));
+  expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(false);
+  await fireEvent.click(toggle('right'));
   expect(screen.getByTestId('col-right').hasAttribute('hidden')).toBe(true);
 });
 
@@ -216,9 +232,10 @@ test('an overlay wider than the room never covers the conversations pane', () =>
   expect(screen.getByTestId('shell').getAttribute('data-overlay')).toBe('true');
   expect(tracks()).toContain(`grid-template-columns: 380px minmax(0, 1fr) 0px`);
   expect(screen.getByTestId('col-right').getAttribute('style')).toContain(`width: ${900 - 380}px`);
-  // Only the recents splitter exists while the overlay is open, and it is on
-  // screen, not under the overlay.
-  expect(screen.getAllByRole('separator')).toHaveLength(1);
+  // The right area's own splitter stays out while the overlay is open; the
+  // recents splitter — the way back from an overlay grown too wide — is on
+  // screen, not under the overlay. The tree's splitter rides inside the panel.
+  expect(screen.getAllByRole('separator')).toHaveLength(2);
 });
 
 test('the header is the drag handle, and it is the only one', () => {

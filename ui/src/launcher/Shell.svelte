@@ -24,8 +24,8 @@
     file,
   }: {
     panels?: PanelState;
-    // No file open means no file stripe at all: the tree takes the whole W and
-    // the tree|file splitter is not rendered (§2).
+    // No file open means the file stripe stays empty: the tree keeps its own
+    // T beside the reserved room, as if the file were there (owner, 2026-10-20).
     fileOpen?: boolean;
     // The header's right cluster: the cloud and settings stay with the launcher.
     tools?: Snippet;
@@ -51,8 +51,9 @@
   // has content. Forcing it on when no file is open made it reappear after a
   // person hid it, and then vanish the moment they pressed a file in it
   // (spec §3: a tree that was open stays open — and one that was shut stays
-  // shut). With no file and no tree the area draws a one-line way back instead.
-  const treeW = $derived(view.tree ? (fileOpen ? view.T : view.W) : 0);
+  // shut). With no file and no tree the right area is blank but for its
+  // header — and the header's tree toggle is the way back.
+  const treeW = $derived(view.tree ? view.T : 0);
   // Written as inline tracks rather than as custom properties: the stylesheet
   // token guard (`styles/tokens.test.ts`) allows `var(--…)` only for the
   // palette, and these are one window's numbers, not tokens.
@@ -86,8 +87,6 @@
       recents: t('toggle_recents'),
       files: t('toggle_files'),
       tree: t('toggle_tree'),
-      hidden: t('tree_hidden'),
-      show: t('tree_show'),
     };
   });
 </script>
@@ -131,13 +130,6 @@
     </div>
   </section>
 
-  {#if overlay}
-    <!-- Clicking anywhere beside the overlay closes it; Esc is the keyboard
-         path and the reason this is not in the tab order. -->
-    <button type="button" class="scrim" data-testid="overlay-scrim" tabindex="-1"
-      aria-hidden="true" onclick={() => (panels = { ...panels, right: false })}></button>
-  {/if}
-
   <!-- Hidden, never unmounted: `Tree` refetches on mount and drops the folders
        the person opened, and the overlay below 1060 is closed constantly.
        The track goes to 0 and `[hidden]` takes it out of the layout. -->
@@ -163,25 +155,16 @@
     <div class="right-body" style={rightStyle}>
       <div class="tree-pane" data-testid="col-tree" hidden={!view.tree}>
         <div class="pane-body">{@render tree?.()}</div>
-        {#if fileOpen}
-          <Splitter
-            label={labels.tree}
-            value={view.T}
-            min={MIN.T}
-            max={maxWidth(panels, 'T', windowWidth)}
-            onResize={(d) => write('T', view.T + d)}
-            onReset={() => write('T', defaultWidth('T'))} />
-        {/if}
+        <Splitter
+          label={labels.tree}
+          value={view.T}
+          min={MIN.T}
+          max={maxWidth(panels, 'T', windowWidth)}
+          onResize={(d) => write('T', view.T + d)}
+          onReset={() => write('T', defaultWidth('T'))} />
       </div>
       {#if fileOpen}
         <div class="file-pane" data-testid="col-file"><div class="pane-body">{@render file?.()}</div></div>
-      {:else if !view.tree}
-        <!-- The only way back: the tree is hidden and there is no file whose
-             width it could take, so the area would otherwise be blank. -->
-        <div class="right-empty" data-testid="tree-hidden">
-          <span>{labels.hidden}</span>
-          <button type="button" data-testid="show-tree" onclick={() => toggle('tree')}>{labels.show}</button>
-        </div>
       {/if}
     </div>
   </aside>
