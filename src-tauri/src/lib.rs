@@ -345,6 +345,28 @@ pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 #[derive(Default)]
 pub struct ReturnToLauncher(std::sync::atomic::AtomicBool);
 
+/// Set immediately before the tray's «Вийти» calls `app.exit(0)`, so the
+/// `ExitRequested` guard can tell the one exit a person asked for from every
+/// other one Tauri routes there. Never cleared: the process ends two statements
+/// later.
+#[derive(Default)]
+pub struct Exiting(std::sync::atomic::AtomicBool);
+
+impl Exiting {
+    pub fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The tray's «Вийти»: §6's only real exit. Marks the exit first, which is what
+/// lets it through the `ExitRequested` guard in [`run`].
+pub fn quit_from_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    app.state::<Exiting>()
+        .0
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+}
+
 /// Reveals and focuses the settings window. The ONE path to the settings
 /// window: the tray's «Налаштування» and the launcher's ⌘, share it.
 /// Returns whether the window was there to act on, for the reason
@@ -665,9 +687,9 @@ pub fn run() -> anyhow::Result<()> {
                     scan_job::resume_scan(&app.state::<state::AppState>(), scan_job::start);
                 });
             }
-            // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
-            // the ExitRequested guard lets through.
-            "quit" => app.exit(0),
+            // §6: the tray's «Вийти» is the only real exit, and it marks itself
+            // on the way (`quit_from_tray`).
+            "quit" => quit_from_tray(app),
             // §D129's temporary tray language submenu (`lang_auto`/`lang_uk`/
             // `lang_en`) is gone as of Task 3 (PR 10f): the language choice
             // lives in the settings window's Application section now
@@ -714,6 +736,7 @@ pub fn run() -> anyhow::Result<()> {
             // replaced. Managed before any window can show or lose focus.
             app.manage(provider::HiddenAt::default());
             app.manage(ReturnToLauncher::default());
+            app.manage(Exiting::default());
             // Immediately after the state exists and before any step here
             // touches the index (managing `HiddenAt::default()` above touches
             // none), so every later step here meets an index that is
@@ -844,17 +867,32 @@ pub fn run() -> anyhow::Result<()> {
         .invoke_handler(invoke_handler())
         .build(tauri::generate_context!())
         .context("building the application")?
-        .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
-                // §6: the tray's Quit is the only exit. A window close or macOS
-                // Cmd+Q fires ExitRequested with `code: None`; the tray's
-                // `app.exit(0)` carries `Some(0)`. Prevent the former, allow the
-                // latter — together with the CloseRequested→hide handler, the
-                // resident can be quit only from the tray.
-                if code.is_none() {
+        .run(|app, event| match event {
+            // §6: the tray's Quit is the only exit. Tauri reaches this event
+            // from two places only (`tauri-runtime-wry-2.11.4/src/lib.rs:4316`,
+            // the last window destroyed, and `:4356`, `AppHandle::exit`), so
+            // the flag `quit_from_tray` sets is the whole difference between
+            // the exit a person asked for and one nothing asked for.
+            //
+            // ⚠️ A macOS Dock Quit never arrives here at all: AppKit's
+            // `terminate:` ends the process through
+            // `applicationWillTerminate:` (tao-0.35.3
+            // `platform_impl/macos/app_delegate.rs:131`), and tao implements
+            // no `applicationShouldTerminate:` to refuse it. This guard
+            // therefore does not close that path; see the task report.
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !app.state::<Exiting>().is_set() {
                     api.prevent_exit();
                 }
             }
+            // §1: a normal application. With no window up, a click on the Dock
+            // icon is the OS asking for the application's window; it takes the
+            // same show-and-focus path as the tray item.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                focus_launcher(app);
+            }
+            _ => {}
         });
     Ok(())
 }

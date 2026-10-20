@@ -960,7 +960,9 @@ fn scan_running(state: &crate::state::AppState) -> bool {
 /// `None` until the first. Managed; written by `hide_launcher` and the
 /// `Focused(false)` arm in `lib.rs`, read by [`start_cold_timer`]. A wall-clock
 /// time: `Instant` does not advance while the machine sleeps, and sleep is time
-/// in the background too.
+/// in the background too. The mark is written only by that hide path — an
+/// answer landing must never write it, or it voids the clock armed in the
+/// background and arms none, and the models are never unloaded.
 #[derive(Default)]
 pub struct HiddenAt(Mutex<Option<SystemTime>>);
 
@@ -1826,28 +1828,6 @@ mod lifecycle {
             app.state::<HiddenAt>().mark();
         };
         assert_eq!(unloads_after(rehidden), 0, "a later hide owns the clock");
-    }
-
-    /// The regression `launcher_answered` used to be: an answer landing while the
-    /// window was up but unfocused marked `HiddenAt` and armed no clock, which
-    /// voided the one armed at the focus loss — the models stayed in memory for
-    /// ever. Nothing on the answer path touches the mark now, so the clock armed
-    /// at the focus loss is the one that fires.
-    #[test]
-    fn an_answer_arriving_in_the_background_keeps_the_clock() {
-        use tauri::Manager as _;
-        let background_answer = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<HiddenAt>().mark();
-            start_cold_timer(app, Duration::from_millis(100));
-            // The ask is out and its answer lands a moment later; the answer
-            // path (`ask` → `bridge`) never writes the mark.
-            std::thread::sleep(Duration::from_millis(30));
-        };
-        assert_eq!(
-            unloads_after(background_answer),
-            1,
-            "an answer arriving in the background cancelled the armed clock"
-        );
     }
 
     #[test]

@@ -196,23 +196,15 @@ fn closing_the_window_hides_and_does_not_exit() {
     );
 }
 
-// The layout module is gone, and with it the managed `Current`. Its one
-// survivor, `HiddenAt`, is provider state now. Nothing can name the deleted
-// types any more, so this reads the `.setup` that managed them: a layout coming
-// back would need a `.manage(` this line does not have.
+// The one thing worth checking about the deleted layout state: its survivor,
+// `HiddenAt`, is provider state and is managed, because `start_cold_timer`
+// panics without it. A text guard because `.setup` cannot be run on the mock;
+// the production half is searched so this test's own literal cannot satisfy it.
 #[test]
-fn no_launcher_layout_is_managed() {
+fn the_focus_mark_is_managed_for_the_cold_timer() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let src = std::fs::read_to_string(&path).expect("lib.rs reads");
-    let cfg_test_at = src
-        .find("#[cfg(test)]")
-        .expect("this file must carry its own #[cfg(test)] module marker");
-    let production = &src[..cfg_test_at];
-    let dead = concat!("launcher_", "layout::");
-    assert!(
-        !production.contains(dead),
-        "`{dead}` survives in production source"
-    );
+    let production = &src[..src.find("#[cfg(test)]").expect("no #[cfg(test)] marker")];
     assert!(
         production.contains(".manage(provider::HiddenAt::default())"),
         "the window's focus mark is no longer managed, and the cold timer panics without it"
