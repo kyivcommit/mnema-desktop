@@ -936,10 +936,8 @@ pub fn run() -> anyhow::Result<()> {
             // `platform_impl/macos/app_delegate.rs:131`), and tao implements
             // no `applicationShouldTerminate:` to refuse it. This guard
             // therefore does not close that path; see the task report.
-            tauri::RunEvent::ExitRequested { api, .. } => {
-                if !app.state::<Exiting>().is_set() {
-                    api.prevent_exit();
-                }
+            tauri::RunEvent::ExitRequested { api, .. } if !app.state::<Exiting>().is_set() => {
+                api.prevent_exit();
             }
             // §1: a normal application. With no window up, a click on the Dock
             // icon is the OS asking for the application's window; it takes the
