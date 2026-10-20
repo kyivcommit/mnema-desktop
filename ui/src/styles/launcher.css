@@ -1,27 +1,13 @@
-/* Launcher surfaces paint themselves; the window between them stays clear. */
-body { background: transparent; }
-
-/* No margin round the panels (owner, 2026-09-25): a transparent band here kept
- * the window from going flush to a screen edge. The widths stay written out
- * because `launcher_position::HANDLE_CENTRE` and its guard read them.
+/* §1: the window is opaque now, so the document paints the surface the panels
+ * sit on instead of leaving it to a transparent window.
  *
- * The window is as wide as the panels on screen, so the tracks are set per
- * `data-cols` (l = tree, s = search, r = source) and each layout adds up to
- * `launcher_layout::width` for it; the guard in `Launcher.test.ts` checks all
- * four. The window is not resizable.
- *
- * The grid starts at the window's left edge and follows `data-cols` alone.
- * The window frame changes before WebKit lays out at the new width, so for one
- * painted frame the new window shows the new tracks laid out at the old width.
- * Starting at the left edge makes that frame right: the search column is at 290
- * when `data-cols` has the tree, else at 0. A centred grid jumped by half the
- * width difference instead (measured: 185 pt, 145 pt).
- * ponytail: a tree toggle still flickers for one frame now and then (measured:
- * the source clipped to the old width on opening, the old layout 290 pt off on
- * closing), because the window moves and WebKit repaints in another process with
- * no order between them; the right panel does not move the window and is clean.
- * Upgrade path on macOS: keep the webview at the widest layout and move the
- * window frame and the webview's offset in one AppKit call. */
+ * The tracks are still written out per `data-cols` (l = tree, s = search,
+ * r = source) until the layout task rewrites them; they no longer size the
+ * window, which the person controls. The grid starts at the window's left edge
+ * and follows `data-cols` alone: the panels move within one window now, so no
+ * frame is painted at the wrong width by a window resize.
+ * ponytail: the traffic lights sit over the top-left corner on macOS and the
+ * search column starts there until the layout task moves the panels down. */
 html, body { overflow: hidden; }
 main.panels {
   height: 100dvh;

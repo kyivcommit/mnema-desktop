@@ -19,31 +19,25 @@ case_ "launcher: source is placed into the tree column" \
   ui/src/styles/launcher.css \
   's~(\[data-cols="lsr"\] > \.doc \{ grid-column: )3~${1}1~' \
   '[data-cols="lsr"] > .doc { grid-column: 1;' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
+  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
 
 case_ "launcher: source loses its grid hook" \
   ui/src/launcher/Cards.svelte \
   's~class="float doc" data-testid="card-source"~class="float" data-testid="card-source"~' \
   'class="float" data-testid="card-source"' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
+  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
 
 case_ "launcher: cards cannot scroll" \
   ui/src/styles/launcher.css \
   's~padding: 14px; overflow: auto;~padding: 14px; overflow: hidden;~' \
   'padding: 14px; overflow: hidden;' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
+  src/launcher/styles.test.ts 'real launcher places all cards' runner=vitest
 
 case_ "launcher: the selected tab looks inactive" \
   ui/src/styles/launcher.css \
   's~\.tree \.tabs button\[aria-pressed="true"\]~.tree .tabs button[aria-pressed="never"]~' \
   '.tree .tabs button[aria-pressed="never"]' \
   src/launcher/styles.test.ts 'real tree marks current file and recent while leaving neighbours plain' runner=vitest
-
-case_ "launcher: pinned state loses its style" \
-  ui/src/styles/launcher.css \
-  's~\.tb\[aria-pressed="true"\]~.tb[aria-pressed="never"]~' \
-  '.tb[aria-pressed="never"]' \
-  src/launcher/styles.test.ts 'real pin exposes pressed state through its style' runner=vitest
 
 case_ "launcher: entry omits its stylesheet" \
   ui/src/launcher/main.ts \
@@ -52,11 +46,11 @@ case_ "launcher: entry omits its stylesheet" \
 import { mount }" \
   src/styles/tokens.test.ts 'imports the stylesheets each window needs, in order' runner=vitest
 
-case_ "launcher: transparent window regains the native shadow" \
+case_ "launcher: the window loses its decorations" \
   src-tauri/tauri.conf.json \
-  's~"shadow": false~"shadow": true~' \
-  '"shadow": true' \
-  src/launcher/styles.test.ts 'transparent launcher disables the native window shadow' runner=vitest
+  's~"decorations": true~"decorations": false~' \
+  '"decorations": false' \
+  src/launcher/styles.test.ts 'the launcher is a normal window: decorated, resizable, and not a popup' runner=vitest
 
 case_ "launcher: light citation pair loses AA contrast" \
   ui/src/styles/tokens.css \

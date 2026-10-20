@@ -1,4 +1,4 @@
-export type Key = 'pin' | 'settings_title' | 'indexed_documents'
+export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
@@ -151,7 +151,6 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
-    pin: 'Пін',
     settings_title: 'Налаштування',
     settings_nav_models: 'Моделі',
     settings_nav_folders: 'Теки',
@@ -1136,7 +1135,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_language_change_unconfirmed: 'Зміну мови не підтверджено. Ось що відповів застосунок:',
   },
   en: {
-    pin: 'Pin',
     settings_title: 'Settings',
     settings_nav_models: 'Models',
     settings_nav_folders: 'Folders',

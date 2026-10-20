@@ -74,8 +74,7 @@
   // screen the way `askFailed` does. `tooLong` comes from `checkQuery` BEFORE any
   // ask, so an over-long first Enter is `error` with no answer behind it. That Enter
   // mounts the tree, and mounting fires `list_tree`; in the cold launcher the
-  // section is `hidden` below, so nothing is drawn, and `launcher-cold` (which
-  // sets `idle`) is the way back to the bare line. A blank Enter is not an
+  // section is `hidden` below, so nothing is drawn. A blank Enter is not an
   // error at all (owner, 2026-10-08): it returns before the machine moves.
   //
   // Narrowing to `reason === 'askFailed'` was considered and rejected: an

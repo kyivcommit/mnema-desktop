@@ -12,7 +12,6 @@ import {
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide: vi.fn() }) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 let sheets: HTMLStyleElement[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +27,6 @@ beforeEach(() => {
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
     if (cmd === 'ask') return Promise.resolve(generated);
-    if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
     if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
     if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
@@ -43,23 +41,31 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); sheets.forEach((s) => s.remove()); sheets = []; });
 
-test('transparent launcher disables the native window shadow', () => {
+test('the launcher is a normal window: decorated, resizable, and not a popup', () => {
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
-    app: { windows: Array<{ label: string; transparent?: boolean; shadow?: boolean }> };
+    app: { windows: Array<Record<string, unknown> & { label: string }> };
   };
-  const launcher = conf.app.windows.find((window) => window.label === 'launcher');
-  expect(launcher).toMatchObject({ transparent: true, shadow: false });
+  const launcher = conf.app.windows.find((window) => window.label === 'launcher')!;
+  expect(launcher).toMatchObject({
+    decorations: true, resizable: true,
+    width: 1440, height: 900, minWidth: 900, minHeight: 600,
+    // macOS draws the traffic lights over the content; elsewhere the keys are
+    // ignored and the normal title bar stays.
+    titleBarStyle: 'Overlay', hiddenTitle: true,
+  });
+  for (const popup of ['transparent', 'shadow', 'alwaysOnTop', 'skipTaskbar']) {
+    expect(launcher, popup).not.toHaveProperty(popup);
+  }
 });
 
-test('real launcher places all cards and keeps the document transparent', async () => {
+test('real launcher places all cards', async () => {
   const { container } = render(Launcher);
   const main = container.querySelector('main')!;
   expect(getComputedStyle(main).display).toBe('grid');
-  expect(getComputedStyle(document.body).backgroundColor).toBe('rgba(0, 0, 0, 0)');
   const bar = container.querySelector('.searchbar')!;
   expect(bar).not.toBeNull();
   expect(bar.contains(screen.getByRole('textbox'))).toBe(true);
-  expect(bar.contains(screen.getByTestId('pin'))).toBe(true);
+  expect(bar.contains(screen.getByTestId('settings'))).toBe(true);
   expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(0); // the search arms are not a choice
   expect(screen.queryByTestId('card-tree')).toBeNull();
   const box = screen.getByRole('textbox');
@@ -120,16 +126,6 @@ test('real source distinguishes primary highlight from its sibling', async () =>
   expect(getComputedStyle(primary[0]).outline).toBe('1px solid var(--cite-line)');
   expect(getComputedStyle(secondary[0]).outline).toBe('none');
   expect(screen.getByTestId('freshness').textContent?.length).toBeGreaterThan(0);
-});
-
-test('real pin exposes pressed state through its style', async () => {
-  render(Launcher);
-  const pin = screen.getByTestId('pin');
-  const before = getComputedStyle(pin).background;
-  await fireEvent.click(pin);
-  expect(pin.getAttribute('aria-pressed')).toBe('true');
-  expect(getComputedStyle(pin).background).toBe('var(--accent-soft)');
-  expect(getComputedStyle(pin).background).not.toBe(before);
 });
 
 test('the left switch hides the tree by the UA [hidden] rule, and the stylesheet does not override it', async () => {

@@ -1,16 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { locale, t } from '../i18n';
-  import { ask, chatTools, continueHistory, historyEntry, launcherAnswered, newChat, listenLauncherCold, openSettings, modelSettings, providerStatus, setLauncherLayout, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
-  import { checkQuery, roleReady, roleServed, heatAfter, stateFromAnswer, turnsAfter, DRAG_GRAB_WINDOW_MS, type Heat, type LauncherState, type Turn } from './state';
+  import { ask, chatTools, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
+  import { checkQuery, roleReady, roleServed, heatAfter, stateFromAnswer, turnsAfter, type Heat, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import SearchLine from './SearchLine.svelte';
   import Cards from './Cards.svelte';
 
   let query = $state('');
   let echo = $state('');
-  let pinned = $state(false);
   // `$state.raw`, here and for `previous`: `Cards` finds a turn by the identity of its
   // answer, and a deep proxy of the same object is not `===` to it.
   let launcherState = $state.raw<LauncherState>({ kind: 'idle' });
@@ -43,7 +41,7 @@
   let statusProvider = $state<ProviderChoice>('openRouter');
   // Cold: the search column alone. The first answer with something to show
   // makes it hot and opens both side panels; after that the person's choice
-  // stands across questions. `launcher-cold` is the only way back.
+  // stands across questions.
   let heat = $state<Heat>('cold');
   let left = $state(false);
   let right = $state(false);
@@ -54,17 +52,9 @@
   const showRight = $derived(heat === 'hot' && right);
   const cols = $derived(`${showLeft ? 'l' : ''}s${showRight ? 'r' : ''}`);
 
-  // Derived booleans, so this runs once per change of what is shown and not
-  // once per write to `left`, `right` or `heat`.
-  $effect(() => {
-    setLauncherLayout(showLeft, showRight).catch((e) => console.error('set_launcher_layout failed', e));
-  });
-
   // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
   const dialogue = $derived(chatOn && statusProvider !== 'mnema');
   const newChatLabel = $derived.by(() => { void $locale; return t('new_chat'); });
-
-  const appWindow = getCurrentWebviewWindow();
 
   // Read on mount and again whenever the window gains focus: the key and the
   // model are changed in another window, and the launcher is hidden, not
@@ -120,7 +110,6 @@
     // The backend first: a screen that says "new" while the session goes on would lie.
     try { await inSession(newChat); } catch (e) { console.error('new_chat failed', e); return; }
     screenGen += 1; // an open that is still reading does not draw over the empty screen
-    coldGen += 1;
     // Only the conversation clears; heat and the panels stay as the person left them.
     turns = [];
     launcherState = { kind: 'idle' };
@@ -131,32 +120,11 @@
 
   onMount(() => {
     refreshAll();
-
-    // The window was hidden past the threshold: forget the answer, keep the
-    // text in the line (the person may still want to ask it).
-    let unlisten: (() => void) | null = null;
-    let gone = false;
-    listenLauncherCold(() => {
-      coldGen += 1;
-      heat = 'cold';
-      left = right = false;
-      launcherState = { kind: 'idle' };
-      turns = [];
-      previous = null;
-      historyId = null;
-      echo = '';
-    })
-      .then((u) => { if (gone) u(); else unlisten = u; })
-      .catch((e) => console.error('listen launcher-cold failed', e));
-    return () => { gone = true; unlisten?.(); };
   });
 
   // The owner validates and calls ask — the whole machine goes through
   // state.ts. A rejected ask becomes a visible error, never a silent reset:
   // an eaten error is easy to miss.
-  // Bumped by `launcher-cold`: an ask that was in flight when the launcher went
-  // cold belongs to an answer the person has been told is forgotten.
-  let coldGen = 0;
   // Bumped by every submit and every open: a Recents read that started before
   // the screen changed hands does not draw over what is on it now.
   let screenGen = 0;
@@ -178,10 +146,8 @@
     echo = '';
     if (!dialogue) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
-    const gen = coldGen;
     try {
       const answer = await inSession(() => ask(check.query));
-      if (gen !== coldGen) return; // went cold meanwhile: drop the answer
       launcherState = stateFromAnswer(check.query, answer);
       turns = turnsAfter(turns, check.query, answer);
       // Whatever answer lands, it is not an opened question, refusals included.
@@ -189,9 +155,6 @@
       // The backend records a generated or citations-only answer inside `ask`, so
       // the list has a new row. A refusal records nothing, so it does not reread it.
       if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
-      // The idle clock restarts when an answer lands, so one that arrived while
-      // the launcher was hidden is not dropped by the hide's older clock.
-      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
       // Only the cold-to-hot step opens the panels; a hot launcher keeps
       // whichever the person switched off.
       const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
@@ -212,7 +175,6 @@
       // second one of its own here, and in state B both were on screen at once.
       echo = check.query;
     } catch (e) {
-      if (gen !== coldGen) return;
       console.error('ask failed', e); // query stays in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
       if (previous) echo = shownEcho; // the restored answer's own question
@@ -227,11 +189,10 @@
     // Kept as `runSearch` keeps it: an error puts back what was on screen.
     const shown = cardsState;
     previous = heat === 'hot' && (shown.kind === 'generated' || shown.kind === 'citationsOnly') ? shown : null;
-    const gen = coldGen;
     const screenAt = ++screenGen;
-    // A launcher that went cold, or any search or other open that began while
-    // the entry was read, owns the screen now; the entry is dropped.
-    const superseded = () => gen !== coldGen || screenAt !== screenGen;
+    // A search or another open that began while the entry was read owns the
+    // screen now; the entry is dropped.
+    const superseded = () => screenAt !== screenGen;
     try {
       const opened = await historyEntry(id);
       if (superseded()) return;
@@ -247,7 +208,6 @@
       const last = opened.turns[opened.turns.length - 1];
       launcherState = stateFromAnswer(last.query, last.answer);
       turns = opened.turns.reduce<Turn[]>((acc, t) => turnsAfter(acc, t.query, t.answer), []);
-      launcherAnswered().catch((e) => console.error('launcher_answered failed', e));
       const warmed = heat === 'cold' && heatAfter(heat, launcherState) === 'hot';
       if (warmed) { heat = 'hot'; left = right = true; }
       echo = last.query;
@@ -259,57 +219,18 @@
     }
   }
 
-  // Hide, never close: a hidden webview keeps state, so `query` and results
-  // survive dismissal (§6, `…interface-design.md:186` — §7.3 is the dismissal
-  // gestures, and does not speak about state).
-  function hide() { appWindow.hide(); }
+  // ⌘, on macOS, Ctrl+, elsewhere. The launcher's own menu is the app menu
+  // now (§1: the policy is `Regular`), and it opens its own settings section;
+  // this key is the launcher's shortcut to the same place.
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') hide();
-    // ⌘, on macOS, Ctrl+, elsewhere. The launcher carries no menu bar (the app
-    // is an Accessory while only it is up), so no menu item can own the key.
     if (event.key === ',' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       openSettings().catch((e) => console.error('open_settings failed', e));
     }
   }
-
-  // D155: on some window managers (mutter on X11) the drag of a frameless
-  // window is a pointer+keyboard grab that takes focus for the whole move and
-  // hands it back at the end. The webview sees that as `blur` a few
-  // milliseconds after the press on the handle. A blur that close to a press
-  // on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
-  // stand: press-to-blur landed at 392 / 516 / 504 ms, so the window stays
-  // armed for a full second — a release means it was a click, not a drag,
-  // and disarms it immediately. On macOS the release is expected to reach the
-  // webview after the drag; on Windows the modal move loop may consume it — either
-  // way no blur arrives during the move, and a stuck arm simply expires
-  // after one second (the Windows live check confirms which). A real blur
-  // after a mere click must still hide.
-  let handlePressedAt = -Infinity;
-  function onPointerDown(event: PointerEvent) {
-    // Tauri's drag script starts a move only for the primary button, so a
-    // right- or middle-button press is never a drag. `!event.button`, not
-    // `=== 0`: jsdom's `fireEvent.pointerDown` leaves it `undefined`.
-    const target = event.target as Element | null;
-    const onHandle = !event.button && !!target?.closest('.searchbar')
-      && !target.closest('button, input, label, a, select, textarea, [role="button"]');
-    // Any press that is not a primary press on the handle disarms on its
-    // own: on X11 the drag ends with no release reaching the webview, so an
-    // arming can outlive its drag.
-    handlePressedAt = onHandle ? Date.now() : -Infinity;
-  }
-  // A release means it was a click, not a drag: the next blur is a dismissal
-  // again. Once a window-manager move grab is up, no release reaches the
-  // webview until it ends.
-  function onPointerUp() { handlePressedAt = -Infinity; }
-  function onBlur() {
-    if (pinned) return;
-    if (Date.now() - handlePressedAt < DRAG_GRAB_WINDOW_MS) return;
-    hide();
-  }
 </script>
 
-<svelte:window onfocus={refreshAll} onkeydown={onKeydown} onpointerdown={onPointerDown} onpointerup={onPointerUp} onblur={onBlur} />
+<svelte:window onfocus={refreshAll} onkeydown={onKeydown} />
 
 <main class="panels" data-cols={cols}>
   <!-- D155: the search panel is the drag handle. "deep" drags from any
@@ -325,7 +246,7 @@
         {/if}
       </div>
       <div class="sb-tools">
-        <Toolbar {heat} bind:left bind:right bind:pinned {status} provider={statusProvider} />
+        <Toolbar {heat} bind:left bind:right {status} provider={statusProvider} />
       </div>
     </div>
     {/snippet}

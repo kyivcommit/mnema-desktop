@@ -11,13 +11,13 @@ afterEach(() => setLocale('en'));
 
 const OK: ProviderStatus = { kind: 'ok' };
 const props = (over: Record<string, unknown> = {}) =>
-  ({ heat: 'hot', left: true, right: true, pinned: false, status: OK, ...over }) as never;
+  ({ heat: 'hot', left: true, right: true, status: OK, ...over }) as never;
 const buttons = () => screen.getAllByRole('button');
 
-test('the buttons stand in the order cloud, left, right, pin, settings', () => {
+test('the buttons stand in the order cloud, left, right, settings', () => {
   setLocale('en');
   render(Toolbar, props());
-  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud', 'toggle-left', 'toggle-right', 'pin', 'settings']);
+  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud', 'toggle-left', 'toggle-right', 'settings']);
 });
 
 test('every button has a non-empty title equal to its aria-label, in both languages', () => {
@@ -25,7 +25,7 @@ test('every button has a non-empty title equal to its aria-label, in both langua
   for (const loc of ['en', 'uk'] as const) {
     setLocale(loc);
     const { unmount } = render(Toolbar, props());
-    expect(buttons()).toHaveLength(5); // positive control: the loop below is not over nothing
+    expect(buttons()).toHaveLength(4); // positive control: the loop below is not over nothing
     for (const b of buttons()) {
       expect(b.getAttribute('aria-label')).toBeTruthy();
       expect(b.getAttribute('title')).toBe(b.getAttribute('aria-label'));
@@ -54,13 +54,6 @@ test('hot: a click flips the toggle', async () => {
   expect(screen.getByTestId('toggle-right').getAttribute('aria-pressed')).toBe('true');
   await fireEvent.click(left);
   expect(left.getAttribute('aria-pressed')).toBe('true');
-});
-
-test('the pin flips on click', async () => {
-  render(Toolbar, props());
-  const pin = screen.getByTestId('pin');
-  await fireEvent.click(pin);
-  expect(pin.getAttribute('aria-pressed')).toBe('true');
 });
 
 test('the cloud opens the models section only when nothing is configured', async () => {

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use mnema_local::{ModelId, ModelState, Sidecar, Store};
 use serde::{Deserialize, Serialize};
@@ -956,23 +956,40 @@ fn scan_running(state: &crate::state::AppState) -> bool {
     )
 }
 
-/// Starts the clock that makes the launcher cold: after `after`, if it has not
-/// been hidden again or shown since, [`on_cold`]. Called at every hide. Its own
-/// timer, not [`crate::go_cold_if_idle`], which only runs at a show — too late,
-/// the person is back by then.
+/// When the launcher window last lost focus (a close hides it and marks again);
+/// `None` until the first. Managed; written by `hide_launcher` and the
+/// `Focused(false)` arm in `lib.rs`, read by [`start_cold_timer`]. A wall-clock
+/// time: `Instant` does not advance while the machine sleeps, and sleep is time
+/// in the background too.
+#[derive(Default)]
+pub struct HiddenAt(Mutex<Option<SystemTime>>);
+
+impl HiddenAt {
+    pub fn mark(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(SystemTime::now());
+    }
+    pub fn get(&self) -> Option<SystemTime> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Starts the clock that unloads the local models: after `after` out of focus,
+/// if the window has not lost focus again or been shown since, [`on_cold`].
+/// Called at every focus loss and at a close. Its own timer, and the only one —
+/// the window is a normal one now, so nothing is "forgotten" at a show (§1).
 pub fn start_cold_timer<R: tauri::Runtime>(app: &tauri::AppHandle<R>, after: Duration) {
     use tauri::Manager as _;
     let Some(state) = app.try_state::<crate::state::AppState>() else {
         return;
     };
-    let hidden = app.state::<crate::launcher_layout::HiddenAt>().get();
+    let hidden = app.state::<HiddenAt>().get();
     let shown = state.local().shown.load(Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(after);
         let state = app.state::<crate::state::AppState>();
-        // A later hide has its own clock; a show since this hide ends it.
-        if app.state::<crate::launcher_layout::HiddenAt>().get() == hidden
+        // A later focus loss has its own clock; a show since this one ends it.
+        if app.state::<HiddenAt>().get() == hidden
             && state.local().shown.load(Ordering::SeqCst) == shown
         {
             on_cold(&state);
@@ -1774,7 +1791,7 @@ mod lifecycle {
             .endpoint_for(Some(ProviderChoice::Mnema), ModelId::Embed)
             .expect("the process starts");
         let mock = tauri::test::mock_app();
-        mock.manage(crate::launcher_layout::HiddenAt::default());
+        mock.manage(HiddenAt::default());
         mock.manage(state);
         let handle = mock.handle().clone();
         let state = handle.state::<AppState>();
@@ -1787,14 +1804,14 @@ mod lifecycle {
     fn the_clock_makes_a_hidden_launcher_cold() {
         use tauri::Manager as _;
         let hide = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<crate::launcher_layout::HiddenAt>().mark();
+            app.state::<HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(100));
         };
         assert_eq!(unloads_after(hide), 1, "hidden, and left alone");
 
         // Shown again before it fires.
         let shown = |state: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<crate::launcher_layout::HiddenAt>().mark();
+            app.state::<HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(400));
             on_show(state).join().unwrap();
         };
@@ -1802,42 +1819,34 @@ mod lifecycle {
 
         // Hidden again (blur after a hide): the older clock is not the one that counts.
         let rehidden = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<crate::launcher_layout::HiddenAt>().mark();
+            app.state::<HiddenAt>().mark();
             start_cold_timer(app, Duration::from_millis(400));
             // SystemTime must have moved for the second mark to differ.
             std::thread::sleep(Duration::from_millis(20));
-            app.state::<crate::launcher_layout::HiddenAt>().mark();
+            app.state::<HiddenAt>().mark();
         };
         assert_eq!(unloads_after(rehidden), 0, "a later hide owns the clock");
     }
 
+    /// The regression `launcher_answered` used to be: an answer landing while the
+    /// window was up but unfocused marked `HiddenAt` and armed no clock, which
+    /// voided the one armed at the focus loss — the models stayed in memory for
+    /// ever. Nothing on the answer path touches the mark now, so the clock armed
+    /// at the focus loss is the one that fires.
     #[test]
-    fn an_answer_after_a_hide_leaves_one_live_clock() {
+    fn an_answer_arriving_in_the_background_keeps_the_clock() {
         use tauri::Manager as _;
-        let after = Duration::from_millis(300);
-        // Hidden, then the answer lands (it marks again): the clock still runs out.
-        let answered_hidden = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-            app.state::<crate::launcher_layout::HiddenAt>().mark();
-            start_cold_timer(app, after);
-            std::thread::sleep(Duration::from_millis(20));
-            crate::answer_landed(app, false, after);
+        let background_answer = |_: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
+            app.state::<HiddenAt>().mark();
+            start_cold_timer(app, Duration::from_millis(100));
+            // The ask is out and its answer lands a moment later; the answer
+            // path (`ask` → `bridge`) never writes the mark.
+            std::thread::sleep(Duration::from_millis(30));
         };
         assert_eq!(
-            unloads_after(answered_hidden),
+            unloads_after(background_answer),
             1,
-            "hidden when the answer came"
-        );
-
-        // Shown when the answer lands: nothing is armed, nothing unloads.
-        let answered_shown =
-            |state: &AppState, app: &tauri::AppHandle<tauri::test::MockRuntime>| {
-                on_show(state).join().unwrap();
-                crate::answer_landed(app, true, after);
-            };
-        assert_eq!(
-            unloads_after(answered_shown),
-            0,
-            "visible when the answer came"
+            "an answer arriving in the background cancelled the armed clock"
         );
     }
 

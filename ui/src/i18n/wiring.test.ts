@@ -34,14 +34,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 // was the pin. That was true only because state A draws no labelled card — a
 // neighbour's defence, not their own. Task 8b made a labelled card render in one
 // more state and ruling I-B in five, and Task 9 adds another; under any of those
-// the tree card's label wins the selector and these tests fail with
-// `expected 'Дерево' to contain 'Пін'`, which says nothing about the pin.
-// `data-testid="pin"` is stable across locales AND across whatever cards render,
-// which the accessible name (the very thing under test) cannot be.
-const pinLabel = (container: HTMLElement) =>
-  container.querySelector('[data-testid="pin"]')!.getAttribute('aria-label')!;
+// the tree card's label wins the selector. `data-testid` is stable across
+// locales AND across whatever cards render, which the accessible name (the very
+// thing under test) cannot be.
+const settingsLabel = (container: HTMLElement) =>
+  container.querySelector('[data-testid="settings"]')!.getAttribute('aria-label')!;
 
-// `locale` is a module-level store shared by every test here, and the two pin
+// `locale` is a module-level store shared by every test here, and the two label
 // tests switch it. An in-test restore is skipped when an assertion fails first,
 // which leaves the last test in this file — whose whole claim is that
 // `setLocale('uk')` is a REAL switch — passing or failing for a reason that has
@@ -57,13 +56,13 @@ describe('i18n wiring', () => {
     await tick();
     expect(input.value).toBe('draft query'); // no remount
     // the switch actually took effect, so "no remount" isn't just "nothing happened"
-    expect(pinLabel(container)).toContain('Пін');
+    expect(settingsLabel(container)).toContain('Налаштування');
   });
 
   it('switches the pin label UK↔EN (spec §7)', async () => {
     const { container } = render(Launcher);
-    setLocale('uk'); await tick(); expect(pinLabel(container)).toContain('Пін');
-    setLocale('en'); await tick(); expect(pinLabel(container)).toContain('Pin');
+    setLocale('uk'); await tick(); expect(settingsLabel(container)).toContain('Налаштування');
+    setLocale('en'); await tick(); expect(settingsLabel(container)).toContain('Settings');
   });
 
   it('syncs document.documentElement.lang to the locale', () => {

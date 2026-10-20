@@ -4462,120 +4462,22 @@ fn every_model_command_the_window_calls_is_registered() {
     }
 }
 
-/// The cold show: past the threshold read from `prefs.json` the launcher takes
-/// the default layout and the launcher window hears `launcher-cold`; short of
-/// it, nothing changes. The mock runtime reports every window visible, so the
-/// test calls `go_cold_if_idle` itself; `focus_launcher` calling it before
-/// `place` is the live run's, and so is the window's size: the mock's
-/// `set_size` does nothing, so `resize` cannot be observed here.
+/// The two popup commands are gone from the IPC surface: the launcher no longer
+/// reports its layout or its answers to Rust, and a window that still called
+/// either has to be refused rather than silently absorbed. This is the half of
+/// `an_answer_arriving_in_the_background_keeps_the_clock` that holds if someone
+/// brings the answer mark back: no command can reach it.
 #[test]
-fn go_cold_if_idle_follows_the_prefs_threshold() {
-    use mnema_desktop::launcher_layout::{Current, HiddenAt, Layout};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tauri::{Listener, Manager, WebviewWindowBuilder};
-
-    let wide = Layout {
-        left: true,
-        right: true,
-    };
-    let run = |after: u64| {
-        let dir = tempfile::tempdir().unwrap();
-        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
-            .unwrap();
-        let app = app_in(dir.path());
-        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
-            .build()
-            .unwrap();
-        let heard = Arc::new(AtomicUsize::new(0));
-        let h = heard.clone();
-        window.listen("launcher-cold", move |_| {
-            h.fetch_add(1, Ordering::SeqCst);
-        });
-        app.state::<Current>().set(wide);
-        app.state::<HiddenAt>().mark();
-        let marked = app.state::<HiddenAt>().get().unwrap();
-        let cold = mnema_desktop::go_cold_if_idle(
-            app.handle(),
-            &window,
-            marked + Duration::from_secs(after),
-        );
-        // The mock delivers synchronously; give a queued one a moment anyway.
-        std::thread::sleep(Duration::from_millis(50));
-        (
-            cold,
-            app.state::<Current>().get(),
-            heard.load(Ordering::SeqCst),
-        )
-    };
-
-    assert_eq!(run(61), (true, Layout::default(), 1));
-    assert_eq!(run(59), (false, wide, 0));
-}
-
-/// An answer that lands restarts the idle clock: hidden at t0, answered one
-/// second short of the threshold, a show past the threshold from the hide is
-/// still hot; without the answer the same show is cold.
-#[test]
-fn an_answer_restarts_the_idle_clock() {
-    use mnema_desktop::launcher_layout::HiddenAt;
-    use tauri::{Manager, WebviewWindowBuilder};
-
-    let run = |answered: bool| {
-        let dir = tempfile::tempdir().unwrap();
-        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
-            .unwrap();
-        let app = app_in(dir.path());
-        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
-            .build()
-            .unwrap();
-        // Hidden "at t0": the clock the answer must move past.
-        app.state::<HiddenAt>().mark();
-        std::thread::sleep(Duration::from_millis(1100));
-        let t0 = app.state::<HiddenAt>().get().unwrap();
-        if answered {
-            call(&main_webview(&app), "launcher_answered", json!({}))
-                .expect("launcher_answered was rejected");
-        }
-        // The answer landed 1.1 s after the hide; 61 s after the hide is past
-        // the threshold for the hide, 59.9 s short of it for the answer.
-        mnema_desktop::go_cold_if_idle(app.handle(), &window, t0 + Duration::from_secs(61))
-    };
-    assert!(run(false));
-    assert!(!run(true));
-}
-
-/// `set_launcher_layout` is reachable through the IPC, binds `left` and
-/// `right`, and records the layout even with no launcher window (the mock app
-/// has none, so only the bookkeeping runs).
-#[test]
-fn every_launcher_command_is_registered() {
-    use mnema_desktop::launcher_layout::{Current, Layout};
+fn the_removed_launcher_commands_are_not_registered() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
-
-    let unbound = error_text(
-        &call(&webview, "set_launcher_layout", json!({}))
-            .expect_err("a command was accepted without the arguments it declares"),
-    );
-    assert_ne!(unbound, not_registered("set_launcher_layout"));
-    assert!(unbound.contains(INVALID_ARGS), "{unbound}");
-    assert!(unbound.contains("`left`"), "{unbound}");
-
-    call(
-        &webview,
-        "set_launcher_layout",
-        json!({ "left": true, "right": false }),
-    )
-    .expect("set_launcher_layout was rejected");
-    assert_eq!(
-        app.state::<Current>().get(),
-        Layout {
-            left: true,
-            right: false
-        }
-    );
+    for cmd in ["set_launcher_layout", "launcher_answered"] {
+        let message = error_text(
+            &call(&webview, cmd, json!({})).expect_err("a removed command was accepted"),
+        );
+        assert_eq!(message, not_registered(cmd), "`{cmd}` is still registered");
+    }
 }
 
 /// `open_settings` takes an optional section: without one it opens the window
@@ -14286,41 +14188,6 @@ fn a_failed_follow_up_keeps_the_session() {
         !r.contains("the failing question"),
         "the failed turn is not in it"
     );
-}
-
-/// Going cold drops the conversation (D169); a show short of the threshold
-/// keeps it.
-#[test]
-fn going_cold_drops_the_session() {
-    use mnema_desktop::dialogue::SessionTurn;
-    use mnema_desktop::launcher_layout::HiddenAt;
-    use tauri::{Manager, WebviewWindowBuilder};
-
-    let run = |after: u64| {
-        let dir = tempfile::tempdir().unwrap();
-        mnema_desktop::prefs::write_key(dir.path(), "launcher_cold_after_minutes", json!(1))
-            .unwrap();
-        let app = app_in(dir.path());
-        let window = WebviewWindowBuilder::new(&app, "launcher", Default::default())
-            .build()
-            .unwrap();
-        app.state::<AppState>().dialogue.replace(vec![SessionTurn {
-            query: "q".into(),
-            answer: bridge::AskAnswer::Refused {
-                kind: bridge::RefusalKind::NoCandidates,
-                text: bridge::TextArmReport::Off,
-                content: bridge::ContentArmReport::Off,
-            },
-            hits: None,
-            stored: None,
-        }]);
-        app.state::<HiddenAt>().mark();
-        let marked = app.state::<HiddenAt>().get().unwrap();
-        mnema_desktop::go_cold_if_idle(app.handle(), &window, marked + Duration::from_secs(after));
-        app.state::<AppState>().dialogue.first_query()
-    };
-    assert_eq!(run(61), None);
-    assert_eq!(run(59), Some("q".to_string()));
 }
 
 // ---- A conversation is one history row, and a row can be continued ----

@@ -10,7 +10,7 @@ const cache = new Map<string, IntlMessageFormat>();
 export function t(key: Key, values?: Record<string, unknown>): string {
   const loc = get(locale);
   const msg = messages[loc][key] ?? messages[FALLBACK][key];
-  if (msg === undefined) return messages[FALLBACK][key] ?? messages.en.pin; // never a raw key
+  if (msg === undefined) return messages[FALLBACK][key] ?? messages.en.toolbar_settings; // never a raw key
   const ck = `${loc}:${key}`;
   let f = cache.get(ck);
   if (!f) { f = new IntlMessageFormat(msg, loc); cache.set(ck, f); }

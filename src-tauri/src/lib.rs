@@ -10,8 +10,6 @@ pub mod dialogue;
 pub mod embed_job;
 pub mod error;
 pub mod job;
-pub mod launcher_layout;
-pub mod launcher_position;
 pub mod locale;
 pub mod models;
 pub mod os_services;
@@ -48,10 +46,6 @@ use tauri::Manager as _;
 /// `ui/src/lib/ipc.test.ts` can read THIS file and compare the name that is
 /// actually emitted, rather than a second copy kept beside it.
 pub const SCAN_PROGRESS_EVENT: &str = "scan-progress";
-
-/// Emitted to the launcher window when it was hidden past the cold threshold;
-/// `ipc.test.ts` compares it with the UI's name for it.
-pub const LAUNCHER_COLD_EVENT: &str = "launcher-cold";
 
 /// Everything the webview is allowed to call, in one place.
 ///
@@ -113,8 +107,6 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::chat_tools_enabled,
         prefs::set_chat_tools,
         open_settings,
-        launcher_layout::set_launcher_layout,
-        launcher_layout::launcher_answered,
     ]
 }
 
@@ -285,45 +277,12 @@ pub fn boot_files(state: &state::AppState) -> i64 {
     state.with_index(|db| db.indexed_file_count()).unwrap_or(0)
 }
 
-/// If the launcher has been hidden for at least the idle threshold at `now`,
-/// makes it cold: the default layout, its window size, and a `launcher-cold`
-/// event to the launcher so the UI drops its answer. Returns whether it did.
-/// The clock is the last hide or the last answer to land, whichever is later
-/// (`launcher_layout::launcher_answered`).
-/// `try_state`: the shell tests build no `AppState`; there the threshold is
-/// its default.
-pub fn go_cold_if_idle<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    window: &tauri::WebviewWindow<R>,
-    now: std::time::SystemTime,
-) -> bool {
-    let minutes = app
-        .try_state::<state::AppState>()
-        .map_or(5, |s| prefs::cold_after_minutes(s.data_dir()));
-    let hidden_at = app.state::<launcher_layout::HiddenAt>().get();
-    if !launcher_layout::goes_cold(hidden_at, now, minutes) {
-        return false;
-    }
-    if let Some(state) = app.try_state::<state::AppState>() {
-        state.dialogue.clear();
-    }
-    let cold = launcher_layout::Layout::default();
-    app.state::<launcher_layout::Current>().set(cold);
-    launcher_layout::resize(window, cold);
-    let _ = app.emit_to("launcher", LAUNCHER_COLD_EVENT, ());
-    true
-}
-
 /// Shows the launcher and focuses it, returning whether the launcher window was
 /// there to act on. The single-instance callback, the tray's "show search"
-/// item and the shortcut share this — it is the ONE show path (D155):
-/// `launcher_position::place` restores where the person left the window, or
-/// applies the platform default. §6: the launcher *hides*, so it is *shown* —
-/// not unminimized, which never re-opens a hidden window. A test drives this
-/// against the mock runtime, where the real window manager is absent, which is
-/// why the return value is the found-ness of the window and not its resulting
-/// focus; a second test drives `place` directly, and a third checks that a
-/// visible launcher (all the mock runtime knows) is focused and not re-placed.
+/// item and the shortcut share this — it is the ONE show path (D155). §6: a
+/// close hides the window to the tray, so it is *shown* — `unminimize` alone
+/// does not re-open a window a close hid — and a minimized one is restored
+/// first, or the hotkey would bring back nothing but the Dock icon.
 pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     match app.get_webview_window("launcher") {
         Some(window) => {
@@ -333,39 +292,20 @@ pub fn focus_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
             if let Some(state) = app.try_state::<state::AppState>() {
                 drop(provider::on_show(&state));
             }
-            // Already up (single-instance while the person is dragging it):
-            // focus, and do not move what no focus loss has recorded yet.
-            if window.is_visible().unwrap_or(false) {
-                let _ = window.set_focus();
-                return true;
+            let _ = window.show();
+            if window.is_minimized().unwrap_or(false) {
+                let _ = window.unminimize();
             }
-            // Cold before `place` and `show`: the window never appears wide,
-            // and the UI clears its answer on `launcher-cold`. `place` then
-            // uses the cold layout.
-            go_cold_if_idle(app, &window, std::time::SystemTime::now());
-            let data_dir = app
-                .try_state::<state::AppState>()
-                .map(|s| s.data_dir().to_path_buf());
-            let memory = app.state::<launcher_position::Memory>();
-            // `try_state`: the shell tests build no `AppState`; there the
-            // file is simply "nothing saved".
-            launcher_position::place(
-                &window,
-                &memory,
-                data_dir.as_deref(),
-                os_services::wayland_session(),
-                app.state::<launcher_layout::Current>().get(),
-            );
+            let _ = window.set_focus();
             true
         }
         None => false,
     }
 }
 
-/// Hides the launcher and records when, so the next show can tell how long it
-/// was away (`launcher_layout::goes_cold`). The shortcut and a window close
-/// hide through here; Esc and blur hide from the UI, and the `Focused(false)`
-/// arm marks those.
+/// Hides the launcher and records when, so the local models' clock can tell how
+/// long the window has been out of focus (`provider::start_cold_timer`). Only a
+/// window close hides it: the shortcut shows, it does not toggle (§1).
 pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("launcher") {
         let _ = window.hide();
@@ -373,27 +313,12 @@ pub fn hide_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// An answer landed (`launcher_layout::launcher_answered`). Marks the idle
-/// clock, and, when the launcher is hidden, arms a cold clock of its own: the
-/// mark voids every clock armed at the hide, so without this a local answer
-/// arriving after Esc would leave the models in memory until the next show.
-pub(crate) fn answer_landed<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    launcher_visible: bool,
-    after: std::time::Duration,
-) {
-    app.state::<launcher_layout::HiddenAt>().mark();
-    if !launcher_visible {
-        provider::start_cold_timer(app, after);
-    }
-}
-
-/// The launcher left the screen: records when, and starts the clock that will
-/// give the local models' memory back if it stays away
-/// (`provider::start_cold_timer`). The one place both hides go through, the
-/// shortcut/close and the `Focused(false)` arm.
+/// The launcher left the screen or lost focus: records when, and starts the
+/// clock that will give the local models' memory back if it stays away
+/// (`provider::start_cold_timer`). The one place both go through, the close and
+/// the `Focused(false)` arm.
 fn launcher_hidden<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    app.state::<launcher_layout::HiddenAt>().mark();
+    app.state::<provider::HiddenAt>().mark();
     if let Some(after) = cold_after(app) {
         provider::start_cold_timer(app, after);
     }
@@ -407,29 +332,21 @@ fn cold_after<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<std::time:
     Some(std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
-/// The global shortcut's action: hide the launcher if it is up, otherwise show
-/// and focus it through `focus_launcher`. The visibility branch is exercised by
-/// the live run — the mock runtime does not track a real window's visibility —
-/// so the CI seam is `focus_launcher`, not this.
+/// The global shortcut's action: show and focus the launcher. A second press is
+/// "I am here" (§1), not a hide — a normal window is dismissed by its own close
+/// button, which hides it to the tray.
 pub fn toggle_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("launcher") {
-        if window.is_visible().unwrap_or(false) {
-            hide_launcher(app);
-        } else {
-            focus_launcher(app);
-        }
-    }
+    focus_launcher(app);
 }
 
-/// Whether closing the settings window should bring the launcher back: set when
-/// the launcher's ⌘, opened them (the launcher hides on the focus loss that
-/// follows), cleared by any other way in, consumed by the close.
+/// Whether closing the settings window should hand focus back to the launcher:
+/// set when the launcher's ⌘, opened them, cleared by any other way in,
+/// consumed by the close.
 #[derive(Default)]
 pub struct ReturnToLauncher(std::sync::atomic::AtomicBool);
 
-/// Reveals and focuses the settings window, then lets the resident become
-/// Regular (Dock icon + menu bar) while it is up (§6/§8). The ONE path to the
-/// settings window: the tray's «Налаштування» and the launcher's ⌘, share it.
+/// Reveals and focuses the settings window. The ONE path to the settings
+/// window: the tray's «Налаштування» and the launcher's ⌘, share it.
 /// Returns whether the window was there to act on, for the reason
 /// `focus_launcher` does.
 pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher: bool) -> bool {
@@ -448,17 +365,10 @@ pub fn show_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>, from_launcher
     found
 }
 
-/// How long the launcher's return waits for the Accessory switch to settle.
-/// macOS only: elsewhere there is no policy switch to wait for.
-const RETURN_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(if cfg!(target_os = "macos") { 100 } else { 0 });
-
 /// Hides the settings window — the window's close and ⌘Q share it (§6: hide,
 /// never quit) — and brings the launcher back if the launcher opened them.
 /// Returns whether it will: the mark was set and a launcher window is there to
 /// show — found-ness, since the mock runtime has no window manager to ask.
-/// The deferred show itself is verified by the live run only: a test binary
-/// exits before the hop runs, and the mock would leave nothing to observe.
 pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let back = app
         .state::<ReturnToLauncher>()
@@ -469,22 +379,8 @@ pub fn hide_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
         let _ = window.hide();
     }
     sync_activation_policy(app);
-    // Regular → Accessory deactivates the app a few milliseconds later, and a
-    // launcher focused before that hides on the blur it causes (live run:
-    // focus in, focus out 9 ms after). So the launcher is shown after the
-    // switch has landed; `set_focus` then re-activates the app, as it does
-    // for every show from the tray or the shortcut.
-    // ponytail: fixed delay, not the resign-active notification tao does not
-    // expose; raise it if a slower machine still flashes the launcher.
     if back {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(RETURN_DELAY);
-            let handle = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                focus_launcher(&handle);
-            });
-        });
+        focus_launcher(app);
     }
     back
 }
@@ -503,27 +399,15 @@ fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, section: Option<St
     }
 }
 
-/// Keeps the macOS activation policy in step with the settings window: the app
-/// is an `Accessory` (no Dock icon, no menu bar — a menu-bar resident) while
-/// only the launcher and tray are up, and becomes `Regular` (Dock icon + the
-/// standard menu bar) while the settings window is visible. §6/§8: the standard
-/// menu belongs to the settings window, not the launcher. A no-op off macOS,
-/// where the method does not exist; OS-level, so it is verified by the live run,
-/// not a headless test.
+/// Keeps the macOS activation policy at `Regular`: a Dock icon, the standard
+/// menu bar and ⌘Q, whether the settings window is up or not. The launcher is a
+/// normal window now (§1), not a menu-bar popup, so there is no Accessory state
+/// left to switch back to — this replaced the policy that followed the settings
+/// window. A no-op off macOS, where the method does not exist; OS-level, so it
+/// is verified by the live run, not a headless test.
 pub fn sync_activation_policy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     #[cfg(target_os = "macos")]
-    {
-        let settings_visible = app
-            .get_webview_window("settings")
-            .and_then(|window| window.is_visible().ok())
-            .unwrap_or(false);
-        let policy = if settings_visible {
-            tauri::ActivationPolicy::Regular
-        } else {
-            tauri::ActivationPolicy::Accessory
-        };
-        let _ = app.set_activation_policy(policy);
-    }
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     #[cfg(not(target_os = "macos"))]
     let _ = app;
 }
@@ -537,7 +421,8 @@ const CMD_Q_CLOSE_SETTINGS: &str = "cmd_q_close_settings";
 /// ExitRequested guard and past §6 — even from a hidden menu bar, since a menu
 /// key-equivalent stays live. In its place ⌘Q is a custom item that hides the
 /// settings window; the app is quit ONLY from the tray's «Вийти» (§6). The menu
-/// bar is shown only while settings is visible (`sync_activation_policy`).
+/// bar is up whenever the application is (§1: `sync_activation_policy` keeps it
+/// `Regular`).
 #[cfg(target_os = "macos")]
 pub(crate) fn build_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -781,23 +666,8 @@ pub fn run() -> anyhow::Result<()> {
                 });
             }
             // §6: the tray's «Вийти» is the only real exit. `Some(0)` is what
-            // the ExitRequested guard lets through. D155: a drag followed by
-            // Quit without a hide would otherwise be lost — record it first.
-            "quit" => {
-                if let Some(webview) = app.get_webview_window("launcher") {
-                    let window = webview.as_ref().window();
-                    let memory = app.state::<launcher_position::Memory>();
-                    let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
-                    launcher_position::remember(
-                        &window,
-                        &memory,
-                        &data_dir,
-                        os_services::wayland_session(),
-                        app.state::<launcher_layout::Current>().get(),
-                    );
-                }
-                app.exit(0)
-            }
+            // the ExitRequested guard lets through.
+            "quit" => app.exit(0),
             // §D129's temporary tray language submenu (`lang_auto`/`lang_uk`/
             // `lang_en`) is gone as of Task 3 (PR 10f): the language choice
             // lives in the settings window's Application section now
@@ -823,60 +693,29 @@ pub fn run() -> anyhow::Result<()> {
                     } else {
                         let _ = window.hide();
                     }
-                    // Hiding the launcher while settings is still up leaves the
-                    // policy unchanged. §6/§8.
+                    // §1: the policy is `Regular` whichever window closed.
                     sync_activation_policy(window.app_handle());
                 }
                 api.prevent_close();
             }
-            // D155: this window hides or exits without giving up focus first,
-            // so all four dismissals (Esc, blur, the shortcut, a close) are
-            // *meant* to arrive here as a focus loss (tao:
-            // `windowDidResignKey:` / `WM_KILLFOCUS`) — the live matrix walks
-            // each of the four separately and is what actually confirms it.
-            // This arm records where the person left it, only if they moved
-            // it (see `launcher_position::remember`).
+            // The window lost focus: the local models' clock starts here, and it
+            // is the only thing that ever unloads them (§1: a background window
+            // gives its memory back after the threshold). A close hides the
+            // window and marks again through `hide_launcher`.
             tauri::WindowEvent::Focused(false) if window.label() == "launcher" => {
-                let app = window.app_handle();
-                // Esc and blur hide from the UI, not through `hide_launcher`.
-                launcher_hidden(app);
-                let memory = app.state::<launcher_position::Memory>();
-                let data_dir = app.state::<state::AppState>().data_dir().to_path_buf();
-                launcher_position::remember(
-                    window,
-                    &memory,
-                    &data_dir,
-                    os_services::wayland_session(),
-                    app.state::<launcher_layout::Current>().get(),
-                );
-            }
-            // D155: the show cannot know where the window manager put the
-            // window — on GTK `outer_position` is a cache the configure event
-            // fills in later — so the first focus-in after a show settles it.
-            // Not Wayland-guarded on purpose: `place` never calls `placed` on
-            // Wayland (`launcher_position::place`'s `if !wayland` block), so
-            // `settled` here is a no-op on that platform. The read goes
-            // through `here` so the settle and the blur convert the same way.
-            tauri::WindowEvent::Focused(true) if window.label() == "launcher" => {
-                let app = window.app_handle();
-                let memory = app.state::<launcher_position::Memory>();
-                memory.settled(launcher_position::here(
-                    window,
-                    app.state::<launcher_layout::Current>().get(),
-                ));
+                launcher_hidden(window.app_handle());
             }
             _ => {}
         })
         .setup(|app| {
             manage_state(app.handle())?;
-            // D155: what the launcher's last show applied and where the person
-            // left it. Managed before any window can show or lose focus.
-            app.manage(launcher_position::Memory::default());
-            app.manage(launcher_layout::Current::default());
-            app.manage(launcher_layout::HiddenAt::default());
+            // The window's focus mark: what the cold timer reads to tell a
+            // clock that still owns its window from one a later focus loss
+            // replaced. Managed before any window can show or lose focus.
+            app.manage(provider::HiddenAt::default());
             app.manage(ReturnToLauncher::default());
             // Immediately after the state exists and before any step here
-            // touches the index (managing `Memory::default()` above touches
+            // touches the index (managing `HiddenAt::default()` above touches
             // none), so every later step here meets an index that is
             // already open, and so does every command arriving after start-up —
             // which is as early as a boot can make it, not a promise about a
@@ -993,9 +832,8 @@ pub fn run() -> anyhow::Result<()> {
                     locale::t(st.effective, locale::Key::SettingsTitle)
                 ));
             }
-            // §6/§8: start as a menu-bar resident — no Dock icon, no menu bar
-            // (settings is hidden at startup). The standard menu returns only
-            // while the settings window is visible.
+            // §1: a normal application — Dock icon, standard menu bar — from
+            // the first frame, whatever window is up.
             sync_activation_policy(app.handle());
             // The folder watcher (spec 2026-09-10): last, because its thread
             // starts with a scan and everything a scan announces to must
@@ -1120,10 +958,9 @@ mod tests {
     /// It sees only the closure bodies written inline — splitting a closure
     /// into a named function, or a `with_index` reached indirectly through a
     /// function this test cannot see into (`tray::refresh_tray` itself, or
-    /// `focus_launcher` in `hide_settings`'s hop, or anything they call) would
-    /// slip straight past it. A second hop (`hide_settings`) made the old
-    /// "exactly one" rule fail, so every hop is now checked the same way, and
-    /// the observer's is required by name: one of the bodies must call
+    /// anything it calls) would slip straight past it. A second hop made the
+    /// old "exactly one" rule fail, so every hop is now checked the same way,
+    /// and the observer's is required by name: one of the bodies must call
     /// `tray::refresh_tray`, so its hop moving or going is still red.
     /// A `#[test]` was chosen over nothing because nothing is a
     /// worse guard still; if a reviewer would rather have this as a

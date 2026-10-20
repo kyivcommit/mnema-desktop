@@ -93,28 +93,26 @@
   // which are component state, are untouched by it.
   //
   // And the shell really does focus this window: every path that raises the
-  // launcher calls `set_focus()` on it, explicitly and on purpose —
-  // `src-tauri/src/lib.rs:99-113` (`focus_launcher`, behind the tray item and
-  // the second-instance handler) and `src-tauri/src/lib.rs:119-131`
-  // (`toggle_launcher`, the global shortcut) both run `show()`, `move_window`,
-  // `set_focus()`. They are the only two paths that show the launcher; the
-  // third `show()` in that file belongs to the settings window. And no fourth
-  // path hides in configuration: `src-tauri/tauri.conf.json` declares the
-  // `launcher` window `"visible": false`, so the window manager never raises it
-  // on its own and the two above are the whole set. (Review Minor 2: a grep over
-  // `*.rs` alone leaves that open.)
+  // launcher goes through `focus_launcher` — the tray item, the second-instance
+  // handler and `toggle_launcher` (the global shortcut) — and it runs `show()`,
+  // `set_focus()`. No fourth path hides in configuration:
+  // `src-tauri/tauri.conf.json` declares the `launcher` window
+  // `"visible": false`, so the window manager never raises it on its own and
+  // the three above are the whole set. (Review Minor 2: a grep over `*.rs`
+  // alone leaves that open.)
   //
   // 🔴 One path needs no Rust at all, and it is the owner's own case (review
-  // Minor 3). With 📌 pin on, `Launcher.svelte:65`'s blur-hide is disabled, so
-  // the launcher stays up and regains DOM focus through ordinary OS window
-  // activation — which is exactly the long-lived launcher that outlives an
-  // index change. That path does not depend on the link below.
+  // Minor 3). The launcher is a normal window (§1), so the person can bring it
+  // back by clicking it in the Dock or the ⌘-Tab switcher, which regains DOM
+  // focus through ordinary OS window activation — exactly the long-lived
+  // launcher that outlives an index change. That path does not depend on the
+  // link below.
   //
   // ⚠️ One link is still unmeasured, and it is narrower than the whole: whether
   // a webview `set_focus()` produces a DOM `focus` event on `window` in the
   // running application. Nobody has run this application yet, so that step is
   // read from the platform, not from a live launcher. It is the raise paths
-  // that need it; the pinned path above does not.
+  // that need it; the Dock/⌘-Tab path above does not.
   //
   // `loading` is a plain `let`, not `$state`: nothing renders from it. It stops
   // two listings being on the wire at once, where the loser lands last and puts

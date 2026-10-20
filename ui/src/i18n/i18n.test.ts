@@ -4,8 +4,8 @@ import { messages, type Key } from './catalog';
 
 describe('i18n', () => {
   it('returns the string for the active locale', () => {
-    setLocale('en'); expect(t('pin')).toBe('Pin');
-    setLocale('uk'); expect(t('pin')).toBe('Пін');
+    setLocale('en'); expect(t('toolbar_settings')).toBe('Settings');
+    setLocale('uk'); expect(t('toolbar_settings')).toBe('Налаштування');
   });
 
   it('falls back to EN and never returns a raw key', () => {

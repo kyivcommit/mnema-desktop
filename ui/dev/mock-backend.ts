@@ -14,7 +14,6 @@
 // live state and `mnemaMock.emit(event, payload)` fires a backend event.
 import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
-import { LAUNCHER_COLD_EVENT } from '../src/lib/ipc';
 import { excerptSpanA, generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, AskAnswer, Catalogue, RoleCatalogue, HistoryEntry, IndexRead, KeyState, LocaleChoice, ModelRole,
@@ -302,8 +301,6 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       if (a.section) void emit('settings-section', a.section);
     },
 
-    set_launcher_layout: () => null,
-    launcher_answered: () => null,
     set_search_arms: (a) => { s.index = { ...s.index, searchTextArm: !!a.text, searchContentArm: !!a.content }; },
     ask: (a) => {
       // The same rule the backend keeps: one row per trimmed query, moved to the top.
@@ -337,5 +334,5 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     throw new Error(`mock backend: no handler for ${cmd}`);
   }, { shouldMockEvents: true });
 
-  Object.assign(globalThis, { mnemaMock: { state: s, emit, cold: () => emit(LAUNCHER_COLD_EVENT) } });
+  Object.assign(globalThis, { mnemaMock: { state: s, emit } });
 }
