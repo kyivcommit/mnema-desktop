@@ -53,6 +53,20 @@ test('the query echoes as a bubble and the answer renders its anchors as buttons
   ]);
 });
 
+// The block renderer puts the answer's text in more than one element, so the
+// citation button is no longer a child of one paragraph — this is the claim
+// that `[n]` survives wherever the block parser puts it.
+test('an anchor survives outside a paragraph: inside a list item, under a heading', () => {
+  const onSelect = vi.fn();
+  const answer = { ...gen(generated), answer: '## Follow\n\n- `tail -f` follows<c>3</c>\n- plain' };
+  render(Answer, { query: 'q', answer, onSelect });
+  const body = screen.getByTestId('answer-body');
+  expect(within(body).getByRole('heading', { level: 4 }).textContent).toBe('Follow');
+  const [first] = within(body).getAllByRole('listitem');
+  expect(within(first).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(within(first).getByText(/tail -f/).tagName).toBe('CODE');
+});
+
 test('the anchor resolves by value, not by position', async () => {
   const onSelect = vi.fn();
   render(Answer, { query: 'q', answer: gen(generated), onSelect }); // anchors 3 and 7

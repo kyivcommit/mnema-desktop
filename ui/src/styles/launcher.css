@@ -203,13 +203,39 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
 }
-.answer-card > p { margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
-.answer-card > p button, .prev .tag {
+/* The answer renders as blocks (`lib/markdown.ts`), so the block parser owns
+   the newlines now: no `white-space: pre-wrap` here, or a paragraph's own
+   breaks would double what the blocks already space. Margins stay 0 —
+   `.answer-card`'s column gap is the spacing. */
+.answer-body { display: flex; flex-direction: column; gap: 12px; }
+.answer-body :is(p, h4, ul, ol) {
+  margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere;
+}
+.answer-body h4 {
+  font-family: var(--sans); font-weight: 600; font-style: normal;
+  font-size: 14px; line-height: 1.45; color: var(--ink);
+}
+.answer-card .answer-body :is(ul, ol) {
+  list-style: disc; display: flex; flex-direction: column; gap: 6px; padding: 0 0 0 22px;
+}
+.answer-card .answer-body ol { list-style: decimal; }
+.answer-body code, .answer-body pre {
+  font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 13px;
+}
+.answer-body code {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 4px; font-size: 12.5px;
+}
+.answer-body pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; line-height: 1.55; white-space: pre;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.answer-body button, .prev .tag {
   font-family: var(--mono); font-weight: 500; font-style: normal;
   color: var(--cite); background: var(--cite-wash); border: 1px solid var(--cite-line);
   border-radius: 5px; padding: 1px 5px; font-size: 11px;
 }
-.answer-card > p button { margin: 0 1px; vertical-align: .12em; }
+.answer-body button { margin: 0 1px; vertical-align: .12em; }
 .answer-card ul, .passages-card ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 9px; }
 .prev {
   width: 100%; padding: 10px 12px; display: grid; grid-template-columns: auto minmax(0, 1fr);
