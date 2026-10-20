@@ -107,6 +107,13 @@ test('real tree marks the current file while leaving neighbours plain', async ()
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).color).toBe('var(--ink)');
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).fontWeight).toBe('500');
   expect(getComputedStyle(selected).color).toBe('var(--ink)');
+  // jsdom ranks specificity by source order, so the computed colours above
+  // cannot prove the open row outranks the file row. The selector is read from
+  // the sheet instead: the file-row rule must exclude the current row, or a
+  // later simplification silently paints the open file as secondary. The lift
+  // itself is a stand-only check.
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.tree li > button\.file-row:not\(\[aria-current="true"\]\)\s*\{/);
 });
 
 // §4: the conversation on screen is `--select`, not the file tree's

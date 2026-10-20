@@ -128,10 +128,7 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .tree li > button {
   font-family: var(--sans); font-weight: 500; font-style: normal; color: var(--ink);
 }
-/* Files read as secondary to folders: the tree's job is navigation, and a
-   leaf is not a place to open. Same weight and colour as the rest of the
-   card's secondary text; `[aria-current]` above still lifts the open file. */
-.tree li > button.file-row { font-family: var(--sans); font-weight: 400; font-style: normal; color: var(--ink-soft); }
+.tree li > button.file-row:not([aria-current="true"]) { font-family: var(--sans); font-weight: 400; font-style: normal; color: var(--ink-soft); }
 .tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
 .tree li > button[aria-expanded="true"]::before { content: '▾'; }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
