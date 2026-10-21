@@ -32,8 +32,9 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// document is `indexed`. Written once so a chunk the queue refuses to embed
 /// and a chunk search refuses to surface cannot drift into disagreeing about
 /// which one that is. [`the_embedding_queue`] builds its own `FROM`/`WHERE`
-/// on top of this exact clause; [`Db::knn_searchable`] uses it as a genuine
-/// vec0 pre-filter, nested inside the one `IN` vec0 accepts per query.
+/// on top of this exact clause; [`Db::knn_searchable`] pre-filters on
+/// [`SEARCHABLE_CHUNK`], which is this plus the folder condition, nested inside
+/// the one `IN` vec0 accepts per query.
 /// Expects the outer query to expose the candidate as `c`.
 const ELIGIBLE_CHUNK: &str = eligible_chunk!();
 
@@ -576,7 +577,7 @@ impl Db {
     }
 
     /// [`Db::knn`], narrowed to chunks a search is allowed to show —
-    /// [`ELIGIBLE_CHUNK`] as a genuine vec0 pre-filter, intersected with
+    /// [`SEARCHABLE_CHUNK`] as a genuine vec0 pre-filter, intersected with
     /// `restrict_to` inside the one `IN` vec0 accepts rather than a second
     /// one. A sibling of `knn`, not a change to it: every `knn` pin in
     /// `tests/space.rs` inserts vectors for ids with no `chunk` row at all,
@@ -938,7 +939,7 @@ impl Db {
         Ok(self.conn().query_row(
             &format!(
                 "SELECT count(DISTINCT chunk_id) FROM {table}
-                  WHERE chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK})"
+                  WHERE chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})"
             ),
             [],
             |r| r.get(0),

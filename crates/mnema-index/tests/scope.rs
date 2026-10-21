@@ -201,9 +201,12 @@ fn found(db: &Db, space: i64, chunks: &[i64]) -> [(&'static str, Vec<usize>); 3]
 }
 
 fn assert_found(db: &Db, space: i64, chunks: &[i64], want: &[usize]) {
-    for (arm, got) in found(db, space, chunks) {
-        assert_eq!(got, want, "{arm} arm");
-    }
+    let wrong: Vec<String> = found(db, space, chunks)
+        .into_iter()
+        .filter(|(_, got)| got != want)
+        .map(|(arm, got)| format!("{arm} arm: got {got:?}"))
+        .collect();
+    assert!(wrong.is_empty(), "want {want:?}; {wrong:?}");
 }
 
 #[test]
@@ -265,6 +268,35 @@ fn one_searched_copy_is_enough() {
 }
 
 #[test]
+fn the_same_folder_name_in_another_root_is_not_covered() {
+    let (db, root_a, space, mut c) = index(&["notes/a.md"]);
+    let root_b = db.insert_watched_root("/other").unwrap();
+    let b = seed(&db, root_b, 2, "notes/b.md", "zebra");
+    db.insert_vector(space, b, &unit_vector_1024()).unwrap();
+    c.push(b);
+    db.set_folder_searched(root_a, "notes", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
+fn a_document_without_a_path_is_never_hidden() {
+    let (db, root, space, mut c) = index(&["notes/a.md"]);
+    let id = format!("{:064}", 7);
+    let orphan = seed(&db, root, 7, "tmp/x.md", "zebra");
+    db.conn()
+        .execute("DELETE FROM path WHERE document_id = ?1", [&id])
+        .unwrap();
+    db.insert_vector(space, orphan, &unit_vector_1024())
+        .unwrap();
+    c.push(orphan);
+    assert_found(&db, space, &c, &[0, 1]);
+    db.set_folder_searched(root, "elsewhere", false).unwrap();
+    assert_found(&db, space, &c, &[0, 1]);
+    db.set_folder_searched(root, "notes", false).unwrap();
+    assert_found(&db, space, &c, &[1]);
+}
+
+#[test]
 fn terms_present_ignores_unsearched_folders() {
     let (db, root, _space, _c) = index(&["off/a.md"]);
     seed(&db, root, 9, "on/b.md", "giraffe");
@@ -277,17 +309,20 @@ fn the_embedding_queue_and_coverage_ignore_entries() {
     let db = temp_db();
     let root = db.insert_watched_root("/r").unwrap();
     let space = space_1024(&db);
-    seed(&db, root, 1, "off/a.md", "zebra");
+    let off = seed(&db, root, 1, "off/a.md", "zebra");
     seed(&db, root, 2, "on/b.md", "zebra");
+    db.insert_vector(space, off, &unit_vector_1024()).unwrap();
     let before = (
         db.chunks_needing_embedding(space, 10).unwrap().len(),
         db.eligible_chunk_count().unwrap(),
+        db.eligible_embedded_chunk_count(space).unwrap(),
     );
-    assert_eq!(before, (2, 2));
+    assert_eq!(before, (1, 2, 1));
     db.set_folder_searched(root, "off", false).unwrap();
     let after = (
         db.chunks_needing_embedding(space, 10).unwrap().len(),
         db.eligible_chunk_count().unwrap(),
+        db.eligible_embedded_chunk_count(space).unwrap(),
     );
     assert_eq!(after, before);
 }

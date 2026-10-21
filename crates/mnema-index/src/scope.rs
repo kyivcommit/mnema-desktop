@@ -21,12 +21,16 @@ macro_rules! path_is_searched {
     };
 }
 
-/// An `AND` clause: the document `d` has at least one searched path. An empty
-/// `search_folder` short-circuits it, so the common case pays one probe.
+/// An `AND` clause: the document `d` has no path at all, or at least one
+/// searched path — a document outside every folder is never hidden by a choice
+/// about folders. An empty `search_folder` short-circuits it, so the common
+/// case pays one probe.
 macro_rules! searchable_document {
     () => {
         concat!(
-            " AND (NOT EXISTS (SELECT 1 FROM search_folder) OR EXISTS (
+            " AND (NOT EXISTS (SELECT 1 FROM search_folder)
+                OR NOT EXISTS (SELECT 1 FROM path pn WHERE pn.document_id = d.id)
+                OR EXISTS (
                 SELECT 1 FROM path pa WHERE pa.document_id = d.id AND ",
             $crate::scope::path_is_searched!(),
             "))"
