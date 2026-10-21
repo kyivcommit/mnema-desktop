@@ -1812,15 +1812,6 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
     state.open_index().unwrap();
-    // An indexed, searchable document that nothing matches: "nothing found"
-    // is only true of an archive that has something to search.
-    state
-        .with_index(|db| {
-            let root = db.insert_watched_root("/tmp/alpha")?;
-            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
-            Ok::<_, mnema_index::Error>(())
-        })
-        .unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -11995,15 +11986,6 @@ fn a_refused_ask_is_not_recorded() {
     mnema_secrets::store(state.credential_ref(), "test-key-history-refused")
         .expect("the key is stored");
     state.open_index().unwrap();
-    // An indexed, searchable document that nothing matches: "nothing found"
-    // is only true of an archive that has something to search.
-    state
-        .with_index(|db| {
-            let root = db.insert_watched_root("/tmp/alpha")?;
-            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
-            Ok::<_, mnema_index::Error>(())
-        })
-        .unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
     let webview = main_webview(&app);
     text_arm_only(&webview);
@@ -12315,7 +12297,10 @@ fn an_empty_answer_says_whether_any_folder_is_searched() {
     let root = state
         .with_index(|db| {
             let root = db.insert_watched_root("/tmp/alpha")?;
-            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
+            let doc = "a".repeat(64);
+            seed_indexed_file(db, root, &doc, "a.txt");
+            // A chunk, so the index has something searchable in principle.
+            rebuild_one_chunk(db, &doc, "synthetic zzz");
             Ok::<_, mnema_index::Error>(root)
         })
         .unwrap();
@@ -12339,6 +12324,24 @@ fn an_empty_answer_says_whether_any_folder_is_searched() {
     set(true);
     let on = ask_q(&webview, "nothing indexed");
     assert_eq!(on["reason"]["kind"], json!("noCandidates"), "{on}");
+}
+
+/// A fresh index (nothing indexed at all) has no folder to blame: the plain
+/// "nothing found", not "search is off".
+#[test]
+fn an_empty_index_refuses_with_no_candidates_not_no_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-empty-index")
+        .expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let answer = ask_q(&webview, "nothing indexed");
+    assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
 }
 
 const FIRST_Q: &str = "quantum entanglement";

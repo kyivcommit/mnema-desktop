@@ -1611,8 +1611,13 @@ fn answer_question(
     if hits.is_empty() {
         // A separate read after retrieval; its failure must not turn an
         // empty result into an error, so it falls back to the plain refusal.
+        // An index with nothing in it has no folder to blame either.
         let searchable = state
-            .with_index(|db| db.any_document_searchable())
+            .with_index(|db| {
+                Ok::<_, mnema_index::Error>(
+                    db.eligible_chunk_count()? == 0 || db.any_document_searchable()?,
+                )
+            })
             .unwrap_or_else(|e| {
                 eprintln!("mnema: could not tell whether any folder is searched: {e}");
                 true
