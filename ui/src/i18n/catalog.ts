@@ -39,7 +39,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_empty' | 'tree_failed'
+  | 'tree_empty' | 'tree_failed' | 'tree_search_in'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
@@ -385,6 +385,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
+    tree_search_in: 'Шукати в «{name}»',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
@@ -1253,6 +1254,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
+    tree_search_in: 'Search in “{name}”',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',

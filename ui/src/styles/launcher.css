@@ -106,21 +106,48 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
-.tree { font-size: 13px; }
+/* As wide as its deepest row, at least the pane: `.pane-body` scrolls it
+   sideways instead of squeezing deep names (owner, 2026-10-21). */
+.tree { font-size: 13px; width: max-content; min-width: 100%; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
-.tree ul ul { padding-left: 14px; }
+/* Every level steps in from its parent folder, the root's own branch included
+   (owner, 2026-10-21, reversing 2026-10-20's flush level 1). */
+.tree ul ul, .tree section > ul + ul { padding-left: 18px; }
 .tree li { display: block; }
-.tree li > button, .tree li > span {
+.tree li > button, .tree li > span, .tree .folder-row > button {
   display: block; width: 100%; padding: 4px 7px; border: 1px solid transparent;
   border-color: transparent; border-radius: 6px; text-align: left;
   background: transparent; color: var(--ink-soft); overflow-wrap: anywhere;
 }
-.tree li > button {
+.tree li > button, .tree .folder-row > button {
   font-family: var(--sans); font-weight: 500; font-style: normal; color: var(--ink);
 }
 .tree li > button.file-row:not([aria-current="true"]) { font-family: var(--sans); font-weight: 400; font-style: normal; color: var(--ink-soft); }
-.tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
-.tree li > button[aria-expanded="true"]::before { content: '▾'; }
+/* Row: chevron, search check, icon, name. The check is not inside the
+   disclosure button, so it sits over the button's empty slot. */
+.tree .folder-row { position: relative; }
+.tree .folder-row > button, .tree li > button.file-row {
+  display: flex; align-items: center; gap: 4px;
+}
+.tree li > button.file-row { padding-left: 23px; }
+.tree .label { white-space: nowrap; }
+.tree .chev { flex: none; color: var(--ink-faint); transition: transform 0.12s; }
+.tree [aria-expanded="true"] > .chev { transform: rotate(90deg); }
+.tree .check-slot { flex: none; width: 16px; }
+.tree .ico { flex: none; color: var(--ink-soft); margin-right: 2px; }
+.tree .search-check {
+  position: absolute; left: 23px; top: 50%; transform: translateY(-50%);
+  appearance: none; width: 16px; height: 16px; margin: 0; border-radius: 4px;
+  display: grid; place-items: center; cursor: pointer; color: var(--ink-soft);
+  border: 1px solid var(--ink-faint); background: transparent;
+}
+.tree .search-check:checked, .tree .search-check:indeterminate { border-color: transparent; }
+.tree .search-check:checked::after { content: '✓'; font-size: 13px; line-height: 1; }
+.tree .search-check:indeterminate::after { content: '–'; font-size: 13px; line-height: 1; }
+.tree .search-check:hover { background: var(--surface-2); }
+.tree .search-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A file outside the search stays openable; it only reads as set aside. */
+.tree li > button.file-row.unsearched:not([aria-current="true"]) { color: var(--ink-faint); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
 /* §4: the conversations. The pane is the scroll container; a row is one line,
    the × shows on hover and on focus. The active row is `--select`, not the

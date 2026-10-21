@@ -42,7 +42,7 @@ function initialState(scenario: string) {
     searchTextArm: true,
     searchContentArm: !fresh,
   };
-  const tree: TreeListing = fresh ? { roots: [] } : structuredClone(oneRootTwoFolders);
+  const tree: TreeListing = fresh ? { roots: [] } : structuredClone(standTree);
   const history: StoredQuestion[] = fresh ? [] : historyTwoQuestions.map((h) => ({ ...h, answer: generated }));
   const scan: ScanState = {
     revision: 1, files: index.indexedFiles, readSeq: 1, jobsDone: 0, lastReading: null,
@@ -110,6 +110,31 @@ const catalogue = (role: ModelRole, openRouter: boolean, mnema: boolean): RoleCa
     ],
     unreadable: 0, unreadableRecords: [],
   };
+};
+
+// The stand's tree: the fixture's rows (the answers cite them) plus enough
+// depth to show nesting, root-level files and the search checks.
+const standTree: TreeListing = {
+  roots: [
+    {
+      ...oneRootTwoFolders.roots[0],
+      files: [
+        ...oneRootTwoFolders.roots[0].files,
+        { relativePath: 'notes/drafts/idea.md', documentId: 'doc-4' },
+        { relativePath: 'notes/drafts/deep/plan.md', documentId: 'doc-5' },
+        { relativePath: 'notes/drafts/deep/quarterly-planning-meetings/2026/minutes-of-the-october-review.md', documentId: 'doc-10' },
+        { relativePath: 'README.md', documentId: 'doc-6' },
+        { relativePath: 'package.json', documentId: 'doc-7' },
+      ],
+    },
+    {
+      rootId: 2, absolutePath: '/home/u/papers', name: 'papers',
+      files: [
+        { relativePath: '2024/survey.pdf', documentId: 'doc-8' },
+        { relativePath: 'index.md', documentId: 'doc-9' },
+      ],
+    },
+  ],
 };
 
 export function installMockBackend(win: 'settings' | 'launcher') {

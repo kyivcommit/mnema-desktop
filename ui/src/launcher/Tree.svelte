@@ -195,6 +195,55 @@
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
   }
 
+  // The search filter: a folder's own flag covers the files directly in it. A
+  // folder with no entry inherits its parent's, so a folder that appears on
+  // disk under a cleared one is cleared too. Only the cleared entries need
+  // persisting; everything starts searched.
+  // shortcut: component state only, lost on restart and not sent to search —
+  // the core stage replaces it with a persisted set.
+  let searched = $state<Record<string, boolean>>({});
+
+  function ownOn(rootId: number, path: string): boolean {
+    for (let p = path; ; p = parentOf(p)) {
+      const k = key(rootId, p);
+      if (k in searched) return searched[k];
+      if (p === '') return true;
+    }
+  }
+
+  function folderPaths(nodes: TreeNode[], out: string[] = []): string[] {
+    for (const n of nodes) if (n.kind === 'folder') { out.push(n.path); folderPaths(n.children, out); }
+    return out;
+  }
+
+  // ✓ when the folder and every folder under it are searched, empty when none
+  // are, — otherwise.
+  function checkState(rootId: number, path: string, children: TreeNode[]): 'on' | 'off' | 'mixed' {
+    const flags = [path, ...folderPaths(children)].map((p) => ownOn(rootId, p));
+    return flags.every(Boolean) ? 'on' : flags.some(Boolean) ? 'mixed' : 'off';
+  }
+
+  // A click sets the whole branch: — and empty turn into ✓, ✓ into empty. The
+  // entries under it are dropped so the branch inherits the new value.
+  function setSearched(rootId: number, path: string, children: TreeNode[]) {
+    const on = checkState(rootId, path, children) !== 'on';
+    const inside = key(rootId, path === '' ? '' : `${path}/`);
+    const next: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(searched)) if (!k.startsWith(inside)) next[k] = v;
+    next[key(rootId, path)] = on;
+    searched = next;
+  }
+
+  // Read in the template, so a locale change re-labels the checks.
+  function searchIn(name: string) {
+    void $locale;
+    return t('tree_search_in', { name });
+  }
+
+  function parentOf(path: string) {
+    return path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  }
+
   // Folders on the selected file's path that the person had shut are set open
   // when a NEW selection lands there — and the root row with them, since it is
   // the outermost folder on every path inside it. `toggled` still wins over `openByDefault`
@@ -248,16 +297,52 @@
   });
 </script>
 
+{#snippet chevron()}
+  <svg class="chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+{/snippet}
+
+{#snippet folderIcon(open: boolean)}
+  <svg class="ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
+    {#if open}
+      <path d="M2 12.5V4.5a1 1 0 0 1 1-1h3l1.5 1.5H12a1 1 0 0 1 1 1V7"/><path d="M2 12.5l1.8-5h10.7l-1.8 5z"/>
+    {:else}
+      <path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>
+    {/if}
+  </svg>
+{/snippet}
+
+{#snippet fileIcon()}
+  <svg class="ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h5.5L12.5 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11A.5.5 0 0 1 4 2z"/><path d="M9.5 2v3h3M5.8 8h4.4M5.8 10.5h4.4"/></svg>
+{/snippet}
+
+<!-- A sibling of the disclosure button, not inside it: a control nested in a
+     button is invalid and its click would also fold the folder. -->
+{#snippet check(rootId: number, path: string, name: string, children: TreeNode[])}
+  {@const state = checkState(rootId, path, children)}
+  <input
+    type="checkbox"
+    class="search-check"
+    data-testid={`tree-check-${rootId}-${path}`}
+    aria-label={searchIn(name)}
+    checked={state === 'on'}
+    indeterminate={state === 'mixed'}
+    onchange={() => setSearched(rootId, path, children)} />
+{/snippet}
+
 {#snippet branch(nodes: TreeNode[], rootId: number)}
   <ul>
     {#each nodes as node (node.path)}
       <li>
         {#if node.kind === 'folder'}
-          <button
-            type="button"
-            data-testid={`tree-folder-${node.path}`}
-            aria-expanded={isOpen(rootId, node.path)}
-            onclick={() => toggle(rootId, node.path)}>{node.name}</button>
+          <div class="folder-row">
+            <button
+              type="button"
+              data-testid={`tree-folder-${node.path}`}
+              aria-expanded={isOpen(rootId, node.path)}
+              onclick={() => toggle(rootId, node.path)}
+              >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(rootId, node.path))}<span class="label">{node.name}</span></button>
+            {@render check(rootId, node.path, node.name, node.children)}
+          </div>
           {#if isOpen(rootId, node.path)}
             {@render branch(node.children, rootId)}
           {/if}
@@ -270,10 +355,11 @@
           <button
             type="button"
             class="file-row"
+            class:unsearched={!ownOn(rootId, parentOf(node.path))}
             data-testid={`tree-file-${node.documentId}`}
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
             onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}
-            >{node.name}</button>
+            >{@render fileIcon()}<span class="label">{node.name}</span></button>
         {/if}
       </li>
     {/each}
@@ -295,11 +381,15 @@
             <!-- The root is a disclosure row like the folders below it (owner,
                  2026-10-20): a flat list under a bare heading read as a pile
                  with no way to fold it. -->
-            <button
-              type="button"
-              data-testid={`tree-root-toggle-${root.rootId}`}
-              aria-expanded={isOpen(root.rootId, '')}
-              onclick={() => toggle(root.rootId, '')}>{root.name}</button>
+            <div class="folder-row">
+              <button
+                type="button"
+                data-testid={`tree-root-toggle-${root.rootId}`}
+                aria-expanded={isOpen(root.rootId, '')}
+                onclick={() => toggle(root.rootId, '')}
+                >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(root.rootId, ''))}<span class="label">{root.name}</span></button>
+              {@render check(root.rootId, '', root.name, nodes)}
+            </div>
           </li>
         </ul>
         <!-- A sibling of the root's own list, not a child of its <li>: nested
