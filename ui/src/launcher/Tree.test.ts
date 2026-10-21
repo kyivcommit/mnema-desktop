@@ -756,14 +756,47 @@ test('writes run one after another', async () => {
   expect(setCalls()[1][1]).toEqual({ rootId: 1, folderPath: 'notes', searched: true });
 });
 
-test('a refused write puts the check back and says so', async () => {
-  mockTree(withNotesOff);
+// The index is the record: `stored` is what the mock backend holds, and a
+// listing is read from it at the moment of the call.
+function storeBackedIndex() {
+  const stored: { folderPath: string; searched: boolean }[] = [{ folderPath: 'notes', searched: false }];
+  treeReply = () => Promise.resolve({ roots: [{ ...oneRootTwoFolders.roots[0], searched: stored.map((e) => ({ ...e })) }] });
+  return stored;
+}
+
+test('after a refused write and a later accepted one, the checks show what the index holds', async () => {
+  const stored = storeBackedIndex();
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const gates: Array<() => void> = [];
+  setReply = (a) => new Promise<void>((resolve, reject) => {
+    const { folderPath, searched } = a as { folderPath: string; searched: boolean };
+    gates.push(gates.length === 0 ? () => reject(new Error('disk full')) : () => {
+      const at = stored.findIndex((e) => e.folderPath === folderPath);
+      if (at >= 0) stored.splice(at, 1);
+      stored.push({ folderPath, searched });
+      resolve();
+    });
+  });
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive')); // will be refused
+  await fireEvent.click(box('notes')); // will be accepted
+  gates[0]();
+  await waitFor(() => expect(gates).toHaveLength(2));
+  await waitFor(() => expect(err).toHaveBeenCalled());
+  gates[1]();
+  await waitFor(() => expect(box('archive').checked).toBe(true)); // the refused click is not shown
+  expect(box('notes').checked).toBe(true); // the accepted one is
+});
+
+test('after a single refused write the check shows the stored value', async () => {
+  storeBackedIndex();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
   setReply = () => Promise.reject(new Error('disk full'));
   mount(null);
   await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
-  await waitFor(() => expect(err).toHaveBeenCalled());
+  expect(box('archive').checked).toBe(false); // shown at click time
   await waitFor(() => expect(box('archive').checked).toBe(true));
+  expect(console.error).toHaveBeenCalled();
 });
 
 test('a listing that arrives during a write is applied after it', async () => {

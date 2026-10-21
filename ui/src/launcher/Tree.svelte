@@ -136,7 +136,10 @@
         // and leave the person with a message, on an event they did not cause.
         if (listing === null) failed = true;
       })
-      .finally(() => { loading = false; });
+      .finally(() => {
+        loading = false;
+        if (reloadAfter) { reloadAfter = false; load(); }
+      });
   }
 
   onMount(load);
@@ -212,6 +215,10 @@
   let pending = 0;
   let chain: Promise<void> = Promise.resolve();
   let held: TreeListing | null = null;
+  // A refused write leaves the shown checks unknown: later queued writes may
+  // still land. Once the queue is empty the index is asked again.
+  let resync = false;
+  let reloadAfter = false;
 
   function fromListing(l: TreeListing): Record<string, boolean> {
     const out: Record<string, boolean> = {};
@@ -244,7 +251,6 @@
   function setSearched(rootId: number, path: string, children: TreeNode[]) {
     const on = checkState(rootId, path, children) !== 'on';
     const inside = key(rootId, path === '' ? '' : `${path}/`);
-    const before = searched;
     const next: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(searched)) if (!k.startsWith(inside)) next[k] = v;
     next[key(rootId, path)] = on;
@@ -254,13 +260,18 @@
     chain = chain
       .then(() => setFolderSearched(rootId, path, on))
       .catch((e) => {
-        // Never silent, and never left showing what the index does not hold.
         console.error('set_folder_searched failed', e);
-        searched = before;
+        resync = true;
       })
       .finally(() => {
         pending--;
-        if (pending === 0 && held) { searched = fromListing(held); held = null; }
+        if (pending > 0) return;
+        if (resync) {
+          // A held listing may predate the later writes; read afresh.
+          resync = false;
+          held = null;
+          if (loading) reloadAfter = true; else load();
+        } else if (held) { searched = fromListing(held); held = null; }
       });
   }
 
