@@ -22,8 +22,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // every command would hand the listing's shape to whatever else asked, and a
 // test would pass on whichever shape happened to be wrong.
 let treeReply: () => Promise<TreeListing> = () => Promise.resolve(emptyListing);
-function route(cmd: string): Promise<unknown> {
+let setReply: (a: unknown) => Promise<void> = () => Promise.resolve();
+function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'list_tree') return treeReply();
+  if (cmd === 'set_folder_searched') return setReply(args);
   throw new Error(`unexpected command ${cmd}`);
 }
 
@@ -69,7 +71,7 @@ function mount(selected: { rootId: number; relativePath: string } | null) {
 // Everything in the card that a keyboard can reach or that claims a role, in
 // document order. Used as a closed enumeration (P5) rather than a spot check.
 function controls() {
-  return [...screen.getByTestId('tree-body').querySelectorAll('button, [tabindex], [role]')]
+  return [...screen.getByTestId('tree-body').querySelectorAll('button, input, [tabindex], [role]')]
     .map((el) => el.getAttribute('data-testid'));
 }
 
@@ -86,6 +88,7 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(route);
   treeReply = () => Promise.resolve(emptyListing);
+  setReply = () => Promise.resolve();
   pick.mockReset();
 });
 
@@ -162,7 +165,9 @@ test('the controls are exactly the ones with a real action', async () => {
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   expect(controls()).toEqual([
-    'tree-root-toggle-1', 'tree-folder-notes', 'tree-file-doc-1', 'tree-file-doc-2', 'tree-folder-archive',
+    'tree-root-toggle-1', 'tree-check-1-',
+    'tree-folder-notes', 'tree-check-1-notes', 'tree-file-doc-1', 'tree-file-doc-2',
+    'tree-folder-archive', 'tree-check-1-archive',
   ]);
 });
 
@@ -710,3 +715,69 @@ test('aria-expanded on a folder says what the folder is actually doing', async (
   expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
 });
 
+
+// --- the search checks, persisted through the index -------------------------
+
+const withNotesOff: TreeListing = {
+  roots: [{ ...oneRootTwoFolders.roots[0], searched: [{ folderPath: 'notes', searched: false }] }],
+};
+const setCalls = () => invoke.mock.calls.filter((c) => c[0] === 'set_folder_searched');
+const box = (path: string) => screen.getByTestId(`tree-check-1-${path}`) as HTMLInputElement;
+
+test('the checks are read from the listing', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await screen.findByTestId('tree-check-1-notes');
+  expect(box('notes').checked).toBe(false);
+  expect(box('archive').checked).toBe(true);
+  expect(box('').indeterminate).toBe(true);
+});
+
+test('a click writes the new state once', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: 'archive', searched: false }]]);
+  expect(box('archive').checked).toBe(false);
+});
+
+test('writes run one after another', async () => {
+  mockTree(withNotesOff);
+  let release!: () => void;
+  setReply = () => new Promise<void>((r) => (release = r));
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  await fireEvent.click(box('notes'));
+  await tick();
+  expect(setCalls()).toHaveLength(1); // the second waits for the first
+  setReply = () => Promise.resolve();
+  release();
+  await waitFor(() => expect(setCalls()).toHaveLength(2));
+  expect(setCalls()[1][1]).toEqual({ rootId: 1, folderPath: 'notes', searched: true });
+});
+
+test('a refused write puts the check back and says so', async () => {
+  mockTree(withNotesOff);
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  setReply = () => Promise.reject(new Error('disk full'));
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  await waitFor(() => expect(err).toHaveBeenCalled());
+  await waitFor(() => expect(box('archive').checked).toBe(true));
+});
+
+test('a listing that arrives during a write is applied after it', async () => {
+  mockTree(withNotesOff);
+  let release!: () => void;
+  setReply = () => new Promise<void>((r) => (release = r));
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  const before = treeCalls().length;
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls().length).toBe(before + 1));
+  await tick();
+  expect(box('archive').checked).toBe(false); // the stale listing did not undo the click
+  release();
+  // the queue is empty: the held listing (archive on) is now what is shown
+  await waitFor(() => expect(box('archive').checked).toBe(true));
+});

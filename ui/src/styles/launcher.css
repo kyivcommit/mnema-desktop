@@ -131,7 +131,7 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 }
 .tree li > button.file-row { padding-left: 23px; }
 .tree .label { white-space: nowrap; }
-.tree .chev { flex: none; color: var(--ink-faint); transition: transform 0.12s; }
+.tree .chev { flex: none; color: var(--ink-soft); transition: transform 0.12s; }
 .tree [aria-expanded="true"] > .chev { transform: rotate(90deg); }
 .tree .check-slot { flex: none; width: 16px; }
 .tree .ico { flex: none; color: var(--ink-soft); margin-right: 2px; }
@@ -139,15 +139,16 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   position: absolute; left: 23px; top: 50%; transform: translateY(-50%);
   appearance: none; width: 16px; height: 16px; margin: 0; border-radius: 4px;
   display: grid; place-items: center; cursor: pointer; color: var(--ink-soft);
-  border: 1px solid var(--ink-faint); background: transparent;
+  border: 1px solid var(--ink-soft); background: transparent;
 }
 .tree .search-check:checked, .tree .search-check:indeterminate { border-color: transparent; }
 .tree .search-check:checked::after { content: '✓'; font-size: 13px; line-height: 1; }
 .tree .search-check:indeterminate::after { content: '–'; font-size: 13px; line-height: 1; }
 .tree .search-check:hover { background: var(--surface-2); }
 .tree .search-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-/* A file outside the search stays openable; it only reads as set aside. */
-.tree li > button.file-row.unsearched:not([aria-current="true"]) { color: var(--ink-faint); }
+/* A file outside the search stays openable; it only reads as set aside. Italic serif
+   (the bundled italic), not a paler colour: --ink-faint is under the contrast floor. */
+.tree li > button.file-row.unsearched:not([aria-current="true"]) { font-family: var(--serif); font-weight: 400; font-style: italic; }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
 /* §4: the conversations. The pane is the scroll container; a row is one line,
    the × shows on hover and on focus. The active row is `--select`, not the

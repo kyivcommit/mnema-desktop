@@ -238,6 +238,20 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
 
     list_tree: () => s.tree,
+    // The core's semantics: drop the root's entries under the folder, then set its own.
+    set_folder_searched: (a) => {
+      const f = a.folderPath as string;
+      s.tree = {
+        ...s.tree,
+        roots: s.tree.roots.map((r) => r.rootId !== a.rootId ? r : {
+          ...r,
+          searched: [
+            ...r.searched.filter((e) => f === '' ? false : !e.folderPath.startsWith(`${f}/`) && e.folderPath !== f),
+            { folderPath: f, searched: a.searched as boolean },
+          ],
+        }),
+      };
+    },
     add_watched_folder: (a) => {
       const rootId = s.nextRootId++;
       const path = a.path as string;

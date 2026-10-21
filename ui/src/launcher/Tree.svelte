@@ -45,7 +45,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { listTree } from '../lib/ipc';
+  import { listTree, setFolderSearched } from '../lib/ipc';
   import type { TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
@@ -120,7 +120,13 @@
     if (loading) return;
     loading = true;
     listTree()
-      .then((l) => { listing = l; failed = false; })
+      .then((l) => {
+        listing = l;
+        failed = false;
+        // A write still on the wire owns the checks: the listing was read
+        // before it landed and would put the old state back under the person.
+        if (pending > 0) held = l; else searched = fromListing(l);
+      })
       .catch((e) => {
         // Non-fatal, but never silent: an unreadable listing must say so
         // rather than look like an empty index (Ruling N).
@@ -197,11 +203,21 @@
 
   // The search filter: a folder's own flag covers the files directly in it. A
   // folder with no entry inherits its parent's, so a folder that appears on
-  // disk under a cleared one is cleared too. Only the cleared entries need
-  // persisting; everything starts searched.
-  // shortcut: component state only, lost on restart and not sent to search —
-  // the core stage replaces it with a persisted set.
+  // disk under a cleared one is cleared too. The index keeps the entries; this
+  // is the shown copy, set from each listing and changed at click time.
   let searched = $state<Record<string, boolean>>({});
+  // Writes go one after another: the command is async and two in flight could
+  // land in either order. `held` is a listing that arrived while one was
+  // pending; it is applied when the queue empties.
+  let pending = 0;
+  let chain: Promise<void> = Promise.resolve();
+  let held: TreeListing | null = null;
+
+  function fromListing(l: TreeListing): Record<string, boolean> {
+    const out: Record<string, boolean> = {};
+    for (const root of l.roots) for (const e of root.searched) out[key(root.rootId, e.folderPath)] = e.searched;
+    return out;
+  }
 
   function ownOn(rootId: number, path: string): boolean {
     for (let p = path; ; p = parentOf(p)) {
@@ -228,10 +244,24 @@
   function setSearched(rootId: number, path: string, children: TreeNode[]) {
     const on = checkState(rootId, path, children) !== 'on';
     const inside = key(rootId, path === '' ? '' : `${path}/`);
+    const before = searched;
     const next: Record<string, boolean> = {};
     for (const [k, v] of Object.entries(searched)) if (!k.startsWith(inside)) next[k] = v;
     next[key(rootId, path)] = on;
     searched = next;
+
+    pending++;
+    chain = chain
+      .then(() => setFolderSearched(rootId, path, on))
+      .catch((e) => {
+        // Never silent, and never left showing what the index does not hold.
+        console.error('set_folder_searched failed', e);
+        searched = before;
+      })
+      .finally(() => {
+        pending--;
+        if (pending === 0 && held) { searched = fromListing(held); held = null; }
+      });
   }
 
   // Read in the template, so a locale change re-labels the checks.
