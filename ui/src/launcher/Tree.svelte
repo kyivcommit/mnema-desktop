@@ -43,7 +43,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { listTree, setFolderSearched } from '../lib/ipc';
   import type { TreeListing } from '../lib/ipc';
@@ -381,6 +381,32 @@
       }
     });
   });
+
+  // The row of a NEW selection is scrolled into view in the pane's own scroller
+  // (`.pane-body`), once per selection key. `await tick()` and not a bare
+  // effect: the folders the selection opens are written by the effect above and
+  // reach the DOM a flush later. The effect reads `listing` and `toggled`, so a
+  // selection that lands before its row exists is retried when it appears; the
+  // key is stamped only once the row is found, so nothing else re-fires it.
+  // `?.` because jsdom has no `scrollIntoView` and other suites mount this card.
+  // `nearest` leaves a visible row where it is. A hidden pane (`[hidden]`
+  // ancestor) is stamped without scrolling: nothing is owed when it is shown.
+  let treeEl = $state<HTMLElement>();
+  let scrolledTo: string | null = null;
+  $effect(() => {
+    const id = selectedKey;
+    void listing;
+    void toggled;
+    if (id === null) { scrolledTo = null; return; }
+    if (id === scrolledTo) return;
+    void tick().then(() => {
+      if (id !== selectedKey || id === scrolledTo) return;
+      const row = treeEl?.querySelector('[aria-current="true"]');
+      if (!row) return;
+      scrolledTo = id;
+      if (!row.closest('[hidden]')) row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    });
+  });
 </script>
 
 {#snippet chevron()}
@@ -454,7 +480,7 @@
 
 <svelte:window onfocus={load} />
 
-<div class="tree" data-testid="tree-body">
+<div class="tree" data-testid="tree-body" bind:this={treeEl}>
   {#if failed}
     <p data-testid="tree-failed">{failedLabel}</p>
   {:else if isEmpty}

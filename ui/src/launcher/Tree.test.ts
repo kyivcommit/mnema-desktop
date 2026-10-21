@@ -110,6 +110,7 @@ beforeEach(() => {
 // shared by every test in this file, and an in-test restore is skipped when an
 // assertion fails first. Restore unconditionally.
 afterEach(() => {
+  delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   // `locale` is a module-level store shared by every test in this file, and an
   // in-test restore is skipped when an assertion fails first. Restore
   // unconditionally.
@@ -1029,4 +1030,83 @@ test('stored open flags of a root the listing no longer has are dropped; a prese
   await screen.findByTestId('tree-root-toggle-1');
   await waitFor(() => expect(Object.keys(stored()).sort()).toEqual(['1\0']));
   expect(stored()['1\0']).toBe(false);
+});
+
+// --- scrolling to the active citation ---------------------------------------
+// jsdom has no layout and no `scrollIntoView`; the spy is installed per test and
+// removed in the unconditional `afterEach` above.
+function spyScroll() {
+  const spy = vi.fn();
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { value: spy, configurable: true, writable: true });
+  return spy;
+}
+
+test('a new selection inside a shut folder scrolls its row into view once, nearest, not smooth', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const { rerender } = mount(null);
+  await screen.findByTestId('tree-folder-notes');
+  expect(spy).not.toHaveBeenCalled();
+
+  await rerender({ selected: SELECTED });
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+  expect(spy.mock.contexts[0]).toBe(screen.getByTestId('tree-file-doc-1'));
+  expect(spy.mock.calls[0]).toEqual([{ block: 'nearest', inline: 'nearest' }]);
+});
+
+test('the same selection, a listing refresh and a check toggle do not scroll again', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+
+  mockTree(withNewFile());
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  await fireEvent.click(screen.getByTestId('tree-check-1-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-archive'));
+  await screen.findByTestId('tree-file-doc-new');
+  await tick();
+
+  expect(spy).toHaveBeenCalledTimes(1);
+});
+
+test('a selection that arrives before the listing scrolls once the row exists', async () => {
+  const spy = spyScroll();
+  const wire = mockTreePending();
+  mount(SELECTED);
+  await tick();
+  expect(spy).not.toHaveBeenCalled();
+
+  wire.resolve(oneRootTwoFolders);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+  expect(spy.mock.contexts[0]).toBe(screen.getByTestId('tree-file-doc-1'));
+});
+
+test('a new selection moves the scroll to the new row', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const { rerender } = mount(SELECTED);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+
+  await rerender({ selected: SELECTED_B });
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+  expect(spy.mock.contexts[1]).toBe(screen.getByTestId('tree-file-doc-2'));
+});
+
+test('a tree pane that is hidden is not scrolled', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const host = document.createElement('div');
+  host.hidden = true;
+  document.body.appendChild(host);
+  try {
+    render(Tree, { target: host, props: { selected: SELECTED, onPick: pick } });
+    await screen.findByTestId('tree-file-doc-1');
+    await tick();
+    expect(spy).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    host.remove();
+  }
 });
