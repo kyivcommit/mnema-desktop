@@ -119,7 +119,9 @@
   function load() {
     if (loading) return;
     loading = true;
-    const started = epoch;
+    // A read that starts with a write on the wire may precede that write's
+    // landing in the store, so it gets an epoch no click can match.
+    const started = pending > 0 ? -1 : epoch;
     listTree()
       .then((l) => {
         listing = l;
