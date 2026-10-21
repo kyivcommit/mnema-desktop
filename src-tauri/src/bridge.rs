@@ -1550,6 +1550,15 @@ fn answer_question(
             .iter()
             .any(|t| matches!(t.answer, AskAnswer::Generated { .. }))
     {
+        // With every folder off the model's own search could only find
+        // nothing: refuse as a first question does (both arms "not run").
+        if every_folder_off(state) {
+            return Ok(AskAnswer::Refused {
+                kind: RefusalKind::NoFoldersSearched,
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            });
+        }
         return follow_up(state, query, arms, roles, generation, &turns, taken);
     }
     let remember = dialogue.then_some(generation);
