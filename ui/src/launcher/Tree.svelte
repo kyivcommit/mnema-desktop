@@ -147,6 +147,13 @@
       .then((l) => {
         listing = l;
         failed = false;
+        // Whole removed roots only: a folder missing for a moment keeps its flag.
+        const live = new Set(l.roots.map((r) => String(r.rootId)));
+        const kept = Object.entries(toggled).filter(([k]) => live.has(k.split('\0')[0]));
+        if (kept.length !== Object.keys(toggled).length) {
+          toggled = Object.fromEntries(kept);
+          saveOpen(toggled);
+        }
         // The checks are taken only from a listing read after the last click
         // and with no write on the wire; any other predates a write and would
         // put the old state back under the person. It is read again once the
@@ -368,7 +375,10 @@
       for (const k of onTheWay) {
         if (next[k] === false) { next[k] = true; changed = true; }
       }
-      if (changed) toggled = next;
+      if (changed) {
+        toggled = next;
+        saveOpen(next);
+      }
     });
   });
 </script>

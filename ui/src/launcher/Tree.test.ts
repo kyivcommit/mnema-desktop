@@ -1011,3 +1011,22 @@ test('a malformed or foreign stored value falls back to the defaults without thr
     cleanup();
   }
 });
+
+const stored = () => JSON.parse(localStorage.getItem('mnema.tree.open') ?? '{}') as Record<string, boolean>;
+
+test('a folder re-opened by a new selection is stored as open', async () => {
+  localStorage.setItem('mnema.tree.open', JSON.stringify({ '1\0notes': false }));
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+  await waitFor(() => expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true'));
+  expect(stored()['1\0notes']).toBe(true);
+});
+
+test('stored open flags of a root the listing no longer has are dropped; a present root keeps its own', async () => {
+  localStorage.setItem('mnema.tree.open', JSON.stringify({ '1\0': false, '99\0': true, '99\0x': false }));
+  mockTree(oneRootTwoFolders);
+  mount(null);
+  await screen.findByTestId('tree-root-toggle-1');
+  await waitFor(() => expect(Object.keys(stored()).sort()).toEqual(['1\0']));
+  expect(stored()['1\0']).toBe(false);
+});
