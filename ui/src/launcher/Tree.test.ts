@@ -733,6 +733,27 @@ test('the checks are read from the listing', async () => {
   expect(box('').indeterminate).toBe(true);
 });
 
+test('a click on a mixed root ticks the whole branch and clears the entries under it', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: '', searched: true }]]);
+  for (const p of ['', 'notes', 'archive']) {
+    expect(box(p).checked).toBe(true);
+    expect(box(p).indeterminate).toBe(false);
+  }
+});
+
+test('a file under an unticked folder is marked unsearched, one under a ticked folder is not', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-archive'));
+  const off = screen.getByTestId('tree-file-doc-1');
+  expect(off.classList.contains('unsearched')).toBe(true);
+  expect(screen.getByTestId('tree-file-doc-3').classList.contains('unsearched')).toBe(false);
+});
+
 test('a click writes the new state once', async () => {
   mockTree(withNotesOff);
   mount(null);

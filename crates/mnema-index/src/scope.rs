@@ -37,8 +37,6 @@ macro_rules! searchable_document {
         )
     };
 }
-// `path_is_searched` is also what `citation` orders by.
-#[allow(unused_imports)]
 pub(crate) use {path_is_searched, searchable_document};
 
 impl Db {

@@ -760,9 +760,11 @@ impl Db {
             .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
     }
 
-    /// How many chunks a search could actually reach — [`ELIGIBLE_CHUNK`],
-    /// the same predicate [`Db::knn_searchable`]'s pre-filter runs, so this
-    /// count and what the arm searches cannot drift apart. Round-3
+    /// How many chunks the index holds that a search could reach —
+    /// [`ELIGIBLE_CHUNK`]. This describes the index, not one search: the
+    /// arm's pre-filter in [`Db::knn_searchable`] runs [`SEARCHABLE_CHUNK`]
+    /// (`space.rs:609`), so while folder entries exist this count also
+    /// includes chunks in unsearched folders (spec §5). Round-3
     /// adversarial review (F-A1): the content arm's `total` used to be
     /// [`Db::chunk_count`], which does not know about `document.status`, so
     /// a document mid-rebuild made `embedded == total` claim coverage the
@@ -903,19 +905,20 @@ impl Db {
         )?)
     }
 
-    /// How many chunks the content arm could actually inspect in this space —
-    /// [`Db::knn_searchable`]'s own pool, the vector table intersected with
-    /// [`ELIGIBLE_CHUNK`] (`space.rs:595`), counted once per chunk. This is the
+    /// How many chunks of this space the index holds that the content arm
+    /// could inspect — the vector table intersected with [`ELIGIBLE_CHUNK`]
+    /// (the pool [`Db::knn_searchable`] ranks, `space.rs:609`, before its
+    /// folder narrowing), counted once per chunk. This is the
     /// honest denominator D115① asks for: [`Db::embedded_chunk_count`] counts
     /// every vector, ineligible ones included, and [`Db::eligible_chunk_count`]
     /// counts every eligible chunk whether or not it has a vector — each
     /// overstates what a search looked at, and the content arm's coverage
     /// sentence read one of them as if it were this.
     ///
-    /// **Reuses [`ELIGIBLE_CHUNK`]** — the same string [`Db::knn_searchable`]'s
-    /// pre-filter runs, not a fresh eligibility clause — so this count and what
-    /// the arm searches cannot drift into disagreeing about which chunks are
-    /// reachable.
+    /// **Reuses [`ELIGIBLE_CHUNK`]**, not a fresh eligibility clause. It
+    /// describes the index, not one search: [`Db::knn_searchable`] narrows by
+    /// [`SEARCHABLE_CHUNK`], so while folder entries exist this coverage line
+    /// also counts chunks in unsearched folders (spec §5).
     ///
     /// **The source is the vector table alone, and deliberately not the `UNION`
     /// [`Db::embedded_chunk_count`] takes.** That method also reads
@@ -926,7 +929,7 @@ impl Db {
     /// else, so a chunk with a `state = 1` row and no vector is one the arm
     /// cannot inspect, and counting it would re-introduce the very overstatement
     /// D115① removes. `count(DISTINCT chunk_id)` is defensive on top of that —
-    /// `chunk_id` is the vec0 table's `INTEGER PRIMARY KEY` (`space.rs:243`), so
+    /// `chunk_id` is the vec0 table's `INTEGER PRIMARY KEY` (`space.rs:257`), so
     /// no chunk appears in it twice today — kept so that a later move to a
     /// multi-source pool cannot silently double-count.
     ///

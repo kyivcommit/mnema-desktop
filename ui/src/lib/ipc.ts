@@ -417,7 +417,7 @@ export const forgetKey = () => invoke<KeyRemoval>('forget_key');
 //
 // Named `ModelRole`/`ModelRefusal` rather than `Role`/`Refusal`: this module
 // already exports a `Refusal` for `AskCitation`'s refused-answer reason
-// (`{kind:'noCandidates'}|{kind:'emptyCompletion'}`, `mnema_index`'s type) —
+// (`{kind:'noCandidates'}|{kind:'emptyCompletion'}|{kind:'noFoldersSearched'}`, `mnema_index`'s type) —
 // a different enum in a different crate that happens to share a name in
 // Rust, where the two never collide because they live in separate modules.
 // Reusing the bare name here would either shadow that export or silently

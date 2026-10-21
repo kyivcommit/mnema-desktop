@@ -1481,7 +1481,8 @@ const MAX_ASK_QUERY: usize = 2048;
 /// model — the gate. A query embedding that already failed on the network
 /// answers the same way with its cause, and chat is not tried (D171).
 /// `Ready` with no hits refuses before calling chat (`NoCandidates`,
-/// `service.py:66-68`); a chat call that fails keeps the citations and says
+/// `service.py:66-68`, or `NoFoldersSearched` when no indexed document is
+/// searchable under the folder entries); a chat call that fails keeps the citations and says
 /// why (D171); a `Ready` call the model answers blankly refuses after
 /// (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the model
 /// wrote become citations.
