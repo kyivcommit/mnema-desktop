@@ -228,3 +228,11 @@ test('the answer says where it came from, in both languages', async () => {
   await tick();
   expect(screen.getByTestId('answer-via').textContent).toBe('from the conversation');
 });
+
+// An answer that cites nothing has no list to head: the heading is not drawn alone.
+test('an answer with no citations draws no Citations heading', () => {
+  render(Answer, { query: 'q', answer: { ...gen(generated), citations: [] }, onSelect: vi.fn() });
+  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: 'Citations' })).toBeNull();
+  expect(screen.queryByRole('list')).toBeNull();
+});
