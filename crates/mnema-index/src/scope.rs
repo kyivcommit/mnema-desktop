@@ -84,4 +84,19 @@ impl Db {
             .query_map(params![root_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Whether any `indexed` document takes part in search — the same
+    /// condition both arms apply, so "nothing is searched" and "search finds
+    /// nothing" cannot disagree (spec §7).
+    pub fn any_document_searchable(&self) -> Result<bool, Error> {
+        Ok(self.conn().query_row(
+            concat!(
+                "SELECT EXISTS (SELECT 1 FROM document d WHERE d.status = 'indexed'",
+                searchable_document!(),
+                ")"
+            ),
+            [],
+            |r| r.get(0),
+        )?)
+    }
 }

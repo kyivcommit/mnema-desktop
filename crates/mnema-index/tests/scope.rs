@@ -440,3 +440,44 @@ fn scope_cost() {
         );
     }
 }
+
+// ---- citation and "is anything searched" (spec §6, §7) ----
+
+#[test]
+fn a_citation_prefers_a_searched_path() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    let chunk = seed(&db, root, 1, "a/x.md", "zebra");
+    add_path(&db, root, &format!("{:064}", 1), "b/x.md");
+    let cited = |db: &Db| db.citation(chunk).unwrap().unwrap().relative_path;
+    assert_eq!(cited(&db).as_deref(), Some("a/x.md"));
+    db.set_folder_searched(root, "a", false).unwrap();
+    assert_eq!(cited(&db).as_deref(), Some("b/x.md"));
+}
+
+#[test]
+fn nothing_searchable_when_every_root_is_off() {
+    let db = temp_db();
+    assert!(!db.any_document_searchable().unwrap());
+    let r1 = db.insert_watched_root("/r1").unwrap();
+    let r2 = db.insert_watched_root("/r2").unwrap();
+    seed(&db, r1, 1, "a.md", "zebra");
+    seed(&db, r2, 2, "b.md", "zebra");
+    assert!(db.any_document_searchable().unwrap());
+    db.set_folder_searched(r1, "", false).unwrap();
+    assert!(db.any_document_searchable().unwrap());
+    db.set_folder_searched(r2, "", false).unwrap();
+    assert!(!db.any_document_searchable().unwrap());
+    db.set_folder_searched(r2, "", true).unwrap();
+    assert!(db.any_document_searchable().unwrap());
+}
+
+#[test]
+fn a_pathless_indexed_document_counts_as_searchable() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    seed(&db, root, 1, "a.md", "zebra");
+    db.conn().execute("DELETE FROM path", []).unwrap();
+    db.set_folder_searched(root, "", false).unwrap();
+    assert!(db.any_document_searchable().unwrap());
+}
