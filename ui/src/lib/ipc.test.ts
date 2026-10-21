@@ -636,6 +636,7 @@ const REGISTERED: AppPrefs = {
   hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
   autostart: { kind: 'disabled' },
   coldAfterMinutes: 5,
+  uiScale: 'medium',
   version: '0.0.0',
   platform: 'mac',
 };
@@ -682,6 +683,14 @@ test('setTheme invokes set_theme with the choice under the key the command decla
   await ipc.setTheme('dark');
 
   expect(invoke).toHaveBeenCalledWith('set_theme', { choice: 'dark' });
+});
+
+test('setUiScale invokes set_ui_scale with the choice under the key the command declares', async () => {
+  invoke.mockResolvedValue(undefined);
+
+  await ipc.setUiScale('large');
+
+  expect(invoke).toHaveBeenCalledWith('set_ui_scale', { choice: 'large' });
 });
 
 test('the hotkey status is a tagged union of exactly two arms', () => {

@@ -18,6 +18,7 @@ const appPrefs = vi.fn();
 const setHotkey = vi.fn();
 const setAutostart = vi.fn();
 const setColdAfter = vi.fn();
+const setUiScale = vi.fn();
 const setTheme = vi.fn();
 const getLocale = vi.fn();
 const setLocaleChoice = vi.fn();
@@ -41,6 +42,7 @@ vi.mock('../lib/ipc', () => ({
   setHotkey: (...a: unknown[]) => setHotkey(...a),
   setAutostart: (...a: unknown[]) => setAutostart(...a),
   setColdAfter: (...a: unknown[]) => setColdAfter(...a),
+  setUiScale: (...a: unknown[]) => setUiScale(...a),
   setTheme: (...a: unknown[]) => setTheme(...a),
   getLocale: (...a: unknown[]) => getLocale(...a),
   setLocaleChoice: (...a: unknown[]) => setLocaleChoice(...a),
@@ -102,6 +104,7 @@ function prefs(over: Partial<AppPrefs> = {}): AppPrefs {
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
     autostart: { kind: 'disabled' },
     coldAfterMinutes: 5,
+    uiScale: 'medium',
     version: '0.0.0',
     platform: 'linux',
     ...over,
@@ -119,6 +122,7 @@ beforeEach(() => {
   setHotkey.mockReset();
   setAutostart.mockReset();
   setColdAfter.mockReset();
+  setUiScale.mockReset();
   setTheme.mockReset();
   getLocale.mockReset();
   setLocaleChoice.mockReset();
@@ -895,6 +899,10 @@ test('a person who opens Application in the settings window reads the shortcut, 
     + ' Світла'
     + ' Темна'
     + ' Системна'
+    + ' Масштаб:'
+    + ' Малий'
+    + ' Середній'
+    + ' Великий'
     + ' Мова:'
     + ' Авто (система)УкраїнськаEnglish' // one <select>'s three <option> texts, concatenated
     + ' Лаунчер'
@@ -1263,6 +1271,141 @@ test('the theme segment speaks the window language, both directions', async () =
   expect(at('application-theme-dark')).toBe('Dark');
   setLocale('uk');
   await waitFor(() => expect(at('application-theme-system')).toBe('Системна'));
+});
+
+// ---------------------------------------------------------------------------
+// The interface scale: three steps, one pressed — the step `appPrefs` reported.
+// The pressed mark is that read and not a press, because the backend applies
+// the scale to every window: what it stored is the only thing a new window may
+// draw.
+// ---------------------------------------------------------------------------
+
+test('the scale segment draws all three steps and presses the one appPrefs reported', async () => {
+  appPrefs.mockResolvedValue(prefs({ uiScale: 'large' }));
+  renderSection();
+  await shown('application-scale-large');
+
+  expect(at('application-scale-small')).toBe('Малий');
+  expect(at('application-scale-medium')).toBe('Середній');
+  expect(at('application-scale-large')).toBe('Великий');
+  expect(pressed('application-scale-large')).toBe('true');
+  expect(pressed('application-scale-small')).toBe('false');
+  expect(pressed('application-scale-medium')).toBe('false');
+});
+
+test('pressing another step sends that choice once, and the pressed mark follows the accepted reply', async () => {
+  setUiScale.mockResolvedValue(undefined);
+  renderSection();
+  await shown('application-scale-small');
+  expect(pressed('application-scale-medium')).toBe('true');
+
+  await fireEvent.click(screen.getByTestId('application-scale-small'));
+
+  await waitFor(() => expect(pressed('application-scale-small')).toBe('true'));
+  expect(setUiScale).toHaveBeenCalledTimes(1);
+  expect(setUiScale).toHaveBeenCalledWith('small');
+  expect(pressed('application-scale-medium')).toBe('false');
+});
+
+test('a refused scale change shows the sentence and leaves the pressed mark where it was', async () => {
+  const SENTENCE = 'prefs.json could not be written';
+  setUiScale.mockRejectedValue(new Error(SENTENCE));
+  renderSection();
+  await shown('application-scale-large');
+
+  await fireEvent.click(screen.getByTestId('application-scale-large'));
+
+  expect(await shown('application-scale-error')).toBe(SENTENCE);
+  expect(at('application-scale-failed')).toBe('Масштаб не змінено. Ось що відповів застосунок:');
+  // Nothing was written and no window was zoomed: the stored step stays.
+  expect(pressed('application-scale-medium')).toBe('true');
+  expect(pressed('application-scale-large')).toBe('false');
+});
+
+test('the scale segment is busy while a change is in flight, so a second press sends one call', async () => {
+  let release!: () => void;
+  setUiScale.mockImplementationOnce(() => new Promise<void>((res) => { release = res; }));
+  renderSection();
+  await shown('application-scale-large');
+  const large = screen.getByTestId('application-scale-large');
+
+  await fireEvent.click(large);
+  await tick();
+  expect((large as HTMLButtonElement).disabled).toBe(true);
+  await fireEvent.click(screen.getByTestId('application-scale-small'));
+  expect(setUiScale).toHaveBeenCalledTimes(1);
+
+  release();
+  await waitFor(() => expect((large as HTMLButtonElement).disabled).toBe(false));
+  expect(pressed('application-scale-large')).toBe('true');
+});
+
+// ---------------------------------------------------------------------------
+// A read takes `uiScale` with everything else it re-reads, so it needs the same
+// per-field stamp the shortcut and autostart have: a read issued before the
+// change must not write the old step back over the accepted one.
+test('a read issued before a scale change cannot put the old step back', async () => {
+  const queue: ReturnType<typeof deferred<AppPrefs>>[] = [];
+  appPrefs.mockImplementation(() => {
+    const d = deferred<AppPrefs>();
+    queue.push(d);
+    return d.promise;
+  });
+  setHotkey.mockRejectedValue(new Error('the shortcut could not be saved'));
+  setUiScale.mockResolvedValue(undefined);
+  renderSection();
+  await waitFor(() => expect(queue).toHaveLength(1));
+  queue[0].resolve(prefs({ uiScale: 'medium' }));
+  await record();
+
+  // A refused shortcut starts the corrective read — held open.
+  await pressKey({ key: ' ', code: 'Space', altKey: true, ctrlKey: true });
+  await waitFor(() => expect(queue).toHaveLength(2));
+
+  // The scale change lands while that read is still out.
+  await fireEvent.click(screen.getByTestId('application-scale-large'));
+  await waitFor(() => expect(pressed('application-scale-large')).toBe('true'));
+
+  // The read answers with what it saw before the change.
+  queue[1].resolve(prefs({ uiScale: 'medium' }));
+  await tick();
+  await tick();
+
+  expect(pressed('application-scale-large')).toBe('true');
+  expect(pressed('application-scale-medium')).toBe('false');
+});
+
+// The theme's twin: a refusal must reach a screen reader on the group, not only
+// in a paragraph above it.
+test('a refused scale change links the scale group to the sentence it drew', async () => {
+  setUiScale.mockRejectedValue(new Error('prefs.json could not be written'));
+  renderSection();
+  await shown('application-scale-large');
+
+  await fireEvent.click(screen.getByTestId('application-scale-large'));
+
+  await shown('application-scale-error');
+  const seg = screen.getByRole('group', { name: 'Масштаб:' });
+  const ids = describedByIds(seg);
+  expect(ids).toContain('application-scale-error');
+  expect(ids).toContain('application-scale-failed');
+  for (const id of ids) expect(document.getElementById(id)).toBeTruthy();
+});
+
+test('the scale segment speaks the window language, both directions', async () => {
+  renderSection();
+  await shown('application-scale-medium');
+  expect(at('application-scale-small')).toBe('Малий');
+  expect(at('application-scale-medium')).toBe('Середній');
+  expect(at('application-scale-large')).toBe('Великий');
+
+  setLocale('en');
+  await waitFor(() => expect(at('application-scale-large')).toBe('Large'));
+  expect(at('application-scale-small')).toBe('Small');
+  expect(at('application-scale-medium')).toBe('Medium');
+
+  setLocale('uk');
+  await waitFor(() => expect(at('application-scale-medium')).toBe('Середній'));
 });
 
 // ---------------------------------------------------------------------------
@@ -2375,6 +2518,8 @@ const ANNOUNCED_BY: ReadonlyArray<readonly [string, string]> = [
   ['application-shortcut-error', ASSERTIVE],
   ['application-theme-failed', ASSERTIVE],
   ['application-theme-error', ASSERTIVE],
+  ['application-scale-failed', ASSERTIVE],
+  ['application-scale-error', ASSERTIVE],
   ['application-language-unknown', ASSERTIVE],
   ['application-language-change-unconfirmed', ASSERTIVE],
   ['application-language-change-error', ASSERTIVE],
@@ -2418,6 +2563,7 @@ const everythingRefused = async () => {
   setHotkey.mockRejectedValue(new Error('the operating system refused the combination'));
   setAutostart.mockRejectedValue(new Error('the login item could not be written'));
   setTheme.mockRejectedValue(new Error('prefs.json is read-only'));
+  setUiScale.mockRejectedValue(new Error('prefs.json is read-only'));
   setColdAfter.mockRejectedValue(new Error('the threshold could not be saved'));
   // The mount's read succeeds, so the select is usable; every read after it
   // fails, which is what puts the read refusal on screen.
@@ -2429,6 +2575,8 @@ const everythingRefused = async () => {
 
   await fireEvent.click(screen.getByTestId('application-theme-dark'));
   await shown('application-theme-error');
+  await fireEvent.click(screen.getByTestId('application-scale-large'));
+  await shown('application-scale-error');
   await fireEvent.click(screen.getByTestId('application-autostart-enable'));
   await shown('application-autostart-error');
   await typeCold('0');

@@ -134,6 +134,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'application_version' | 'application_load_failed'
   | 'application_theme' | 'theme_light' | 'theme_dark' | 'theme_system'
   | 'application_theme_failed'
+  | 'application_scale' | 'scale_small' | 'scale_medium' | 'scale_large'
+  | 'application_scale_failed'
   // Task 3 (PR 10f): the language choice, moved out of the tray's temporary
   // submenu into this section. `application_language_uk`/`_en` are endonyms —
   // a language's own name for itself — so they read the SAME in both
@@ -1111,6 +1113,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Темна',
     theme_system: 'Системна',
     application_theme_failed: 'Вигляд не змінено. Ось що відповів застосунок:',
+    // «Масштаб», не «Розмір тексту»: це масштаб усього інтерфейсу — кожне вікно
+    // дістає його як page zoom, і підпис не має обіцяти меншого.
+    application_scale: 'Масштаб:',
+    scale_small: 'Малий',
+    scale_medium: 'Середній',
+    scale_large: 'Великий',
+    application_scale_failed: 'Масштаб не змінено. Ось що відповів застосунок:',
     // Task 3 (PR 10f). `_uk`/`_en` are endonyms — a language's own name for
     // itself — and read the same in the `en` block below. `locale.rs`'s own
     // `endonym`, which gave these same two strings to the tray submenu this
@@ -1471,6 +1480,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     theme_dark: 'Dark',
     theme_system: 'Match the system',
     application_theme_failed: 'The appearance was not changed. This is what the application answered:',
+    application_scale: 'Scale:',
+    scale_small: 'Small',
+    scale_medium: 'Medium',
+    scale_large: 'Large',
+    application_scale_failed: 'The scale was not changed. This is what the application answered:',
     application_language_label: 'Language:',
     application_language_auto: 'Auto (system)',
     application_language_uk: 'Українська',

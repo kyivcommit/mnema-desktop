@@ -25,6 +25,7 @@ pub mod theme;
 pub mod tray;
 mod tray_icons;
 mod tree;
+mod ui_scale;
 pub mod walk_job;
 pub mod watch;
 
@@ -100,6 +101,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         locale::set_locale,
         theme::get_theme,
         theme::set_theme,
+        ui_scale::set_ui_scale,
         prefs::app_prefs,
         prefs::set_hotkey,
         prefs::set_autostart,
@@ -813,6 +815,10 @@ pub fn run() -> anyhow::Result<()> {
             // D146 / PR 10b: the persisted theme, applied to the native chrome
             // before either window shows. See `theme::apply_persisted`.
             theme::apply_persisted(app.handle());
+            // The persisted interface scale: page zoom in every window, for
+            // the same reason and at the same point — before either window
+            // shows, so no frame is drawn at the default and then resized.
+            ui_scale::apply_persisted(app.handle());
             // The first app menu was built during `build()` from the OS locale
             // alone (`boot_lang` — no path resolver yet to read prefs). Rebuild
             // it now from the resolved language so an explicit saved choice that
