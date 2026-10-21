@@ -318,11 +318,11 @@ export const oneDocumentTwoRoots: TreeListing = {
 export const emptyListing: TreeListing = { roots: [] };
 
 // The Recents tab's list, as `list_history` answers it: newest first, `askedAt`
-// in seconds and 100 s apart, so a pinned clock puts the rows in two different
-// minutes. Latin text on purpose, the same reason as the folder names above.
+// in seconds and 100 s apart, each with the backend's preview of its answer.
+// Latin text on purpose, the same reason as the folder names above.
 export const historyTwoQuestions: HistoryEntry[] = [
-  { id: 2, query: 'when does the lease renew', askedAt: 1_700_000_100 },
-  { id: 1, query: 'invoice payment terms', askedAt: 1_700_000_000 },
+  { id: 2, query: 'when does the lease renew', preview: 'The renewal date is in the signed copy.', askedAt: 1_700_000_100 },
+  { id: 1, query: 'invoice payment terms', preview: 'Payment is due thirty days after the invoice date.', askedAt: 1_700_000_000 },
 ];
 
 // The two `ModelSettings` fields added with provider-per-role, for test

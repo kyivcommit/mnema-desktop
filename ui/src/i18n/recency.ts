@@ -1,6 +1,8 @@
 import { t, type Loc } from './index';
 
-// How long ago a question was asked, for the Recents tab (review Minor 5).
+// How long ago a question was asked (review Minor 5). Its caller is the
+// settings window's scan card (`settings/Scanning.svelte`); the conversations
+// panel says when by its date group and no longer uses a relative phrase.
 //
 // 🔴 The unit is what this file exists to get right. `HistoryEntry.askedAt`
 // (`lib/ipc.ts`) is `query_history.asked_at` (`crates/mnema-index/src/migrations.rs:148`),
@@ -11,11 +13,10 @@ import { t, type Loc } from './index';
 //
 // Relative rather than a formatted date, and that is a decision: a date needs a
 // time zone, so what a person sees would depend on the machine the card runs on
-// and on which zone a test happens to run in, while "how long ago" is the
-// question the card's own name asks and needs no zone at all. The cost is that
-// an old entry reads as `412 days ago` rather than as a date; the Recents list
-// is what was asked LAST, so the sentence stays true for as long as nothing new
-// has been asked.
+// and on which zone a test happens to run in, while "how long ago" needs no
+// zone at all. The cost is that an old entry reads as `412 days ago` rather
+// than as a date; the scan card is about the LAST pass, so the sentence stays
+// true for as long as nothing new has been scanned.
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -43,17 +44,47 @@ export function formatIndexedAt(indexedAt: number, nowMs: number): string {
 }
 
 /**
+ * The date group a question belongs to, for the Recents panel's headings.
+ *
+ * 🔴 `askedAtSec` is SECONDS and `nowMs` is `Date.now()` — the same trap
+ * `formatIndexedAt` documents above.
+ *
+ * The bucket is a LOCAL CALENDAR day, not an elapsed 24-hour span: read at
+ * 00:30, an entry asked at 23:45 is yesterday even though it is 45 minutes
+ * old. A stamp in the FUTURE (a clock stepped back, a machine whose zone
+ * moved) is `today`, the bucket a person would put it in anyway.
+ */
+export type DayBucket = 'today' | 'yesterday' | 'week' | 'earlier';
+
+const MS_PER_DAY = 86_400_000;
+
+// A millisecond instant as a whole day number, derived from its LOCAL Y/M/D so
+// the 23- and 25-hour days of a DST change cannot shift the count.
+function dayNumber(ms: number): number {
+  const d = new Date(ms);
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / MS_PER_DAY;
+}
+
+export function dayBucket(askedAtSec: number, nowMs: number): DayBucket {
+  const days = dayNumber(nowMs) - dayNumber(askedAtSec * 1000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days <= 7) return 'week';
+  return 'earlier';
+}
+
+/**
  * The same instant as a DATE, for §9.3's "last update, shown with its date"
  * requirement (D-e).
  *
  * It lives beside `formatIndexedAt` so one module still answers for one kind of
  * time, and it is not a duplicate of it: a relative phrase like "3 days ago" is
  * what a person feels, the date is what they compare against the file they
- * edited this morning. The Recents card's argument for a relative phrase ONLY
- * (the header above) held because that card has no zone to be right about;
- * §9.3 does — it is a person
- * reading their own index on their own machine, so the machine's own zone is
- * the right one and `Intl.DateTimeFormat` is left to take it from the runtime.
+ * edited this morning. The relative phrase's argument (the header above) held
+ * because the scan card has no zone to be right about; §9.3 does — it is a
+ * person reading their own index on their own machine, so the machine's own
+ * zone is the right one and `Intl.DateTimeFormat` is left to take it from the
+ * runtime.
  *
  * 🔴 `indexedAt` is SECONDS, the same unit and the same trap as above:
  * `MAX(ingest_stage.updated_at)` is an `INTEGER … DEFAULT (unixepoch())` column

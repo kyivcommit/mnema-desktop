@@ -12,11 +12,14 @@ use crate::{Db, Error};
 /// that would exceed it.
 pub const HISTORY_LIMIT: i64 = 50;
 
-/// One entry in the history, without its answer.
+/// One entry in the history, with the answer JSON the caller stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
     pub id: i64,
     pub query: String,
+    /// The `answer` column as written: the caller's own JSON. The list only
+    /// draws a one-line preview from it; opening the row parses it.
+    pub answer: String,
     /// Unix seconds, as `unixepoch()` writes them.
     pub asked_at: i64,
 }
@@ -61,10 +64,11 @@ impl Db {
         })
     }
 
-    /// Every entry, newest first, without the answers.
+    /// Every entry, newest first, each with its stored answer JSON for the
+    /// list's preview — `history_answer` reads the same column to open it.
     pub fn history_list(&self) -> Result<Vec<HistoryRow>, Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, query, asked_at FROM query_history
+            "SELECT id, query, answer, asked_at FROM query_history
               ORDER BY asked_at DESC, id DESC",
         )?;
         let rows = stmt
@@ -72,7 +76,8 @@ impl Db {
                 Ok(HistoryRow {
                     id: r.get(0)?,
                     query: r.get(1)?,
-                    asked_at: r.get(2)?,
+                    answer: r.get(2)?,
+                    asked_at: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

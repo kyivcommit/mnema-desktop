@@ -344,8 +344,11 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     ask: (a) => {
       // The same rule the backend keeps: one row per trimmed query, moved to the top.
       const query = (a.query as string).trim();
+      // The backend cuts the answer's opening to one line for the sidebar; the
+      // bench keeps the demo answer's own prose, its citation markers stripped.
+      const preview = (generated.kind === 'generated' ? generated.answer : '').replace(/<c>\d+<\/c>/g, '');
       s.history = [
-        { id: s.nextHistoryId++, query, askedAt: Math.floor(Date.now() / 1000), answer: generated },
+        { id: s.nextHistoryId++, query, preview, askedAt: Math.floor(Date.now() / 1000), answer: generated },
         ...s.history.filter((h) => h.query !== query),
       ];
       // `AskReply`, not the bare answer: the launcher reads `reply.answer` and
@@ -353,7 +356,15 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       // because that is what a `StoredTurn` holds.
       return { answer: generated, historyId: s.history[0].id };
     },
-    list_history: () => s.history.map(({ id, query, askedAt }) => ({ id, query, askedAt })),
+    // The backend matches the question and the WHOLE stored answer, caselessly;
+    // the bench does the same over its stored `answer`, not the drawn preview.
+    list_history: (a) => {
+      const words = ((a.filter as string | undefined) ?? '').trim().toLowerCase();
+      const answerOf = (h: StoredQuestion) => (h.answer.kind === 'generated' ? h.answer.answer : '');
+      return s.history
+        .filter((h) => !words || `${h.query}\n${answerOf(h)}`.toLowerCase().includes(words))
+        .map(({ id, query, preview, askedAt }) => ({ id, query, preview, askedAt }));
+    },
     history_entry: (a) => {
       const hit = s.history.find((h) => h.id === a.id);
       return hit ? { kind: 'dialogue', turns: [{ query: hit.query, answer: hit.answer }] } : { kind: 'gone' };

@@ -72,12 +72,20 @@ test('listTree invokes list_tree', async () => {
 // The launcher's Recents tab reads questions through these three, not through
 // `list_tree`. Each is answered by its own command name, and the id travels as
 // `{ id }` because that is the argument name `bridge.rs` takes.
-test('listHistory invokes list_history with the command name alone', async () => {
+//
+// `list_history` carries the filter under the name the command takes, and an
+// absent filter travels as `undefined` — JSON drops it, so the backend sees no
+// filter at all rather than the empty string that would narrow the list.
+test('listHistory invokes list_history with the filter it is given', async () => {
   invoke.mockResolvedValue([]);
 
   await ipc.listHistory();
+  await ipc.listHistory('lease');
 
-  expect(invoke.mock.calls.filter((c) => c[0] === 'list_history')).toEqual([['list_history']]);
+  expect(invoke.mock.calls.filter((c) => c[0] === 'list_history')).toEqual([
+    ['list_history', { filter: undefined }],
+    ['list_history', { filter: 'lease' }],
+  ]);
 });
 
 test('historyEntry and deleteHistoryEntry send the id they are given, under the name the command takes', async () => {
@@ -925,7 +933,7 @@ test('the local-model-progress event name is the one provider.rs actually emits'
 const BRIDGE_RS = readFileSync(join(HERE, '../../../src-tauri/src/bridge.rs'), 'utf8');
 
 test('HistoryEntry is exactly what bridge.rs defines, field for field', () => {
-  const fixture: HistoryEntry = { id: 0, query: '', askedAt: 0 };
+  const fixture: HistoryEntry = { id: 0, query: '', preview: '', askedAt: 0 };
   expect(Object.keys(fixture).sort()).toEqual(
     rustStructFields(BRIDGE_RS, 'HistoryEntry').map(camelOfSnake).sort(),
   );

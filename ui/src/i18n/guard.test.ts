@@ -152,6 +152,13 @@ const LATIN_ALLOWLIST: Allowlisted[] = [
   { file: 'recency.ts', text: 'long', reason: 'Intl.DateTimeFormat dateStyle option value' },
   // Task 9: the scan time follows the date, same call, one more option value.
   { file: 'recency.ts', text: 'short', reason: 'Intl.DateTimeFormat timeStyle option value' },
+  // `dayBucket`'s own tag values. Fixed vocabulary matched against the
+  // `DayBucket` union, never shown: every heading the Recents panel draws comes
+  // from `catalog.ts` (`history_group_*`).
+  { file: 'recency.ts', text: 'today', reason: 'DayBucket tag, not prose' },
+  { file: 'recency.ts', text: 'yesterday', reason: 'DayBucket tag, not prose' },
+  { file: 'recency.ts', text: 'week', reason: 'DayBucket tag, not prose' },
+  { file: 'recency.ts', text: 'earlier', reason: 'DayBucket tag, not prose' },
 ];
 
 function isAllowlisted(file: string, text: string, list: Allowlisted[]): boolean {

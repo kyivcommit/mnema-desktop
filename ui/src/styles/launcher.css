@@ -150,32 +150,76 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    (the bundled italic), not a paler colour: --ink-faint is under the contrast floor. */
 .tree li > button.file-row.unsearched:not([aria-current="true"]) { font-family: var(--serif); font-weight: 400; font-style: italic; }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
-/* §4: the conversations. The pane is the scroll container; a row is one line,
-   the × shows on hover and on focus. The active row is `--select`, not the
-   file tree's `--cite-wash`: "the conversation on screen" and "the file in the
-   tree" are different selections. */
+/* §4: the conversations. The header is pinned above the body, which is the
+   scroll container; a row is the question with one clipped line of its answer,
+   and when it was asked is said once by the group's label. The × shows on hover
+   and on focus. The active row is `--select`, not the file tree's
+   `--cite-wash`: "the conversation on screen" and "the file in the tree" are
+   different selections (owner's mockup, 2026-10-21). */
+.recents-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 0 4px 7px; }
+.recents-title {
+  flex: 1 1 auto; min-width: 0; margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 14px; color: var(--ink);
+}
+/* The filter: pinned above the body with the header, so it cannot scroll away.
+   Full width of the panel's content box, and 34px with 8px radius so it reads
+   as a field at the 180px minimum panel width and not as a bar. */
+.recents-search { position: relative; flex: none; margin: 0 0 6px; }
+.recents-search svg {
+  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  color: var(--ink-soft); pointer-events: none;
+}
+.recents-search input {
+  width: 100%; height: 34px; padding: 0 9px 0 28px;
+  /* WebKit draws a native search field, which drops this border and height. */
+  appearance: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink); font-size: 13px;
+}
+.recents-search input::placeholder { color: var(--ink-soft); }
+/* The field's name, for a screen reader only — the placeholder says the same
+   word on screen. `.answer-card h3.sr-only`'s recipe, scoped to this field. */
+.recents-search label {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 .recents-body { flex: 1 1 auto; min-height: 0; overflow: auto; font-size: 13px; }
 .recents-body ul { list-style: none; margin: 0; padding: 0; }
+.recents-group + .recents-group { margin-top: 18px; }
+/* The house section label (`.answer-card h3`), upper-cased here rather than in
+   the catalogue, which stays sentence-case in both locales. */
+.recents-group h3 {
+  margin: 0 0 2px; padding: 0 7px;
+  font-family: var(--mono); font-weight: 400; font-style: normal;
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
+}
 .history-row { display: flex; align-items: center; gap: 4px; padding: 0; border-radius: 6px; }
 .history-row[aria-current="true"] { background: var(--select); color: var(--on-select); }
 .history-open {
-  flex: 1; min-width: 0; padding: 4px 7px; border: 0; border-radius: 6px; background: transparent;
+  flex: 1; min-width: 0; padding: 5px 7px; border: 0; border-radius: 6px; background: transparent;
   color: inherit; text-align: left; font: inherit;
-  /* One line: the question clips to make room, the time never wraps below it. */
-  display: flex; align-items: baseline; gap: 6px;
+  /* Two lines, both clipped to one: the question, then the answer's opening. */
+  display: flex; flex-direction: column; gap: 1px;
 }
-.history-query, .history-asked {
+.history-query, .history-preview {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.history-query { flex: 1 1 auto; min-width: 0; }
-.history-asked { flex: none; font-size: 11px; color: var(--ink-soft); }
-.history-row[aria-current="true"] .history-asked { color: inherit; }
-/* Opacity, not visibility: a hidden control cannot take focus. */
+.history-query { color: var(--ink); }
+.history-preview { font-size: 12px; color: var(--ink-soft); }
+/* The preview is an echo of the question — until the row is selected, where
+   both take the selection's own ink. */
+.history-row[aria-current="true"] :is(.history-query, .history-preview) { color: inherit; }
+/* Opacity, not visibility: a hidden control cannot take focus. Width too, not just
+   opacity: an always-present 22px would clip every row's text, so it opens on
+   hover/focus; `overflow: hidden` keeps the glyph from spilling at width 0.
+   `:focus-within` still fires at width 0, so a keyboard user sees it open. */
 .history-remove {
-  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
-  background: transparent; color: inherit; font-size: 14px; line-height: 1; opacity: 0;
+  flex: 0 0 auto; width: 0; height: 22px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; font-size: 14px; line-height: 1; overflow: hidden;
+  opacity: 0;
 }
-.history-row:hover .history-remove, .history-row:focus-within .history-remove { opacity: 1; }
+.history-row:hover .history-remove, .history-row:focus-within .history-remove { width: 22px; opacity: 1; }
 .recents-body .guard {
   margin: 0 0 8px; padding: 8px; overflow-wrap: anywhere; font-size: 12px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
@@ -198,7 +242,10 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .composer {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px;
-  background: var(--surface);
+  /* The same recessed fill as the conversations search field, and for the same
+     reason: on `--surface` this box read as part of the page and only its
+     border said it was a field (owner, 2026-10-21). */
+  background: var(--surface-2);
 }
 .composer:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
