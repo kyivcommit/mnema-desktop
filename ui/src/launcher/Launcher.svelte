@@ -283,7 +283,7 @@
     {/if}
   {/snippet}
   {#snippet tools()}
-    <button type="button" class="new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
+    <button type="button" class="tb new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
       {newChatLabel}
     </button>

@@ -441,7 +441,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Task 14.2: a load in flight, not an error; it goes on in the background.
     no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     no_answer_no_tool_use: 'Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».',
-    answer_via_search: 'пошук', answer_via_conversation: 'з розмови', new_chat: 'Новий чат',
+    answer_via_search: 'пошук', answer_via_conversation: 'з розмови', new_chat: 'Новий',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1282,7 +1282,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_failed: 'The provider returned an error ({reason}).',
     no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     no_answer_no_tool_use: 'This model cannot continue a conversation. Choose another one or turn off Tool support.',
-    answer_via_search: 'search', answer_via_conversation: 'from the conversation', new_chat: 'New chat',
+    answer_via_search: 'search', answer_via_conversation: 'from the conversation', new_chat: 'New',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
