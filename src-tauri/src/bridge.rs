@@ -1475,14 +1475,15 @@ const MAX_ASK_QUERY: usize = 2048;
 /// halves of `ask.py:17`'s `min_length=1, max_length=2048`; the blank guard
 /// keeps a meaningless question from reaching the billable query embed —
 /// the D115 mechanism through this caller — and the length guard resolves
-/// spec §12). Then the branches, in order: any non-`Ready` readiness
+/// spec §12). Then the branches, in order: no hits with every folder off
+/// refuses (`NoFoldersSearched`) before readiness is asked, so it holds with
+/// no chat model too; any non-`Ready` readiness
 /// answers with the citations retrieval already found
 /// ([`AskAnswer::CitationsOnly`], `why: NotAsked`) and never reaches the chat
 /// model — the gate. A query embedding that already failed on the network
 /// answers the same way with its cause, and chat is not tried (D171).
 /// `Ready` with no hits refuses before calling chat (`NoCandidates`,
-/// `service.py:66-68`, or `NoFoldersSearched` when no indexed document is
-/// searchable under the folder entries); a chat call that fails keeps the citations and says
+/// `service.py:66-68`); a chat call that fails keeps the citations and says
 /// why (D171); a `Ready` call the model answers blankly refuses after
 /// (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the model
 /// wrote become citations.
@@ -1554,6 +1555,17 @@ fn answer_question(
     let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
 
+    // Before readiness: "search is off for every folder" is true whether or
+    // not a chat model is usable, and the citations-only "no passages matched"
+    // would not be.
+    if hits.is_empty() && every_folder_off(state) {
+        return Ok(AskAnswer::Refused {
+            kind: RefusalKind::NoFoldersSearched,
+            text,
+            content,
+        });
+    }
+
     // With both roles on Mnema retrieval and chat share one process: readiness
     // would only ask for it again, and a process retrieval already saw fail
     // would be started a second time in the same ask.
@@ -1610,26 +1622,8 @@ fn answer_question(
     }
 
     if hits.is_empty() {
-        // A separate read after retrieval; its failure must not turn an
-        // empty result into an error, so it falls back to the plain refusal.
-        // An index with nothing in it has no folder to blame either.
-        let searchable = state
-            .with_index(|db| {
-                Ok::<_, mnema_index::Error>(
-                    db.eligible_chunk_count()? == 0 || db.any_document_searchable()?,
-                )
-            })
-            .unwrap_or_else(|e| {
-                eprintln!("mnema: could not tell whether any folder is searched: {e}");
-                true
-            });
-        let kind = if searchable {
-            RefusalKind::NoCandidates
-        } else {
-            RefusalKind::NoFoldersSearched
-        };
         return Ok(AskAnswer::Refused {
-            kind,
+            kind: RefusalKind::NoCandidates,
             text,
             content,
         });
@@ -1683,6 +1677,23 @@ fn answer_question(
             Ok(answer)
         }
     }
+}
+
+/// True when the index holds chunks and no indexed document is searchable
+/// under the folder entries. A separate read after retrieval; its failure must
+/// not turn an empty result into an error, so it reads as "not all off". An
+/// index with nothing in it has no folder to blame.
+fn every_folder_off(state: &State<'_, AppState>) -> bool {
+    state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(
+                db.eligible_chunk_count()? > 0 && !db.any_document_searchable()?,
+            )
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("mnema: could not tell whether any folder is searched: {e}");
+            false
+        })
 }
 
 /// A question after the first of a session: the model sees the conversation

@@ -12326,6 +12326,67 @@ fn an_empty_answer_says_whether_any_folder_is_searched() {
     assert_eq!(on["reason"]["kind"], json!("noCandidates"), "{on}");
 }
 
+/// One indexed file under one root, a key but NO chat model (readiness is
+/// `NoModel`); returns the window and the root, the text arm only.
+fn no_chat_model_with_one_file(
+    app: &tauri::App<MockRuntime>,
+    indexed: bool,
+) -> (WebviewWindow<MockRuntime>, i64) {
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-no-chat").expect("the key is stored");
+    state.open_index().unwrap();
+    let root = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            if indexed {
+                let doc = "a".repeat(64);
+                seed_indexed_file(db, root, &doc, "a.txt");
+                rebuild_one_chunk(db, &doc, "synthetic zzz");
+            }
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
+    let webview = main_webview(app);
+    text_arm_only(&webview);
+    (webview, root)
+}
+
+/// Every folder off says so even when no chat model is usable: the
+/// citations-only "no passages matched" would be false. The folder on, and the
+/// empty index, keep the citations-only answer (both directions).
+#[test]
+fn every_folder_off_refuses_even_without_a_chat_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let (webview, root) = no_chat_model_with_one_file(&app, true);
+    let set = |searched: bool| {
+        call(
+            &webview,
+            "set_folder_searched",
+            json!({ "rootId": root, "folderPath": "", "searched": searched }),
+        )
+        .expect("set_folder_searched was rejected");
+    };
+
+    set(false);
+    let off = ask_q(&webview, "nothing indexed");
+    assert_eq!(off["kind"], json!("refused"), "{off}");
+    assert_eq!(off["reason"]["kind"], json!("noFoldersSearched"), "{off}");
+
+    set(true);
+    let on = ask_q(&webview, "nothing indexed");
+    assert_eq!(on["kind"], json!("citationsOnly"), "{on}");
+}
+
+#[test]
+fn an_empty_index_without_a_chat_model_stays_citations_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let (webview, _) = no_chat_model_with_one_file(&app, false);
+    let answer = ask_q(&webview, "nothing indexed");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+}
+
 /// A fresh index (nothing indexed at all) has no folder to blame: the plain
 /// "nothing found", not "search is off".
 #[test]
