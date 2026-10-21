@@ -271,6 +271,7 @@
   {/snippet}
   {#snippet recents()}
     <Recents activeId={historyId} gen={historyGen} onOpen={openHistory}
+      onNew={startNewChat} newDisabled={launcherState.kind === 'inFlight'}
       onDelete={(id) => { if (id === historyId) historyId = null; }}
       error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
   {/snippet}

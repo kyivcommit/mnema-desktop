@@ -2119,12 +2119,14 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
         .collect()
 }
 
-/// One row of the launcher's history: a question, without its answer.
+/// One row of the launcher's history: a question and the one line of its answer
+/// the list draws under it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
     pub id: i64,
     pub query: String,
+    pub preview: String,
     pub asked_at: i64,
 }
 
@@ -2138,18 +2140,257 @@ pub enum HistoryOpen {
     Gone,
 }
 
-/// The history, newest first.
+/// The history, newest first, each row with a preview of its answer. `filter`
+/// keeps the rows whose own text holds it, ignoring case; absent, empty or
+/// whitespace-only keeps every row.
 #[tauri::command(async)]
-pub fn list_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, Error> {
+pub fn list_history(
+    state: State<'_, AppState>,
+    filter: Option<String>,
+) -> Result<Vec<HistoryEntry>, Error> {
+    // Trimmed, then lowercased once here: SQLite's `lower()` is ASCII-only, and
+    // the filter may be Cyrillic. A trailing space the window did not strip
+    // must not turn a match into nothing.
+    let needle = filter
+        .map(|f| f.trim().to_lowercase())
+        .filter(|f| !f.is_empty());
     let rows = state.with_index(|db| db.history_list())?;
     Ok(rows
         .into_iter()
+        .filter(|r| match &needle {
+            Some(needle) => history_matches(r, needle),
+            None => true,
+        })
         .map(|r| HistoryEntry {
             id: r.id,
             query: r.query,
+            // The row's blob is parsed twice — here and in the match; they are
+            // 50 small snapshots, and sharing one parse would thread a parsed
+            // row through both.
+            preview: answer_preview(&r.answer),
             asked_at: r.asked_at,
         })
         .collect())
+}
+
+/// The answer as one line for the conversations list: the **last turn's** text,
+/// its whitespace collapsed, a leading markdown block marker stripped, cut to
+/// 140 characters on a char boundary — no ellipsis, the list clips.
+///
+/// 🔴 The LAST TURN, not the last turn that generated text — and that is a
+/// choice, not an oversight, because `session_from` (below) answers a different
+/// question with a different rule (`rposition` over generated turns: what a
+/// follow-up continues FROM). Here the row is the conversation's latest
+/// exchange: a follow-up that was refused or came back citations-only is what
+/// happened last, and previewing an older answer would claim the conversation
+/// ended with it. D178 records the decision.
+///
+/// Empty for an answer with no generated text, and for a row that does not
+/// parse at all. The failure is silent here on purpose: a broken row must not
+/// take the whole list down with it — the question is still worth its line, and
+/// `history_entry` reports `unreadable` when the row is opened.
+fn answer_preview(stored: &str) -> String {
+    let answer = match serde_json::from_str::<Stored>(stored) {
+        Ok(Stored::Dialogue { turns }) => match turns.into_iter().next_back() {
+            Some(turn) => turn.answer,
+            None => return String::new(),
+        },
+        Ok(Stored::Single(answer)) => answer,
+        Err(_) => return String::new(),
+    };
+    let AskAnswer::Generated { answer, .. } = answer else {
+        return String::new();
+    };
+    // Anchors first: the list has no citation UI (the transcript splits them
+    // into `[N]` buttons), so `<c>3</c>` would be read as markup. The gap an
+    // anchor leaves between a word and its punctuation is closed BEFORE the
+    // anchor goes, where the anchor still marks it — a pass over the finished
+    // sentence would also eat `cd ..` and `ls .`.
+    let closed = drop_gap_before_punctuated_anchor(&answer);
+    let one_line = mnema_rag::strip_anchors(&closed)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // ONE leading block marker, and only when whitespace follows it: a repeat
+    // would eat `**Bold**` and the sign of `-5 °C`, turning a preview into a
+    // different sentence.
+    let body = match one_line.chars().next() {
+        Some(c @ ('#' | '>' | '-' | '*' | '`'))
+            if one_line[c.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace) =>
+        {
+            one_line[c.len_utf8()..].trim_start()
+        }
+        _ => &one_line,
+    };
+    // Char boundary, not a byte slice: the answer may be Cyrillic, where 140
+    // bytes can land inside a character.
+    match body.char_indices().nth(140) {
+        Some((end, _)) => body[..end].to_string(),
+        None => body.to_string(),
+    }
+}
+
+/// `<c>N</c>` between a word and its punctuation leaves a space behind once the
+/// anchor is stripped ("answers <c>1</c>."). The gap is closed here, while the
+/// anchor still marks it — a pass over the finished sentence would also eat the
+/// space in `cd ..` and `ls .`.
+fn drop_gap_before_punctuated_anchor(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<c>") {
+        let (head, from_anchor) = rest.split_at(start);
+        out.push_str(head);
+        let Some(end) = from_anchor.find("</c>") else {
+            out.push_str(from_anchor);
+            return out;
+        };
+        let anchor = &from_anchor[..end + "</c>".len()];
+        let tail = &from_anchor[anchor.len()..];
+        // A RUN of adjacent anchors stands between the word and its stop too:
+        // `x <c>1</c><c>2</c>.` closes the gap before the first of them.
+        let mut look = tail;
+        while let Some(after) = look.strip_prefix("<c>") {
+            let Some(close) = after.find("</c>") else {
+                break;
+            };
+            look = &after[close + "</c>".len()..];
+        }
+        let punctuated = look
+            .chars()
+            .next()
+            .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | '»'));
+        if punctuated && out.ends_with(' ') {
+            out.pop();
+        }
+        out.push_str(anchor);
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn generated(answer: &str) -> String {
+        json!({
+            "kind": "generated",
+            "answer": answer,
+            "citations": [],
+            "text": { "kind": "off" },
+            "content": { "kind": "off" },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn anchors_leave_the_preview_without_the_space_before_the_stop() {
+        // The transcript splits anchors into `[N]` buttons; the list has none.
+        assert_eq!(
+            answer_preview(&generated("The source answers <c>1</c>.")),
+            "The source answers."
+        );
+        assert_eq!(
+            answer_preview(&generated("`wttr paris` <c>4</c> або `curl` <c>6</c>")),
+            "`wttr paris` або `curl`"
+        );
+        // The gap is closed at the anchor, never over the finished sentence:
+        // those spaces are payload inside a command.
+        assert_eq!(
+            answer_preview(&generated("Run `cd ..` to go up")),
+            "Run `cd ..` to go up"
+        );
+        assert_eq!(
+            answer_preview(&generated("`ls .` lists it")),
+            "`ls .` lists it"
+        );
+        // Two anchors at the same point: the gap belongs to the run, not to the
+        // first anchor alone.
+        assert_eq!(answer_preview(&generated("x <c>1</c><c>2</c>.")), "x.");
+    }
+
+    #[test]
+    fn one_block_marker_goes_and_payload_characters_stay() {
+        assert_eq!(answer_preview(&generated("# A heading")), "A heading");
+        assert_eq!(answer_preview(&generated("> quoted")), "quoted");
+        // A sign and a bold run are text, not markers: an earlier repeat-based
+        // strip ate both, turning a preview into a different sentence.
+        assert_eq!(
+            answer_preview(&generated("-5 °C at the sensor")),
+            "-5 °C at the sensor"
+        );
+        assert_eq!(
+            answer_preview(&generated("**Bold** opening")),
+            "**Bold** opening"
+        );
+        assert_eq!(
+            answer_preview(&generated("`ls -la` prints")),
+            "`ls -la` prints"
+        );
+    }
+
+    #[test]
+    fn a_dialogue_previews_its_last_turn_and_a_textless_one_is_empty() {
+        let dialogue = |last: serde_json::Value| {
+            json!({
+                "turns": [
+                    { "query": "first", "answer": {
+                        "kind": "generated", "answer": "first answer", "citations": [],
+                        "text": { "kind": "off" }, "content": { "kind": "off" } } },
+                    { "query": "second", "answer": last },
+                ]
+            })
+            .to_string()
+        };
+        assert_eq!(
+            answer_preview(&dialogue(json!({
+                "kind": "generated", "answer": "the last turn", "citations": [],
+                "text": { "kind": "off" }, "content": { "kind": "off" } }))),
+            "the last turn"
+        );
+        assert_eq!(
+            answer_preview(&dialogue(json!({
+                "kind": "citationsOnly", "citations": [], "why": { "kind": "notAsked" },
+                "text": { "kind": "off" }, "content": { "kind": "off" } }))),
+            "",
+            "a dialogue whose last turn has no generated text previews as nothing"
+        );
+    }
+}
+
+/// Whether the row's own text holds `needle_lower`, already lowercased: its
+/// question plus every turn's question and generated answer. A citation is a
+/// source, not the answer, so its passage text does not match; a row whose
+/// snapshot does not parse still matches on its question.
+fn history_matches(row: &mnema_index::HistoryRow, needle_lower: &str) -> bool {
+    let holds = |text: &str| text.to_lowercase().contains(needle_lower);
+    if holds(&row.query) {
+        return true;
+    }
+    let turns = match serde_json::from_str::<Stored>(&row.answer) {
+        Ok(Stored::Dialogue { turns }) => turns,
+        // The bare-answer format: the question was checked above, only the
+        // answer is left.
+        Ok(Stored::Single(answer)) => return answer_holds(&answer, needle_lower),
+        Err(_) => return false,
+    };
+    turns
+        .iter()
+        .any(|t| holds(&t.query) || answer_holds(&t.answer, needle_lower))
+}
+
+/// Whether a generated answer's text holds `needle_lower`; a citations-only or
+/// refused answer has no text of its own to find.
+fn answer_holds(answer: &AskAnswer, needle_lower: &str) -> bool {
+    match answer {
+        AskAnswer::Generated { answer, .. } => answer.to_lowercase().contains(needle_lower),
+        _ => false,
+    }
 }
 
 /// An entry's turns, or why it has none: `Gone` for an id no longer in the

@@ -42,6 +42,10 @@ fn the_same_query_replaces_and_moves_to_top() {
         ["q1", "q2"],
         "one row per query, the repeat on top"
     );
+    assert_eq!(
+        list[0].answer, r#""c""#,
+        "the list carries the stored answer JSON, which the list draws a preview from"
+    );
 
     assert_eq!(
         db.history_answer(list[0].id).unwrap(),

@@ -82,7 +82,7 @@ export type TreeListing = { roots: TreeRoot[] };
 
 // One question the person asked, as the sidebar's conversation list shows it
 // (`bridge.rs` `HistoryEntry`). `askedAt` is SECONDS since the epoch, newest first.
-export type HistoryEntry = { id: number; query: string; askedAt: number };
+export type HistoryEntry = { id: number; query: string; preview: string; askedAt: number };
 
 // What opening an entry answers with (`bridge.rs` `HistoryOpen`): a typed reply,
 // not an error, so the window branches on `kind` rather than on a message.
@@ -239,7 +239,11 @@ export const ask = (query: string) => invoke<AskReply>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const setFolderSearched = (rootId: number, folderPath: string, searched: boolean) =>
   invoke<void>('set_folder_searched', { rootId, folderPath, searched });
-export const listHistory = () => invoke<HistoryEntry[]>('list_history');
+// The filter goes to the backend rather than being applied here: the stored
+// answer is longer than the drawn preview, so a match on the preview alone
+// would hide a conversation whose answer does hold the word.
+export const listHistory = (filter?: string) =>
+  invoke<HistoryEntry[]>('list_history', { filter });
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
 // Makes an opened entry the conversation the next question continues; false when it cannot be.
 export const continueHistory = (id: number) => invoke<boolean>('continue_history', { id });

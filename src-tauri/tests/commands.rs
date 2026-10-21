@@ -11793,6 +11793,22 @@ fn history_rows(webview: &WebviewWindow<MockRuntime>) -> Vec<Value> {
         .clone()
 }
 
+/// The same list under a filter; the shape is the unfiltered list's.
+fn filtered_history_rows(webview: &WebviewWindow<MockRuntime>, filter: &str) -> Vec<Value> {
+    call(webview, "list_history", json!({ "filter": filter }))
+        .expect("list_history was rejected")
+        .as_array()
+        .expect("list_history did not answer with an array")
+        .clone()
+}
+
+/// The questions a list answers with, in the order it sent them.
+fn queries_of(rows: &[Value]) -> Vec<String> {
+    rows.iter()
+        .map(|r| r["query"].as_str().expect("a row has a question").into())
+        .collect()
+}
+
 /// The launcher marks the conversation a fresh answer belongs to, and it needs
 /// the row's id to do it: matching on the query text would mark whichever
 /// conversation happens to start with the same words.
@@ -11876,6 +11892,11 @@ fn a_generated_ask_is_recorded_and_reopens_identically() {
     let rows = history_rows(&webview);
     assert_eq!(rows.len(), 1, "one generated ask is one row: {rows:?}");
     assert_eq!(rows[0]["query"], json!("quantum entanglement"), "{rows:?}");
+    assert_eq!(
+        rows[0]["preview"],
+        json!("The source answers."),
+        "the preview is the generated answer, as one line: {rows:?}"
+    );
     assert!(
         rows[0]["askedAt"].is_i64(),
         "askedAt is the camelCase wire name: {rows:?}"
@@ -11897,6 +11918,39 @@ fn a_generated_ask_is_recorded_and_reopens_identically() {
     assert_eq!(
         opened["turns"][0]["answer"], answer,
         "the reopened answer must be the JSON ask gave, value for value: {opened}"
+    );
+}
+
+/// The list draws the answer under the question on one line: whitespace
+/// collapses, a leading block marker goes, and the cut at 140 characters lands
+/// on a char boundary — a byte slice would split a Cyrillic character.
+#[test]
+fn the_preview_is_the_answer_collapsed_to_one_line() {
+    let long = "Результат — уривок, який список обрізає. ".repeat(6); // over 140 chars
+    let completion = chat_text(&format!("#  The source answers <c>1</c>.\n\n\n  {long}"));
+    let server = MockServer::new(vec![Reply::ok(&completion)]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    let answer = ask_q(&webview, "quantum entanglement");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+
+    let expected: String = format!("The source answers. {long}")
+        .chars()
+        .take(140)
+        .collect();
+    assert_eq!(
+        expected.chars().count(),
+        140,
+        "the fixture is longer than the cut"
+    );
+
+    let rows = history_rows(&webview);
+    assert_eq!(
+        rows[0]["preview"],
+        json!(expected),
+        "the preview is the answer on one line, markers stripped and cut to 140: {rows:?}"
     );
 }
 
@@ -11925,6 +11979,11 @@ fn a_citations_only_ask_is_recorded() {
 
     let rows = history_rows(&webview);
     assert_eq!(rows.len(), 1, "a citations-only ask is kept: {rows:?}");
+    assert_eq!(
+        rows[0]["preview"],
+        json!(""),
+        "an answer with no generated text has an empty preview, never a missing field: {rows:?}"
+    );
     let id = rows[0]["id"].as_i64().expect("the row has an id");
     let opened =
         call(&webview, "history_entry", json!({ "id": id })).expect("history_entry was rejected");
@@ -12045,6 +12104,16 @@ fn an_unreadable_snapshot_opens_as_unreadable_and_can_be_deleted() {
         rows.len(),
         1,
         "the unreadable row is still listed: {rows:?}"
+    );
+    assert_eq!(
+        rows[0]["query"],
+        json!("q"),
+        "the question survives a snapshot that does not parse: {rows:?}"
+    );
+    assert_eq!(
+        rows[0]["preview"],
+        json!(""),
+        "a snapshot that does not parse previews as nothing, not as the list failing: {rows:?}"
     );
     let id = rows[0]["id"].as_i64().expect("the row has an id");
 
@@ -12230,6 +12299,192 @@ fn a_failed_history_write_does_not_fail_the_ask() {
         vec![json!("quantum resonance"), json!("quantum entanglement")],
         "with the trigger gone, B is recorded and newest"
     );
+}
+
+// ---- The conversations filter: `list_history` searches questions and answers ----
+
+/// A word in the second turn's answer, in no question, finds the row: the list
+/// searches the stored answer, not only the one line it draws.
+#[test]
+fn a_word_only_in_the_second_answer_selects_the_row() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("The follow-up mentions papaya.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    ask_q(&webview, "tell me more");
+    call(&webview, "new_chat", json!({})).unwrap();
+    ask_q(&webview, "ext4");
+
+    let rows = filtered_history_rows(&webview, "papaya");
+    assert_eq!(queries_of(&rows), vec![FIRST_Q.to_string()], "{rows:?}");
+    assert_eq!(
+        rows[0]["preview"],
+        json!("The follow-up mentions papaya."),
+        "a filtered row keeps the list's own shape: {rows:?}"
+    );
+}
+
+/// A word only in a question finds that row; a word only in a cited passage
+/// does not — the passage is a source, not the answer.
+#[test]
+fn a_word_only_in_the_question_selects_that_row() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    call(&webview, "new_chat", json!({})).unwrap();
+    ask_q(&webview, "ext4");
+
+    let rows = filtered_history_rows(&webview, "entanglement");
+    assert_eq!(queries_of(&rows), vec![FIRST_Q.to_string()], "{rows:?}");
+    // "resonance" is in the passage the first answer cites, in neither question
+    // and in neither answer.
+    assert_eq!(
+        filtered_history_rows(&webview, "resonance"),
+        Vec::<Value>::new(),
+        "a citation passage must not be searched as the answer"
+    );
+}
+
+/// Case-insensitivity has to reach Cyrillic: SQLite's `lower()` is ASCII-only,
+/// so the filter is lowered in Rust.
+#[test]
+fn a_filter_ignores_case_beyond_ascii() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("Відповідь згадує Київ."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let webview = ask_ready_with_one_passage(&app);
+
+    ask_q(&webview, "quantum entanglement");
+
+    for filter in ["київ", "КИЇВ", "Київ"] {
+        let rows = filtered_history_rows(&webview, filter);
+        assert_eq!(rows.len(), 1, "filter {filter:?}: {rows:?}");
+    }
+}
+
+/// The filter searches every turn, not only the last one the preview draws.
+#[test]
+fn a_word_in_an_earlier_turn_matches_the_dialogue() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("The first turn mentions papaya <c>1</c>.")),
+        Reply::ok(&chat_text("The last turn says nothing of it.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+
+    ask_q(&webview, FIRST_Q);
+    ask_q(&webview, "tell me more");
+
+    let rows = filtered_history_rows(&webview, "papaya");
+    assert_eq!(rows.len(), 1, "the earlier turn is searched: {rows:?}");
+    assert_eq!(
+        rows[0]["preview"],
+        json!("The last turn says nothing of it."),
+        "the term is in the earlier turn only: {rows:?}"
+    );
+}
+
+/// The format before conversations stored the bare answer, with no `turns`: its
+/// answer is searched too, so an old row does not lose its text.
+#[test]
+fn a_bare_answer_row_matches_on_its_answer() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let mut answer = ask_q(&webview, FIRST_Q);
+    answer["answer"] = json!("The old answer mentions papaya.");
+    seed_row(&app, &webview, "old question", &answer);
+
+    let rows = filtered_history_rows(&webview, "papaya");
+    assert_eq!(
+        queries_of(&rows),
+        vec!["old question".to_string()],
+        "{rows:?}"
+    );
+}
+
+/// The filter is trimmed on this side too, not only in the window: a trailing
+/// space a person typed at the end of a word must not turn a match into nothing.
+#[test]
+fn the_filter_is_trimmed_before_matching() {
+    let server = MockServer::new(vec![Reply::ok(&chat_text("It resonates <c>1</c>."))]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _) = dialogue_ready(&app);
+    let mut answer = ask_q(&webview, FIRST_Q);
+    answer["answer"] = json!("The old answer mentions papaya.");
+    seed_row(&app, &webview, "old question", &answer);
+
+    for padded in ["  papaya  ", "papaya ", "\tpapaya"] {
+        let rows = filtered_history_rows(&webview, padded);
+        assert_eq!(
+            queries_of(&rows),
+            vec!["old question".to_string()],
+            "a padded filter {padded:?} must match like the bare word: {rows:?}"
+        );
+    }
+}
+
+/// A snapshot that no longer parses still has its question to be found by; the
+/// broken JSON itself is not text the filter searches.
+#[test]
+fn an_unreadable_snapshot_matches_by_its_question_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    app.state::<AppState>()
+        .with_index(|db| db.history_record("broken question", "{\"kind\":\"nope\"}"))
+        .unwrap();
+    let webview = main_webview(&app);
+
+    let rows = filtered_history_rows(&webview, "BROKEN");
+    assert_eq!(rows.len(), 1, "the row stays findable: {rows:?}");
+    assert_eq!(rows[0]["preview"], json!(""), "{rows:?}");
+    assert_eq!(
+        filtered_history_rows(&webview, "nope"),
+        Vec::<Value>::new(),
+        "the unreadable JSON is not text to match into"
+    );
+}
+
+/// No filter, an empty one and one that is only spaces all keep the whole list:
+/// `invoke('list_history')` with no argument object must be unchanged.
+#[test]
+fn without_a_filter_the_whole_list_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    app.state::<AppState>().open_index().unwrap();
+    app.state::<AppState>()
+        .with_index(|db| {
+            db.history_record("first question", "{\"kind\":\"nope\"}")?;
+            db.history_record("second question", "{\"kind\":\"nope\"}")?;
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+
+    assert_eq!(history_rows(&webview).len(), 2, "no argument object at all");
+    for filter in ["", "   "] {
+        assert_eq!(
+            filtered_history_rows(&webview, filter).len(),
+            2,
+            "filter {filter:?} must keep every row"
+        );
+    }
 }
 
 // ---- Launcher dialogue: the session in memory and `ask` over it ----
@@ -12813,6 +13068,11 @@ fn a_dialogue_is_one_row_keyed_by_its_first_question() {
 
     let row = only_row(&webview);
     assert_eq!(row["query"], json!(FIRST_Q), "{row}");
+    assert_eq!(
+        row["preview"],
+        json!("Glad to help."),
+        "the preview is the last turn's answer: {row}"
+    );
     let opened = open_row(&webview, row["id"].as_i64().unwrap());
     assert_eq!(opened["kind"], json!("dialogue"), "{opened}");
     let turns = opened["turns"].as_array().unwrap();

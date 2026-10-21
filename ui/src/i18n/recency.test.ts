@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { formatDuration, formatIndexedAt, formatIndexedDate } from './recency';
+import { formatDuration, formatIndexedAt, formatIndexedDate, dayBucket } from './recency';
 import { setLocale } from './index';
 
 // `locale` is a module-level store shared by every test in this file; restore
@@ -130,6 +130,51 @@ describe('formatIndexedDate', () => {
     expect(expected('en').endsWith('.')).toBe(false);
     expect(formatIndexedDate(AT, 'uk')).toBe(expected('uk'));
     expect(formatIndexedDate(AT, 'en')).toBe(expected('en'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `dayBucket` — the Recents panel's date groups. Local calendar days, built
+// here from local date parts so the expectations hold in any zone: a literal
+// UTC stamp would only be right in the zone its author sat in.
+// ---------------------------------------------------------------------------
+describe('dayBucket', () => {
+  const NOW = new Date(2026, 9, 21, 12, 0, 0).getTime();
+  // `askedAt` is SECONDS (`unixepoch()`), `now` milliseconds.
+  const on = (year: number, month: number, day: number, hour = 12) =>
+    new Date(year, month, day, hour, 0, 0).getTime() / 1000;
+
+  // 🔴 The boundary is LOCAL MIDNIGHT, not 24 elapsed hours: read at 00:30, a
+  // question asked at 23:45 is yesterday, and an implementation computing
+  // `now - asked < 24 h` would call it today. The 00:00 and 23:00 rows below
+  // are the two sides of that line.
+  it('puts a question on the local day it was asked, not on an elapsed span', () => {
+    expect(dayBucket(on(2026, 9, 21, 0), NOW)).toBe('today');
+    expect(dayBucket(on(2026, 9, 21, 11), NOW)).toBe('today');
+    expect(dayBucket(on(2026, 9, 20, 23), NOW)).toBe('yesterday');
+    expect(dayBucket(on(2026, 9, 20, 12), NOW)).toBe('yesterday');
+  });
+
+  it('puts days 2 to 7 in the week and anything older in earlier', () => {
+    expect(dayBucket(on(2026, 9, 19), NOW)).toBe('week'); // 2
+    expect(dayBucket(on(2026, 9, 14), NOW)).toBe('week'); // 7, the last day of the band
+    expect(dayBucket(on(2026, 9, 13), NOW)).toBe('earlier'); // 8
+    expect(dayBucket(on(2026, 8, 21), NOW)).toBe('earlier'); // a month back
+  });
+
+  // A clock stepped back, or a machine whose zone moved, can hand this a stamp
+  // from the future. It must not fall through to a bucket that does not exist.
+  it('reads a stamp from the future as today', () => {
+    expect(dayBucket(on(2026, 9, 21, 18), NOW)).toBe('today');
+    expect(dayBucket(on(2026, 9, 25), NOW)).toBe('today');
+  });
+
+  // Month and year boundaries are day arithmetic, not "same month" or "same
+  // year": a wrong implementation would put these in the wrong band.
+  it('counts across a month and a year boundary', () => {
+    const newYear = new Date(2027, 0, 2, 12, 0, 0).getTime();
+    expect(dayBucket(on(2026, 11, 31), newYear)).toBe('week'); // 2 days
+    expect(dayBucket(on(2026, 11, 26), newYear)).toBe('week'); // 7 days
   });
 });
 

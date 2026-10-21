@@ -41,6 +41,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_empty' | 'tree_failed' | 'tree_search_in'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
+  | 'history_search_placeholder' | 'history_search_label' | 'history_nothing_found'
+  | 'history_group_today' | 'history_group_yesterday' | 'history_group_week' | 'history_group_earlier'
   | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
@@ -48,7 +50,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
-  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_chat'
+  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_chat' | 'new_conversation'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -391,6 +393,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     history_unreadable: 'Цей запис не відкривається.',
     history_open_failed: 'Не вдалося відкрити цю бесіду.',
     recents_failed: 'Не вдалося завантажити бесіди.',
+    history_search_placeholder: 'Пошук',
+    history_search_label: 'Пошук у бесідах',
+    history_nothing_found: 'Нічого не знайдено',
+    history_group_today: 'Сьогодні',
+    history_group_yesterday: 'Вчора',
+    history_group_week: 'Попередні 7 днів',
+    history_group_earlier: 'Раніше',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
     fresh_file_missing: 'Файла немає на диску',
@@ -441,6 +450,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     no_answer_no_tool_use: 'Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».',
     new_chat: 'Новий',
+    // The panel's compose button is the same action as the centre «New»; a
+    // screen reader listing buttons would otherwise hear the name twice.
+    new_conversation: 'Нова бесіда',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1260,6 +1272,13 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     history_unreadable: 'This entry cannot be opened.',
     history_open_failed: 'This conversation could not be opened.',
     recents_failed: 'The conversations could not be loaded.',
+    history_search_placeholder: 'Search',
+    history_search_label: 'Search conversations',
+    history_nothing_found: 'Nothing found',
+    history_group_today: 'Today',
+    history_group_yesterday: 'Yesterday',
+    history_group_week: 'Previous 7 days',
+    history_group_earlier: 'Earlier',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',
     fresh_file_missing: 'The file is missing from disk',
@@ -1281,6 +1300,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     no_answer_no_tool_use: 'This model cannot continue a conversation. Choose another one or turn off Tool support.',
     new_chat: 'New',
+    new_conversation: 'New conversation',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',

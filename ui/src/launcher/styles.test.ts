@@ -140,19 +140,37 @@ test('the answer card keeps the column gap its parts depend on', () => {
   );
 });
 
-// §4: one line — the question, the time to its right, the × after it. The
-// question clips to make room and the time never takes a line of its own.
-test('a conversation row is one line: question, time right, then ×', async () => {
+// §4 (owner's mockup, 2026-10-21): two lines — the question, then a clipped
+// preview of the answer — with the × in its own column to the right. The
+// relative time each row used to carry is gone: the group heading says when.
+test('a conversation row is two lines: question, preview, then ×', async () => {
   render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
   const row = await screen.findByTestId('recents-row-1');
   const open = within(row).getByTestId('recents-open-1');
   const query = within(row).getByTestId('recents-query');
-  const asked = within(row).getByTestId('recents-asked');
-  expect(query.parentElement).toBe(open); // both parts inside the row's one button
-  expect(asked.parentElement).toBe(open);
+  const preview = within(row).getByTestId('recents-preview');
+  expect(query.parentElement).toBe(open); // both lines inside the row's one button
+  expect(preview.parentElement).toBe(open);
   expect(getComputedStyle(open).display).toBe('flex');
-  expect(getComputedStyle(query).flexGrow).toBe('1'); // the question takes the room left over
-  expect(getComputedStyle(asked).flexGrow).toBe('0'); // the time does not shrink or wrap
+  expect(getComputedStyle(open).flexDirection).toBe('column');
+  expect(getComputedStyle(query).textOverflow).toBe('ellipsis'); // each line clips, never wraps
+  expect(getComputedStyle(preview).textOverflow).toBe('ellipsis');
+  expect(getComputedStyle(preview).color).toBe('var(--ink-soft)'); // an echo of the question
+  const remove = within(row).getByTestId('recents-remove-1');
+  expect(getComputedStyle(remove).flexGrow).toBe('0'); // the × keeps its own column
+  // The selected row lifts both lines to the selection's own ink — read from the
+  // sheet, as jsdom hands `inherit` back unresolved.
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.history-row\[aria-current="true"\] :is\(\.history-query, \.history-preview\)\s*\{[^}]*color:\s*inherit/);
+  expect(css).toMatch(/\.recents-group h3\s*\{[^}]*text-transform:\s*uppercase/);
+});
+
+// The header is pinned: it sits outside the body that scrolls, so the panel's
+// name and its compose button stay put above fifty rows.
+test('the conversations header is pinned above the scrolling body', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.recents-head\s*\{[^}]*flex:\s*none/);
+  expect(css).toMatch(/\.recents-body\s*\{[^}]*overflow:\s*auto/);
 });
 
 // The open-failure alert sits beside the list and carried only `.composer`'s
@@ -201,6 +219,13 @@ test('the file pane keeps the second track when the tree is hidden', async () =>
   expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
 });
 
+// Owner, 2026-10-21: the composer carries the same recessed fill as the
+// conversations search field. On `--surface` it read as part of the page.
+test('the composer sits on the search field fill, not on the page surface', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.composer\s*\{[^}]*background:\s*var\(--surface-2\)/);
+});
+
 // Owner, 2026-10-20: one focus ring on the composer — the box's
 // `:focus-within` outline — and never a second, UA-drawn one on the field
 // inside it. Read from the sheet: jsdom's UA stylesheet draws no ring, so a
@@ -228,4 +253,15 @@ test('the cloud is coloured by what it reports, and an inactive one has no hover
   expect(css).toMatch(/\.cloud\[data-status="unreachable"\]\s*\{[^}]*color:\s*var\(--err\)/);
   expect(css).toMatch(/\.cloud\[data-status="notConfigured"\][^{]*\{[^}]*stroke-dasharray/);
   expect(css).toMatch(/button:hover[^{]*:not\(\[aria-disabled="true"\]\)[^{]*\{/);
+});
+
+// Owner, 2026-10-21: the «×» must cost no width until the row is hovered or
+// focused — an always-present 22px clipped every question and preview. Read
+// from the sheet: jsdom computes no hover, and the failure this guards is a
+// future edit moving the width back into the default rule.
+test('the history remove button takes no width until its row is hovered or focused', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.history-remove\s*\{\s*[^}]*width:\s*0\b/);
+  expect(css).toMatch(/\.history-row:hover \.history-remove[^{]*\{[^}]*width:\s*22px/);
+  expect(css).toMatch(/\.history-row:focus-within \.history-remove[^{]*\{[^}]*width:\s*22px/);
 });
