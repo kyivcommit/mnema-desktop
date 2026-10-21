@@ -77,7 +77,7 @@ test('real launcher places the three areas with the tree inside the right one', 
   // pane inside the right area, not a column of its own (§2).
   const centre = screen.getByTestId('col-transcript');
   expect(centre.contains(screen.getByRole('textbox'))).toBe(true);
-  expect(centre.contains(screen.getByTestId('settings'))).toBe(true);
+  expect(centre.contains(screen.getByTestId('new-chat'))).toBe(true);
   const tree = screen.getByTestId('col-tree');
   expect(tree.contains(screen.getByTestId('tree-body'))).toBe(true);
   expect(screen.getByTestId('col-right').contains(tree)).toBe(true);
