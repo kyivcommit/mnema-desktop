@@ -4,6 +4,39 @@ use rusqlite::{Transaction, TransactionBehavior, params};
 
 use crate::{Db, Error};
 
+/// "This `path` row `pa` is searched" (spec §5): the nearest `search_folder`
+/// entry at or above its folder decides, no entry means searched. Written once
+/// for the two search arms and for `citation`'s choice of path. The prefix is
+/// compared with `substr`, never `LIKE`, so `_`/`%` are literal and `note`
+/// does not cover `notes/a.md`.
+macro_rules! path_is_searched {
+    () => {
+        "COALESCE((SELECT f.searched FROM search_folder f
+                    WHERE f.watched_root_id = pa.watched_root_id
+                      AND (f.folder_path = ''
+                           OR substr(pa.relative_path, 1, length(f.folder_path) + 1)
+                              = f.folder_path || '/')
+                    ORDER BY length(f.folder_path) DESC
+                    LIMIT 1), 1) = 1"
+    };
+}
+
+/// An `AND` clause: the document `d` has at least one searched path. An empty
+/// `search_folder` short-circuits it, so the common case pays one probe.
+macro_rules! searchable_document {
+    () => {
+        concat!(
+            " AND (NOT EXISTS (SELECT 1 FROM search_folder) OR EXISTS (
+                SELECT 1 FROM path pa WHERE pa.document_id = d.id AND ",
+            $crate::scope::path_is_searched!(),
+            "))"
+        )
+    };
+}
+// `path_is_searched` is also what `citation` orders by.
+#[allow(unused_imports)]
+pub(crate) use {path_is_searched, searchable_document};
+
 impl Db {
     /// Records that `folder_path` (root-relative, `/`-separated, `""` = the
     /// root) is searched or not, and forgets every entry beneath it: a choice

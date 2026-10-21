@@ -111,13 +111,14 @@ impl Db {
     /// place, that table is where to go. Pinned by
     /// `a_terms_presence_is_asked_of_the_whole_index`.
     pub fn terms_present(&self, prepared: &str) -> Result<Vec<String>, Error> {
-        let mut stmt = self.conn().prepare(
+        let mut stmt = self.conn().prepare(concat!(
             "SELECT 1 FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
-              WHERE chunk_fts MATCH ?1 AND document.status = 'indexed'
-              LIMIT 1",
-        )?;
+               JOIN document d ON d.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND d.status = 'indexed'",
+            crate::scope::searchable_document!(),
+            " LIMIT 1"
+        ))?;
         let mut out = Vec::new();
         for term in crate::text_prep::terms(prepared) {
             if stmt.exists(params![quote_term(term)])? {
@@ -135,13 +136,14 @@ impl Db {
     // correctness change. Codex round-2 review measured the plan on both
     // sides.
     fn matching(&self, expr: &str, limit: i64) -> Result<Vec<i64>, Error> {
-        let mut stmt = self.conn().prepare(
+        let mut stmt = self.conn().prepare(concat!(
             "SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
-              WHERE chunk_fts MATCH ?1 AND document.status = 'indexed'
-              ORDER BY rank, chunk_fts.rowid LIMIT ?2",
-        )?;
+               JOIN document d ON d.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND d.status = 'indexed'",
+            crate::scope::searchable_document!(),
+            " ORDER BY rank, chunk_fts.rowid LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![expr, limit], |r| r.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for r in rows {

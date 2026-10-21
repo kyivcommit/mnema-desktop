@@ -109,15 +109,15 @@ case_ "harness: the corpus really moves a format between readers" \
 # that a document being written answers nothing.
 #
 # The guard behind that decision is one clause: `search_lexical` filters
-# `AND document.status = 'indexed'`. Drop it and a document mid-rebuild answers
+# `AND d.status = 'indexed'`. Drop it and a document mid-rebuild answers
 # searches with the chunks that happened to land. Measured by the reviewer:
 # without this clause and with 3f disabled the whole suite is **green**; with 3f
 # present it reddens on 3f by name.
 case_ "index: a search does not answer from a document that is not indexed" \
   crates/mnema-index/src/search.rs \
-  "s~SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document.status = 'indexed'~SELECT chunk_fts.rowid FROM chunk_fts
+  "s~SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d.status = 'indexed'~SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
+               JOIN document d ON d.id = chunk.document_id
               WHERE chunk_fts MATCH ?1 ~" \
   "WHERE chunk_fts MATCH ?1" \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised

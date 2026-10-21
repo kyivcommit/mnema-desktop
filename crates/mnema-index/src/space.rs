@@ -35,8 +35,21 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// on top of this exact clause; [`Db::knn_searchable`] uses it as a genuine
 /// vec0 pre-filter, nested inside the one `IN` vec0 accepts per query.
 /// Expects the outer query to expose the candidate as `c`.
-const ELIGIBLE_CHUNK: &str =
-    "FROM chunk c JOIN document d ON d.id = c.document_id WHERE d.status = 'indexed'";
+const ELIGIBLE_CHUNK: &str = eligible_chunk!();
+
+/// [`ELIGIBLE_CHUNK`] as a literal, so [`SEARCHABLE_CHUNK`] is built from the
+/// same text by `concat!` rather than a copy that could drift.
+macro_rules! eligible_chunk {
+    () => {
+        "FROM chunk c JOIN document d ON d.id = c.document_id WHERE d.status = 'indexed'"
+    };
+}
+use eligible_chunk;
+
+/// [`ELIGIBLE_CHUNK`] narrowed to documents with a searched path (spec §5):
+/// what the two search arms read. The embedding queue and the coverage counts
+/// stay on [`ELIGIBLE_CHUNK`] — unsearched folders are still embedded.
+const SEARCHABLE_CHUNK: &str = concat!(eligible_chunk!(), crate::scope::searchable_document!());
 
 /// The queue itself: the `FROM` and `WHERE` of "which chunks does this space
 /// still owe a vector", shared by the query that hands them over and the count
@@ -592,7 +605,7 @@ impl Db {
                 let mut stmt = self.conn().prepare(&format!(
                     "SELECT chunk_id, distance FROM {table}
                       WHERE embedding MATCH ?1 AND k = ?2
-                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})
+                        AND chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK})
                       ORDER BY distance NULLS LAST, chunk_id"
                 ))?;
                 stmt.query_map(params![blob, window], distance_row)?
@@ -603,7 +616,7 @@ impl Db {
                 let mut stmt = self.conn().prepare(&format!(
                     "SELECT chunk_id, distance FROM {table}
                       WHERE embedding MATCH ?1 AND k = ?2
-                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK}
+                        AND chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK}
                                            AND c.id IN (SELECT value FROM json_each(?3)))
                       ORDER BY distance NULLS LAST, chunk_id"
                 ))?;
@@ -925,7 +938,7 @@ impl Db {
         Ok(self.conn().query_row(
             &format!(
                 "SELECT count(DISTINCT chunk_id) FROM {table}
-                  WHERE chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})"
+                  WHERE chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK})"
             ),
             [],
             |r| r.get(0),
