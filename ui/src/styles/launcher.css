@@ -219,10 +219,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   background: var(--accent-soft); color: var(--accent); font-size: 15px;
 }
 .composer-send:disabled { background: transparent; color: var(--ink-soft); }
-.composer-hint {
-  margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
-  font-size: 11px; color: var(--ink-soft);
-}
 .composer :is(.guard, .refusal) { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
 .composer .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
 .composer .refusal { color: var(--ink-soft); }
