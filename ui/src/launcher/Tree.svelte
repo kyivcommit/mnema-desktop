@@ -119,13 +119,18 @@
   function load() {
     if (loading) return;
     loading = true;
+    const started = epoch;
     listTree()
       .then((l) => {
         listing = l;
         failed = false;
-        // A write still on the wire owns the checks: the listing was read
-        // before it landed and would put the old state back under the person.
-        if (pending > 0) held = l; else searched = fromListing(l);
+        // The checks are taken only from a listing read after the last click
+        // and with no write on the wire; any other predates a write and would
+        // put the old state back under the person. It is read again once the
+        // queue is empty.
+        if (epoch === started && pending === 0) searched = fromListing(l);
+        else if (pending > 0) resync = true;
+        else reloadAfter = true;
       })
       .catch((e) => {
         // Non-fatal, but never silent: an unreadable listing must say so
@@ -210,13 +215,13 @@
   // is the shown copy, set from each listing and changed at click time.
   let searched = $state<Record<string, boolean>>({});
   // Writes go one after another: the command is async and two in flight could
-  // land in either order. `held` is a listing that arrived while one was
-  // pending; it is applied when the queue empties.
+  // land in either order. `epoch` counts clicks, so a listing can tell it was
+  // read before one.
   let pending = 0;
+  let epoch = 0;
   let chain: Promise<void> = Promise.resolve();
-  let held: TreeListing | null = null;
-  // A refused write leaves the shown checks unknown: later queued writes may
-  // still land. Once the queue is empty the index is asked again.
+  // After a refused write, or a listing that predates a click, the shown
+  // checks are unknown. Once the queue is empty the index is asked again.
   let resync = false;
   let reloadAfter = false;
 
@@ -257,6 +262,7 @@
     searched = next;
 
     pending++;
+    epoch++;
     chain = chain
       .then(() => setFolderSearched(rootId, path, on))
       .catch((e) => {
@@ -267,11 +273,9 @@
         pending--;
         if (pending > 0) return;
         if (resync) {
-          // A held listing may predate the later writes; read afresh.
           resync = false;
-          held = null;
           if (loading) reloadAfter = true; else load();
-        } else if (held) { searched = fromListing(held); held = null; }
+        }
       });
   }
 

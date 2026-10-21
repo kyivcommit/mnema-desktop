@@ -799,18 +799,56 @@ test('after a single refused write the check shows the stored value', async () =
   expect(console.error).toHaveBeenCalled();
 });
 
-test('a listing that arrives during a write is applied after it', async () => {
-  mockTree(withNotesOff);
-  let release!: () => void;
-  setReply = () => new Promise<void>((r) => (release = r));
+// A listing read before a click carries the old state. Whenever it lands, the
+// click stays and the index is read again.
+function staleLoad() {
+  let land!: () => void;
+  const stale = { roots: [{ ...oneRootTwoFolders.roots[0], searched: [{ folderPath: 'notes', searched: false }] }] };
+  const fresh = treeReply;
+  treeReply = () => { treeReply = fresh; return new Promise<TreeListing>((r) => (land = () => r(stale))); };
+  return { land: () => land() };
+}
+function recordingWrite(stored: { folderPath: string; searched: boolean }[]) {
+  let done!: () => void;
+  setReply = (a) => new Promise<void>((resolve) => {
+    const { folderPath, searched } = a as { folderPath: string; searched: boolean };
+    done = () => { stored.push({ folderPath, searched }); resolve(); };
+  });
+  return { done: () => done() };
+}
+
+test('a stale listing landing while the write is pending does not revert it', async () => {
+  const stored = storeBackedIndex();
   mount(null);
-  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
-  const before = treeCalls().length;
+  await screen.findByTestId('tree-check-1-archive');
+  const stale = staleLoad();
   await fireEvent.focus(window);
-  await waitFor(() => expect(treeCalls().length).toBe(before + 1));
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  const write = recordingWrite(stored);
+  await fireEvent.click(box('archive'));
+  stale.land();
   await tick();
-  expect(box('archive').checked).toBe(false); // the stale listing did not undo the click
-  release();
-  // the queue is empty: the held listing (archive on) is now what is shown
-  await waitFor(() => expect(box('archive').checked).toBe(true));
+  expect(box('archive').checked).toBe(false);
+  write.done();
+  await waitFor(() => expect(treeCalls()).toHaveLength(3)); // read again after the drain
+  await tick();
+  expect(box('archive').checked).toBe(false); // the stored value, not the stale one
+});
+
+test('a stale listing landing after the write finished does not revert it', async () => {
+  const stored = storeBackedIndex();
+  mount(null);
+  await screen.findByTestId('tree-check-1-archive');
+  const stale = staleLoad();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  const write = recordingWrite(stored);
+  await fireEvent.click(box('archive'));
+  write.done();
+  await waitFor(() => expect(setCalls()).toHaveLength(1));
+  await tick(); await tick();
+  stale.land();
+  await waitFor(() => expect(treeCalls()).toHaveLength(3));
+  await tick();
+  expect(box('archive').checked).toBe(false);
 });
