@@ -9,9 +9,11 @@
   // a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
   // this binding is out of the way (`store_rune_conflict`).
-  let { value = $bindable(''), state: launcherState, onSubmit }: {
+  let { value = $bindable(''), state: launcherState, scopeOff = false, onSubmit }: {
+    // Every folder is unticked: nothing can be searched, so nothing is sent.
     value?: string;
     state: LauncherState;
+    scopeOff?: boolean;
     onSubmit: (raw: string) => void;
   } = $props();
 
@@ -21,7 +23,7 @@
 
   // The button and Enter agree on when a question may leave; `runSearch` still
   // judges the text itself (a blank Enter does nothing there too).
-  const canSend = $derived(value.trim() !== '' && launcherState.kind !== 'inFlight');
+  const canSend = $derived(value.trim() !== '' && launcherState.kind !== 'inFlight' && !scopeOff);
 
   // Every message is driven by the machine's state, not a local guard — so a
   // rejected `ask` (askFailed) is as visible as a too-long one.
@@ -39,8 +41,13 @@
   });
   const refusalMessage = $derived.by(() => {
     void $locale;
-    return launcherState.kind === 'refused' ? refusalText(launcherState.reason.kind) : '';
+    if (launcherState.kind !== 'refused') return '';
+    // Stale once any folder is ticked again; the live line covers the off case.
+    if (launcherState.reason.kind === 'noFoldersSearched' && !scopeOff) return '';
+    return refusalText(launcherState.reason.kind);
   });
+
+  const noFolders = $derived.by(() => { void $locale; return t('refusal_no_folders_searched'); });
 
   let box = $state<HTMLTextAreaElement | null>(null);
 
@@ -92,7 +99,9 @@
   <p class="composer-hint">{hint}</p>
   {#if errorText}
     <p class="guard" role="alert">{errorText}</p>
-  {:else if launcherState.kind === 'refused'}
+  {:else if scopeOff}
+    <p class="guard" role="status">{noFolders}</p>
+  {:else if refusalMessage}
     <p class="refusal" role="status">{refusalMessage}</p>
   {/if}
 </div>

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Tree, { buildFolderTree } from './Tree.svelte';
@@ -83,6 +83,20 @@ function currentRows() {
   return [...screen.getByTestId('tree-body').querySelectorAll('[aria-current="true"]')]
     .map((el) => el.getAttribute('data-testid'));
 }
+
+// The open folders live in `localStorage` (CLAUDE.md, Node 24): a fresh
+// in-memory store per test, so one test's toggles never reach the next.
+beforeEach(() => {
+  const map = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => { map.set(k, v); },
+      removeItem: (k: string) => { map.delete(k); },
+    },
+    configurable: true,
+  });
+});
 
 beforeEach(() => {
   invoke.mockReset();
@@ -912,4 +926,88 @@ test('a discarded stale listing still updates the files', async () => {
   await fireEvent.click(box('archive')); // write stays pending
   stale.land();
   expect(await screen.findByTestId('tree-file-doc-new')).toBeTruthy();
+});
+
+// --- the scope signal: is every root unticked? --------------------------------
+
+const allOff = (id: number) => ({ rootId: id, folderPath: '', searched: false });
+const twoRootsOff: TreeListing = {
+  roots: [
+    { ...oneRootTwoFolders.roots[0], rootId: 1, searched: [allOff(1)] },
+    { ...oneRootTwoFolders.roots[0], rootId: 2, searched: [allOff(2)] },
+  ],
+};
+const lastScope = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.at(-1)?.[0];
+function mountScope(onScopeChange: (v: boolean) => void) {
+  return render(Tree, { selected: null, onPick: pick, onScopeChange });
+}
+
+test('unticking every root reports all-off, ticking one back reports not', async () => {
+  mockTree({ roots: [{ ...oneRootTwoFolders.roots[0], rootId: 1, searched: [] }, { ...oneRootTwoFolders.roots[0], rootId: 2, searched: [] }] });
+  const onScope = vi.fn();
+  mountScope(onScope);
+  await screen.findByTestId('tree-check-1-');
+  expect(lastScope(onScope)).toBe(false);
+  await fireEvent.click(screen.getByTestId('tree-check-1-'));
+  expect(lastScope(onScope)).toBe(false); // root 2 is still on
+  await fireEvent.click(screen.getByTestId('tree-check-2-'));
+  expect(lastScope(onScope)).toBe(true);
+  await fireEvent.click(screen.getByTestId('tree-check-2-'));
+  expect(lastScope(onScope)).toBe(false);
+});
+
+test('a listing that arrives with every root off reports all-off; one root on does not', async () => {
+  mockTree(twoRootsOff);
+  const onScope = vi.fn();
+  mountScope(onScope);
+  await waitFor(() => expect(lastScope(onScope)).toBe(true));
+
+  cleanup();
+  mockTree({ roots: [twoRootsOff.roots[0], { ...twoRootsOff.roots[1], searched: [] }] });
+  const second = vi.fn();
+  mountScope(second);
+  await screen.findByTestId('tree-check-2-');
+  expect(second).toHaveBeenCalled(); // the listing was seen
+  expect(lastScope(second)).toBe(false);
+});
+
+test('a failed or empty listing is never all-off', async () => {
+  mockTreeFailure();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const failed = vi.fn();
+  mountScope(failed);
+  await screen.findByTestId('tree-failed');
+  expect(failed.mock.calls.some((c) => c[0] === true)).toBe(false);
+
+  cleanup();
+  mockTree(emptyListing);
+  const empty = vi.fn();
+  mountScope(empty);
+  await screen.findByTestId('tree-empty');
+  expect(empty.mock.calls.some((c) => c[0] === true)).toBe(false);
+});
+
+// --- the open folders survive a restart -------------------------------------
+
+test('a root the person shut stays shut after a remount', async () => {
+  mockTree(oneRootTwoFolders);
+  mount(null);
+  const toggle = await screen.findByTestId('tree-root-toggle-1');
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  await fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+  cleanup();
+  mount(null);
+  expect((await screen.findByTestId('tree-root-toggle-1')).getAttribute('aria-expanded')).toBe('false');
+});
+
+test('a malformed or foreign stored value falls back to the defaults without throwing', async () => {
+  mockTree(oneRootTwoFolders);
+  for (const bad of ['{not json', '[1,2]', '"x"', 'null', JSON.stringify({ '1\0': 'no' })]) {
+    localStorage.setItem('mnema.tree.open', bad);
+    mount(null);
+    expect((await screen.findByTestId('tree-root-toggle-1')).getAttribute('aria-expanded')).toBe('true');
+    cleanup();
+  }
 });

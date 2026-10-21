@@ -51,9 +51,11 @@
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
   // as well, which is what the backend is asked to open.
-  let { selected, onPick }: {
+  let { selected, onPick, onScopeChange }: {
     selected: TreeSelection | null;
     onPick: (pick: TreePick) => void;
+    // Called when "every root is unticked" changes; the composer says so at once.
+    onScopeChange?: (allOff: boolean) => void;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
@@ -61,7 +63,26 @@
   // Folders the person opened or shut by hand, keyed per root: two roots may
   // hold the same folder path and must not share one open flag. The root row
   // itself lives in the same map under its root's `''` path.
-  let toggled = $state<Record<string, boolean>>({});
+  // Remembered across restarts (best effort, like `layout.ts`): a malformed
+  // value, or any entry that is not a boolean, is ignored.
+  const OPEN_KEY = 'mnema.tree.open';
+  function loadOpen(): Record<string, boolean> {
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem(OPEN_KEY) ?? 'null');
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      return Object.fromEntries(Object.entries(raw).filter(([, v]) => typeof v === 'boolean'));
+    } catch {
+      return {};
+    }
+  }
+  function saveOpen(map: Record<string, boolean>) {
+    try {
+      localStorage.setItem(OPEN_KEY, JSON.stringify(map));
+    } catch {
+      // quota or a locked-down webview: the folders are not worth a crash
+    }
+  }
+  let toggled = $state<Record<string, boolean>>(loadOpen());
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -209,6 +230,7 @@
   function toggle(rootId: number, path: string) {
     const k = key(rootId, path);
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
+    saveOpen(toggled);
   }
 
   // The search filter: a folder's own flag covers the files directly in it. A
@@ -252,6 +274,13 @@
     const flags = [path, ...folderPaths(children)].map((p) => ownOn(rootId, p));
     return flags.every(Boolean) ? 'on' : flags.some(Boolean) ? 'mixed' : 'off';
   }
+
+  // True only for a loaded listing with at least one root, every one unticked.
+  const allOff = $derived(
+    listing !== null && roots.length > 0 &&
+      roots.every(({ root, nodes }) => checkState(root.rootId, '', nodes) === 'off'),
+  );
+  $effect(() => onScopeChange?.(allOff));
 
   // A click sets the whole branch: — and empty turn into ✓, ✓ into empty. The
   // entries under it are dropped so the branch inherits the new value.

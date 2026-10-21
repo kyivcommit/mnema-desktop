@@ -15,6 +15,8 @@
   import type { AskCitation, DocumentFocus, DocumentLocation, Hit } from '../lib/ipc';
 
   let query = $state('');
+  // Every folder unticked in the tree: the composer refuses at once.
+  let scopeOff = $state(false);
   // `$state.raw`, here and for `previous`: the transcript finds a turn by the
   // identity of its answer, and a deep proxy of the same object is not `===` to it.
   let launcherState = $state.raw<LauncherState>({ kind: 'idle' });
@@ -259,7 +261,7 @@
 <Shell bind:panels fileOpen={openFile !== null}>
   {#snippet transcript()}
     <Transcript {turns} state={shownState} onSelected={showCitation} />
-    <Composer bind:value={query} state={launcherState} onSubmit={runSearch} />
+    <Composer bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
   {/snippet}
   {#snippet recents()}
     <Recents activeId={historyId} gen={historyGen} onOpen={openHistory}
@@ -267,7 +269,7 @@
       error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
   {/snippet}
   {#snippet tree()}
-    <Tree {selected} onPick={openAtStart} />
+    <Tree {selected} onPick={openAtStart} onScopeChange={(v) => (scopeOff = v)} />
   {/snippet}
   {#snippet file()}
     {#if openFile !== null}

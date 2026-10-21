@@ -1463,3 +1463,21 @@ test('a failed settings read leaves the cloud not ready, whatever the probe said
   render(Launcher);
   await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('notConfigured'));
 });
+
+test('unticking the last folder says so at once and blocks the ask; ticking one back lifts it', async () => {
+  mockBackend(undefined);
+  render(Launcher);
+  const check = (await screen.findByTestId('tree-check-1-')) as HTMLInputElement;
+  const line = () => screen.queryByText(t('refusal_no_folders_searched'));
+  expect(line()).toBeNull();
+
+  await fireEvent.click(check); // the only root goes from on to off
+  await waitFor(() => expect(line()).not.toBeNull());
+  await submit('anything');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(0);
+
+  await fireEvent.click(check);
+  await waitFor(() => expect(line()).toBeNull());
+  await submit('anything');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(1);
+});
