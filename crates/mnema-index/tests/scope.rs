@@ -70,3 +70,18 @@ fn the_migration_is_the_sixth() {
     let db = temp_db();
     assert_eq!(rows(&db), 0, "a fresh database has the table, empty");
 }
+
+#[test]
+fn setting_the_same_folder_again_flips_its_entry() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    for path in ["notes", ""] {
+        db.set_folder_searched(root, path, false).unwrap();
+        db.set_folder_searched(root, path, true).unwrap();
+        assert_eq!(
+            db.search_folders(root).unwrap(),
+            vec![(path.to_string(), true)]
+        );
+        db.set_folder_searched(root, path, false).unwrap();
+    }
+}

@@ -1081,7 +1081,8 @@ impl Db {
     /// replaceable and removable, and [`Db::upsert_vector_for_text`], added
     /// by Task 6 as the one the embedding pass actually calls.
     /// [`Db::create_space`], [`Db::drop_space`] and
-    /// [`Db::delete_watched_root`] open one directly.
+    /// [`Db::delete_watched_root`] and [`Db::set_folder_searched`] open one
+    /// directly.
     /// [`Db::adopt_embedding_model`] does both at once: one transaction
     /// through [`Db::create_space`], another through `self.transaction` for
     /// the pointer write itself.
@@ -1375,8 +1376,8 @@ fn delete_watched_root_in(tx: &Transaction<'_>, root_id: i64) -> Result<u64, Err
         tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
     }
     // Cascades away the path rows of any document that survived — one still
-    // named from another root — and this root's tag_rule, skipped and
-    // ignore_rule rows.
+    // named from another root — and this root's tag_rule, skipped,
+    // ignore_rule and search_folder rows.
     tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
     Ok(doomed.len() as u64)
 }
