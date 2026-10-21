@@ -51,6 +51,8 @@ test('the query echoes as a bubble and the answer renders its anchors as buttons
     'Answer',
     'Citations',
   ]);
+  // The answer's heading is for a screen reader: it is not drawn.
+  expect(screen.getByRole('heading', { name: 'Answer' }).classList.contains('sr-only')).toBe(true);
 });
 
 // The block renderer puts the answer's text in more than one element, so the
@@ -214,17 +216,9 @@ test('the preview label and both headings follow a live language switch', async 
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 });
 
-test('the answer says where it came from, in both languages', async () => {
-  const via = (v: 'search' | 'conversation') => ({ ...gen(generated), via: v });
-  const { unmount } = render(Answer, { query: 'q', answer: via('search'), onSelect: vi.fn() });
-  expect(screen.getByTestId('answer-via').textContent).toBe('search');
-  setLocale('uk');
-  await tick();
-  expect(screen.getByTestId('answer-via').textContent).toBe('пошук');
-  unmount();
-  render(Answer, { query: 'q', answer: via('conversation'), onSelect: vi.fn() });
-  expect(screen.getByTestId('answer-via').textContent).toBe('з розмови');
-  setLocale('en');
-  await tick();
-  expect(screen.getByTestId('answer-via').textContent).toBe('from the conversation');
+// An answer that cites nothing has no list to head: the heading is not drawn alone.
+test('an answer with no citations draws no Citations heading', () => {
+  render(Answer, { query: 'q', answer: { ...gen(generated), citations: [] }, onSelect: vi.fn() });
+  expect(screen.queryByRole('heading', { name: 'Citations' })).toBeNull();
+  expect(screen.queryByRole('list')).toBeNull();
 });

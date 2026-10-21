@@ -77,7 +77,7 @@ test('real launcher places the three areas with the tree inside the right one', 
   // pane inside the right area, not a column of its own (§2).
   const centre = screen.getByTestId('col-transcript');
   expect(centre.contains(screen.getByRole('textbox'))).toBe(true);
-  expect(centre.contains(screen.getByTestId('settings'))).toBe(true);
+  expect(centre.contains(screen.getByTestId('new-chat'))).toBe(true);
   const tree = screen.getByTestId('col-tree');
   expect(tree.contains(screen.getByTestId('tree-body'))).toBe(true);
   expect(screen.getByTestId('col-right').contains(tree)).toBe(true);
@@ -130,9 +130,8 @@ test('real recents marks the conversation on screen with --select', async () => 
 });
 
 // The card is a column with one gap between its parts, and `Answer` relies on
-// it: the header, paragraph, citations and the via line all carry `margin: 0`,
-// and `.answer-card .via` pulls up by -9 px. Without this rule the paragraph
-// and the via line sit on each other. Pinned by reading the sheet, as the cloud
+// it: the paragraph and the citations carry `margin: 0`. Without this rule
+// the paragraph and the citation list sit on each other. Pinned by reading the sheet, as the cloud
 // colours below are: no jsdom render computes the gap (review, Important 1).
 test('the answer card keeps the column gap its parts depend on', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');

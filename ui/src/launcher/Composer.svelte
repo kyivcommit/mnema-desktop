@@ -18,7 +18,6 @@
   } = $props();
 
   const placeholder = $derived.by(() => { void $locale; return t('search_placeholder'); });
-  const hint = $derived.by(() => { void $locale; return t('composer_hint'); });
   const sendLabel = $derived.by(() => { void $locale; return t('composer_send'); });
 
   // The button and Enter agree on when a question may leave; `runSearch` still
@@ -96,7 +95,6 @@
       onkeydown={onKeydown}></textarea>
     <button type="button" class="composer-send" aria-label={sendLabel} disabled={!canSend} onclick={() => onSubmit(value)}>↵</button>
   </div>
-  <p class="composer-hint">{hint}</p>
   {#if errorText}
     <p class="guard" role="alert">{errorText}</p>
   {:else if scopeOff}

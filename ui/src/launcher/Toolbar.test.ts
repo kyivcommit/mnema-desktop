@@ -15,10 +15,10 @@ const OK: ProviderStatus = { kind: 'ok' };
 const props = (over: Record<string, unknown> = {}) => ({ status: OK, ...over }) as never;
 const buttons = () => screen.getAllByRole('button');
 
-test('the buttons stand in the order cloud, settings', () => {
+test('the toolbar holds the cloud and nothing else', () => {
   setLocale('en');
   render(Toolbar, props());
-  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud', 'settings']);
+  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud']);
 });
 
 test('every button has a non-empty title equal to its aria-label, in both languages', () => {
@@ -26,7 +26,7 @@ test('every button has a non-empty title equal to its aria-label, in both langua
   for (const loc of ['en', 'uk'] as const) {
     setLocale(loc);
     const { unmount } = render(Toolbar, props());
-    expect(buttons()).toHaveLength(2); // positive control: the loop below is not over nothing
+    expect(buttons()).toHaveLength(1); // positive control: the loop below is not over nothing
     for (const b of buttons()) {
       expect(b.getAttribute('aria-label')).toBeTruthy();
       expect(b.getAttribute('title')).toBe(b.getAttribute('aria-label'));
@@ -69,12 +69,6 @@ test('the cloud title says what is missing, and why it is unreachable', () => {
   expect(title(OK)).toContain('OpenRouter');
   setLocale('uk');
   expect(title(OK)).toContain('OpenRouter');
-});
-
-test('settings opens without a section', async () => {
-  render(Toolbar, props());
-  await fireEvent.click(screen.getByTestId('settings'));
-  expect(openSettings).toHaveBeenCalledWith();
 });
 
 test('the cloud names the missing local models, not the key', () => {

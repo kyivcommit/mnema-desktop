@@ -188,7 +188,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   border-radius: 13px 13px 5px 13px; background: var(--accent-soft);
   font-size: 14px; line-height: 1.5; overflow-wrap: anywhere;
 }
-.answer-card .via { margin-top: -9px; font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 11px; color: var(--ink-soft); }
 /* §5: the conversation. Role is told by alignment, so nothing here names a
    speaker: the question sits right (`.umsg`, drawn by `Answer`), the answer is
    the plain text column on the left, without a bubble. */
@@ -219,14 +218,16 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   background: var(--accent-soft); color: var(--accent); font-size: 15px;
 }
 .composer-send:disabled { background: transparent; color: var(--ink-soft); }
-.composer-hint {
-  margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
-  font-size: 11px; color: var(--ink-soft);
-}
 .composer :is(.guard, .refusal) { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
 .composer .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
 .composer .refusal { color: var(--ink-soft); }
-.new-chat { flex: none; font-size: 12.5px; padding: 3px 9px; }
+.tb.new-chat { width: auto; gap: 5px; padding: 0 8px 0 5px; font-size: 12.5px; }
+/* The answer's heading is for a screen reader only: the card's first block is
+   the answer itself, and a visible label above it said nothing a person sees. */
+.answer-card h3.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 .answer-card h3 {
   margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);

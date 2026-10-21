@@ -22,7 +22,6 @@
 
   // `known` must come from the citations' own anchor values (Decision 5) —
   // an anchor number that has no matching citation stays literal text.
-  const viaText = $derived.by(() => { void $locale; return t(answer.via === 'conversation' ? 'answer_via_conversation' : 'answer_via_search'); });
 
   const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
   // The markdown layer is pure and knows nothing of citations; the anchors are
@@ -52,8 +51,7 @@
 <div class="answer-card">
   <div class="umsg" data-testid="query-echo">{query}</div>
 
-  <h3>{answerHeading}</h3>
-  <span class="via" data-testid="answer-via">{viaText}</span>
+  <h3 class="sr-only">{answerHeading}</h3>
   <div class="answer-body" data-testid="answer-body">
     {#each blocks as block}
       {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
@@ -64,41 +62,43 @@
     {/each}
   </div>
 
-  <h3>{citationsHeading}</h3>
-  <ul>
-    {#each previews as { citation, label } (citation.anchor)}
-      <li>
-        <button
-          type="button"
-          class="prev"
-          data-testid={`preview-${citation.anchor}`}
-          onclick={() => onSelect(citation)}
-        >
-          <!-- 🔴 Owner review on PR #24, P2. This preview used to render the
-               label ALONE, so the card listing an answer's citations was a
-               list of file paths: a person reading `[7]` in the prose above
-               found nothing in the list carrying that number, and nothing of
-               the passage the sentence rests on. Three parts, in reading
-               order: which anchor this is, what it says, where it came from.
+  {#if previews.length > 0}
+    <h3>{citationsHeading}</h3>
+    <ul>
+      {#each previews as { citation, label } (citation.anchor)}
+        <li>
+          <button
+            type="button"
+            class="prev"
+            data-testid={`preview-${citation.anchor}`}
+            onclick={() => onSelect(citation)}
+          >
+            <!-- 🔴 Owner review on PR #24, P2. This preview used to render the
+                 label ALONE, so the card listing an answer's citations was a
+                 list of file paths: a person reading `[7]` in the prose above
+                 found nothing in the list carrying that number, and nothing of
+                 the passage the sentence rests on. Three parts, in reading
+                 order: which anchor this is, what it says, where it came from.
 
-               The anchor is bracketed to match the form it takes in the prose
-               (`[{segment.n}]` in the `anchors` snippet below) — the two are the
-               same reference and a person has to be able to pair them by sight.
+                 The anchor is bracketed to match the form it takes in the prose
+                 (`[{segment.n}]` in the `anchors` snippet below) — the two are the
+                 same reference and a person has to be able to pair them by sight.
 
-               `citation-anchor`/`citation-text`/`citation-label`, NOT
-               `preview-*`: the preview testids are queried as a namespace
-               (`queryAllByTestId(/^preview-/)`) and a second id inside it is
-               counted as a preview row. Held by ONE test — `the preview
-               namespace holds one id per citation and nothing else`,
-               `Answer.test.ts` — and by nothing else; the same rule
-               `Passages.svelte` follows for its own row. -->
-          <span class="tag" data-testid="citation-anchor">[{citation.anchor}]</span>
-          <span class="q" data-testid="citation-text">{citation.text}</span>
-          <span class="path" data-testid="citation-label">{label}</span>
-        </button>
-      </li>
-    {/each}
-  </ul>
+                 `citation-anchor`/`citation-text`/`citation-label`, NOT
+                 `preview-*`: the preview testids are queried as a namespace
+                 (`queryAllByTestId(/^preview-/)`) and a second id inside it is
+                 counted as a preview row. Held by ONE test — `the preview
+                 namespace holds one id per citation and nothing else`,
+                 `Answer.test.ts` — and by nothing else; the same rule
+                 `Passages.svelte` follows for its own row. -->
+            <span class="tag" data-testid="citation-anchor">[{citation.anchor}]</span>
+            <span class="q" data-testid="citation-text">{citation.text}</span>
+            <span class="path" data-testid="citation-label">{label}</span>
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </div>
 
 {#snippet inline(spans: Span[])}
