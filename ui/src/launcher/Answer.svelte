@@ -17,6 +17,7 @@
     onSelect: (citation: AskCitation) => void;
   } = $props();
 
+  const answerHeading = $derived.by(() => { void $locale; return t('answer_heading'); });
   const citationsHeading = $derived.by(() => { void $locale; return t('citations_heading'); });
 
   // `known` must come from the citations' own anchor values (Decision 5) —
@@ -50,6 +51,7 @@
 <div class="answer-card">
   <div class="umsg" data-testid="query-echo">{query}</div>
 
+  <h3 class="sr-only">{answerHeading}</h3>
   <div class="answer-body" data-testid="answer-body">
     {#each blocks as block}
       {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
