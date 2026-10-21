@@ -20,7 +20,7 @@ fn block(reading_order: i64, text: &str) -> Block {
 // ---------------------------------------------------------------- chunk_anchor
 
 #[test]
-fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() {
+fn chunk_anchor_reports_the_identity_and_the_blocks_a_chunk_covers() {
     let dir = tempfile::tempdir().unwrap();
     let db = fresh(&dir);
 
@@ -60,7 +60,7 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
     // `ord = 4`, not 0: every other assertion on `ChunkAnchor.ord` in the
     // repository used to be `assert_eq!(anchor.ord, 0)`, on a fixture that
     // could not tell "read the column" apart from "return a hardcoded 0" —
-    // 27 of 28 `source_around` fixtures through the IPC also cite `ord: 0`.
+    // Every IPC fixture that cites a passage sends `ord: 0` as well.
     // Non-zero here closes that gap at the layer that reads the column
     // directly.
     let chunk_id = db
@@ -75,10 +75,6 @@ fn chunk_anchor_reports_the_page_and_reading_order_range_of_the_chunks_blocks() 
     assert_eq!(anchor.ord, 4);
     assert_eq!(anchor.text, full_text);
     assert_eq!(anchor.spans, locator.spans);
-    assert_eq!(anchor.section_title.as_deref(), Some("Section One"));
-    assert_eq!(anchor.page_no, 1);
-    assert_eq!(anchor.first_reading_order, 2);
-    assert_eq!(anchor.last_reading_order, 3);
 
     // Both directions: an id no chunk carries answers None, not the anchor
     // above under a different guise.
@@ -266,228 +262,4 @@ fn roots_holding_path_returns_every_root() {
     // leave that clause unpinned.
     let roots = db.roots_holding_path("shared.txt").unwrap();
     assert_eq!(roots, vec![root_a, root_b]);
-}
-
-/// A second document, inserted **before** the one under test, and it kills two
-/// mutants that survived while every fixture here held exactly one document.
-///
-/// 1. `WHERE b.document_id = ?1` widened to `(… OR 1 = 1)` — a window not
-///    scoped to a document at all — was invisible: with one document, "every
-///    block" and "this document's blocks" are the same set. That mutant is
-///    literally "return another document's paragraphs under the user's
-///    citation", the hazard the whole PR exists to refuse.
-/// 2. `p.page_no` swapped for `p.id` was invisible because pages inserted
-///    first and in order get `id == page_no`. Inserting a decoy first pushes
-///    the real document's page ids past its page numbers, so the two stop
-///    coinciding.
-///
-/// Its blocks carry `reading_order` values that collide with the real
-/// document's, so a query that forgot the document term would interleave them.
-fn insert_decoy_document(db: &Db) {
-    let decoy = db
-        .insert_document(&"d".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    for page_no in 1..=2 {
-        let page = db.insert_page(&decoy, page_no, "native:txt", None).unwrap();
-        for i in 1..=3 {
-            db.insert_block(page, &block(i, &format!("DECOY p{page_no}b{i}")))
-                .unwrap();
-        }
-    }
-}
-
-// ----------------------------------------------------------------- reading_window
-
-/// Whitespace-only blocks do not count against the radius.
-///
-/// Owner review on PR #22 reproduced this with `[real, spaces, passage, tab,
-/// real]` and `radius = 1`: the window returned the two blank blocks and hid
-/// **both** real neighbours. ⚠️ That is the owner's reproduction, not the
-/// fixture below — this one uses ` \t ` on **both** sides, and the comment on
-/// it says why a spaces-only blank would measure nothing here. The readers store them on purpose — the text
-/// reader treats a line of spaces as content, so one between two blank lines
-/// becomes its own row — while `chunk_blocks` skips them, so no passage can
-/// ever come from one. Counting them made `radius` mean stored rows instead of
-/// visible source.
-#[test]
-fn reading_window_skips_blocks_a_chunk_could_never_have_come_from() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
-    let doc = db
-        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    // ⚠️ Each blank carries a **tab**, not spaces alone, and that is the whole
-    // discriminating power of this fixture: SQLite's one-argument `trim`
-    // removes spaces and nothing else, so a spaces-only blank is excluded even
-    // by the broken predicate and proves nothing. A blank the broken predicate
-    // would keep is the only kind that measures anything here.
-    for (i, text) in ["real before", " \t ", "passage", " \t ", "real after"]
-        .iter()
-        .enumerate()
-    {
-        db.insert_block(page, &block(i as i64 + 1, text)).unwrap();
-    }
-
-    // The anchor is the passage at reading_order 3; radius 1 either side.
-    let window = db.reading_window(&doc, 1, 3, 3, 1).unwrap();
-
-    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["real before", "passage", "real after"],
-        "the blank rows must not consume the radius — the card would show two empty paragraphs \
-         and neither real neighbour"
-    );
-    // Both directions: the window is now the whole chunkable document, so
-    // neither flag may claim there is more.
-    assert!(!window.has_more_before);
-    assert!(!window.has_more_after);
-}
-
-/// The `radius.max(0)` guard, which had eight lines of reasoning and no test.
-///
-/// `reading_window` is `pub`, and the command's `u32` clamp does not protect
-/// it. A negative radius without the guard is silently catastrophic rather
-/// than loud: `LIMIT -1` means *no limit* in SQLite, `radius as usize` wraps to
-/// a huge number so `truncate` does nothing, and `len > -1` makes both flags
-/// true — the whole document returned, with two lies about it.
-#[test]
-fn reading_window_treats_a_negative_radius_as_zero_rather_than_no_limit() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
-    let doc = db
-        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    for i in 1..=5 {
-        db.insert_block(page, &block(i, &format!("b{i}"))).unwrap();
-    }
-
-    // ⚠️ `-2`, not `-1`, and the difference is the whole test. At `-1` the
-    // guard is a no-op: `limit = radius + 1` is `0`, and `LIMIT 0` returns no
-    // rows, which is what the guarded path returns anyway. At `-2` the limit
-    // is `-1`, and in SQLite `LIMIT -1` means *no limit* — every block before
-    // and after the anchor comes back, `truncate` is a no-op because
-    // `radius as usize` has wrapped, and both flags read `len > -2`. That is
-    // the catastrophe; `-1` cannot see it. (The first draft of this test used
-    // `-1` and the mutant survived it.)
-    let window = db.reading_window(&doc, 1, 3, 3, -2).unwrap();
-
-    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["b3"],
-        "a negative radius must degrade to zero — the anchor block alone — not \
-         to an unbounded LIMIT that returns the whole document"
-    );
-    // Both flags stay honest: there really is more on each side.
-    assert!(window.has_more_before);
-    assert!(window.has_more_after);
-}
-
-/// Three pages of three blocks, anchored in the middle, so that **both** sides
-/// of the window cross a page boundary and both `has_more` flags are true.
-///
-/// The shape is load-bearing, and a smaller one hid two live mutants. With an
-/// anchor whose before-side and after-side each stay inside one page,
-/// `ORDER BY p.page_no DESC, b.reading_order DESC` and the bare
-/// `ORDER BY b.reading_order DESC` return the same rows — `reading_order` is
-/// unique only per page (`ix_block_page`, `schema.sql:140`), so it is not a
-/// document ordinal, and the difference only shows when the candidates span
-/// two pages and the values collide across them. Here `p1b3` and `p2b3` both
-/// carry `reading_order = 3`, which is what makes the page term load-bearing.
-///
-/// Both flags are asserted **true** here; the two tests below assert them
-/// false. Neither direction alone is coverage: a flag hardcoded either way
-/// passes one of the pair.
-#[test]
-fn reading_window_returns_radius_blocks_each_side_in_document_reading_order() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
-    insert_decoy_document(&db);
-    let doc = db
-        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-
-    for page_no in 1..=3 {
-        let page = db.insert_page(&doc, page_no, "native:txt", None).unwrap();
-        for i in 1..=3 {
-            db.insert_block(page, &block(i, &format!("p{page_no}b{i}")))
-                .unwrap();
-        }
-    }
-
-    // Anchor: page 2, reading_order 2. Radius 3 leaves exactly one block over
-    // on each side (`p1b1` before, `p3b3` after), so both flags must be true.
-    let window = db.reading_window(&doc, 2, 2, 2, 3).unwrap();
-
-    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["p1b2", "p1b3", "p2b1", "p2b2", "p2b3", "p3b1", "p3b2"]
-    );
-    assert!(window.has_more_before, "p1b1 is out of range before");
-    assert!(window.has_more_after, "p3b3 is out of range after");
-
-    // The page term is what puts p1b3 before p2b1 despite the larger
-    // reading_order; pinned so dropping it from either ORDER BY goes red.
-    let pages: Vec<i64> = window.blocks.iter().map(|b| b.page_no).collect();
-    assert_eq!(pages, vec![1, 1, 2, 2, 2, 3, 3]);
-}
-
-/// Both directions of the flag: an anchor at the very start of the document,
-/// with a radius larger than the whole document, must report no more on
-/// either side — a window that always claimed `true` would pass the test
-/// above alone.
-#[test]
-fn reading_window_reports_no_more_when_the_document_ends() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
-    insert_decoy_document(&db);
-    let doc = db
-        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    for i in 1..=3 {
-        db.insert_block(page, &block(i, &format!("b{i}"))).unwrap();
-    }
-
-    let window = db.reading_window(&doc, 1, 1, 1, 10).unwrap();
-
-    assert!(!window.has_more_before);
-    assert!(!window.has_more_after);
-    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(texts, vec!["b1", "b2", "b3"]);
-}
-
-/// Pins the `LIMIT radius + 1` mechanism: a document where the before-side
-/// has exactly one block more than the radius asks for must report
-/// `has_more_before == true`, and this is red against a hardcoded flag in
-/// either direction.
-#[test]
-fn reading_window_reports_more_before_when_exactly_one_block_is_out_of_range() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = fresh(&dir);
-    insert_decoy_document(&db);
-    let doc = db
-        .insert_document(&"a".repeat(64), "text/plain", 1, SourceKind::Document)
-        .unwrap();
-    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
-    // radius=2 before the anchor (block 4): blocks 1..3 exist before it, one
-    // more than the radius can show (2, 3), so block 1 is the "one out of
-    // range" that must flip has_more_before to true.
-    for i in 1..=5 {
-        db.insert_block(page, &block(i, &format!("b{i}"))).unwrap();
-    }
-
-    let window = db.reading_window(&doc, 1, 4, 4, 2).unwrap();
-
-    assert!(window.has_more_before);
-    // After side: block 5 is the only one after the anchor, well within the
-    // radius of 2 — so has_more_after must be false, not merely "not
-    // asserted".
-    assert!(!window.has_more_after);
-    let texts: Vec<&str> = window.blocks.iter().map(|b| b.text.as_str()).collect();
-    assert_eq!(texts, vec!["b2", "b3", "b4", "b5"]);
 }

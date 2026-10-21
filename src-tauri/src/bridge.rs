@@ -869,7 +869,7 @@ pub struct Hit {
     pub section_title: Option<String>,
     pub coordinate: Coordinate,
     /// The occurrence identity a re-index can invalidate but `chunk_id` alone
-    /// cannot reveal — carried so a later `source_around` call can be pinned
+    /// cannot reveal — carried so a later `open_document` call can be pinned
     /// against it (owner-Codex P1 on PR #22; `mnema_index::Citation`'s own
     /// doc comment explains each field).
     pub document_id: String,
@@ -1322,9 +1322,13 @@ pub enum Via {
     Conversation,
 }
 
-/// What [`ask`] answers with. Different states are different variants, never a
-/// `null` (the shape [`TextArmReport`]/[`ContentArmReport`] share). Every
-/// variant carries the arm reports, because retrieval is identical across them.
+/// One answer to one question, as the window draws it and as `query_history`
+/// stores it. Different states are different variants, never a `null` (the
+/// shape [`TextArmReport`]/[`ContentArmReport`] share). Every variant carries
+/// the arm reports, because retrieval is identical across them.
+///
+/// [`ask`] returns this inside [`AskReply`], with the history row's id beside
+/// it. This type itself is the stored JSON, so it grows no window-only fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum AskAnswer {
@@ -1478,11 +1482,26 @@ const MAX_ASK_QUERY: usize = 2048;
 /// (`EmptyCompletion`, `service.py:80-82`); otherwise the anchors the model
 /// wrote become citations.
 #[tauri::command(async)]
-pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskAnswer, Error> {
+pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskReply, Error> {
     let mut taken = None;
     let answer = answer_question(&state, &query, &mut taken)?;
-    record_answer(&state, &query, &answer, taken);
-    Ok(answer)
+    let history_id = record_answer(&state, &query, &answer, taken);
+    Ok(AskReply { answer, history_id })
+}
+
+/// What [`ask`] answers with: the answer, and the id of the history row it was
+/// written to.
+///
+/// The id sits beside [`AskAnswer`] and never inside it: that type is also the
+/// JSON stored in `query_history`, so a field added here would be written into
+/// every row and read back out of it, and rows stored before the field existed
+/// would need a default they cannot honestly have. `None` is an answer that was
+/// not recorded — a refusal, a failed chat call, or a write that failed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskReply {
+    pub answer: AskAnswer,
+    pub history_id: Option<i64>,
 }
 
 /// The answer [`ask`] gives, before anything is kept of it.
@@ -1898,9 +1917,10 @@ pub fn new_chat(state: State<'_, AppState>) {
 }
 
 /// Keeps a question that got an answer, so the launcher's history can reopen
-/// it. A refusal or an error is not an answer and is not kept, and neither is
-/// a citations-only answer whose model failed to answer (any `why` but
-/// `NotAsked`): it must not replace the row of an earlier generated answer.
+/// it, and answers the id of the row it wrote. A refusal or an error is not an
+/// answer and is not kept, and neither is a citations-only answer whose model
+/// failed to answer (any `why` but `NotAsked`): it must not replace the row of
+/// an earlier generated answer.
 ///
 /// A failed write is logged and then ignored: the person asked and must still
 /// get the answer, and losing a history row is the lesser harm.
@@ -1909,7 +1929,7 @@ fn record_answer(
     query: &str,
     answer: &AskAnswer,
     taken: Option<Vec<crate::dialogue::SessionTurn>>,
-) {
+) -> Option<i64> {
     // Only a question nobody asked a model keeps its citations: any other
     // reason is a failure, and a failure must not replace a stored answer.
     if !matches!(
@@ -1920,7 +1940,7 @@ fn record_answer(
                 ..
             }
     ) {
-        return;
+        return None;
     }
     // The row is the whole conversation, keyed by its first question. A turn
     // the session did not take (the switch is off, or the session changed
@@ -1938,18 +1958,20 @@ fn record_answer(
             answer: answer.clone(),
         }],
     };
-    let Some(key) = turns.first().map(|t| t.query.clone()) else {
-        return;
-    };
+    let key = turns.first().map(|t| t.query.clone())?;
     let json = match serde_json::to_string(&serde_json::json!({ "turns": turns })) {
         Ok(json) => json,
         Err(e) => {
             eprintln!("mnema: could not record the answer in the history: {e}");
-            return;
+            return None;
         }
     };
-    if let Err(e) = state.with_index(|db| db.history_record(&key, &json)) {
-        eprintln!("mnema: could not record the answer in the history: {e}");
+    match state.with_index(|db| db.history_record(&key, &json)) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            eprintln!("mnema: could not record the answer in the history: {e}");
+            None
+        }
     }
 }
 

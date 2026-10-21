@@ -68,11 +68,9 @@ pub fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
         ))
         // `open_settings` reads it; the production `.setup` manages it.
         .manage(mnema_desktop::ReturnToLauncher::default())
-        // `set_launcher_layout` reads it; the production `.setup` manages it.
-        .manage(mnema_desktop::launcher_layout::Current::default())
-        .manage(mnema_desktop::launcher_position::Memory::default())
-        // `go_cold_if_idle` reads it; the production `.setup` manages it.
-        .manage(mnema_desktop::launcher_layout::HiddenAt::default())
+        // The focus mark `start_cold_timer` reads; the production `.setup`
+        // manages it.
+        .manage(mnema_desktop::provider::HiddenAt::default())
         .invoke_handler(mnema_desktop::invoke_handler())
         .build(mock_context(noop_assets()))
         .expect("failed to build the mock application")

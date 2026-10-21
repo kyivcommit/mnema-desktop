@@ -79,7 +79,7 @@ export type TreeFile = { relativePath: string; documentId: string };
 export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[] };
 export type TreeListing = { roots: TreeRoot[] };
 
-// One question the person asked, as the launcher's Recents tab lists it
+// One question the person asked, as the sidebar's conversation list shows it
 // (`bridge.rs` `HistoryEntry`). `askedAt` is SECONDS since the epoch, newest first.
 export type HistoryEntry = { id: number; query: string; askedAt: number };
 
@@ -204,17 +204,37 @@ export const removeMask = (pattern: string) => invoke<boolean>('remove_mask', { 
 export type Freshness =
   | { kind: 'current' } | { kind: 'reindexed' } | { kind: 'fileChanged' }
   | { kind: 'fileMissing' } | { kind: 'noPath' };
-export type SourceBlock = { blockId: number; kind: string; text: string; pageNo: number; readingOrder: number };
-export type WireSegment = { blockId: number; start: number; end: number; blockStart: number };
-export type SourceAround =
-  | { kind: 'excerpt'; blocks: SourceBlock[]; spans: WireSegment[]; documentId: string;
-      sectionTitle: string | null; hasMoreBefore: boolean; hasMoreAfter: boolean; freshness: Freshness }
-  | { kind: 'gone'; reason: { kind: 'noSuchChunk' } | { kind: 'idReused' } };
+
+// The whole of one document, from `open_document`. `blocks` is the file itself,
+// not a window around a citation: the pane scrolls it from beginning to end.
+// `kind` is `block.type` verbatim, so the caller decides what it draws as a
+// heading. `spans` measure into `blockId` in Unicode scalar values — `length`
+// is the slice, `primary` the clicked one.
+export type DocumentLocation = { documentId: string; rootId: number | null; relativePath: string | null };
+export type DocumentFocus = { chunkId: number; ord: number; text: string };
+export type PaneSpan = { blockId: number; blockStart: number; length: number; primary: boolean };
+// `relativePath` is the path the view was resolved for: the caller's own when
+// it named one, and the document's sole `path` row when it named none — the
+// same row freshness is decided for. Null when neither exists, which is
+// `noPath`'s other half and not something the pane may invent.
+export type DocumentView =
+  | { kind: 'file';
+      blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
+      focusBlockIds: number[]; spans: PaneSpan[]; relativePath: string | null; freshness: Freshness }
+  // `rebuilding`: the document is being rewritten right now, so the index holds
+  // a prefix of it, not the file — retry after the scan rather than show it.
+  | { kind: 'unavailable'; reason: 'noSuchDocument' | 'noBlocks' | 'rebuilding' | 'tooLarge' };
+
+// What `ask` answers with (`bridge.rs` `AskReply`): the answer, and the id of the
+// history row it was written to. The id is beside the answer, never inside it —
+// `AskAnswer` is also the JSON stored in `query_history`. Null when nothing was
+// recorded: a refusal, a failed chat call, or a write that failed.
+export type AskReply = { answer: AskAnswer; historyId: number | null };
 
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
-export const ask = (query: string) => invoke<AskAnswer>('ask', { query });
+export const ask = (query: string) => invoke<AskReply>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const listHistory = () => invoke<HistoryEntry[]>('list_history');
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
@@ -230,11 +250,14 @@ export const addWatchedFolder = (path: string) => invoke<number>('add_watched_fo
 // the compare would check nothing.
 export const removeWatchedFolder = (rootId: number, path: string) =>
   invoke<number>('remove_watched_folder', { rootId, path });
-export const sourceAround = (c: AskCitation | Hit, radius = 3) =>
-  invoke<SourceAround>('source_around', {
-    chunkId: c.chunkId, passageText: c.text,
-    citedDocumentId: c.documentId, citedOrd: c.ord, citedRootId: c.rootId,
-    citedRelativePath: c.relativePath, radius,
+// A citation opens the whole file with its passage highlighted; the tree opens
+// the same file with no focus. A partial `focus` is ignored by the backend —
+// `chunk.id` is reused, so an id is only meaningful with the full `ord` + `text`
+// pair the backend's focus pin compares.
+export const openDocument = (location: DocumentLocation, focus: DocumentFocus | null = null) =>
+  invoke<DocumentView>('open_document', {
+    documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath,
+    chunkId: focus?.chunkId ?? null, citedOrd: focus?.ord ?? null, citedText: focus?.text ?? null,
   });
 
 // A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only
@@ -847,25 +870,6 @@ export const listenScanProgress = async (cb: (state: ScanState) => void): Promis
   const { listen } = await import('@tauri-apps/api/event');
   return listen<ScanState>(SCAN_PROGRESS_EVENT, (e) => cb(e.payload));
 };
-
-// The launcher window forgot its last answer after being hidden past the cold
-// threshold (`lib.rs`). Emitted to the launcher window only, with no payload,
-// before the window is shown again.
-export const LAUNCHER_COLD_EVENT = 'launcher-cold';
-
-export const listenLauncherCold = async (cb: () => void): Promise<UnlistenFn> => {
-  const { listen } = await import('@tauri-apps/api/event');
-  return listen(LAUNCHER_COLD_EVENT, () => cb());
-};
-
-// Which side panels the launcher shows; the window is resized to match
-// (`launcher_layout.rs`). Idempotent on the Rust side, but callers still send
-// one call per change.
-export const setLauncherLayout = (left: boolean, right: boolean) =>
-  invoke<void>('set_launcher_layout', { left, right });
-
-// An answer was applied: restarts the launcher's idle clock (Rust side).
-export const launcherAnswered = () => invoke<void>('launcher_answered');
 
 // Takes no channel at all (bridge.rs): stopping a job never depends on owning
 // the channel it reports on, which is why a page that has lost the channel must

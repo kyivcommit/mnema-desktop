@@ -10,14 +10,15 @@ beforeEach(() => openSettings.mockReset().mockResolvedValue(undefined));
 afterEach(() => setLocale('en'));
 
 const OK: ProviderStatus = { kind: 'ok' };
-const props = (over: Record<string, unknown> = {}) =>
-  ({ heat: 'hot', left: true, right: true, pinned: false, status: OK, ...over }) as never;
+// The panel toggles live on `Shell` (§2); this cluster is the cloud and the
+// settings button.
+const props = (over: Record<string, unknown> = {}) => ({ status: OK, ...over }) as never;
 const buttons = () => screen.getAllByRole('button');
 
-test('the buttons stand in the order cloud, left, right, pin, settings', () => {
+test('the buttons stand in the order cloud, settings', () => {
   setLocale('en');
   render(Toolbar, props());
-  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud', 'toggle-left', 'toggle-right', 'pin', 'settings']);
+  expect(buttons().map((b) => b.dataset.testid)).toEqual(['provider-cloud', 'settings']);
 });
 
 test('every button has a non-empty title equal to its aria-label, in both languages', () => {
@@ -25,7 +26,7 @@ test('every button has a non-empty title equal to its aria-label, in both langua
   for (const loc of ['en', 'uk'] as const) {
     setLocale(loc);
     const { unmount } = render(Toolbar, props());
-    expect(buttons()).toHaveLength(5); // positive control: the loop below is not over nothing
+    expect(buttons()).toHaveLength(2); // positive control: the loop below is not over nothing
     for (const b of buttons()) {
       expect(b.getAttribute('aria-label')).toBeTruthy();
       expect(b.getAttribute('title')).toBe(b.getAttribute('aria-label'));
@@ -34,33 +35,6 @@ test('every button has a non-empty title equal to its aria-label, in both langua
     unmount();
   }
   expect(seen[0]).not.toEqual(seen[1]);
-});
-
-test('cold: the panel toggles are disabled and not pressed', () => {
-  render(Toolbar, props({ heat: 'cold', left: true, right: true }));
-  for (const id of ['toggle-left', 'toggle-right']) {
-    const b = screen.getByTestId(id) as HTMLButtonElement;
-    expect(b.disabled).toBe(true);
-    expect(b.getAttribute('aria-pressed')).toBe('false');
-  }
-});
-
-test('hot: a click flips the toggle', async () => {
-  render(Toolbar, props());
-  const left = screen.getByTestId('toggle-left');
-  expect(left.getAttribute('aria-pressed')).toBe('true');
-  await fireEvent.click(left);
-  expect(left.getAttribute('aria-pressed')).toBe('false');
-  expect(screen.getByTestId('toggle-right').getAttribute('aria-pressed')).toBe('true');
-  await fireEvent.click(left);
-  expect(left.getAttribute('aria-pressed')).toBe('true');
-});
-
-test('the pin flips on click', async () => {
-  render(Toolbar, props());
-  const pin = screen.getByTestId('pin');
-  await fireEvent.click(pin);
-  expect(pin.getAttribute('aria-pressed')).toBe('true');
 });
 
 test('the cloud opens the models section only when nothing is configured', async () => {

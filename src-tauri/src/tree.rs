@@ -1,9 +1,9 @@
-//! Read-only reads for the launcher's two side cards: the left card's watched
-//! folders and their indexed files (§7, [`list_tree`]); the right card's
-//! paragraphs around a cited passage (§7.1,
-//! [`source_around`]). Read-only, so neither command adds a data-loss surface
-//! (spec §12) — they only reflect the index at query time, and `source_around`
-//! refuses rather than answer with text a rebuild has since replaced.
+//! Read-only reads for the launcher's two side cards: the tree's watched
+//! folders and their indexed files (§7, [`list_tree`]); the file pane's whole
+//! document (§7.1, [`open_document`]), with the cited passage highlighted.
+//! Read-only, so neither command adds a data-loss surface (spec §12) — they
+//! only reflect the index at query time, and `open_document` refuses rather
+//! than answer with text a rebuild has since replaced.
 //!
 //! And, since PR 8a, the exclusion screen's own folder tree
 //! ([`list_subfolders`]) — the one read in this file that goes to the **disk**
@@ -13,25 +13,11 @@
 use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
-use mnema_index::{Db, PathOccupant};
+use mnema_index::{Db, DocumentStatus, PathOccupant};
 use mnema_walk::{BuiltinLayers, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
-
-/// The widest window `source_around` will read, in blocks either side.
-///
-/// The radius is the caller's choice — the card shows one paragraph either
-/// side, a scrolling card wants more — but a client must not be able to ask
-/// for a whole book. **Clamped, not rejected:** `0` is answered as `1` (the
-/// passage's own block plus one either side), and anything above this ceiling
-/// is answered at the ceiling. Neither is an error.
-///
-/// ⚠️ That promise covers the values that reach the command. The parameter is
-/// `u32`, so a negative or fractional radius is refused one layer earlier, by
-/// deserialisation, and the caller gets an error rather than a clamped
-/// answer. PR 6 must always send a non-negative integer.
-const MAX_RADIUS: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -363,75 +349,6 @@ pub fn mask_preview(state: State<'_, AppState>, pattern: String) -> Result<MaskP
     Ok(MaskPreview { paths, documents })
 }
 
-/// What the launcher's right card paints around a cited passage, or the
-/// refusal that says the passage is no longer there.
-///
-/// ⚠️ `rename_all_fields`, and it is **not** decoration. `rename_all` on an
-/// *enum* renames the variants only; the fields inside a struct variant keep
-/// their snake_case names without this second attribute. Measured, not
-/// reasoned: without it `Excerpt` ships `document_id` and `has_more_before`
-/// inside a camelCase payload. The `AskAnswer` precedent (`bridge.rs:849-854`)
-/// does not warn (its variants are at `bridge.rs:855-876`), because every
-/// field of its struct variants is one word.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    tag = "kind"
-)]
-pub enum SourceAround {
-    Excerpt {
-        /// The blocks in document reading order: `radius` before the passage's
-        /// own block(s), those blocks, then `radius` after.
-        blocks: Vec<SourceBlock>,
-        /// Where to paint. See [`WireSegment`] for the unit and the arithmetic
-        /// — both are easy to get wrong from the payload alone, and getting
-        /// them wrong moves the highlight silently.
-        spans: Vec<WireSegment>,
-        /// The excerpt's own provenance — the content hash of the document the
-        /// blocks actually came from, so a caller can see it disagreeing with
-        /// the citation it came from.
-        ///
-        /// ⚠️ **No `relative_path` here, deliberately.** No read method can
-        /// produce one for the excerpt: `ChunkAnchor` carries no path, and
-        /// `PathOccupant::relative_path` is the *cited* path — the query key —
-        /// so the field could only ever echo the caller's own input back and
-        /// disagree with nothing. The card's header uses the citation's
-        /// `relativePath` (`bridge.rs:828`); the provenance check is
-        /// `documentId`.
-        document_id: String,
-        section_title: Option<String>,
-        has_more_before: bool,
-        has_more_after: bool,
-        freshness: Freshness,
-    },
-    /// The passage is not at that id any more. **No text is returned**: the
-    /// alternative is another chunk's neighbourhood under the user's citation.
-    Gone { reason: GoneReason },
-}
-
-/// Why the passage is not at that id any more. Two causes, split for the same
-/// reason `RefusalKind` splits `ask`'s (`bridge.rs:838-847`): a caller may
-/// render one sentence for both, and the split is what makes both directions
-/// assertable here.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum GoneReason {
-    /// No chunk carries that id. Three causes, and the third is the common
-    /// one: the document was deleted; a rebuild has not re-inserted yet; or
-    /// **the file was edited and re-walked, so `repoint` gave the path to a new
-    /// `document_id` and `forget_if_unnamed` deleted the displaced document
-    /// outright**, cascading its chunks away. That last one is why `Reindexed`
-    /// is rare and this is not.
-    NoSuchChunk,
-    /// A chunk carries that id, and it is not this passage: the id was reused
-    /// by a rebuild or by another document. `chunk.id` is `INTEGER PRIMARY
-    /// KEY` without `AUTOINCREMENT`, so SQLite hands the ids of deleted rows
-    /// out again — and `ask` and `source_around` are two IPC calls seconds
-    /// apart, which no snapshot can span.
-    IdReused,
-}
-
 /// How far the indexed text has drifted from the file it was read out of.
 ///
 /// Five variants, and every one of them has a test that produced it: a card
@@ -476,18 +393,6 @@ pub enum Freshness {
     NoPath,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceBlock {
-    pub block_id: i64,
-    /// `block.type` verbatim, so a caller can drop page headers and footers
-    /// without the backend baking that display choice in.
-    pub kind: String,
-    pub text: String,
-    pub page_no: i64,
-    pub reading_order: i64,
-}
-
 /// A camelCase mirror of [`mnema_core::Segment`] for the wire.
 ///
 /// ⚠️ **Do not "fix" this by putting `rename_all` on `Segment` itself.** That
@@ -529,57 +434,6 @@ impl From<Segment> for WireSegment {
             block_start: s.block_start,
         }
     }
-}
-
-/// [`SourceAround::Excerpt`] minus its `freshness` — everything one snapshot
-/// can know about a passage that is still there.
-///
-/// A struct rather than six fields repeated at the seam: `Excerpt` is built
-/// from it by [`ExcerptFields::with`], so the two cannot drift apart field by
-/// field. It deliberately holds `document_id` **once**; the freshness
-/// comparison reads it from here rather than from a second copy carried
-/// alongside, because two copies of one fact is the class this project has
-/// paid most for and a later refactor comparing the wrong one would be silent.
-struct ExcerptFields {
-    blocks: Vec<SourceBlock>,
-    spans: Vec<WireSegment>,
-    document_id: String,
-    section_title: Option<String>,
-    has_more_before: bool,
-    has_more_after: bool,
-}
-
-impl ExcerptFields {
-    fn with(self, freshness: Freshness) -> SourceAround {
-        SourceAround::Excerpt {
-            blocks: self.blocks,
-            spans: self.spans,
-            document_id: self.document_id,
-            section_title: self.section_title,
-            has_more_before: self.has_more_before,
-            has_more_after: self.has_more_after,
-            freshness,
-        }
-    }
-}
-
-/// What one snapshot can know. The command turns this into a
-/// [`SourceAround`] after the `stat`, which is the only step that needs the
-/// filesystem and the one step that must not happen inside the snapshot.
-enum Composed {
-    /// Nothing further to decide — the pin already refused.
-    Settled(SourceAround),
-    /// An excerpt whose `freshness` is still open, plus the `path` row
-    /// deciding it needs: the recorded size and mtime, the absolute root, and
-    /// which document that location names now. `None` when the citation
-    /// carried no path, when no row is at that location, or when the root
-    /// could not be resolved to exactly one candidate — all three are
-    /// [`Freshness::NoPath`], because a guessed root is a confident verdict
-    /// about the wrong file.
-    Pending {
-        excerpt: ExcerptFields,
-        occupant: Option<PathOccupant>,
-    },
 }
 
 /// The `path` row the freshness verdict is read off, or `None` when there is
@@ -641,102 +495,9 @@ fn cited_occupant(
     }
 }
 
-/// The identity pin, then everything one snapshot can know about the passage
-/// it let through.
-///
-/// **The pin has two halves, and both must hold.** `chunk_id` alone cannot say
-/// whether it still names the passage the user clicked, so the caller echoes
-/// the passage's occurrence identity — `documentId` and `ord` (Task 1) — and
-/// its text, and this compares each against the chunk the id names now.
-///
-/// - **The text** is compared against `chunk.text` **exactly**. Not
-///   `contains`, not trimmed, not normalised: the text on the wire is
-///   `chunk.text` verbatim — `AskCitation::text` is `Hit::text` cloned when
-///   `ask` builds each citation, which is `Citation::text`, which is
-///   the `chunk.text` column (read back by `Db::citation`) — so any loosening
-///   only widens what a reused id can pass as. A `contains` comparison would
-///   accept `""` and match every chunk in the index.
-/// - **The identity** — `document_id` and `ord` — catches what byte-identical
-///   text cannot: `chunk.id` is reused across documents just as readily as
-///   within one (`schema.sql:149`, no `AUTOINCREMENT`), and two documents
-///   whose middle paragraph happens to be identical make the text pin alone
-///   powerless. `ord` is the other half — the same paragraph repeated *inside*
-///   one document reuses `document_id` but not `ord`
-///   (`UNIQUE(document_id, ord)`, `schema.sql:168`). Neither pin is redundant
-///   with the other: identity says *which* chunk this claims to be, the text
-///   says its content did not change under a re-index that kept the same
-///   `(document_id, ord)`.
-///
-/// **Why it cannot return a finished answer.** `Excerpt` carries a
-/// `freshness`, and `Current`/`FileChanged`/`FileMissing` are undecidable
-/// without a `stat` — which must not happen in here: this whole function runs
-/// inside [`mnema_index::Db::read_snapshot`], holding a deferred read
-/// transaction, inside `with_index`, holding the state mutex. A `stat` on a
-/// sleeping network drive inside both would block every other command on a
-/// filesystem round-trip. So the ingredients come back and the command
-/// decides.
-#[allow(clippy::too_many_arguments)]
-fn build_source_around(
-    db: &Db,
-    chunk_id: i64,
-    passage_text: &str,
-    cited_document_id: &str,
-    cited_ord: i64,
-    cited_root_id: Option<i64>,
-    cited_relative_path: Option<&str>,
-    radius: i64,
-) -> Result<Composed, mnema_index::Error> {
-    let Some(anchor) = db.chunk_anchor(chunk_id)? else {
-        return Ok(Composed::Settled(SourceAround::Gone {
-            reason: GoneReason::NoSuchChunk,
-        }));
-    };
-    if anchor.text != passage_text {
-        return Ok(Composed::Settled(SourceAround::Gone {
-            reason: GoneReason::IdReused,
-        }));
-    }
-    if anchor.document_id != cited_document_id || anchor.ord != cited_ord {
-        return Ok(Composed::Settled(SourceAround::Gone {
-            reason: GoneReason::IdReused,
-        }));
-    }
-
-    let window = db.reading_window(
-        &anchor.document_id,
-        anchor.page_no,
-        anchor.first_reading_order,
-        anchor.last_reading_order,
-        radius,
-    )?;
-    let occupant = cited_occupant(db, cited_root_id, cited_relative_path)?;
-
-    Ok(Composed::Pending {
-        excerpt: ExcerptFields {
-            blocks: window
-                .blocks
-                .into_iter()
-                .map(|b| SourceBlock {
-                    block_id: b.block_id,
-                    kind: b.kind,
-                    text: b.text,
-                    page_no: b.page_no,
-                    reading_order: b.reading_order,
-                })
-                .collect(),
-            spans: anchor.spans.into_iter().map(WireSegment::from).collect(),
-            document_id: anchor.document_id,
-            section_title: anchor.section_title,
-            has_more_before: window.has_more_before,
-            has_more_after: window.has_more_after,
-        },
-        occupant,
-    })
-}
-
 /// How far the indexed text has drifted from the file it was read out of.
 ///
-/// The only filesystem call `source_around` makes, and it is here rather than
+/// The only filesystem call either command makes, and it is here rather than
 /// in the composer for the reason given there. `mnema_walk::stat`
 /// (`mnema-walk/src/lib.rs:371`) rather than a hand-rolled `SystemTime`
 /// conversion: `mtime` is **nanoseconds**, and the one place that number is
@@ -770,69 +531,293 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
     Freshness::Current
 }
 
-/// The paragraphs around a cited passage, read out of the index — never off
-/// the disk (spec §12), which the webview could not read anyway under
-/// `default-src 'self'`.
+/// The most blocks `open_document` will return.
 ///
-/// Off the main thread for the reason given on [`crate::bridge::open_index`],
-/// and every **index** read inside one
-/// [`mnema_index::Db::read_snapshot`] — but the `stat` deliberately outside
-/// it. The snapshot holds a deferred read transaction for its whole body and
-/// `with_index` holds the state mutex for the whole call; a filesystem
-/// round-trip inside both would block every other command on a volume that
-/// happens to be asleep. So the closure returns the ingredients and the
-/// verdict is decided out here.
+/// At the ceiling the command answers `unavailable { tooLarge }` rather than a
+/// shortened list: the citation the pane was opened for can sit past the cut,
+/// and a list missing it reads as "nothing found" instead of "incomplete".
+/// 50 000 blocks is hundreds of thousands of pages and well past any real
+/// document — the number is a guess, not a measurement.
 ///
-/// `cited_document_id`/`cited_ord` are mandatory — the occurrence identity
-/// `Hit`/`AskCitation` mint for every citation since Task 1 — and are compared
-/// exactly, never defaulted or skipped when absent: a client that could omit
-/// them would turn the pin off for itself, silently. `cited_root_id` is the
-/// odd one out and stays `Option`: it feeds `Freshness` only (via
-/// `cited_occupant`), never the refusal above, because it is legitimately
-/// absent whenever the chunk's document sits under zero or several distinct
-/// watched roots (`Citation::root_id`, `write.rs:95-106`) — a citation for
-/// such a document can still ask and still get a verdict, a degraded one,
-/// through the fallback `cited_occupant` keeps for exactly that case.
+/// Pinned by `tests::the_block_ceiling_is_fifty_thousand` in this file: the
+/// shell test that pins the refusal would pass for any smaller number, so the
+/// number itself needs its own assertion.
 ///
-/// Eight parameters mirrors the wire contract (§10) one field at a time —
-/// splitting them into a struct would be a seam no caller needs yet. **There
-/// is no caller yet**: `ui/src/` carries no `sourceAround`
-/// (`grep -rn "sourceAround" ui/src/` is empty) — PR 6b adds `ipc.ts`'s
-/// wrapper, and it is what must send the three parameters this task added
-/// (`citedDocumentId`, `citedOrd`, `citedRootId`), not something already
-/// relying on them today.
+/// shortcut: paging, when a document this size actually turns up; v1 sends the
+/// whole file in one payload.
+const MAX_BLOCKS: usize = 50_000;
+
+/// The whole of one document's indexed text, or the reason it cannot be shown.
+///
+/// `blocks` is the file, not a window around a citation — the pane scrolls the
+/// file itself. `kind` on each block is `block.type` verbatim, so the pane can
+/// drop page headers or draw headings without the backend baking that display
+/// choice in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum DocumentView {
+    File {
+        blocks: Vec<ViewBlock>,
+        /// Every block the focused citation covers, in reading order — a chunk
+        /// can span several. Empty when no focus was accepted.
+        focus_block_ids: Vec<i64>,
+        /// The exact slice to paint inside those blocks.
+        spans: Vec<PaneSpan>,
+        /// The path this view was resolved for: the caller's own when it named
+        /// one, the document's sole `path` row when it named none. `None` when
+        /// neither exists — the same case `Freshness::NoPath` reports, and the
+        /// pane titles itself from it rather than staying blank.
+        relative_path: Option<String>,
+        freshness: Freshness,
+    },
+    /// The document cannot be shown whole, and a partial one never is.
+    Unavailable { reason: UnavailableReason },
+}
+
+/// One block of [`DocumentView::File`], section title included from its page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewBlock {
+    pub block_id: i64,
+    pub kind: String,
+    pub text: String,
+    pub page_no: i64,
+    pub section_title: Option<String>,
+}
+
+/// A highlight measured inside one block, flattened for a whole-file pane.
+///
+/// The unit is [`WireSegment`]'s: `block_start` is the offset into the text of
+/// block `block_id`, in **Unicode scalar values**, not UTF-16 code units.
+/// `start`/`end` from the stored span are not shipped: they index the chunk's
+/// own text, and that text is not on this wire — only their difference, as
+/// `length`, is useful. `primary` mirrors `Source.svelte`'s own spans; v1
+/// highlights one citation, so every span here is primary.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneSpan {
+    pub block_id: i64,
+    pub block_start: u32,
+    pub length: u32,
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnavailableReason {
+    NoSuchDocument,
+    NoBlocks,
+    /// The document is being written right now (`document.status = 'pending'`):
+    /// ingest clears and rewrites it a slice at a time, so what the index holds
+    /// is a prefix of the file, not the file. A fourth reason rather than
+    /// `noBlocks`, which would say the document is empty when it is unfinished.
+    Rebuilding,
+    TooLarge,
+}
+
+/// [`DocumentView::File`] minus the verdict only a `stat` can give: the index
+/// half is read inside one snapshot, and the `stat` happens after it.
+struct FileFields {
+    blocks: Vec<ViewBlock>,
+    focus_block_ids: Vec<i64>,
+    spans: Vec<PaneSpan>,
+    /// The path the view was resolved for, already picked by
+    /// [`build_document_view`] — the pane's title, and the only place a
+    /// citation that named no place on disk can get one.
+    relative_path: Option<String>,
+}
+
+impl FileFields {
+    fn with(self, freshness: Freshness) -> DocumentView {
+        DocumentView::File {
+            blocks: self.blocks,
+            focus_block_ids: self.focus_block_ids,
+            spans: self.spans,
+            relative_path: self.relative_path,
+            freshness,
+        }
+    }
+}
+
+/// What one snapshot can know about a document view; the freshness verdict is
+/// decided after it, outside the snapshot and outside `with_index`.
+enum ComposedView {
+    Settled(DocumentView),
+    Pending {
+        file: FileFields,
+        occupant: Option<PathOccupant>,
+    },
+}
+
+/// One document's blocks, its focus and the `path` row freshness needs — no
+/// `stat`, for the reason [`decide_freshness`] gives.
+///
+/// The fallback for a caller that named no location: when the document has
+/// exactly one `path` row, that row is the location; when it has several or
+/// none, the verdict is [`Freshness::NoPath`] rather than a guess about one of
+/// them. Half a location (a root with no path) is left to [`cited_occupant`],
+/// which already says what it can and cannot resolve.
+fn build_document_view(
+    db: &Db,
+    document_id: &str,
+    root_id: Option<i64>,
+    relative_path: Option<&str>,
+    focus: Option<(i64, i64, &str)>,
+    limit: usize,
+) -> Result<ComposedView, mnema_index::Error> {
+    let Some(view) = db.document_view(document_id, limit)? else {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::NoSuchDocument,
+        }));
+    };
+
+    // The status gate, and why it is not optional: ingest records a rebuild and
+    // then writes the document back **a slice at a time** (`STATUS_REBUILDING`,
+    // `mnema-ingest/src/lib.rs:530`, written through before the first slice),
+    // while `clear_document_content_in` deletes the pages and then writes
+    // `pending`, both in one transaction (`write.rs:1220-1221`). A `pending`
+    // document that still holds blocks is therefore a file being rewritten, and
+    // answering with those blocks would be a partial file that claims to be
+    // whole — the one failure this pane exists to avoid. `failed`/`skipped`
+    // have no corpus text to show.
+    match db.document_status(document_id)? {
+        DocumentStatus::Pending => {
+            return Ok(ComposedView::Settled(DocumentView::Unavailable {
+                reason: UnavailableReason::Rebuilding,
+            }));
+        }
+        DocumentStatus::Failed | DocumentStatus::Skipped => {
+            return Ok(ComposedView::Settled(DocumentView::Unavailable {
+                reason: UnavailableReason::NoBlocks,
+            }));
+        }
+        DocumentStatus::Indexed => {}
+    }
+
+    if view.truncated {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::TooLarge,
+        }));
+    }
+    if view.blocks.is_empty() {
+        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+            reason: UnavailableReason::NoBlocks,
+        }));
+    }
+
+    // The focus is accepted only with its full occurrence identity:
+    // `chunk.id` is reused, so the id alone could highlight another passage
+    // inside the right file.
+    let (focus_block_ids, spans) = match focus {
+        Some((chunk_id, ord, text)) => match db.chunk_anchor(chunk_id)? {
+            Some(anchor)
+                if anchor.document_id == document_id
+                    && anchor.ord == ord
+                    && anchor.text == text =>
+            {
+                (
+                    anchor.spans.iter().map(|s| s.block_id).collect(),
+                    anchor
+                        .spans
+                        .into_iter()
+                        // Through the one `WireSegment` conversion, not a second
+                        // copy of it: this is the payload the pane paints, and
+                        // the unit it documents is the same one.
+                        .map(|s| {
+                            let wire = WireSegment::from(s);
+                            PaneSpan {
+                                block_id: wire.block_id,
+                                block_start: wire.block_start,
+                                length: wire.end - wire.start,
+                                primary: true,
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            _ => (Vec::new(), Vec::new()),
+        },
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let occupant = match (root_id, relative_path) {
+        (None, None) => match db.document_path(document_id)? {
+            Some((root, path)) => cited_occupant(db, Some(root), Some(&path))?,
+            None => None,
+        },
+        (root_id, relative_path) => cited_occupant(db, root_id, relative_path)?,
+    };
+
+    Ok(ComposedView::Pending {
+        file: FileFields {
+            blocks: view
+                .blocks
+                .into_iter()
+                .map(|b| ViewBlock {
+                    block_id: b.block_id,
+                    kind: b.kind,
+                    text: b.text,
+                    page_no: b.page_no,
+                    section_title: b.section_title,
+                })
+                .collect(),
+            focus_block_ids,
+            spans,
+            // Read off the occupant freshness is decided for, so the title and
+            // the badge can never name two different places.
+            relative_path: occupant.as_ref().map(|o| o.relative_path.clone()),
+        },
+        occupant,
+    })
+}
+
+/// The whole of one document, read out of the index — what the right pane
+/// paints.
+///
+/// Everything the index can answer comes back from one
+/// [`mnema_index::Db::read_snapshot`]; the `stat` that decides `freshness`
+/// happens outside it and outside [`AppState::with_index`], for the reason
+/// [`decide_freshness`] gives.
+///
+/// A `chunk_id` without its `ord` and `text` is not refused. It is ignored:
+/// the file still opens, unhighlighted, and a client that sent half the pair
+/// gets no highlight rather than one on a passage it may not have meant.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(async)]
-pub fn source_around(
+pub fn open_document(
     state: State<'_, AppState>,
-    chunk_id: i64,
-    passage_text: String,
-    cited_document_id: String,
-    cited_ord: i64,
-    cited_root_id: Option<i64>,
-    cited_relative_path: Option<String>,
-    radius: u32,
-) -> Result<SourceAround, Error> {
-    let radius = radius.clamp(1, MAX_RADIUS) as i64;
+    document_id: String,
+    root_id: Option<i64>,
+    relative_path: Option<String>,
+    chunk_id: Option<i64>,
+    cited_ord: Option<i64>,
+    cited_text: Option<String>,
+) -> Result<DocumentView, Error> {
+    let focus = match (chunk_id, cited_ord, cited_text.as_deref()) {
+        (Some(chunk_id), Some(ord), Some(text)) => Some((chunk_id, ord, text)),
+        _ => None,
+    };
     let composed = state.with_index(|db| {
         db.read_snapshot(|db| {
-            build_source_around(
+            build_document_view(
                 db,
-                chunk_id,
-                &passage_text,
-                &cited_document_id,
-                cited_ord,
-                cited_root_id,
-                cited_relative_path.as_deref(),
-                radius,
+                &document_id,
+                root_id,
+                relative_path.as_deref(),
+                focus,
+                MAX_BLOCKS,
             )
         })
     })?;
     Ok(match composed {
-        Composed::Settled(answer) => answer,
-        Composed::Pending { excerpt, occupant } => {
-            let freshness = decide_freshness(occupant.as_ref(), &excerpt.document_id);
-            excerpt.with(freshness)
+        ComposedView::Settled(view) => view,
+        ComposedView::Pending { file, occupant } => {
+            let freshness = decide_freshness(occupant.as_ref(), &document_id);
+            file.with(freshness)
         }
     })
 }
@@ -958,7 +943,7 @@ pub struct Subfolder {
 ///    reaches it too.)
 /// 6. `Open` — none of the above.
 ///
-/// ⚠️ `rename_all_fields`, for the reason [`SourceAround`] measured: on an
+/// ⚠️ `rename_all_fields`, for the reason [`DocumentView`] needed it: on an
 /// *enum*, `rename_all` renames the variants only, and the fields inside a
 /// struct variant keep their snake_case names without this second attribute.
 /// `prefix` is one word, so today it changes nothing — which is exactly how a
@@ -1473,7 +1458,7 @@ mod tests {
     ///
     /// `SubfolderState` is an **enum**, so `rename_all` renames its variants
     /// and `rename_all_fields` is what would rename a struct variant's fields —
-    /// the trap `SourceAround` measured one type up. `prefix` is one word, so
+    /// the trap `DocumentView` carries one type up. `prefix` is one word, so
     /// the second attribute changes nothing today; the tags are what a caller
     /// switches on, and every one of the five is asserted because a card with a
     /// default branch is how an unrecognised state gets drawn as an ordinary
@@ -1555,108 +1540,119 @@ mod tests {
         }
     }
 
-    /// One `Excerpt` carrying every camelCase field this PR puts on the wire.
-    ///
-    /// ⚠️ `spans` is built with `.into()` rather than `WireSegment::from(…)`
-    /// **on purpose**, and it is what makes Step 3's red-proof possible: the
-    /// reflexive `impl From<T> for T` means this line still compiles if
-    /// `spans` is changed to a bare `Vec<Segment>` — the mutation "delete the
-    /// conversion and send `Segment` straight" — so that mutation shows up as
-    /// a failing assertion about `block_start`, not as a compile error the
-    /// harness would report as a broken case.
-    fn sample_excerpt() -> SourceAround {
-        SourceAround::Excerpt {
-            blocks: vec![SourceBlock {
+    /// One `DocumentView::File` carrying every camelCase field the pane reads.
+    fn sample_view() -> DocumentView {
+        DocumentView::File {
+            blocks: vec![ViewBlock {
                 block_id: 41,
                 kind: "paragraph".into(),
                 text: "Ціна оцифрування одного аркуша становить дві гривні.".into(),
                 page_no: 3,
-                reading_order: 2,
+                section_title: Some("Розділ перший".into()),
             }],
-            spans: vec![sample_segment().into()],
-            document_id: "d".repeat(64),
-            section_title: Some("Розділ перший".into()),
-            has_more_before: true,
-            has_more_after: false,
+            focus_block_ids: vec![41],
+            spans: vec![PaneSpan {
+                block_id: 41,
+                block_start: 2,
+                length: 5,
+                primary: true,
+            }],
+            relative_path: Some("notes/a.md".into()),
             freshness: Freshness::FileChanged,
         }
     }
 
-    /// The wire contract PR 6 matches on (§10), asserted in both directions for
-    /// each of the three shapes this PR adds.
+    /// The wire contract the pane matches on (§10), asserted in both
+    /// directions.
     ///
-    /// The three are not one rule. `SourceAround` is an **enum**, where
-    /// `rename_all` renames the variants only and `rename_all_fields` is what
-    /// renames the fields of a struct variant — the trap this plan measured
-    /// rather than reasoned from the `AskAnswer` precedent, whose struct
-    /// variants are all one-word fields. `SourceBlock` and `WireSegment` are
-    /// plain **structs**, where `rename_all` does rename fields. And `Segment`
-    /// itself carries no rename at all, which is why `WireSegment` exists.
+    /// `DocumentView` is an **enum**, where `rename_all` renames the variants
+    /// only and `rename_all_fields` renames a struct variant's fields — without
+    /// the second attribute this ships `focus_block_ids` inside a camelCase
+    /// payload. `ViewBlock` and `PaneSpan` are plain structs, where
+    /// `rename_all` does rename the fields.
     #[test]
-    fn source_wire_shape_is_camel_case() {
-        let v = serde_json::to_value(sample_excerpt()).unwrap();
+    fn document_view_wire_shape_is_camel_case() {
+        let v = serde_json::to_value(sample_view()).unwrap();
 
-        // The variant tag, which is what a caller switches on.
-        assert_eq!(v["kind"], "excerpt");
-
+        assert_eq!(v["kind"], "file");
         // Present, camelCase — the struct-variant fields `rename_all` alone
         // would have left in snake_case.
-        assert!(v["documentId"].is_string());
-        assert!(v["sectionTitle"].is_string());
-        assert!(v["hasMoreBefore"].is_boolean());
-        assert!(v["hasMoreAfter"].is_boolean());
+        assert!(v["focusBlockIds"].is_array());
         // Absent, the other direction: a payload carrying both spellings would
-        // satisfy the six assertions above while PR 6 read the wrong one.
-        assert!(v.get("document_id").is_none());
-        assert!(v.get("section_title").is_none());
-        assert!(v.get("has_more_before").is_none());
-        assert!(v.get("has_more_after").is_none());
+        // satisfy the assertions above while the pane read the wrong one.
+        assert!(v.get("focus_block_ids").is_none());
 
-        // ⚠️ `relativePath` is **not** a field of `Excerpt` and must not become
-        // one: no read method can produce a path for the excerpt (`ChunkAnchor`
-        // carries none, and `PathOccupant::relative_path` is the caller's own
-        // query key), so it could only ever echo the input back and disagree
-        // with nothing. Asserted in both spellings, because reinstating it in
-        // either would be the regression.
-        assert!(v.get("relativePath").is_none());
-        assert!(v.get("relative_path").is_none());
-
-        // `SourceBlock`.
         let block = &v["blocks"][0];
         assert!(block["blockId"].is_i64());
         assert!(block["pageNo"].is_i64());
-        assert!(block["readingOrder"].is_i64());
-        assert!(block["kind"].is_string());
-        assert!(block["text"].is_string());
+        assert!(block["sectionTitle"].is_string());
+        assert_eq!(block["kind"], "paragraph");
         assert!(block.get("block_id").is_none());
         assert!(block.get("page_no").is_none());
-        assert!(block.get("reading_order").is_none());
+        assert!(block.get("section_title").is_none());
 
-        // `WireSegment`.
         let span = &v["spans"][0];
         assert!(span["blockId"].is_i64());
         assert!(span["blockStart"].is_u64());
+        assert_eq!(span["primary"], true);
         assert!(span.get("block_id").is_none());
         assert!(span.get("block_start").is_none());
 
-        // The refusal variant and its cause, both tags.
-        let gone = serde_json::to_value(SourceAround::Gone {
-            reason: GoneReason::IdReused,
-        })
-        .unwrap();
-        assert_eq!(gone["kind"], "gone");
-        assert_eq!(gone["reason"]["kind"], "idReused");
-        assert!(gone.get("blocks").is_none());
-        let missing = serde_json::to_value(SourceAround::Gone {
-            reason: GoneReason::NoSuchChunk,
-        })
-        .unwrap();
-        assert_eq!(missing["reason"]["kind"], "noSuchChunk");
+        // The pane's title, when the citation named no path on disk.
+        assert_eq!(v["relativePath"], "notes/a.md");
+        assert!(v.get("relative_path").is_none());
 
-        // Every `Freshness` tag, because the set is closed (the outcomes of two
-        // comparisons) and a card must render each: a default branch drawing
-        // `Current` for a tag it does not recognise is how a stale excerpt gets
-        // shown as fresh.
+        // The refusal carries its reason as a bare tag — the window switches on
+        // the string, not on an object.
+        let refused = serde_json::to_value(DocumentView::Unavailable {
+            reason: UnavailableReason::TooLarge,
+        })
+        .unwrap();
+        assert_eq!(refused["kind"], "unavailable");
+        assert_eq!(refused["reason"], "tooLarge");
+        assert!(refused.get("blocks").is_none());
+    }
+
+    /// A missing section title crosses as `null`, **present**, not as an absent
+    /// key: "we do not know" and "the value is empty" must not render as the
+    /// same thing (`list_tree`'s wire test pins the same rule).
+    #[test]
+    fn a_block_with_no_section_title_still_carries_the_key() {
+        let DocumentView::File {
+            blocks,
+            focus_block_ids,
+            spans,
+            relative_path,
+            freshness,
+        } = sample_view()
+        else {
+            unreachable!("sample_view is a File")
+        };
+        let untitled = serde_json::to_value(DocumentView::File {
+            blocks: blocks
+                .into_iter()
+                .map(|b| ViewBlock {
+                    section_title: None,
+                    ..b
+                })
+                .collect(),
+            focus_block_ids,
+            spans,
+            relative_path,
+            freshness,
+        })
+        .unwrap();
+
+        assert!(untitled["blocks"][0].get("sectionTitle").is_some());
+        assert!(untitled["blocks"][0]["sectionTitle"].is_null());
+    }
+
+    /// Every `Freshness` tag, because the set is closed (the outcomes of two
+    /// comparisons) and the pane must render each: a default branch drawing
+    /// `Current` for a tag it does not recognise is how a stale file gets shown
+    /// as fresh.
+    #[test]
+    fn every_freshness_tag_crosses_camel_case() {
         for (variant, tag) in [
             (Freshness::Current, "current"),
             (Freshness::Reindexed, "reindexed"),
@@ -1667,42 +1663,6 @@ mod tests {
             let f = serde_json::to_value(&variant).unwrap();
             assert_eq!(f["kind"], tag, "{variant:?} crossed as {f}");
         }
-        assert_eq!(v["freshness"]["kind"], "fileChanged");
-
-        // A missing section title crosses as `null`, **present**, not as an
-        // absent key. The distinction is this crate's standing one — `Citation`
-        // makes the argument for `relative_path`, and PR 4's `list_tree` test
-        // pins it the same way: "we do not know" and "the value is empty" must
-        // not render as the same thing. Measured, not assumed: marking the
-        // field `skip_serializing_if = "Option::is_none"` passed every other
-        // assertion in this file.
-        let SourceAround::Excerpt {
-            blocks,
-            spans,
-            document_id,
-            has_more_before,
-            has_more_after,
-            freshness,
-            ..
-        } = sample_excerpt()
-        else {
-            unreachable!("sample_excerpt is an Excerpt")
-        };
-        let untitled = serde_json::to_value(SourceAround::Excerpt {
-            blocks,
-            spans,
-            document_id,
-            section_title: None,
-            has_more_before,
-            has_more_after,
-            freshness,
-        })
-        .unwrap();
-        assert!(
-            untitled.get("sectionTitle").is_some(),
-            "a page with no section title must still carry the key: {untitled}"
-        );
-        assert!(untitled["sectionTitle"].is_null(), "{untitled}");
     }
 
     /// The `WireSegment` conversion is load-bearing, so this proves it rather
@@ -1711,28 +1671,24 @@ mod tests {
     /// [`mnema_core::Segment`] is **persisted** — `chunk.char_span` stores a
     /// `Vec<Segment>` as JSON and the schema's `CHECK` and its
     /// `chunk_span_blocks_bi` trigger both read that JSON *by key* — so the
-    /// type cannot be given a `rename_all` and crosses as `block_start`.
-    /// Sending it straight is the mutation this test is written against: delete
-    /// the conversion, make `spans` a `Vec<Segment>`, and the two assertions
-    /// below go red while everything else still compiles.
+    /// type cannot be given a `rename_all` and crosses as `block_start`. The
+    /// pane's `PaneSpan` is built through this conversion, so a swapped field
+    /// would ship a perfectly camelCase, perfectly wrong highlight.
     ///
     /// Both directions: the mirror must be camelCase **and** must carry the
-    /// same four values, in the same roles — a conversion that swapped `start`
-    /// for `block_start` would ship a perfectly camelCase, perfectly wrong
-    /// highlight.
+    /// same four values, in the same roles.
     #[test]
     fn a_real_segment_crosses_the_wire_through_its_camel_case_mirror() {
         let segment = sample_segment();
-        let v = serde_json::to_value(sample_excerpt()).unwrap();
-        let span = &v["spans"][0];
+        let v = serde_json::to_value(WireSegment::from(segment)).unwrap();
 
-        assert_eq!(span["blockId"], segment.block_id);
-        assert_eq!(span["start"], segment.start);
-        assert_eq!(span["end"], segment.end);
-        assert_eq!(span["blockStart"], segment.block_start);
+        assert_eq!(v["blockId"], segment.block_id);
+        assert_eq!(v["start"], segment.start);
+        assert_eq!(v["end"], segment.end);
+        assert_eq!(v["blockStart"], segment.block_start);
 
-        assert!(span.get("block_start").is_none());
-        assert!(span.get("block_id").is_none());
+        assert!(v.get("block_start").is_none());
+        assert!(v.get("block_id").is_none());
     }
 
     #[test]
@@ -1757,5 +1713,13 @@ mod tests {
             v.get("recents").is_none(),
             "list_tree still carries recents: {v}"
         );
+    }
+
+    /// The ceiling is part of the wire contract, not a tuning knob: any smaller
+    /// number still refuses a 50 001-block document, so the shell test that
+    /// pins the refusal cannot see a downward drift. This is that half.
+    #[test]
+    fn the_block_ceiling_is_fifty_thousand() {
+        assert_eq!(MAX_BLOCKS, 50_000);
     }
 }

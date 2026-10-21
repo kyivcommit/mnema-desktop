@@ -3,12 +3,13 @@
   import { citationLabel } from '../i18n/label';
   import { splitAnchors } from '../lib/anchors';
   import type { AskAnswer, AskCitation } from '../lib/ipc';
+  import { renderMarkdown, type Span } from '../lib/markdown';
 
   // Narrowed to the `generated` member (review I1): `LauncherState.generated`
   // (`state.ts:22`) already carries this exact type, and Task 8b mounts
   // `Answer` from that state — the compiler should enforce the pairing, not
   // let a wrong-state mount render two headings over an empty card. Callers
-  // holding a wider `AskAnswer` narrow the way `Cards.test.ts:23` already
+  // holding a wider `AskAnswer` narrow the way the transcript's turns already
   // does, through `stateFromAnswer`.
   let { answer, query, onSelect }: {
     answer: Extract<AskAnswer, { kind: 'generated' }>;
@@ -24,7 +25,10 @@
   const viaText = $derived.by(() => { void $locale; return t(answer.via === 'conversation' ? 'answer_via_conversation' : 'answer_via_search'); });
 
   const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
-  const segments = $derived(splitAnchors(answer.answer, known));
+  // The markdown layer is pure and knows nothing of citations; the anchors are
+  // split out of each span below, so `[n]` works inside a paragraph, a list
+  // item, a heading and a fenced block alike.
+  const blocks = $derived(renderMarkdown(answer.answer));
 
   function citationFor(n: number): AskCitation {
     const found = answer.citations.find((c) => c.anchor === n);
@@ -35,8 +39,8 @@
   // Ruling D: `citationLabel()` reads the locale store at call time (through
   // `t()` and `formatLocator()`) but is not reactive on its own, so the whole
   // preview list is rebuilt inside one $derived.by that reads $locale — the
-  // house pattern (Arms.svelte:11-12, Cards.svelte:91).
-  // Ruling S: the rule itself lives in `i18n/label.ts` and `Source.svelte`
+  // house pattern (Arms.svelte:11-12, Shell.svelte).
+  // Ruling S: the rule itself lives in `i18n/label.ts` and `Passages.svelte`
   // calls the same function — one rule, one place. What stays here is the
   // reactivity, which is per-component.
   const previews = $derived.by(() => {
@@ -50,7 +54,15 @@
 
   <h3>{answerHeading}</h3>
   <span class="via" data-testid="answer-via">{viaText}</span>
-  <p data-testid="answer-body">{#each segments as segment}{#if segment.kind === 'text'}{segment.text}{:else}<button type="button" onclick={() => onSelect(citationFor(segment.n))}>[{segment.n}]</button>{/if}{/each}</p>
+  <div class="answer-body" data-testid="answer-body">
+    {#each blocks as block}
+      {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
+      {:else if block.kind === 'h'}<h4>{@render inline(block.spans)}</h4>
+      {:else if block.kind === 'p'}<p>{@render inline(block.spans)}</p>
+      {:else}<svelte:element this={block.kind} start={block.kind === 'ol' ? block.start : undefined}>{#each block.items as item}<li>{@render inline(item)}</li>{/each}</svelte:element>
+      {/if}
+    {/each}
+  </div>
 
   <h3>{citationsHeading}</h3>
   <ul>
@@ -70,8 +82,8 @@
                order: which anchor this is, what it says, where it came from.
 
                The anchor is bracketed to match the form it takes in the prose
-               (`[{segment.n}]` above) — the two are the same reference and a
-               person has to be able to pair them by sight.
+               (`[{segment.n}]` in the `anchors` snippet below) — the two are the
+               same reference and a person has to be able to pair them by sight.
 
                `citation-anchor`/`citation-text`/`citation-label`, NOT
                `preview-*`: the preview testids are queried as a namespace
@@ -88,3 +100,12 @@
     {/each}
   </ul>
 </div>
+
+{#snippet inline(spans: Span[])}
+  {#each spans as span}{#if span.kind === 'strong'}<strong>{@render anchors(span.text)}</strong>{:else if span.kind === 'code'}<code>{@render anchors(span.text)}</code>{:else}{@render anchors(span.text)}{/if}{/each}
+{/snippet}
+
+{#snippet anchors(text: string)}
+  {#each splitAnchors(text, known) as segment}{#if segment.kind === 'text'}{segment.text}{:else}<button type="button" onclick={() => onSelect(citationFor(segment.n))}>[{segment.n}]</button>{/if}{/each}
+{/snippet}
+

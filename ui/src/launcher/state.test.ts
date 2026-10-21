@@ -1,7 +1,7 @@
 import { ROLE_FIELDS } from '../lib/fixtures';
 import { expect, test } from 'vitest';
-import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, heatAfter, firstCard, turnsAfter } from './state';
-import { generated, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
+import { checkQuery, MAX_ASK_QUERY, stateFromAnswer, roleReady, firstCard, turnsAfter } from './state';
+import { generated, citationA, citationB, citationsOnly, emptyCitationsOnly, refusedNoCandidates, refusedEmptyCompletion } from '../lib/fixtures';
 import type { AskAnswer, ModelSettings, IndexSettings } from '../lib/ipc';
 
 test('a non-blank query within the limit is accepted', () => {
@@ -92,32 +92,15 @@ test('roleReady(embed): a present key and a model name on an index that is not r
   expect(roleReady({ key: presentKey, index: unreadableIndexCarryingAModel, platform, ...ROLE_FIELDS }, 'embed')).toBe(false);
 });
 
-// Cold -> hot happens on an answer that has something to show, and only then.
-test('heatAfter: a generated or non-empty citations-only answer warms the launcher', () => {
-  expect(heatAfter('cold', stateFromAnswer('q', generated))).toBe('hot');
-  expect(heatAfter('cold', stateFromAnswer('q', citationsOnly))).toBe('hot');
-});
-
-test('heatAfter: a refusal, an empty citations-only answer, idle and in-flight leave a cold launcher cold', () => {
-  expect(heatAfter('cold', stateFromAnswer('q', refusedNoCandidates))).toBe('cold');
-  expect(heatAfter('cold', stateFromAnswer('q', emptyCitationsOnly))).toBe('cold');
-  expect(heatAfter('cold', { kind: 'idle' })).toBe('cold');
-  expect(heatAfter('cold', { kind: 'inFlight', query: 'q' })).toBe('cold');
-  expect(heatAfter('cold', { kind: 'error', reason: 'askFailed' })).toBe('cold');
-});
-
-test('heatAfter: a hot launcher stays hot through every state', () => {
-  expect(heatAfter('hot', { kind: 'error', reason: 'askFailed' })).toBe('hot');
-  expect(heatAfter('hot', stateFromAnswer('q', refusedNoCandidates))).toBe('hot');
-  expect(heatAfter('hot', { kind: 'idle' })).toBe('hot');
-});
-
-test('firstCard: the first citation of either answer, null when there is none', () => {
-  const g = stateFromAnswer('q', generated);
+// The array order is NOT anchor order on purpose: 7 sits before 3, so a plain
+// `citations[0]` returns `citationB` and fails here.
+test('firstCard: the smallest anchor of either answer, null when there is none', () => {
+  const g = stateFromAnswer('q', { ...generated, citations: [citationB, citationA] } as AskAnswer);
   const c = stateFromAnswer('q', citationsOnly);
   const e = stateFromAnswer('q', emptyCitationsOnly);
   if (g.kind !== 'generated' || c.kind !== 'citationsOnly' || e.kind !== 'citationsOnly') throw new Error('fixture');
-  expect(firstCard(g.answer)).toBe(g.answer.citations[0]);
+  expect(g.answer.citations[0]).toBe(citationB);
+  expect(firstCard(g.answer)).toBe(citationA);
   expect(firstCard(c.answer)).toBe(c.answer.citations[0]);
   expect(firstCard(e.answer)).toBeNull();
 });

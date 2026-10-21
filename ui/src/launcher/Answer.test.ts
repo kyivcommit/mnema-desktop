@@ -7,7 +7,7 @@ import { generated, generatedArchived, generatedNoPath } from '../lib/fixtures';
 import { setLocale } from '../i18n';
 import type { AskAnswer } from '../lib/ipc';
 
-// Mirrors Cards.test.ts: `locale` is a module-level store shared by every
+// As everywhere in this suite: `locale` is a module-level store shared by every
 // test in this file. Restore unconditionally so a failed assertion in the
 // locale-switch test cannot leave the next test to fail for a reason that
 // has nothing to do with what it claims.
@@ -17,7 +17,7 @@ afterEach(() => setLocale('en'));
 // `Extract<AskAnswer, { kind: 'generated' }>` (it pairs with
 // `LauncherState.generated`, `state.ts:22`, the way Task 8b will mount it),
 // but the fixtures in `lib/fixtures.ts` are declared as the wide `AskAnswer`
-// union. Narrow through the same door `Cards.test.ts:23` already uses
+// union. Narrow through the same door the transcript's turns use
 // (`stateFromAnswer`) instead of widening the component's prop type.
 function gen(a: AskAnswer) {
   const s = stateFromAnswer('q', a);
@@ -53,6 +53,42 @@ test('the query echoes as a bubble and the answer renders its anchors as buttons
   ]);
 });
 
+// The block renderer puts the answer's text in more than one element, so the
+// citation button is no longer a child of one paragraph — this is the claim
+// that `[n]` survives wherever the block parser puts it.
+test('an anchor survives outside a paragraph: inside a list item, under a heading', () => {
+  const onSelect = vi.fn();
+  const answer = { ...gen(generated), answer: '## Follow\n\n- `tail -f` follows<c>3</c>\n- plain' };
+  render(Answer, { query: 'q', answer, onSelect });
+  const body = screen.getByTestId('answer-body');
+  expect(within(body).getByRole('heading', { level: 4 }).textContent).toBe('Follow');
+  const [first] = within(body).getAllByRole('listitem');
+  expect(within(first).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(within(first).getByText(/tail -f/).tagName).toBe('CODE');
+});
+
+// The brief is «an anchor survives in every block»: a fence is a block, and it
+// used to render `{block.text}` raw, so a `<c>N</c>` inside one reached the DOM
+// as a tag.
+test('an anchor survives inside a fence, which stays literal around it', () => {
+  const answer = { ...gen(generated), answer: '```\ntail -f<c>3</c>\n```' };
+  render(Answer, { query: 'q', answer, onSelect: vi.fn() });
+  const pre = screen.getByTestId('answer-body').querySelector('pre')!;
+  expect(within(pre).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(pre.textContent).toBe('tail -f[3]');
+});
+
+// The worse half of the same defect: a fence the model never closed swallowed
+// the rest of the answer, so every citation after it was literal text.
+test('an unclosed fence ends at the first anchor: the rest of the answer still renders', () => {
+  const answer = { ...gen(generated), answer: '```\ntail -f app.log\n<c>3</c> follows the end.' };
+  render(Answer, { query: 'q', answer, onSelect: vi.fn() });
+  const body = screen.getByTestId('answer-body');
+  expect(body.querySelector('pre')!.textContent).toBe('tail -f app.log');
+  expect(within(body).getByRole('button', { name: '[3]' }).tagName).toBe('BUTTON');
+  expect(body.textContent).not.toMatch(/<c>/);
+});
+
 test('the anchor resolves by value, not by position', async () => {
   const onSelect = vi.fn();
   render(Answer, { query: 'q', answer: gen(generated), onSelect }); // anchors 3 and 7
@@ -71,7 +107,7 @@ test('the preview namespace holds one id per citation and nothing else', () => {
   //
   // 🔴 This test is the ONLY thing that catches the collision — measured, by
   // putting `preview-label` back in the component AND in every query in this
-  // file: 1 failed, 169 passed, and the one is this test. `Cards.test.ts` has a
+  // file: 1 failed, 169 passed, and the one is this test. The deleted `Cards.test.ts` had a
   // `/^preview-/` count of its own, but it is in state E, where
   // `Selection.svelte:87-90` mounts `Passages` and not this component, so that
   // namespace is empty there whatever the label is called. It cannot witness

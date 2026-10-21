@@ -1,25 +1,26 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
+import Shell from './Shell.svelte';
 import Tree from './Tree.svelte';
-import Source from './Source.svelte';
+import Recents from './Recents.svelte';
+import FilePane from './FilePane.svelte';
 import {
-  citationA, citationB, generated, oneRootTwoFolders, excerptSpanA, excerptSpanB, historyTwoQuestions,
+  generated, oneRootTwoFolders, historyTwoQuestions,
 } from '../lib/fixtures';
 
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ hide: vi.fn() }) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 let sheets: HTMLStyleElement[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 beforeEach(() => {
   invoke.mockReset();
-  invoke.mockImplementation((cmd: string, args?: { chunkId: number }) => {
+  invoke.mockImplementation((cmd: string) => {
     if (cmd === 'model_settings') return Promise.resolve({
       key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0,
         embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false },
@@ -27,10 +28,17 @@ beforeEach(() => {
     if (cmd === 'provider_status') return Promise.resolve({ kind: 'ok' });
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(historyTwoQuestions);
-    if (cmd === 'ask') return Promise.resolve(generated);
-    if (cmd === 'set_launcher_layout' || cmd === 'launcher_answered') return Promise.resolve();
-    if (cmd === 'source_around' && args?.chunkId === 42) return Promise.resolve(excerptSpanA);
-    if (cmd === 'source_around' && args?.chunkId === 43) return Promise.resolve(excerptSpanB);
+    if (cmd === 'ask') return Promise.resolve({ answer: generated, historyId: null });
+    if (cmd === 'open_document') return Promise.resolve({
+      kind: 'file',
+      blocks: [{ blockId: 1, kind: 'paragraph', text: 'A cited passage. And more.', pageNo: 1, sectionTitle: null }],
+      focusBlockIds: [1],
+      spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
+      relativePath: 'notes/a.md',
+      // `fileChanged`, not `current`: the badge speaks only when it carries
+      // news (owner, 2026-10-20), and the pin below needs one on screen.
+      freshness: { kind: 'fileChanged' },
+    });
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
     throw new Error(`unexpected command ${cmd}`);
   });
@@ -43,139 +51,177 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); sheets.forEach((s) => s.remove()); sheets = []; });
 
-test('transparent launcher disables the native window shadow', () => {
+test('the launcher is a normal window: decorated, resizable, and not a popup', () => {
   const conf = JSON.parse(readFileSync(join(HERE, '../../../src-tauri/tauri.conf.json'), 'utf8')) as {
-    app: { windows: Array<{ label: string; transparent?: boolean; shadow?: boolean }> };
+    app: { windows: Array<Record<string, unknown> & { label: string }> };
   };
-  const launcher = conf.app.windows.find((window) => window.label === 'launcher');
-  expect(launcher).toMatchObject({ transparent: true, shadow: false });
+  const launcher = conf.app.windows.find((window) => window.label === 'launcher')!;
+  expect(launcher).toMatchObject({
+    decorations: true, resizable: true,
+    width: 1440, height: 900, minWidth: 900, minHeight: 600,
+    // macOS draws the traffic lights over the content; elsewhere the keys are
+    // ignored and the normal title bar stays.
+    titleBarStyle: 'Overlay', hiddenTitle: true,
+  });
+  for (const popup of ['transparent', 'shadow', 'alwaysOnTop', 'skipTaskbar']) {
+    expect(launcher, popup).not.toHaveProperty(popup);
+  }
 });
 
-test('real launcher places all cards and keeps the document transparent', async () => {
+test('real launcher places the three areas with the tree inside the right one', async () => {
   const { container } = render(Launcher);
   const main = container.querySelector('main')!;
   expect(getComputedStyle(main).display).toBe('grid');
-  expect(getComputedStyle(document.body).backgroundColor).toBe('rgba(0, 0, 0, 0)');
-  const bar = container.querySelector('.searchbar')!;
-  expect(bar).not.toBeNull();
-  expect(bar.contains(screen.getByRole('textbox'))).toBe(true);
-  expect(bar.contains(screen.getByTestId('pin'))).toBe(true);
-  expect(bar.querySelectorAll('input[type="checkbox"]')).toHaveLength(0); // the search arms are not a choice
-  expect(screen.queryByTestId('card-tree')).toBeNull();
+
+  // The composer and the toolbar share the transcript's column; the tree is a
+  // pane inside the right area, not a column of its own (§2).
+  const centre = screen.getByTestId('col-transcript');
+  expect(centre.contains(screen.getByRole('textbox'))).toBe(true);
+  expect(centre.contains(screen.getByTestId('settings'))).toBe(true);
+  const tree = screen.getByTestId('col-tree');
+  expect(tree.contains(screen.getByTestId('tree-body'))).toBe(true);
+  expect(screen.getByTestId('col-right').contains(tree)).toBe(true);
+  // The pane itself does not scroll — its splitter lives on its edge and would
+  // scroll with the content — the body inside it does.
+  expect(getComputedStyle(tree).overflow).toBe('');
+  expect(getComputedStyle(tree.querySelector('.pane-body')!).overflow).toBe('auto');
+
   const box = screen.getByRole('textbox');
   await fireEvent.input(box, { target: { value: 'question' } });
   await fireEvent.keyDown(box, { key: 'Enter' });
-  await screen.findByTestId('card-centre');
-  // The first card is preselected, so the source card is up before any click.
-  expect(screen.getByTestId('card-source')).toBeTruthy();
-  await fireEvent.click(screen.getByTestId('preview-3'));
-  await waitFor(() => expect(screen.getByTestId('source-body').getAttribute('data-pending')).toBe('0'));
-  expect(screen.getAllByTestId('source-block').length).toBeGreaterThan(0);
-  const centre = bar.parentElement!;
-  expect(centre.className).toBe('col-centre');
-  expect(centre.parentElement).toBe(main);
-  expect(screen.getByTestId('card-centre').parentElement).toBe(centre);
-  for (const [id, column] of [['card-tree', '1'], ['card-source', '3']]) {
-    const el = screen.getByTestId(id);
-    expect(el.parentElement).toBe(main);
-    const style = getComputedStyle(el);
-    expect(style.gridColumn).toBe(column);
-    expect(style.overflow).toBe('auto');
-  }
-  expect(getComputedStyle(centre).gridColumn).toBe('2');
-  expect(getComputedStyle(centre).display).toBe('flex');
-  expect(getComputedStyle(screen.getByTestId('card-centre')).overflow).toBe('auto');
+  await screen.findByTestId('turn');
+  expect(screen.getAllByTestId('turn')).toHaveLength(1);
 });
 
-test('real tree marks current file and recent while leaving neighbours plain', async () => {
-  render(Tree, { selected: citationA, historyId: 1 });
+test('real tree marks the current file while leaving neighbours plain', async () => {
+  render(Tree, { selected: { rootId: 1, relativePath: 'notes/a.md' }, onPick: () => {} });
   const selected = await screen.findByTestId('tree-file-doc-1');
   const other = screen.getByTestId('tree-file-doc-2');
-  function check(on: Element, off: Element) {
-    expect(on.getAttribute('aria-current')).toBe('true');
-    expect(off.hasAttribute('aria-current')).toBe(false);
-    expect(getComputedStyle(on).background).toBe('var(--cite-wash)');
-    expect(getComputedStyle(on).borderColor).toBe('var(--cite-line)');
-    expect(getComputedStyle(off).background).not.toBe('var(--cite-wash)');
-    expect(getComputedStyle(off).borderColor).not.toBe('var(--cite-line)');
-  }
-  check(selected, other);
-  await fireEvent.click(screen.getByTestId('tree-tab-recents'));
-  check(await screen.findByTestId('tree-history-1'), screen.getByTestId('tree-history-2'));
-  const on = getComputedStyle(screen.getByTestId('tree-tab-recents'));
-  const off = getComputedStyle(screen.getByTestId('tree-tab-files'));
-  expect(on.background).toBe('var(--surface)');
-  expect(off.background).not.toBe(on.background);
-});
-
-test('real source distinguishes primary highlight from its sibling', async () => {
-  render(Source, { selected: citationA, siblings: [citationA, citationB] });
-  await waitFor(() => expect(screen.getByTestId('source-body').getAttribute('data-pending')).toBe('0'));
-  const marks = screen.getAllByTestId('hl');
-  const primary = marks.filter((m) => m.getAttribute('data-primary') === 'true');
-  const secondary = marks.filter((m) => !m.hasAttribute('data-primary'));
-  expect(primary).toHaveLength(1);
-  expect(secondary).toHaveLength(1);
-  for (const mark of marks) expect(getComputedStyle(mark).background).toBe('var(--cite-wash)');
-  expect(getComputedStyle(primary[0]).outline).toBe('1px solid var(--cite-line)');
-  expect(getComputedStyle(secondary[0]).outline).toBe('none');
-  expect(screen.getByTestId('freshness').textContent?.length).toBeGreaterThan(0);
-});
-
-test('real pin exposes pressed state through its style', async () => {
-  render(Launcher);
-  const pin = screen.getByTestId('pin');
-  const before = getComputedStyle(pin).background;
-  await fireEvent.click(pin);
-  expect(pin.getAttribute('aria-pressed')).toBe('true');
-  expect(getComputedStyle(pin).background).toBe('var(--accent-soft)');
-  expect(getComputedStyle(pin).background).not.toBe(before);
-});
-
-test('the left switch hides the tree by the UA [hidden] rule, and the stylesheet does not override it', async () => {
-  render(Launcher);
-  const box = screen.getByRole('textbox');
-  await fireEvent.input(box, { target: { value: 'question' } });
-  await fireEvent.keyDown(box, { key: 'Enter' });
-  const tree = await screen.findByTestId('card-tree');
-  expect(getComputedStyle(tree).display).not.toBe('none');
-  tree.setAttribute('hidden', '');
-  expect(getComputedStyle(tree).display).toBe('none');
-});
-
-// Placement in every layout, not only the widest: a wrong rule would put a
-// panel into an implicit track with the other three layouts untested.
-test('each data-cols layout places the tree, search, results and source in its own tracks', async () => {
-  const { container } = render(Launcher);
-  const main = container.querySelector('main')!;
-  const box = screen.getByRole('textbox');
-  await fireEvent.input(box, { target: { value: 'question' } });
-  await fireEvent.keyDown(box, { key: 'Enter' });
-  await screen.findByTestId('card-source');
-  const col = (el: Element) => getComputedStyle(el).gridColumn;
-  const bar = container.querySelector('.col-centre')!;
-  const expected: Record<string, { bar: string; results: string; tree?: string; source?: string }> = {
-    s: { bar: '1', results: '1' },
-    ls: { bar: '2', results: '2', tree: '1' },
-    sr: { bar: '1', results: '1', source: '2' },
-    lsr: { bar: '2', results: '2', tree: '1', source: '3' },
-  };
-  for (const [cols, want] of Object.entries(expected)) {
-    main.setAttribute('data-cols', cols);
-    expect(col(bar), `${cols} centre column`).toBe(want.bar);
-    expect(screen.getByTestId('card-centre').parentElement, `${cols} results`).toBe(bar);
-    if (want.tree) expect(col(screen.getByTestId('card-tree')), `${cols} tree`).toBe(want.tree);
-    if (want.source) expect(col(screen.getByTestId('card-source')), `${cols} source`).toBe(want.source);
-  }
-});
-
-test('nothing spans two grid rows, so no card can size the search panel (WebKit spanning-item distribution)', () => {
+  expect(selected.getAttribute('aria-current')).toBe('true');
+  expect(other.hasAttribute('aria-current')).toBe(false);
+  expect(getComputedStyle(selected).background).toBe('var(--cite-wash)');
+  expect(getComputedStyle(selected).borderColor).toBe('var(--cite-line)');
+  expect(getComputedStyle(other).background).not.toBe('var(--cite-wash)');
+  expect(getComputedStyle(other).borderColor).not.toBe('var(--cite-line)');
+  // A file reads as secondary to a folder: same weight, `--ink-soft` — while
+  // the open row above is lifted back to `--ink`.
+  expect(getComputedStyle(other).color).toBe('var(--ink-soft)');
+  expect(getComputedStyle(other).fontWeight).toBe('400');
+  expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).color).toBe('var(--ink)');
+  expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).fontWeight).toBe('500');
+  expect(getComputedStyle(selected).color).toBe('var(--ink)');
+  // jsdom ranks specificity by source order, so the computed colours above
+  // cannot prove the open row outranks the file row. The selector is read from
+  // the sheet instead: the file-row rule must exclude the current row, or a
+  // later simplification silently paints the open file as secondary. The lift
+  // itself is a stand-only check.
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  expect(css).toMatch(/main\.panels\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\);/);
-  expect(css).not.toMatch(/(^|\n)main[^{]*\{[^}]*grid-row/); // the card-internal grids below may use rows
-  expect(css).toMatch(/\.col-centre\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*5px/);
-  expect(css).toMatch(/\.col-centre > \.results\s*\{[^}]*flex:\s*1 1 auto/);
-  expect(css).toMatch(/\.searchbar\s*\{[^}]*flex:\s*none/);
+  expect(css).toMatch(/\.tree li > button\.file-row:not\(\[aria-current="true"\]\)\s*\{/);
+});
+
+// §4: the conversation on screen is `--select`, not the file tree's
+// `--cite-wash` — the two selection meanings stay apart on screen.
+test('real recents marks the conversation on screen with --select', async () => {
+  render(Recents, { activeId: 1, gen: 0, onOpen: () => {} });
+  const on = await screen.findByTestId('recents-row-1');
+  const off = screen.getByTestId('recents-row-2');
+  expect(getComputedStyle(on).background).toBe('var(--select)');
+  expect(getComputedStyle(off).background).not.toBe('var(--select)');
+});
+
+// The card is a column with one gap between its parts, and `Answer` relies on
+// it: the header, paragraph, citations and the via line all carry `margin: 0`,
+// and `.answer-card .via` pulls up by -9 px. Without this rule the paragraph
+// and the via line sit on each other. Pinned by reading the sheet, as the cloud
+// colours below are: no jsdom render computes the gap (review, Important 1).
+test('the answer card keeps the column gap its parts depend on', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(
+    /\.answer-card,\s*\.passages-card\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;[^}]*gap:\s*13px/,
+  );
+});
+
+// §4: one line — the question, the time to its right, the × after it. The
+// question clips to make room and the time never takes a line of its own.
+test('a conversation row is one line: question, time right, then ×', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
+  const row = await screen.findByTestId('recents-row-1');
+  const open = within(row).getByTestId('recents-open-1');
+  const query = within(row).getByTestId('recents-query');
+  const asked = within(row).getByTestId('recents-asked');
+  expect(query.parentElement).toBe(open); // both parts inside the row's one button
+  expect(asked.parentElement).toBe(open);
+  expect(getComputedStyle(open).display).toBe('flex');
+  expect(getComputedStyle(query).flexGrow).toBe('1'); // the question takes the room left over
+  expect(getComputedStyle(asked).flexGrow).toBe('0'); // the time does not shrink or wrap
+});
+
+// The open-failure alert sits beside the list and carried only `.composer`'s
+// rule before the fix round, so it drew as bare text (review, minor). The frame
+// is read from the sheet as well as the render: jsdom drops a `background` and
+// a `border` written as a `var(…)` shorthand, so the computed colour cannot
+// answer for it.
+test('the conversation alert is the same framed message as the composer guard', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {}, error: 'historyFailed' });
+  const alert = await screen.findByTestId('recents-error');
+  expect(alert.getAttribute('role')).toBe('alert');
+  const computed = getComputedStyle(alert);
+  expect(computed.fontSize).toBe('12px'); // the rule reaches this element…
+  expect(computed.margin).toBe('0px 0px 8px 0px');
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(
+    /\.recents-body \.guard\s*\{[^}]*background:\s*var\(--surface-2\);[^}]*border:\s*1px solid var\(--line\)/,
+  );
+});
+
+test('real file pane paints the cited span and keeps its badge on screen', async () => {
+  render(FilePane, {
+    location: { documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md' },
+    focus: null,
+    onFocusHandled: () => {},
+  });
+  const mark = await screen.findByTestId('hl');
+  expect(mark.getAttribute('data-primary')).toBe('true');
+  expect(getComputedStyle(mark).background).toBe('var(--cite-wash)');
+  expect(getComputedStyle(mark).outline).toBe('1px solid var(--cite-line)');
+  expect(screen.getByTestId('file-badge').textContent?.length).toBeGreaterThan(0);
+});
+
+// The carried finding from the shell: with the tree hidden its track is 0 px,
+// and a file pane placed by auto-flow lands in that track and is invisible.
+// Both panes name their column, so the file stays in the second one in both
+// modes — asserted after the tree is actually hidden, not just with the class
+// rule in the sheet.
+test('the file pane keeps the second track when the tree is hidden', async () => {
+  render(Shell, { fileOpen: true });
+  expect(getComputedStyle(screen.getByTestId('col-tree')).gridColumn).toBe('1');
+  expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
+
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(screen.getByTestId('col-tree').hasAttribute('hidden')).toBe(true);
+  expect(getComputedStyle(screen.getByTestId('col-file')).gridColumn).toBe('2');
+});
+
+// Owner, 2026-10-20: one focus ring on the composer — the box's
+// `:focus-within` outline — and never a second, UA-drawn one on the field
+// inside it. Read from the sheet: jsdom's UA stylesheet draws no ring, so a
+// computed style cannot see the doubling.
+test('the composer draws one focus ring: the box, never the field inside it', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.composer:focus-within\s*\{\s*outline:\s*2px solid var\(--accent\)/);
+  expect(css).toMatch(/\.composer textarea\s*\{[^}]*outline:\s*none/);
+});
+
+// §2 (owner, 2026-10-20): the right area is a column like the others — the
+// overlay painted over the transcript and the composer, and typing into
+// invisible text is not a usable transcript. Nothing in the sheet positions it
+// over the centre; a hidden pane leaves the grid instead.
+test('the right area is a column, never an overlay', () => {
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.shell > \.right\s*\{[^}]*position:\s*relative/);
+  expect(css).not.toMatch(/\.overlay/);
+  expect(css).not.toMatch(/\.scrim/);
+  expect(css).not.toMatch(/--glow/);
 });
 
 test('the cloud is coloured by what it reports, and an inactive one has no hover background', () => {

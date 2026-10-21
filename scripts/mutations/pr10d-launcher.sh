@@ -7,43 +7,37 @@ case_ "launcher: current row loses its state selector" \
   ui/src/styles/launcher.css \
   's~\.tree \[aria-current="true"\]~.tree [aria-current="never"]~' \
   '.tree [aria-current="never"]' \
-  src/launcher/styles.test.ts 'real tree marks current file and recent while leaving neighbours plain' runner=vitest
+  src/launcher/styles.test.ts 'real tree marks the current file while leaving neighbours plain' runner=vitest
 
 case_ "launcher: primary source highlight loses its outline" \
   ui/src/styles/launcher.css \
   's~mark\[data-primary="true"\]~mark[data-primary="never"]~' \
   'mark[data-primary="never"]' \
-  src/launcher/styles.test.ts 'real source distinguishes primary highlight from its sibling' runner=vitest
+  src/launcher/styles.test.ts 'real file pane paints the cited span and keeps its badge on screen' runner=vitest
 
-case_ "launcher: source is placed into the tree column" \
+case_ "launcher: the right area loses its own track" \
+  ui/src/launcher/Shell.svelte \
+  's~minmax\(0, 1fr\) \$\{view\.right\}px~minmax(0, 1fr) 0px~' \
+  'minmax(0, 1fr) 0px' \
+  src/launcher/Shell.test.ts 'a toggle hands its width to the neighbour' runner=vitest
+
+case_ "launcher: the tree toggle stops hiding the tree" \
+  ui/src/launcher/Shell.svelte \
+  's~hidden=\{!panels\.tree\}~hidden={false}~' \
+  'hidden={false}' \
+  src/launcher/Shell.test.ts 'the tree toggle does not change the transcript width' runner=vitest
+
+case_ "launcher: the transcript cannot scroll" \
   ui/src/styles/launcher.css \
-  's~(\[data-cols="lsr"\] > \.doc \{ grid-column: )3~${1}1~' \
-  '[data-cols="lsr"] > .doc { grid-column: 1;' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
+  's~.centre-body > .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto; }~.centre-body > .transcript { flex: 1 1 auto; min-height: 0; }~' \
+  '.centre-body > .transcript { flex: 1 1 auto; min-height: 0; }' \
+  src/launcher/Launcher.test.ts 'the shell is one row of tracks and the transcript is the only scroller' runner=vitest
 
-case_ "launcher: source loses its grid hook" \
-  ui/src/launcher/Cards.svelte \
-  's~class="float doc" data-testid="card-source"~class="float" data-testid="card-source"~' \
-  'class="float" data-testid="card-source"' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
-
-case_ "launcher: cards cannot scroll" \
+case_ "launcher: the conversation on screen looks inactive" \
   ui/src/styles/launcher.css \
-  's~padding: 14px; overflow: auto;~padding: 14px; overflow: hidden;~' \
-  'padding: 14px; overflow: hidden;' \
-  src/launcher/styles.test.ts 'real launcher places all cards and keeps the document transparent' runner=vitest
-
-case_ "launcher: the selected tab looks inactive" \
-  ui/src/styles/launcher.css \
-  's~\.tree \.tabs button\[aria-pressed="true"\]~.tree .tabs button[aria-pressed="never"]~' \
-  '.tree .tabs button[aria-pressed="never"]' \
-  src/launcher/styles.test.ts 'real tree marks current file and recent while leaving neighbours plain' runner=vitest
-
-case_ "launcher: pinned state loses its style" \
-  ui/src/styles/launcher.css \
-  's~\.tb\[aria-pressed="true"\]~.tb[aria-pressed="never"]~' \
-  '.tb[aria-pressed="never"]' \
-  src/launcher/styles.test.ts 'real pin exposes pressed state through its style' runner=vitest
+  's~\.history-row\[aria-current="true"\] \{~.history-row[aria-current="never"] {~' \
+  '.history-row[aria-current="never"]' \
+  src/launcher/styles.test.ts 'real recents marks the conversation on screen with --select' runner=vitest
 
 case_ "launcher: entry omits its stylesheet" \
   ui/src/launcher/main.ts \
@@ -52,11 +46,11 @@ case_ "launcher: entry omits its stylesheet" \
 import { mount }" \
   src/styles/tokens.test.ts 'imports the stylesheets each window needs, in order' runner=vitest
 
-case_ "launcher: transparent window regains the native shadow" \
+case_ "launcher: the window loses its decorations" \
   src-tauri/tauri.conf.json \
-  's~"shadow": false~"shadow": true~' \
-  '"shadow": true' \
-  src/launcher/styles.test.ts 'transparent launcher disables the native window shadow' runner=vitest
+  's~"decorations": true~"decorations": false~' \
+  '"decorations": false' \
+  src/launcher/styles.test.ts 'the launcher is a normal window: decorated, resizable, and not a popup' runner=vitest
 
 case_ "launcher: light citation pair loses AA contrast" \
   ui/src/styles/tokens.css \

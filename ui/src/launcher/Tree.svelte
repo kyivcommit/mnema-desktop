@@ -5,6 +5,13 @@
     | { kind: 'folder'; name: string; path: string; children: TreeNode[] }
     | { kind: 'file'; name: string; path: string; documentId: string };
 
+  // The selection is the (root, path) PAIR, not `documentId`: one document can
+  // sit at several paths (`schema.sql`'s `path` table), and a key on the id
+  // would mark every row that shows it instead of the one that was opened.
+  export type TreeSelection = { rootId: number; relativePath: string };
+  // What a click carries: the selection plus the id the pane is opened by.
+  export type TreePick = TreeSelection & { documentId: string };
+
   // Decision 6: the folder tree is a split of `relativePath` on `/`, and
   // nothing else — the backend hands over flat paths per root. Pure and
   // exported so the depth cases (no slash at all, two levels deep, both mixed
@@ -38,43 +45,23 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { formatIndexedAt } from '../i18n/recency';
-  import { deleteHistoryEntry, listHistory, listTree } from '../lib/ipc';
-  import type { AskCitation, Hit, HistoryEntry, TreeListing } from '../lib/ipc';
+  import { listTree } from '../lib/ipc';
+  import type { TreeListing } from '../lib/ipc';
 
-  // Ruling O: Task 8b holds the selection as exactly this union, so pinning
-  // the narrower type here would force a signature change one task later.
-  // Both members carry `documentId`, which is all this card reads.
-  //
-  // The Recents tab lists the person's questions, not documents, so the card
-  // needs to know which question is on screen (`historyId`, the launcher's
-  // answer) and when a question was asked since it last read the list
-  // (`historyGen`). Both default to "none", so a card with no history wired
-  // still draws; `onOpenHistory` is the launcher's to supply.
-  let {
-    selected,
-    historyId = null,
-    historyGen = 0,
-    onOpenHistory,
-  }: {
-    selected: AskCitation | Hit | null;
-    historyId?: number | null;
-    historyGen?: number;
-    onOpenHistory?: (id: number) => void;
+  // Ruling O, restated for the pair: the selection is the file's place on
+  // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
+  // as well, which is what the backend is asked to open.
+  let { selected, onPick }: {
+    selected: TreeSelection | null;
+    onPick: (pick: TreePick) => void;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
   let failed = $state(false);
-  let tab = $state<'files' | 'recents'>('files');
   // Folders the person opened or shut by hand, keyed per root: two roots may
-  // hold the same folder path and must not share one open flag.
+  // hold the same folder path and must not share one open flag. The root row
+  // itself lives in the same map under its root's `''` path.
   let toggled = $state<Record<string, boolean>>({});
-  // `null` until the first read lands, so an empty list is not drawn before the
-  // question of whether it is empty has been answered.
-  let history = $state<HistoryEntry[] | null>(null);
-  // A first read that failed, while nothing is on screen: the Recents tab says so.
-  // A read that fails after a list is already shown keeps the list, as list_tree does.
-  let historyFailed = $state(false);
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -85,36 +72,38 @@
   // mount-time snapshot goes stale: §7.3 keeps the window alive across a hide,
   // so one launcher outlives many index changes and keeps listing rows that are
   // no longer there. The trigger below is the window regaining focus, and it is
-  // chosen rather than invented — `Launcher.svelte:65` already treats window
-  // BLUR as "the person has left" and hides the launcher on it, so focus is the
-  // same signal in reverse: the launcher is in front of the person again, which
-  // is the moment its listing is about to be read. It costs nothing while the
-  // window is hidden and it is not tied to the answer state, so the toggles,
-  // which are component state, are untouched by it.
+  // chosen rather than invented — it is the moment the launcher is in front of
+  // the person again, which is when its listing is about to be read. It costs
+  // nothing while the window is hidden and it is not tied to the answer state,
+  // so the toggles, which are component state, are untouched by it.
+  //
+  // (The earlier version of this note justified the trigger from a blur handler
+  // in `Launcher.svelte` that hides the launcher. There is none, and there was
+  // not: a window close hides the launcher in Rust (`CloseRequested` →
+  // `hide_launcher`), and the `Focused(false)` arm there only arms the cold
+  // timer. Focus is this card's own signal, not half of a pair.)
   //
   // And the shell really does focus this window: every path that raises the
-  // launcher calls `set_focus()` on it, explicitly and on purpose —
-  // `src-tauri/src/lib.rs:99-113` (`focus_launcher`, behind the tray item and
-  // the second-instance handler) and `src-tauri/src/lib.rs:119-131`
-  // (`toggle_launcher`, the global shortcut) both run `show()`, `move_window`,
-  // `set_focus()`. They are the only two paths that show the launcher; the
-  // third `show()` in that file belongs to the settings window. And no fourth
-  // path hides in configuration: `src-tauri/tauri.conf.json` declares the
-  // `launcher` window `"visible": false`, so the window manager never raises it
-  // on its own and the two above are the whole set. (Review Minor 2: a grep over
-  // `*.rs` alone leaves that open.)
+  // launcher goes through `focus_launcher` — the tray item, the second-instance
+  // handler and `toggle_launcher` (the global shortcut) — and it runs `show()`,
+  // `set_focus()`. No fourth path hides in configuration:
+  // `src-tauri/tauri.conf.json` declares the `launcher` window
+  // `"visible": false`, so the window manager never raises it on its own and
+  // the three above are the whole set. (Review Minor 2: a grep over `*.rs`
+  // alone leaves that open.)
   //
   // 🔴 One path needs no Rust at all, and it is the owner's own case (review
-  // Minor 3). With 📌 pin on, `Launcher.svelte:65`'s blur-hide is disabled, so
-  // the launcher stays up and regains DOM focus through ordinary OS window
-  // activation — which is exactly the long-lived launcher that outlives an
-  // index change. That path does not depend on the link below.
+  // Minor 3). The launcher is a normal window (§1), so the person can bring it
+  // back by clicking it in the Dock or the ⌘-Tab switcher, which regains DOM
+  // focus through ordinary OS window activation — exactly the long-lived
+  // launcher that outlives an index change. That path does not depend on the
+  // link below.
   //
   // ⚠️ One link is still unmeasured, and it is narrower than the whole: whether
   // a webview `set_focus()` produces a DOM `focus` event on `window` in the
   // running application. Nobody has run this application yet, so that step is
   // read from the platform, not from a live launcher. It is the raise paths
-  // that need it; the pinned path above does not.
+  // that need it; the Dock/⌘-Tab path above does not.
   //
   // `loading` is a plain `let`, not `$state`: nothing renders from it. It stops
   // two listings being on the wire at once, where the loser lands last and puts
@@ -146,82 +135,18 @@
 
   onMount(load);
 
-  // The questions, newest first, as `list_history` sends them. Read on mount, on
-  // focus, and whenever `historyGen` moves (see the effect below). Two reads can
-  // be in flight at once, and the one that started last is the one that counts:
-  // a reply to an older read is not applied over a newer answer, but a read that
-  // is still on the wire does not stop a newer one from being asked for.
-  let historyAsked = 0;
-  let historyApplied = 0;
-  function loadHistory() {
-    const mine = ++historyAsked;
-    listHistory()
-      .then((h) => {
-        if (mine > historyApplied) { historyApplied = mine; history = h; historyFailed = false; }
-      })
-      .catch((e) => {
-        console.error('list_history failed', e);
-        if (history === null) historyFailed = true;
-      });
-  }
-
-  // A question's remove button deletes the entry. The row goes once the delete has
-  // resolved and the list has been read again, so a delete that fails leaves the
-  // row where it was. Nothing is confirmed and nothing is opened.
-  function removeHistory(id: number) {
-    deleteHistoryEntry(id)
-      .then(loadHistory)
-      .catch((e) => console.error('delete_history_entry failed', e));
-  }
-
-  // `historyGen` is the launcher's signal that a question was just answered. The
-  // effect depends on the number, not on the prop read: a parent that re-sets its
-  // props (a new selection) must not read the questions again, and an equal value
-  // does not propagate through a `$derived`. It runs once on mount, which is the
-  // first read; the read itself is inside `untrack`.
-  const generation = $derived(historyGen);
-  $effect(() => {
-    void generation;
-    untrack(loadHistory);
-  });
-
-  const filesLabel = $derived.by(() => { void $locale; return t('tree_tab_files'); });
-  const recentsLabel = $derived.by(() => { void $locale; return t('tree_tab_recents'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
-  const historyEmptyLabel = $derived.by(() => { void $locale; return t('history_empty'); });
 
-  // Ruling P: selection is by documentId, never by relativePath — two roots
-  // can hold the same relative path under different documents.
-  const selectedId = $derived(selected?.documentId ?? null);
+  // Ruling P, reversed on purpose: the key is the (root, path) pair, never
+  // `documentId` — two roots can hold the same relative path under different
+  // documents, and one document can be named from several paths. Only the row
+  // that was opened is marked.
+  const selectedKey = $derived(selected === null ? null : key(selected.rootId, selected.relativePath));
 
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
   );
-  // Review Minor 5: each question says HOW LONG AGO it was asked. The whole list
-  // is rebuilt inside one `$derived.by` that reads `$locale` — `formatIndexedAt`
-  // goes through `t()` and is not reactive on its own, the house pattern
-  // (`Answer.svelte:40-43`, `Passages.svelte:62-69`).
-  //
-  // The clock is read here rather than ticked: these labels do not update on
-  // their own, they are recomputed when the list changes, when the language
-  // changes, and every time the launcher is raised, which is the only moment a
-  // person is reading them. A timer would redraw the card behind a person who
-  // is not looking at it.
-  const historyRows = $derived.by(() => {
-    void $locale;
-    const now = Date.now();
-    return (history ?? []).map((entry) => ({
-      entry,
-      asked: formatIndexedAt(entry.askedAt, now),
-      // Named for its own question: a screen reader hears the row, not a count.
-      removeName: t('history_remove', { query: entry.query }),
-    }));
-  });
-
-  // The Files tab is empty when there are no roots, and only then. Questions do
-  // not count: an index with nothing indexed can still have been asked things,
-  // and the Recents tab says so for itself.
   const isEmpty = $derived(listing !== null && listing.roots.length === 0);
 
   // NUL as the separator because no path component can contain one, so no two
@@ -234,15 +159,18 @@
   }
 
   // Folders start expanded along the path to the selected file and collapsed
-  // everywhere else. Derived from `selected`, so a new citation opens its
-  // folder without a refetch; `toggled` still wins, so an opened folder the
-  // person is reading does not shut itself on the next answer.
+  // everywhere else; the root holding it joins the set, so a root row the
+  // person shut is re-opened by a new selection exactly like a folder on the
+  // way. Derived from `selected`, so a new selection opens its folder without
+  // a refetch; `toggled` still wins, so an opened folder the person is reading
+  // does not shut itself on the next answer.
   const openByDefault = $derived.by(() => {
     const open = new Set<string>();
-    if (selectedId === null || listing === null) return open;
+    if (selectedKey === null || listing === null) return open;
     for (const root of listing.roots) {
       for (const file of root.files) {
-        if (file.documentId !== selectedId) continue;
+        if (key(root.rootId, file.relativePath) !== selectedKey) continue;
+        open.add(key(root.rootId, ''));
         const parts = file.relativePath.split('/');
         parts.pop();
         let path = '';
@@ -257,7 +185,9 @@
 
   function isOpen(rootId: number, path: string) {
     const k = key(rootId, path);
-    return k in toggled ? toggled[k] : openByDefault.has(k);
+    // The root row (path '') starts EXPANDED (owner, 2026-10-20): collapsing
+    // is the person's option, never the default.
+    return k in toggled ? toggled[k] : path === '' || openByDefault.has(k);
   }
 
   function toggle(rootId: number, path: string) {
@@ -265,45 +195,25 @@
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
   }
 
-  // 🔴 Owner review on PR #24, P4. The invariant: when the source card shows a
-  // passage, this card shows which row it came from. Two states broke it, and
-  // `openByDefault` above cannot reach either — it is consulted only where
-  // `toggled` has no entry, and only by the Files tab.
+  // Folders on the selected file's path that the person had shut are set open
+  // when a NEW selection lands there — and the root row with them, since it is
+  // the outermost folder on every path inside it. `toggled` still wins over `openByDefault`
+  // everywhere else (Ruling M): a folder the person opened or shut somewhere
+  // else is none of this selection's business, and clearing those would snap
+  // every folder shut on each click.
   //
-  // `toggled` winning over `openByDefault` is Ruling M and it stands: folders
-  // must not snap shut on every question. But "this citation is now selected"
-  // is a DIFFERENT event from "an answer arrived" — it is the person's own
-  // click on a citation, and its entire purpose is to be shown where the
-  // passage came from. So a NEW selection clears the hand-toggle on the folders
-  // along its own path, and on no others: a folder opened or shut somewhere
-  // else is none of this selection's business, and clearing those would be
-  // Ruling M's defect with an extra step.
+  // The stamp is the selection key plus the folders on its way, so the effect
+  // fires when the selection changes or when the listing that completes it
+  // arrives — and not on every refresh. A refresh that returns the same listing
+  // moves nothing. A file that moves to a new path no longer matches the pair,
+  // so it is no longer selected and no folder is re-opened: the tree stops
+  // claiming the pane's file is there, which is the honest answer.
   //
-  // Deliberately NOT undone by an ANSWER: a person who shuts the folder of the
-  // passage already on screen keeps it shut while the selection stands. They
-  // acted on a row they could see, and no new event has happened since.
-  //
-  // ⚠️ "While the selection stands" is the whole of the promise, and the wider
-  // form this comment used to make was false (review Minor 4). It is also
-  // narrower than a reader will take it: a SECOND citation in the same document
-  // does not re-open the folder either, because the stamp does not change — the
-  // shut folder stays shut, and the person keeps the view they chose. Only a
-  // change to the selected document's folder chain moves it. The stamp below
-  // holds the folders on the selected document's way, so a REFRESH that
-  // reshapes that chain — the file moved — re-fires the effect and re-opens the
-  // folder, on an event the person did not cause. That is defensible: the chain
-  // really did change. And it can only ever open, never shut: the loop writes
-  // `false → true` and nothing else. Both halves are pinned in `Tree.test.ts`
-  // (`a refresh that moves the selected file…` and its control, `a refresh that
-  // changes nothing…`).
-  //
-  // The stamp is what makes "a change" precise: it holds the selected document
-  // and the folders on its way, so it also fires when the listing arrives after
-  // the selection did. Everything it writes is read inside `untrack`, so this
-  // effect depends on the selection and the listing, never on what it sets.
+  // Everything it writes is read inside `untrack`, so this effect depends on
+  // the selection and the listing, never on what it sets.
   let lastSelection = '';
   $effect(() => {
-    const id = selectedId;
+    const id = selectedKey;
     const l = listing;
     const onTheWay = openByDefault;
     const stamp = JSON.stringify([id, [...onTheWay].sort()]);
@@ -352,91 +262,53 @@
             {@render branch(node.children, rootId)}
           {/if}
         {:else}
-          <!-- 🔴 Owner review on PR #24, P5. This row was a `<button>` with no
-               `onclick` and a `role="treeitem"` with no enclosing tree, group
-               or keyboard model: click, Enter and Space all did nothing, and a
-               keyboard reached it only to find that out. It is a row, so it is
-               rendered as one.
-
-               The other option — wire the promised action — is not reachable
-               from this card: opening a document needs a command that takes a
-               `documentId` and the bridge has none (`lib/ipc.ts:81-107`;
-               `source_around` needs a chunk, which only a citation carries).
-               A row that says "activate me" and cannot is the finding itself.
-
-               `aria-current` stays: it is a global attribute, valid on any
-               element, and it is what says which row the source card is
-               showing. `aria-selected` goes with the role — it is defined only
-               inside a listbox/grid/tree, and on a bare row it states a
-               membership that no longer exists. -->
-          <span
+          <!-- The row is a real action now: clicking it opens the file in the
+               pane at its start (spec §2, §3). The selection — and therefore
+               `aria-current` — is the (root, path) pair, so two rows naming the
+               same document are not both marked; only the one that was opened
+               is. -->
+          <button
+            type="button"
+            class="file-row"
             data-testid={`tree-file-${node.documentId}`}
-            aria-current={node.documentId === selectedId ? 'true' : undefined}
-            >{node.name}</span>
+            aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
+            onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}
+            >{node.name}</button>
         {/if}
       </li>
     {/each}
   </ul>
 {/snippet}
 
-<svelte:window onfocus={() => { load(); loadHistory(); }} />
+<svelte:window onfocus={load} />
 
 <div class="tree" data-testid="tree-body">
-  <div class="tabs">
-    <button
-      type="button"
-      data-testid="tree-tab-files"
-      aria-pressed={tab === 'files'}
-      onclick={() => (tab = 'files')}>{filesLabel}</button>
-    <button
-      type="button"
-      data-testid="tree-tab-recents"
-      aria-pressed={tab === 'recents'}
-      onclick={() => (tab = 'recents')}>{recentsLabel}</button>
-  </div>
-
-  {#if tab === 'files'}
-    {#if failed}
-      <p data-testid="tree-failed">{failedLabel}</p>
-    {:else if isEmpty}
-      <p data-testid="tree-empty">{emptyLabel}</p>
-    {:else}
-      {#each roots as { root, nodes } (root.rootId)}
-        <section data-testid={`tree-root-${root.rootId}`}>
-          <h4>{root.name}</h4>
-          {@render branch(nodes, root.rootId)}
-        </section>
-      {/each}
-    {/if}
-  {:else if history === null && historyFailed}
-    <p data-testid="history-failed">{failedLabel}</p>
-  {:else if history !== null && history.length === 0}
-    <p data-testid="history-empty">{historyEmptyLabel}</p>
+  {#if failed}
+    <p data-testid="tree-failed">{failedLabel}</p>
+  {:else if isEmpty}
+    <p data-testid="tree-empty">{emptyLabel}</p>
   {:else}
-    <ul>
-      {#each historyRows as { entry, asked, removeName } (entry.id)}
-        <li>
-          <!-- The row is a span, not a button: its two buttons are the actions.
-               `tree-history-*` is the row namespace, so the parts inside carry
-               ids that do not start with it — the rule `Passages` and `Answer`
-               follow. `aria-current` sits on the row because the style keys on
-               it there, and the row is what the launcher's `historyId` marks. -->
-          <span data-testid={`tree-history-${entry.id}`} class="history-row"
-            aria-current={entry.id === historyId ? 'true' : undefined}>
-            <button type="button" class="history-open" data-testid={`history-open-${entry.id}`}
-              onclick={() => onOpenHistory?.(entry.id)}>
-              <span data-testid="history-query" class="history-query">{entry.query}</span>
-              <span data-testid="history-asked" class="history-asked">{asked}</span>
-            </button>
-            <!-- Shown on hover and on focus, through opacity and never through
-                 `visibility`: a hidden control cannot take focus, and this one must
-                 always be reachable from a keyboard. -->
-            <button type="button" class="history-remove" data-testid={`history-remove-${entry.id}`}
-              aria-label={removeName}
-              onclick={() => removeHistory(entry.id)}>×</button>
-          </span>
-        </li>
-      {/each}
-    </ul>
+    {#each roots as { root, nodes } (root.rootId)}
+      <section data-testid={`tree-root-${root.rootId}`}>
+        <ul>
+          <li>
+            <!-- The root is a disclosure row like the folders below it (owner,
+                 2026-10-20): a flat list under a bare heading read as a pile
+                 with no way to fold it. -->
+            <button
+              type="button"
+              data-testid={`tree-root-toggle-${root.rootId}`}
+              aria-expanded={isOpen(root.rootId, '')}
+              onclick={() => toggle(root.rootId, '')}>{root.name}</button>
+          </li>
+        </ul>
+        <!-- A sibling of the root's own list, not a child of its <li>: nested
+             there, level-1 folders inherit the `ul ul` indent meant for level 2
+             and deeper (`launcher.css`). -->
+        {#if isOpen(root.rootId, '')}
+          {@render branch(nodes, root.rootId)}
+        {/if}
+      </section>
+    {/each}
   {/if}
 </div>

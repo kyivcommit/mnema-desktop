@@ -310,7 +310,7 @@ test('no section claims to be disabled, and no button carries aria-describedby',
 
 // M3 (review): aria-pressed is the only signal of which section is selected —
 // there is no CSS anywhere in this project. Both directions, before and after
-// a click, the shape already used at launcher/Tree.test.ts:864.
+// a click, the shape already used at launcher/Shell.test.ts:56.
 test('aria-pressed says which section is selected', async () => {
   setLocale('en'); // seed, do not inherit
   render(Settings);

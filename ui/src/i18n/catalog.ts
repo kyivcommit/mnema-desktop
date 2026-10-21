@@ -1,4 +1,4 @@
-export type Key = 'pin' | 'settings_title' | 'indexed_documents'
+export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
@@ -33,18 +33,18 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
+  | 'composer_send' | 'composer_hint'
   | 'phase_text' | 'phase_content' | 'phase_chat'
-  | 'toolbar_left' | 'toolbar_right' | 'toolbar_settings'
+  | 'toggle_recents' | 'toggle_files' | 'toggle_tree' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
-  | 'card_tree' | 'card_answer' | 'card_source'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_tab_files' | 'tree_tab_recents' | 'tree_empty' | 'tree_failed'
-  | 'history_empty' | 'history_remove' | 'history_unreadable'
-  | 'fresh_current' | 'fresh_reindexed' | 'fresh_file_changed'
-  | 'fresh_file_missing' | 'fresh_no_path'
-  | 'gone_no_such_chunk' | 'gone_id_reused'
-  | 'source_loading' | 'source_failed' | 'source_wrong_document'
+  | 'tree_empty' | 'tree_failed'
+  | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
+  | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
+  | 'file_loading' | 'file_failed' | 'file_focus_gone'
+  | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
+  | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
@@ -151,7 +151,6 @@ export type Key = 'pin' | 'settings_title' | 'indexed_documents'
 
 export const messages: Record<'uk' | 'en', Record<Key, string>> = {
   uk: {
-    pin: 'Пін',
     settings_title: 'Налаштування',
     settings_nav_models: 'Моделі',
     settings_nav_folders: 'Теки',
@@ -350,10 +349,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
+    // §5: the send button's own name (its visible mark is «↵»), and the one line
+    // under the field that says what the two Enter keys do.
+    composer_send: 'Надіслати',
+    composer_hint: '↵ надіслати · ⇧+↵ новий рядок',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
-    toolbar_left: 'Ліва панель', toolbar_right: 'Права панель', toolbar_settings: 'Налаштування',
+    toggle_recents: 'Бесіди', toggle_files: 'Файли', toggle_tree: 'Дерево', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
     provider_ok_mnema: 'Mnema (локально) готова',
     provider_unreachable_mnema: 'Mnema (локально) не відповідає: {reason}',
@@ -375,33 +378,33 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_row_ready: '✓',
     provider_downloading: 'Завантаження: {name}',
     provider_missing_local_models: 'Завантажте моделі Mnema — відкрити налаштування моделей',
-    card_tree: 'Дерево', card_answer: 'Відповідь', card_source: 'Джерело',
     // Ruling on the state E aria-label: the centre card is one <section>, but
     // it is not one FACT. Announcing state E as «Відповідь» named the region
     // for the thing it says is unavailable, where a person using a screen
     // reader cannot see the contradiction and correct for it.
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
-    tree_tab_files: 'Файли', tree_tab_recents: 'Нещодавні',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
-    fresh_current: 'Актуально',
+    history_open_failed: 'Не вдалося відкрити цю бесіду.',
+    recents_failed: 'Не вдалося завантажити бесіди.',
     fresh_reindexed: 'Цей шлях тепер належить іншому документу',
     fresh_file_changed: 'Файл змінився після індексації',
     fresh_file_missing: 'Файла немає на диску',
-    // Ruling X: `noPath` has three causes and deletion is only one of them
-    // (`src-tauri/src/tree.rs:226-241`), so this says the location is unknown
-    // and never that the file is gone.
-    fresh_no_path: 'Розташування на диску невідоме',
-    gone_no_such_chunk: 'Цього фрагмента більше немає в індексі',
-    gone_id_reused: 'Цей ідентифікатор тепер вказує на інший фрагмент',
-    source_loading: 'Завантаження джерела…',
-    source_failed: 'Не вдалося завантажити джерело.',
-    // M2: shown instead of a freshness verdict when the excerpt names a
-    // different document than the citation does.
-    source_wrong_document: 'Цей уривок походить з іншого документа, ніж цитата',
+    file_loading: 'Завантаження файла…',
+    file_failed: 'Не вдалося завантажити файл.',
+    // A citation from a stored conversation outlives the chunks it names: a
+    // reindex or a reused chunk id leaves it pointing at nothing, and the pane
+    // otherwise shows the whole file with no highlight and no word about it.
+    file_focus_gone: 'Уривка, на який вказувала цитата, більше немає в цьому файлі.',
+    // §3: a document that cannot be shown whole is never shown short, so each
+    // reason gets its own sentence rather than a blank pane.
+    file_unavailable_no_such_document: 'Цього документа більше немає в індексі.',
+    file_unavailable_no_blocks: 'У цьому документі немає тексту.',
+    file_unavailable_rebuilding: 'Документ зараз переіндексовується — спробуйте після сканування.',
+    file_unavailable_too_large: 'Файл завеликий, щоб показати його повністю.',
     // 🔴 Ruling AF: `bridge.rs:536-540` opens state E for any non-`Ready`
     // readiness, `bridge.rs:293-302` gives that three variants, and the wire
     // shape at `bridge.rs:476-480` carries none of them. So this sentence says
@@ -1051,7 +1054,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_group_shortcut: 'Виклик',
     application_group_appearance: 'Вигляд',
     application_group_launcher: 'Лаунчер',
-    application_launcher_cold_label: 'Лаунчер забуває останню відповідь через (хвилин):',
+    application_launcher_cold_label: 'Вивантажувати локальну модель через (хвилин) без фокуса:',
     application_launcher_cold_failed: 'Час не змінено. Ось що відповів застосунок:',
     application_group_startup: 'Запуск',
     application_group_version: 'Версія',
@@ -1136,7 +1139,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_language_change_unconfirmed: 'Зміну мови не підтверджено. Ось що відповів застосунок:',
   },
   en: {
-    pin: 'Pin',
     settings_title: 'Settings',
     settings_nav_models: 'Models',
     settings_nav_folders: 'Folders',
@@ -1221,10 +1223,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
+    composer_send: 'Send',
+    composer_hint: '↵ to send · ⇧+↵ for a new line',
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
-    toolbar_left: 'Left panel', toolbar_right: 'Right panel', toolbar_settings: 'Settings',
+    toggle_recents: 'Conversations', toggle_files: 'Files', toggle_tree: 'Tree', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
     provider_ok_mnema: 'Mnema (local) is ready',
     provider_unreachable_mnema: 'Mnema (local) is not responding: {reason}',
@@ -1246,24 +1250,24 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_row_ready: '✓',
     provider_downloading: 'Downloading: {name}',
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
-    card_tree: 'Tree', card_answer: 'Answer', card_source: 'Source',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
-    tree_tab_files: 'Files', tree_tab_recents: 'Recents',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',
-    fresh_current: 'Up to date',
+    history_open_failed: 'This conversation could not be opened.',
+    recents_failed: 'The conversations could not be loaded.',
     fresh_reindexed: 'This path now names another document',
     fresh_file_changed: 'The file changed after indexing',
     fresh_file_missing: 'The file is missing from disk',
-    fresh_no_path: 'The location on disk is unknown',
-    gone_no_such_chunk: 'This passage is no longer in the index',
-    gone_id_reused: 'This identifier now points to another passage',
-    source_loading: 'Loading the source…',
-    source_failed: 'The source could not be loaded.',
-    source_wrong_document: 'This excerpt came from a different document than the citation',
+    file_loading: 'Loading the file…',
+    file_failed: 'The file could not be loaded.',
+    file_focus_gone: 'The passage this citation pointed at is no longer in this file.',
+    file_unavailable_no_such_document: 'This document is no longer in the index.',
+    file_unavailable_no_blocks: 'This document has no text.',
+    file_unavailable_rebuilding: 'This document is being reindexed — try again after the scan.',
+    file_unavailable_too_large: 'The file is too large to show in full.',
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',
@@ -1433,7 +1437,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     application_group_shortcut: 'Shortcut',
     application_group_appearance: 'Appearance',
     application_group_launcher: 'Launcher',
-    application_launcher_cold_label: 'Launcher forgets the last answer after (minutes):',
+    application_launcher_cold_label: 'Unload the local model after (minutes) without focus:',
     application_launcher_cold_failed: 'The time was not changed. This is what the application answered:',
     application_group_startup: 'Startup',
     application_group_version: 'Version',

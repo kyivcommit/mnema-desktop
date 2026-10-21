@@ -4,19 +4,6 @@ import type { AskAnswer, AskCitation, Hit, Refusal, ModelSettings } from '../lib
 // is the convenience mirror so a blank/over-long query never reaches `ask`.
 export const MAX_ASK_QUERY = 2048;
 
-// D155: on some window managers (mutter on X11) the drag of a frameless
-// window is a pointer+keyboard grab that takes focus for the whole move and
-// hands it back at the end. The webview sees that as `blur` a few
-// milliseconds after the press on the handle. A blur that close to a press
-// on the drag handle is the drag, not a dismissal. Measured on the Ubuntu
-// stand (X11, mutter, software rendering): press-to-blur landed at
-// 392 / 516 / 504 ms. A `pointerup` disarms the window as soon as it is a
-// click, not a drag, so 1000 ms is only the fallback for a platform where
-// neither the release nor a focus change reaches the webview after a drag —
-// a 2x margin over the slowest measured trial. Lives here (not as an
-// instance-script `export const` in Launcher.svelte) so the test can import
-// it as a plain value.
-export const DRAG_GRAB_WINDOW_MS = 1000;
 
 export type QueryCheck =
   | { ok: true; query: string }
@@ -71,20 +58,6 @@ export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
 // says so, so a refusal cannot reach a card component by accident.
 export type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
 
-// The launcher is cold until an answer with something to show arrives, and
-// the first such answer is the only way in; going back is the `launcher-cold`
-// event, not a state. A refusal, an error and a citations-only answer with no
-// passages leave a cold launcher as narrow as it was, and a hot one stays hot
-// through everything.
-export type Heat = 'cold' | 'hot';
-
-export function heatAfter(prev: Heat, s: LauncherState): Heat {
-  if ((s.kind === 'generated' || s.kind === 'citationsOnly') && s.answer.citations.length > 0) {
-    return 'hot';
-  }
-  return prev;
-}
-
 // One question with the answer it got. A conversation is a list of these.
 export type Turn = { query: string; answer: CardAnswer };
 
@@ -99,9 +72,14 @@ export function turnsAfter(turns: Turn[], query: string, a: AskAnswer): Turn[] {
   return turns;
 }
 
-// The card the source panel opens on. The centre lists previews (generated) or
-// ranked passages (citations only) in `citations` order, so the first of that
-// list is the first card it draws; `Cards.test.ts` holds this against the DOM.
-export function firstCard(a: CardAnswer): AskCitation | Hit | null {
-  return a.citations[0] ?? null;
+// The citation the file pane opens on: the SMALLEST `anchor` of a generated
+// answer (spec §3 — the smallest anchor, which is not the list's order: the
+// model numbers the passages it cites, and its list need not be sorted), and
+// the first of a citations-only list, whose `Hit`s carry no anchor at all.
+// `Launcher` opens it when the answer arrives, and `Selection` starts on it, so
+// pressing the card the pane already shows has nothing to move.
+export function firstCard(a: AskAnswer): AskCitation | Hit | null {
+  if (a.kind === 'generated') return [...a.citations].sort((x, y) => x.anchor - y.anchor)[0] ?? null;
+  if (a.kind === 'citationsOnly') return a.citations[0] ?? null;
+  return null; // a refusal cites nothing
 }

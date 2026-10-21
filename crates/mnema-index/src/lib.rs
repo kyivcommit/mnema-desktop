@@ -1,3 +1,4 @@
+mod file_view;
 mod history;
 mod journal;
 mod meta;
@@ -8,6 +9,7 @@ mod space;
 mod text_prep;
 mod write;
 
+pub use file_view::{DocumentViewRow, ViewBlockRow};
 pub use history::{HISTORY_LIMIT, HistoryRow};
 pub use journal::{DocumentStatus, SkipEntry, SkipRule, SkippedFile};
 pub use meta::{
@@ -21,7 +23,7 @@ pub use space::{AdoptedSpace, Neighbours, PendingChunk, VectorRole};
 pub use text_prep::{prepare_for_search, search_terms};
 pub use write::{
     ChunkAnchor, Citation, INDEX_FORMAT_VERSION, IndexedFileRow, PathEntry, PathOccupant,
-    ReadingWindow, RecentDocRow, SourceBlockRow, WatchedRootRow,
+    RecentDocRow, WatchedRootRow,
 };
 
 impl Error {

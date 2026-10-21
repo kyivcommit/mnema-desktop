@@ -90,7 +90,7 @@ pub enum AutostartState {
 pub struct AppPrefs {
     pub hotkey: HotkeyState,
     pub autostart: AutostartState,
-    /// Minutes of idleness after which the launcher forgets its last answer;
+    /// Minutes without focus after which the local models are unloaded;
     /// [`cold_after_minutes`] is its one reader.
     pub cold_after_minutes: u32,
     pub version: String,
@@ -244,8 +244,8 @@ pub fn write_role(
     })
 }
 
-/// Minutes the launcher may stay hidden before its next show is cold
-/// (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
+/// Minutes the window may stay out of focus before the local models are
+/// unloaded (`launcher_cold_after_minutes`): an integer of at least 1, else 5.
 pub fn cold_after_minutes(data_dir: &Path) -> u32 {
     read_all(data_dir)
         .get("launcher_cold_after_minutes")
@@ -752,9 +752,9 @@ pub fn set_chat_tools(
     crate::models::choose_chat_tools(&state, on, cloud.unwrap_or(false))
 }
 
-/// Sets the idle threshold after which the launcher forgets its last answer,
-/// and answers with the stored value. `go_cold_if_idle` reads the key on every
-/// show, so the next show already uses it.
+/// Sets the threshold after which the local models are unloaded, and answers
+/// with the stored value. `lib.rs`'s `cold_after` reads the key at every focus
+/// loss, so the next time the window loses focus already uses it.
 ///
 /// Refuses `0`: [`cold_after_minutes`] would read it back as the default, so
 /// accepting it would store a value that means something else.

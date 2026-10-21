@@ -23,6 +23,11 @@ target/
 # missing build output here never blocks a `cargo` command.
 ui/dist/
 ui/node_modules/
+# A root-level `node_modules/` is not the frontend's tree: it is Vite's/Vitest's
+# cache, created when a test run is started from the repository root (the
+# mutation harness does exactly that). Root-anchored, for the reason above, and
+# kept out of the public repository — the cache embeds absolute local paths.
+/node_modules/
 
 # --- Python, for the experiments only ---
 __pycache__/

@@ -4,8 +4,8 @@ import { messages, type Key } from './catalog';
 
 describe('i18n', () => {
   it('returns the string for the active locale', () => {
-    setLocale('en'); expect(t('pin')).toBe('Pin');
-    setLocale('uk'); expect(t('pin')).toBe('Пін');
+    setLocale('en'); expect(t('toolbar_settings')).toBe('Settings');
+    setLocale('uk'); expect(t('toolbar_settings')).toBe('Налаштування');
   });
 
   it('falls back to EN and never returns a raw key', () => {
@@ -30,7 +30,7 @@ describe('i18n', () => {
   // knows, and it used to be plural over all of them. Pinned HERE, beside the
   // catalogue's other plural, because an arm needs a COUNT and not a fixture:
   // `ASK_TOP_K` is 8 (`bridge.rs:496`), so 1 reaches `one`, 2 reaches `few` and
-  // 5 reaches `many` — three states a person can actually get to. `Cards.test.ts`
+  // 5 reaches `many` — three states a person can actually get to. `Passages.svelte`
   // owns the other half of the claim, that the card passes its own count.
   it('the state E banner counts passages through CLDR plural, in both locales', () => {
     setLocale('uk');

@@ -79,7 +79,7 @@ pub enum Key {
     TrayResumeScanning, // "Продовжити сканування" / "Continue scanning"
     TrayQuit,           // "Вийти" / "Quit"
     SettingsTitle,      // "Налаштування" / "Settings" (window title after "Mnema — ")
-    CloseSettings,      // "Закрити налаштування" / "Close Settings"
+    HideWindow,         // "Сховати вікно" / "Hide Window" (⌘Q, §6 — never a quit)
     MenuEdit,           // "Редагувати" / "Edit"
     MenuWindow,         // "Вікно" / "Window"
     // The two hotkey refusals that are OURS rather than the parser's. They are
@@ -108,7 +108,7 @@ pub const ALL_KEYS: &[Key] = &[
     Key::TrayResumeScanning,
     Key::TrayQuit,
     Key::SettingsTitle,
-    Key::CloseSettings,
+    Key::HideWindow,
     Key::MenuEdit,
     Key::MenuWindow,
     Key::HotkeyNeedsAKey,
@@ -144,8 +144,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         (Lang::En, TrayQuit) => "Quit",
         (Lang::Uk, SettingsTitle) => "Налаштування",
         (Lang::En, SettingsTitle) => "Settings",
-        (Lang::Uk, CloseSettings) => "Закрити налаштування",
-        (Lang::En, CloseSettings) => "Close Settings",
+        (Lang::Uk, HideWindow) => "Сховати вікно",
+        (Lang::En, HideWindow) => "Hide Window",
         (Lang::Uk, MenuEdit) => "Редагувати",
         (Lang::En, MenuEdit) => "Edit",
         (Lang::Uk, MenuWindow) => "Вікно",

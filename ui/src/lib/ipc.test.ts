@@ -21,17 +21,17 @@ import type {
   ScanState,
   HistoryEntry,
   HistoryOpen,
+  DocumentView,
   Roles,
   Configured,
   RoleModel,
   RoleStatuses,
   ProviderStatus,
-  SourceAround,
   StoredExclusion,
   SubfolderListing,
   SubfolderState,
 } from './ipc';
-import { LAUNCHER_COLD_EVENT, LOCAL_MODEL_PROGRESS_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
+import { LOCAL_MODEL_PROGRESS_EVENT, OTHER_JOBS, SCAN_PROGRESS_EVENT } from './ipc';
 import {
   generated,
   generatedArchived,
@@ -211,28 +211,36 @@ test('forgetKey invokes forget_key with no arguments', async () => {
   expect(invoke).toHaveBeenCalledWith('forget_key');
 });
 
-test('sourceAround echoes the whole identity, not just the id', async () => {
-  if (generated.kind !== 'generated') throw new Error('fixture drifted');
-  invoke.mockResolvedValue({ kind: 'gone', reason: { kind: 'noSuchChunk' } });
-
-  await ipc.sourceAround(generated.citations[0]);
-
-  expect(invoke).toHaveBeenCalledWith('source_around', {
-    chunkId: 42, passageText: 'A cited passage.',
-    citedDocumentId: 'doc-1', citedOrd: 0, citedRootId: 7,
-    citedRelativePath: 'notes/a.md', radius: 3,
-  });
-});
-
-test('SourceAround rejects Rust snake_case wire fields', () => {
-  const source: SourceAround = {
-    kind: 'excerpt', blocks: [], spans: [], documentId: 'doc-1', sectionTitle: null,
-    hasMoreBefore: false, hasMoreAfter: false, freshness: { kind: 'current' },
+test('DocumentView rejects Rust snake_case wire fields', () => {
+  const view: DocumentView = {
+    kind: 'file', blocks: [], focusBlockIds: [], spans: [], relativePath: null,
+    freshness: { kind: 'current' },
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
-    has_more_before: false,
+    focus_block_ids: [],
   };
 
-  expect(source.kind).toBe('excerpt');
+  expect(view.kind).toBe('file');
+});
+
+test('openDocument sends the location and the full citation pair, nulls included', async () => {
+  invoke.mockResolvedValue({ kind: 'unavailable', reason: 'noSuchDocument' });
+
+  await ipc.openDocument(
+    { documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md' },
+    { chunkId: 42, ord: 0, text: 'A cited passage.' },
+  );
+  expect(invoke).toHaveBeenCalledWith('open_document', {
+    documentId: 'doc-1', rootId: 7, relativePath: 'notes/a.md',
+    chunkId: 42, citedOrd: 0, citedText: 'A cited passage.',
+  });
+
+  // The tree opens a file with no citation; the keys are sent as null rather
+  // than dropped, so the command's optional arguments bind to `None`.
+  await ipc.openDocument({ documentId: 'doc-2', rootId: null, relativePath: null });
+  expect(invoke).toHaveBeenLastCalledWith('open_document', {
+    documentId: 'doc-2', rootId: null, relativePath: null,
+    chunkId: null, citedOrd: null, citedText: null,
+  });
 });
 
 test('the fixtures carry the pinned AskAnswer tags', () => {
@@ -858,13 +866,6 @@ const LIB_RS = readFileSync(join(HERE, '../../../src-tauri/src/lib.rs'), 'utf8')
 
 test('the scan-progress event name is the one lib.rs actually emits', () => {
   expect(SCAN_PROGRESS_EVENT).toBe(rustStrConst(LIB_RS, 'SCAN_PROGRESS_EVENT'));
-});
-
-// The same failure for `launcher-cold`: rename one side and the launcher keeps
-// its last answer inside a window Rust has already narrowed.
-test('the launcher-cold event name is the one lib.rs actually emits', () => {
-  expect(LAUNCHER_COLD_EVENT).toBe(rustStrConst(LIB_RS, 'LAUNCHER_COLD_EVENT'));
-  expect(LIB_RS).toMatch(/emit_to\("launcher", LAUNCHER_COLD_EVENT,/);
 });
 
 test('OtherJob is exactly what scan_state.rs defines, in the spelling serde sends', () => {

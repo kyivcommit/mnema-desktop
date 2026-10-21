@@ -1,40 +1,19 @@
-/* Launcher surfaces paint themselves; the window between them stays clear. */
-body { background: transparent; }
-
-/* No margin round the panels (owner, 2026-09-25): a transparent band here kept
- * the window from going flush to a screen edge. The widths stay written out
- * because `launcher_position::HANDLE_CENTRE` and its guard read them.
+/* §1: the window is opaque now, so the document paints the surface the panels
+ * sit on instead of leaving it to a transparent window.
  *
- * The window is as wide as the panels on screen, so the tracks are set per
- * `data-cols` (l = tree, s = search, r = source) and each layout adds up to
- * `launcher_layout::width` for it; the guard in `Launcher.test.ts` checks all
- * four. The window is not resizable.
- *
- * The grid starts at the window's left edge and follows `data-cols` alone.
- * The window frame changes before WebKit lays out at the new width, so for one
- * painted frame the new window shows the new tracks laid out at the old width.
- * Starting at the left edge makes that frame right: the search column is at 290
- * when `data-cols` has the tree, else at 0. A centred grid jumped by half the
- * width difference instead (measured: 185 pt, 145 pt).
- * ponytail: a tree toggle still flickers for one frame now and then (measured:
- * the source clipped to the old width on opening, the old layout 290 pt off on
- * closing), because the window moves and WebKit repaints in another process with
- * no order between them; the right panel does not move the window and is clean.
- * Upgrade path on macOS: keep the webview at the widest layout and move the
- * window frame and the webview's offset in one AppKit call. */
+ * §2: one row of three areas — [recents L][transcript 1fr][right W] — and the
+ * right area is [tree T][file W − T]. The widths are the person's (`layout.ts`);
+ * a hidden panel hands its width to the transcript by leaving the grid, so the
+ * window never changes size because a panel did. No `data-cols`, no Rust.
+ */
 html, body { overflow: hidden; }
-main.panels {
+main.shell {
+  position: relative;
   height: 100dvh;
-  padding: 0px 0px;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  gap: 5px;
-  justify-content: start;
+  overflow: hidden;
 }
-main.panels[data-cols="s"] { grid-template-columns: 470px; }
-main.panels[data-cols="ls"] { grid-template-columns: 285px 470px; }
-main.panels[data-cols="sr"] { grid-template-columns: 470px 366px; }
-main.panels[data-cols="lsr"] { grid-template-columns: 285px 470px 366px; }
 main button, main input {
   font: inherit;
   font-family: var(--sans);
@@ -49,32 +28,70 @@ main :is(button, input):focus-visible {
   outline-offset: 2px;
 }
 main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="true"]) { background-color: var(--surface-3); }
-/* Opaque (owner, 2026-09-25): a 90% fill with a backdrop blur let the window
- * behind show through every panel, and WebKit dropped and re-drew the blur
- * with a delay each time the window gained or lost focus. */
-.searchbar, .float {
-  min-width: 0;
-  min-height: 0;
-  background: var(--surface);
-  border-radius: 14px;
+/* The three areas. Opaque (owner, 2026-09-25): a 90% fill with a backdrop blur
+ * let the window behind show through every panel, and WebKit dropped and re-drew
+ * the blur with a delay each time the window gained or lost focus. */
+.shell > .recents {
+  grid-column: 1; position: relative;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--surface); border-right: 1px solid var(--line);
+  /* The traffic lights are drawn over this corner too (`titleBarStyle:
+     Overlay`): the strip stays clear until the sidebar fills it. */
+  padding: 38px 8px 8px;
 }
-.searchbar {
-  flex: none;
-  padding: 11px 13px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  box-shadow: 0 22px 50px -20px var(--glow), 0 6px 16px -8px var(--shadow);
+.shell > .centre { grid-column: 2; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.shell > .right {
+  grid-column: 3; position: relative;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--surface); border-left: 1px solid var(--line);
 }
-.sb-row { display: flex; align-items: flex-start; gap: 12px; min-height: 26px; } /* the handle offset assumes this row is `.tb` tall */
-.sb-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* The panel is hidden, not unmounted (the tree must keep its folders and its
+ * fetch), and `display: flex` above would otherwise beat the UA `[hidden]`
+ * rule and leave it on screen. */
+.shell > .right[hidden], .tree-pane[hidden] { display: none; }
+.head, .right-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px; }
+/* macOS draws its traffic lights over the content (`titleBarStyle: Overlay`,
+ * `tauri.conf.json`). The row is the window's drag handle — the buttons inside
+ * it are excluded by tag — and while the sidebar is shut this row is under the
+ * lights, so it keeps clear of them; with the sidebar open the lights sit over
+ * the sidebar and this header carries no empty inset. */
+.head { padding: 0 10px; }
+main.shell[data-left="false"] .head { padding-left: 78px; }
+.right-head { padding: 0 10px; }
+.centre-body {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 0 20px 16px;
+}
+.centre-body > .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.centre-body > .composer { flex: none; }
+.right-body {
+  flex: 1 1 auto; min-height: 0;
+  display: grid;
+}
+/* The pane itself does not scroll: its body does. A splitter is absolutely
+ * positioned on the pane's edge, and inside a scroll container it would scroll
+ * with the content and widen the scrollable area by its own hit target. */
+.tree-pane, .file-pane { position: relative; min-width: 0; min-height: 0; }
+/* Explicit columns: with the tree hidden its track is 0 px, and a file pane
+ * placed by auto-flow would land in that track and be 0 px wide. Column 2 is
+ * the file's place in both modes. */
+.tree-pane { grid-column: 1; }
+.file-pane { grid-column: 2; }
+.pane-body { height: 100%; overflow: auto; padding: 0 12px 12px; }
+.file-pane { border-left: 1px solid var(--line); }
+/* §2: a 1px line with a 4px hit target and no visible handle. It sits on its
+ * pane's inner edge, so it takes no track of its own and the widths in
+ * `layout.ts` are the widths on screen. */
+.splitter {
+  position: absolute; top: 0; bottom: 0; width: 1px; z-index: 3;
+  background: var(--line); cursor: col-resize; touch-action: none; outline: none;
+}
+.splitter::before { content: ''; position: absolute; inset: 0 -1.5px; }
+.splitter:hover, .splitter:focus-visible { background: var(--accent); }
+.recents > .splitter, .tree-pane > .splitter { right: -1px; }
+.right > .splitter { left: -1px; }
 .toolbar { display: flex; align-items: center; gap: 2px; margin-left: auto; }
-.search-line { flex: 1; min-width: 0; }
-.search-line input {
-  width: 100%; min-width: 0; border: 0; background: transparent;
-  padding: 2px 0; font-size: 15.5px;
-}
-.search-line input::placeholder { color: var(--ink-soft); }
 .tb {
   flex: none; width: 26px; height: 26px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -88,28 +105,6 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 .cloud[data-status="unreachable"] { color: var(--err); }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
-.search-line :is(.guard, .refusal) {
-  margin: 8px 0 0; overflow-wrap: anywhere; font-size: 12px;
-}
-.search-line .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
-.search-line .refusal { color: var(--ink-soft); }
-.float {
-  padding: 14px; overflow: auto;
-  box-shadow: 0 20px 46px -20px var(--shadow), 0 3px 8px -4px var(--shadow);
-}
-/* One grid row, and nothing spans: the centre track holds a flex column (search
-   panel above results), and the tree and source cards each take a whole track.
-   A card spanning two rows made WKWebView feed its content height into the
-   `auto` first row, which grew the search panel (25 pt in the three-column
-   layout, measured; Chromium never did). */
-.col-centre { display: flex; flex-direction: column; gap: 5px; min-width: 0; min-height: 0; }
-.col-centre > .results { flex: 1 1 auto; }
-/* The centre column is the first track unless the tree is on screen. */
-main > .col-side { grid-column: 1; }
-main > .col-centre { grid-column: 1; }
-main.panels:is([data-cols="ls"], [data-cols="lsr"]) > .col-centre { grid-column: 2; }
-main.panels[data-cols="sr"] > .doc { grid-column: 2; }
-main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 
 .tree { font-size: 13px; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
@@ -123,41 +118,42 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
 .tree li > button {
   font-family: var(--sans); font-weight: 500; font-style: normal; color: var(--ink);
 }
+.tree li > button.file-row:not([aria-current="true"]) { font-family: var(--sans); font-weight: 400; font-style: normal; color: var(--ink-soft); }
 .tree li > button[aria-expanded]::before { content: '▸'; display: inline-block; width: 12px; }
 .tree li > button[aria-expanded="true"]::before { content: '▾'; }
-.tree li > span > span { display: block; }
-.tree li > span > span + span { font-size: 11px; color: var(--ink-soft); }
 .tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
-/* A question row: the open button takes the width, the remove button sits at its
-   right. Text is one line with an ellipsis; the full query is in the DOM. */
-.tree .history-row { display: flex; align-items: center; gap: 4px; padding: 0; }
-.tree .history-open {
-  flex: 1; min-width: 0; padding: 4px 7px; border: 0; background: transparent;
-  color: var(--ink); text-align: left; font: inherit;
+/* §4: the conversations. The pane is the scroll container; a row is one line,
+   the × shows on hover and on focus. The active row is `--select`, not the
+   file tree's `--cite-wash`: "the conversation on screen" and "the file in the
+   tree" are different selections. */
+.recents-body { flex: 1 1 auto; min-height: 0; overflow: auto; font-size: 13px; }
+.recents-body ul { list-style: none; margin: 0; padding: 0; }
+.history-row { display: flex; align-items: center; gap: 4px; padding: 0; border-radius: 6px; }
+.history-row[aria-current="true"] { background: var(--select); color: var(--on-select); }
+.history-open {
+  flex: 1; min-width: 0; padding: 4px 7px; border: 0; border-radius: 6px; background: transparent;
+  color: inherit; text-align: left; font: inherit;
+  /* One line: the question clips to make room, the time never wraps below it. */
+  display: flex; align-items: baseline; gap: 6px;
 }
-.tree .history-query, .tree .history-asked {
+.history-query, .history-asked {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tree .history-asked { font-size: 11px; color: var(--ink-soft); }
+.history-query { flex: 1 1 auto; min-width: 0; }
+.history-asked { flex: none; font-size: 11px; color: var(--ink-soft); }
+.history-row[aria-current="true"] .history-asked { color: inherit; }
 /* Opacity, not visibility: a hidden control cannot take focus. */
-.tree .history-remove {
+.history-remove {
   flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px;
-  background: transparent; color: var(--ink-soft); font-size: 14px; line-height: 1; opacity: 0;
+  background: transparent; color: inherit; font-size: 14px; line-height: 1; opacity: 0;
 }
-.tree .history-row:hover .history-remove, .tree .history-row:focus-within .history-remove { opacity: 1; }
-.tree h4 {
-  margin: 10px 0 4px; overflow-wrap: anywhere;
-  font-family: var(--sans); font-weight: 500; font-style: normal;
+.history-row:hover .history-remove, .history-row:focus-within .history-remove { opacity: 1; }
+.recents-body .guard {
+  margin: 0 0 8px; padding: 8px; overflow-wrap: anywhere; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
 }
-.tree .tabs { display: flex; gap: 5px; padding: 3px; border-radius: 9px; background: var(--surface-3); margin-bottom: 11px; }
-.tree .tabs button {
-  flex: 1; min-width: 0; padding: 5px 2px; border: 0; border-radius: 6px;
-  font-size: 12.5px; background: transparent; color: var(--ink-soft); overflow-wrap: anywhere;
-}
-.tree .tabs button[aria-pressed="true"] {
-  background: var(--surface); color: var(--ink);
-  font-family: var(--sans); font-weight: 600; font-style: normal;
-}
+.tree section + section { margin-top: 8px; }
+
 .answer-card, .passages-card { display: flex; flex-direction: column; gap: 13px; }
 .umsg {
   align-self: flex-end; max-width: 88%; padding: 9px 13px;
@@ -165,19 +161,83 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
   font-size: 14px; line-height: 1.5; overflow-wrap: anywhere;
 }
 .answer-card .via { margin-top: -9px; font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 11px; color: var(--ink-soft); }
-.results .turn + .turn { margin-top: 22px; }
+/* §5: the conversation. Role is told by alignment, so nothing here names a
+   speaker: the question sits right (`.umsg`, drawn by `Answer`), the answer is
+   the plain text column on the left, without a bubble. */
+.transcript { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.transcript .exchange { display: flex; flex-direction: column; min-width: 0; }
+/* §5: the composer. The box grows with its text to five rows and then scrolls;
+   Enter sends, Shift+Enter is a newline, and the hint below says so. */
+.composer {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface);
+}
+.composer:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.composer textarea {
+  flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; resize: none;
+  max-height: calc(1.5em * 5); overflow-y: auto;
+  font-family: var(--sans); font-weight: 400; font-style: normal; font-size: 15px;
+  line-height: 1.5; color: var(--ink);
+  /* One focus ring, on the box (`.composer:focus-within` above) — the field's
+   * own UA ring inside it read as a double outline (owner, 2026-10-20). */
+  outline: none;
+}
+.composer textarea::placeholder { color: var(--ink-soft); }
+.composer-send {
+  flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent); font-size: 15px;
+}
+.composer-send:disabled { background: transparent; color: var(--ink-soft); }
+.composer-hint {
+  margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
+  font-size: 11px; color: var(--ink-soft);
+}
+.composer :is(.guard, .refusal) { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.composer .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
+.composer .refusal { color: var(--ink-soft); }
 .new-chat { flex: none; font-size: 12.5px; padding: 3px 9px; }
 .answer-card h3 {
   margin: 0; font-family: var(--mono); font-weight: 400; font-style: normal;
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
 }
-.answer-card > p { margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
-.answer-card > p button, .prev .tag {
+/* The answer renders as blocks (`lib/markdown.ts`), so the block parser owns
+   the newlines now: it joins a paragraph's soft breaks with spaces, so
+   `pre-wrap` here only preserves the lines it left literal — a table row, a
+   quote — and that is the one place the previous rendering is kept. Margins
+   stay 0 — `.answer-card`'s column gap is the spacing. */
+.answer-body { display: flex; flex-direction: column; gap: 12px; }
+.answer-body :is(p, h4, ul, ol) {
+  margin: 0; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere;
+}
+.answer-body p { white-space: pre-wrap; }
+.answer-body h4 {
+  font-family: var(--sans); font-weight: 600; font-style: normal;
+  font-size: 14px; line-height: 1.45; color: var(--ink);
+}
+.answer-card .answer-body :is(ul, ol) {
+  list-style: disc; display: flex; flex-direction: column; gap: 6px; padding: 0 0 0 22px;
+}
+.answer-card .answer-body ol { list-style: decimal; }
+.answer-body code, .answer-body pre {
+  font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 13px;
+}
+.answer-body code {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 4px; font-size: 12.5px;
+}
+.answer-body pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; line-height: 1.55; white-space: pre;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.answer-body button, .prev .tag {
   font-family: var(--mono); font-weight: 500; font-style: normal;
   color: var(--cite); background: var(--cite-wash); border: 1px solid var(--cite-line);
   border-radius: 5px; padding: 1px 5px; font-size: 11px;
 }
-.answer-card > p button { margin: 0 1px; vertical-align: .12em; }
+.answer-body button { margin: 0 1px; vertical-align: .12em; }
 .answer-card ul, .passages-card ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 9px; }
 .prev {
   width: 100%; padding: 10px 12px; display: grid; grid-template-columns: auto minmax(0, 1fr);
@@ -199,17 +259,19 @@ main.panels[data-cols="lsr"] > .doc { grid-column: 3; }
   padding: 11px 13px; border: 1px solid var(--cite-line); border-radius: 10px;
   background: var(--cite-wash); font-size: 13px; line-height: 1.55;
 }
-.source-card { display: flex; flex-direction: column; gap: 10px; }
-.source-card h3 {
+.file-card { display: flex; flex-direction: column; gap: 10px; }
+.file-card h3 {
   margin: 0; padding-bottom: 9px; border-bottom: 1px solid var(--line);
   font-family: var(--mono); font-weight: 400; font-style: normal;
   font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere;
 }
-.source-card p { margin: 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
-.source-card [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
-.source-card mark {
+.file-card p, .file-card h4, .file-card pre { margin: 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
+.file-card h4 { font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 13px; color: var(--ink); }
+.file-card pre { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; }
+.file-card [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
+.file-card mark {
   background: var(--cite-wash); color: var(--ink); padding: 1px 3px; border-radius: 3px;
   outline: none; box-decoration-break: clone; -webkit-box-decoration-break: clone;
 }
-.source-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
+.file-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
 

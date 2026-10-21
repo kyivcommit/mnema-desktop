@@ -543,7 +543,6 @@ jobs:
           - pr10f-tray-locale
           - pr10f-settings
           - watcher
-          - launcher-position
           - branch-review
           - citation-identity
           - model-config
@@ -595,8 +594,6 @@ jobs:
           - file: pr10d-launcher
             node: true
           - file: pr10f-settings
-            node: true
-          - file: launcher-position
             node: true
           - file: debt-ui-blind-tests
             node: true
