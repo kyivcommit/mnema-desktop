@@ -17,7 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, AskAnswer, Catalogue, RoleCatalogue, DocumentView, HistoryEntry, IndexRead, KeyState, LocaleChoice,
-  ModelRole, ScanState, ThemeChoice, TreeListing,
+  ModelRole, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
 // The history as `list_history` keeps it, with the answer each question got.
@@ -52,6 +52,7 @@ function initialState(scenario: string) {
     hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
     autostart: { kind: 'disabled' },
     coldAfterMinutes: 5,
+    uiScale: 'medium',
     version: '0.0.0-mock',
     platform: 'mac',
   };
@@ -323,6 +324,14 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       if (a.minutes === 0) throw 'the launcher needs at least one minute out of focus before the local model is unloaded';
       s.prefs = { ...s.prefs, coldAfterMinutes: a.minutes as number };
       return s.prefs.coldAfterMinutes;
+    },
+    // Stored only: the real command zooms every window, which a browser tab
+    // cannot do.
+    // The command falls back to medium for anything unknown; the stand does the
+    // same, or it would show a fourth state the application never persists.
+    set_ui_scale: (a) => {
+      const choice = a.choice as UiScale;
+      s.prefs = { ...s.prefs, uiScale: ['small', 'medium', 'large'].includes(choice) ? choice : 'medium' };
     },
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},

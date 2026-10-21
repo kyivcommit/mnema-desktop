@@ -4,7 +4,8 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    appPrefs, setHotkey, setAutostart, setColdAfter, type AppPrefs, type AutostartState, type LocaleChoice, type ThemeChoice,
+    appPrefs, setHotkey, setAutostart, setColdAfter, setUiScale, type AppPrefs, type AutostartState,
+    type LocaleChoice, type ThemeChoice, type UiScale,
   } from '../lib/ipc';
   import { formatShortcut, isModifierOnlyPress, shortcutFromEvent, MODIFIER_KEY_NAME } from '../i18n/shortcut';
   import { theme, changeTheme } from '../theme';
@@ -46,6 +47,10 @@
   // where its own stamp survived.
   let hotkeySeq = 0;
   let autostartSeq = 0;
+  // The scale's own stamp, for the same reason: `refresh` re-reads `uiScale`
+  // too, so a read issued before a change that landed meanwhile must not write
+  // the old step back over the accepted one.
+  let scaleSeq = 0;
 
   // D165 (1): who started a read decides how loud its refusal is. A read a
   // person's press started is the answer to that press — assertive; the mount
@@ -65,14 +70,16 @@
   async function refresh(origin: 'mount' | 'press'): Promise<void> {
     const myHotkey = ++hotkeySeq;
     const myAutostart = ++autostartSeq;
+    const myScale = ++scaleSeq;
     try {
       const p = await appPrefs();
       const takeHotkey = myHotkey === hotkeySeq;
       const takeAutostart = myAutostart === autostartSeq;
+      const takeScale = myScale === scaleSeq;
       // Superseded on every field this read could have written — `version`
       // and `platform` are decided at compile time and cannot have changed,
       // so there is nothing left for either to say.
-      if (!takeHotkey && !takeAutostart) return;
+      if (!takeHotkey && !takeAutostart && !takeScale) return;
       prefs = {
         ...p,
         // A writer that landed while this read was in flight holds the truth
@@ -80,6 +87,7 @@
         // read was issued before it.
         hotkey: takeHotkey || prefs === null ? p.hotkey : prefs.hotkey,
         autostart: takeAutostart || prefs === null ? p.autostart : prefs.autostart,
+        uiScale: takeScale || prefs === null ? p.uiScale : prefs.uiScale,
       };
       loadError = null;
       // The hotkey THIS read wrote to the screen, or `null` if it did not
@@ -505,6 +513,49 @@
   }
 
   // ---------------------------------------------------------------------------
+  // The interface scale: three steps, one pressed. The pressed step is
+  // `prefs.uiScale` from the read above and never a store of its own — the
+  // backend zooms every window, so what it stored is the only thing a new
+  // window may draw.
+  // ---------------------------------------------------------------------------
+
+  const scaleLabelText = $derived.by(() => { void $locale; return t('application_scale'); });
+  const scaleSmallLabel = $derived.by(() => { void $locale; return t('scale_small'); });
+  const scaleMediumLabel = $derived.by(() => { void $locale; return t('scale_medium'); });
+  const scaleLargeLabel = $derived.by(() => { void $locale; return t('scale_large'); });
+  const scaleFailedLabel = $derived.by(() => { void $locale; return t('application_scale_failed'); });
+
+  // A rejected `set_ui_scale`'s own sentence, VERBATIM beside the catalogue
+  // lead-in — the theme's shape.
+  let scaleError = $state<string | null>(null);
+  // The in-flight guard its siblings have: three buttons share it, and a press
+  // while one call is out would send a second.
+  let scaleBusy = $state(false);
+
+  async function chooseScale(choice: UiScale) {
+    // Both halves: `disabled` is what a person sees, the early return is what
+    // holds against a click dispatched at a disabled element.
+    if (scaleBusy) return;
+    scaleError = null;
+    scaleBusy = true;
+    try {
+      await setUiScale(choice);
+      // The mark moves on the ACCEPTED choice, after the reply — not when the
+      // press happened, which would draw a zoom no window got. The stamp makes
+      // an earlier `appPrefs` read drop this field rather than write the old
+      // step back over it.
+      scaleSeq += 1;
+      prefs = { ...prefs!, uiScale: choice };
+    } catch (err) {
+      // Nothing was written and no window was zoomed, so `prefs.uiScale` is
+      // still the stored step and stays pressed under the failure sentence.
+      scaleError = err instanceof Error ? err.message : String(err);
+    } finally {
+      scaleBusy = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Language (Task 3, PR 10f): moved out of the tray's temporary language
   // submenu (Task 1/2) into this section. The store lives in
   // `../locale-choice`, a module-level singleton like `../theme` — this
@@ -697,6 +748,7 @@
   );
   const coldDescribedBy = $derived(coldError === null ? undefined : 'application-launcher-cold-failed application-launcher-cold-error');
   const themeDescribedBy = $derived(themeError === null ? undefined : 'application-theme-failed application-theme-error');
+  const scaleDescribedBy = $derived(scaleError === null ? undefined : 'application-scale-failed application-scale-error');
   // Language has two independent rejections (a failed READ, a failed CHANGE)
   // plus two non-error outcomes worth describing (`partial`, `unknown`) —
   // never more than one pair on screen at once, but the select links to
@@ -810,6 +862,10 @@
     if (themeError !== null) {
       out.push({ key: 'theme-failed', text: themeFailedLabel });
       out.push({ key: 'theme-error', text: themeError });
+    }
+    if (scaleError !== null) {
+      out.push({ key: 'scale-failed', text: scaleFailedLabel });
+      out.push({ key: 'scale-error', text: scaleError });
     }
     if (coldError !== null) {
       out.push({ key: 'cold-failed', text: coldFailedLabel });
@@ -938,6 +994,39 @@
         disabled={themeBusy}
         onclick={() => chooseTheme('system')}
       >{themeSystemLabel}</button>
+    </div>
+
+    <!-- The interface scale, the theme segment's twin: three explicit buttons
+         for the three-way testids, `.seg` for the same look, and the mark read
+         from `prefs.uiScale` — the backend applies it to every window as page
+         zoom, so the whole interface scales, not only text. -->
+    <p id="application-scale-label">{scaleLabelText}</p>
+    {#if scaleError !== null}
+      <p id="application-scale-failed" data-testid="application-scale-failed" data-announced-by={ASSERTIVE_ID}>{scaleFailedLabel}</p>
+      <p id="application-scale-error" data-testid="application-scale-error" data-announced-by={ASSERTIVE_ID}>{scaleError}</p>
+    {/if}
+    <div class="seg" role="group" aria-labelledby="application-scale-label" aria-describedby={scaleDescribedBy}>
+      <button
+        type="button"
+        data-testid="application-scale-small"
+        aria-pressed={prefs.uiScale === 'small'}
+        disabled={scaleBusy}
+        onclick={() => chooseScale('small')}
+      >{scaleSmallLabel}</button>
+      <button
+        type="button"
+        data-testid="application-scale-medium"
+        aria-pressed={prefs.uiScale === 'medium'}
+        disabled={scaleBusy}
+        onclick={() => chooseScale('medium')}
+      >{scaleMediumLabel}</button>
+      <button
+        type="button"
+        data-testid="application-scale-large"
+        aria-pressed={prefs.uiScale === 'large'}
+        disabled={scaleBusy}
+        onclick={() => chooseScale('large')}
+      >{scaleLargeLabel}</button>
     </div>
 
     <p id="application-language-label">{languageLabelText}</p>

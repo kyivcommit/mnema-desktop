@@ -93,6 +93,9 @@ pub struct AppPrefs {
     /// Minutes without focus after which the local models are unloaded;
     /// [`cold_after_minutes`] is its one reader.
     pub cold_after_minutes: u32,
+    /// `"small" | "medium" | "large"` — the scale `ui_scale` applied to every
+    /// window's webview at boot, and the one the settings control draws.
+    pub ui_scale: String,
     pub version: String,
     pub platform: crate::models::Platform,
 }
@@ -511,6 +514,9 @@ pub fn app_prefs<R: tauri::Runtime>(
         hotkey: state.hotkey(),
         autostart: read_autostart(&state),
         cold_after_minutes: cold_after_minutes(state.data_dir()),
+        // Read fresh on every call, the same source `ui_scale::apply_persisted`
+        // reads once at boot: no state field caches the scale either.
+        ui_scale: crate::ui_scale::to_str(crate::ui_scale::read_choice(state.data_dir())).into(),
         // The same version the macOS About box shows (`build_app_menu`), which
         // is the one the bundle carries rather than this crate's own constant.
         version: app.package_info().version.to_string(),

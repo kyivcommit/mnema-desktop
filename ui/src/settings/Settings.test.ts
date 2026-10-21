@@ -36,6 +36,7 @@ const APP_PREFS: AppPrefs = {
   hotkey: { shortcut: 'Alt+Space', status: { kind: 'registered' } },
   autostart: { kind: 'disabled' },
   coldAfterMinutes: 5,
+  uiScale: 'medium',
   version: '0.0.0',
   platform: 'linux',
 };

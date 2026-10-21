@@ -10844,6 +10844,77 @@ fn set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc() {
     );
 }
 
+#[test]
+fn set_ui_scale_persists_the_choice_and_app_prefs_reads_it_back_through_the_ipc() {
+    // Reachability through the real `invoke_handler`, and the persist and
+    // read-back round trip: the file, the `appPrefs.uiScale` the settings
+    // window draws its control from, and a foreign key surviving the write.
+    //
+    // The per-window `WebviewWindow::set_zoom` loop inside `apply_to_windows`
+    // stays unobservable here — the mock runtime implements `set_zoom` as
+    // `Ok(())` and records nothing
+    // (`tauri-2.11.5/src/test/mock_runtime.rs:583`), so this test cannot tell
+    // "the loop ran" from "the loop was deleted"; that is verified by the live
+    // run. What the walk over windows does need is a window to walk, hence the
+    // fixture check below.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    assert!(
+        !app.webview_windows().is_empty(),
+        "the apply loop needs at least one window to walk"
+    );
+
+    // Written by another owner's path, before the scale is ever set: the
+    // locked read-modify-write in `prefs::write_key` is what must keep it.
+    mnema_desktop::prefs::write_key(dir.path(), "locale", json!("uk"))
+        .expect("seeding a foreign key");
+
+    let before = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(
+        before["uiScale"],
+        json!("medium"),
+        "no stored choice yet, so the window is told the default: {before}"
+    );
+
+    call(&webview, "set_ui_scale", json!({ "choice": "large" })).expect("set_ui_scale rejected");
+
+    let after = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(
+        after["uiScale"],
+        json!("large"),
+        "the choice must come back through the same field the control draws: {after}"
+    );
+
+    let raw = std::fs::read_to_string(dir.path().join("prefs.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        parsed["ui_scale"],
+        json!("large"),
+        "the file is the truth, under the snake_case key every other owner uses: {raw}"
+    );
+    assert_eq!(
+        parsed["locale"],
+        json!("uk"),
+        "the write dropped a key another command owns: {raw}"
+    );
+
+    // An unknown value on the wire is not an error and not a fourth state.
+    call(&webview, "set_ui_scale", json!({ "choice": "gigantic" }))
+        .expect("set_ui_scale rejected an unknown value instead of falling back");
+    let fallen = call(&webview, "app_prefs", json!({})).expect("app_prefs rejected");
+    assert_eq!(
+        fallen["uiScale"],
+        json!("medium"),
+        "unknown → medium: {fallen}"
+    );
+    let raw = std::fs::read_to_string(dir.path().join("prefs.json")).unwrap();
+    assert!(
+        raw.contains("\"ui_scale\": \"medium\""),
+        "an unknown wire value must be stored as the choice it fell back to: {raw}"
+    );
+}
+
 #[cfg(unix)]
 use app::app_with_a_worker_that_reads_nothing;
 

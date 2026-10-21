@@ -922,6 +922,10 @@ export type AutostartState =
   | { kind: 'disabled' }
   | { kind: 'unknown'; reason: string };
 
+// The interface scale. Applied by the backend as page zoom to EVERY window, so
+// it is the whole interface that scales, not only text.
+export type UiScale = 'small' | 'medium' | 'large';
+
 // Everything the Application section draws.
 //
 // `platform` is the same `Platform` the model settings carry, and it comes from
@@ -937,6 +941,7 @@ export type AppPrefs = {
   autostart: AutostartState;
   // Minutes of idleness after which the launcher forgets its last answer.
   coldAfterMinutes: number;
+  uiScale: UiScale;
   version: string;
   platform: Platform;
 };
@@ -964,6 +969,10 @@ export const setAutostart = (enabled: boolean) =>
 // fractional number (the command would fail to deserialise it). Answers the
 // stored value.
 export const setColdAfter = (minutes: number) => invoke<number>('set_cold_after', { minutes });
+
+// Answers nothing, like `setTheme`: a rejection means nothing was written and no
+// window was zoomed, so a resolved call accepted the choice it was sent.
+export const setUiScale = (choice: UiScale) => invoke<void>('set_ui_scale', { choice });
 
 // The «Tool support» switch (`chat_tools_enabled`, `set_chat_tools`): on narrows
 // the chat list to models that take tools. `setChatTools` answers the stored value,

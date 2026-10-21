@@ -64,7 +64,7 @@ case_ "theme: set_theme unregistered — the window cannot reach it" \
   src-tauri/src/lib.rs \
   's~        theme::set_theme,\n~~' \
   '        theme::get_theme,
-        prefs::app_prefs,' \
+        ui_scale::set_ui_scale,' \
   mnema-desktop 'set_theme_persists_the_choice_and_get_theme_reads_it_back_through_the_ipc' --test commands
 
 case_ "theme.ts: the system choice must remove the attribute, not write it" \
