@@ -38,7 +38,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'toggle_recents' | 'toggle_files' | 'toggle_tree' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
-  | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
+  | 'no_path_on_disk' | 'citations_heading'
   | 'tree_empty' | 'tree_failed' | 'tree_search_in'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
@@ -48,7 +48,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
-  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'answer_via_search' | 'answer_via_conversation' | 'new_chat'
+  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_chat'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -383,7 +383,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // for the thing it says is unavailable, where a person using a screen
     // reader cannot see the contradiction and correct for it.
     card_passages: 'Уривки',
-    no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
+    no_path_on_disk: 'нема на диску', citations_heading: 'Цитати',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
     tree_search_in: 'Шукати в «{name}»',
     history_empty: 'Тут з’являться ваші запити',
@@ -440,7 +440,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Task 14.2: a load in flight, not an error; it goes on in the background.
     no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     no_answer_no_tool_use: 'Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».',
-    answer_via_search: 'пошук', answer_via_conversation: 'з розмови', new_chat: 'Новий',
+    new_chat: 'Новий',
     // Review Minor 5: the Recents tab renders WHEN each document was indexed,
     // and the wire carries it (`ipc.ts:65`, seconds since the epoch —
     // `schema.sql:261`'s `unixepoch()`). Relative rather than a date, and that
@@ -1252,7 +1252,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_downloading: 'Downloading: {name}',
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
     card_passages: 'Passages',
-    no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
+    no_path_on_disk: 'no path on disk', citations_heading: 'Citations',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
     tree_search_in: 'Search in “{name}”',
     history_empty: 'Your questions will appear here',
@@ -1280,7 +1280,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_failed: 'The provider returned an error ({reason}).',
     no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     no_answer_no_tool_use: 'This model cannot continue a conversation. Choose another one or turn off Tool support.',
-    answer_via_search: 'search', answer_via_conversation: 'from the conversation', new_chat: 'New',
+    new_chat: 'New',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',

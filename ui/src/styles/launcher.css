@@ -188,7 +188,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   border-radius: 13px 13px 5px 13px; background: var(--accent-soft);
   font-size: 14px; line-height: 1.5; overflow-wrap: anywhere;
 }
-.answer-card .via { margin-top: -9px; font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 11px; color: var(--ink-soft); }
 /* §5: the conversation. Role is told by alignment, so nothing here names a
    speaker: the question sits right (`.umsg`, drawn by `Answer`), the answer is
    the plain text column on the left, without a bubble. */

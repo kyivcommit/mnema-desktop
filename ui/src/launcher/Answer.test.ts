@@ -44,13 +44,8 @@ test('the query echoes as a bubble and the answer renders its anchors as buttons
   expect(body).not.toMatch(/<c>/);
   expect(body).toBe('Costs four hryvnias[3] and the total cannot exceed the cap[7].');
 
-  // Re-review N2: presence was defended, identity was not — swapping the two
-  // headings so the prose reads "Citations" and the citation list reads
-  // "Answer" was 88/88 green. Order in the document is the identity.
-  expect(screen.getAllByRole('heading').map((h) => h.textContent)).toEqual([
-    'Answer',
-    'Citations',
-  ]);
+  // The citation list is the only heading the card draws.
+  expect(screen.getAllByRole('heading').map((h) => h.textContent)).toEqual(['Citations']);
 });
 
 // The block renderer puts the answer's text in more than one element, so the
@@ -191,48 +186,29 @@ test('clicking an anchor and clicking its preview both select the same citation'
 // Review I3: the two headings share the same gap — folded into the same
 // switch here rather than left undefended (Task 5's review found the
 // identical class as its Important I2, one component earlier).
-test('the preview label and both headings follow a live language switch', async () => {
+test('the preview label and the heading follow a live language switch', async () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/lines 5–7/);
-  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
 
   setLocale('uk');
   await tick();
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/рядки 5–7/);
-  expect(screen.getByRole('heading', { name: 'Відповідь' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Цитати' })).toBeTruthy();
 
   setLocale('en'); // the switch back is part of the claim, not the cleanup — afterEach owns that
   await tick();
   expect(screen.getByTestId('preview-3').querySelector('[data-testid="citation-label"]')!.textContent)
     .toMatch(/lines 5–7/);
-  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Citations' })).toBeTruthy();
-});
-
-test('the answer says where it came from, in both languages', async () => {
-  const via = (v: 'search' | 'conversation') => ({ ...gen(generated), via: v });
-  const { unmount } = render(Answer, { query: 'q', answer: via('search'), onSelect: vi.fn() });
-  expect(screen.getByTestId('answer-via').textContent).toBe('search');
-  setLocale('uk');
-  await tick();
-  expect(screen.getByTestId('answer-via').textContent).toBe('пошук');
-  unmount();
-  render(Answer, { query: 'q', answer: via('conversation'), onSelect: vi.fn() });
-  expect(screen.getByTestId('answer-via').textContent).toBe('з розмови');
-  setLocale('en');
-  await tick();
-  expect(screen.getByTestId('answer-via').textContent).toBe('from the conversation');
 });
 
 // An answer that cites nothing has no list to head: the heading is not drawn alone.
 test('an answer with no citations draws no Citations heading', () => {
   render(Answer, { query: 'q', answer: { ...gen(generated), citations: [] }, onSelect: vi.fn() });
-  expect(screen.getByRole('heading', { name: 'Answer' })).toBeTruthy();
   expect(screen.queryByRole('heading', { name: 'Citations' })).toBeNull();
   expect(screen.queryByRole('list')).toBeNull();
 });

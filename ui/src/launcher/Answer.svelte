@@ -17,12 +17,10 @@
     onSelect: (citation: AskCitation) => void;
   } = $props();
 
-  const answerHeading = $derived.by(() => { void $locale; return t('answer_heading'); });
   const citationsHeading = $derived.by(() => { void $locale; return t('citations_heading'); });
 
   // `known` must come from the citations' own anchor values (Decision 5) —
   // an anchor number that has no matching citation stays literal text.
-  const viaText = $derived.by(() => { void $locale; return t(answer.via === 'conversation' ? 'answer_via_conversation' : 'answer_via_search'); });
 
   const known = $derived(new Set(answer.citations.map((c) => c.anchor)));
   // The markdown layer is pure and knows nothing of citations; the anchors are
@@ -52,8 +50,6 @@
 <div class="answer-card">
   <div class="umsg" data-testid="query-echo">{query}</div>
 
-  <h3>{answerHeading}</h3>
-  <span class="via" data-testid="answer-via">{viaText}</span>
   <div class="answer-body" data-testid="answer-body">
     {#each blocks as block}
       {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
