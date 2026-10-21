@@ -4,6 +4,7 @@ mod journal;
 mod meta;
 mod migrations;
 mod open;
+mod scope;
 mod search;
 mod space;
 mod text_prep;
