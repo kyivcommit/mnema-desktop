@@ -141,9 +141,15 @@
   async function startNewChat() {
     if (launcherState.kind === 'inFlight') return;
     // The backend first: a screen that says "new" while the session goes on would lie.
-    try { await inSession(newChat); } catch (e) { console.error('new_chat failed', e); return; }
+    // Where it keeps no conversation there is nothing to tell it.
+    if (dialogue) {
+      try { await inSession(newChat); } catch (e) { console.error('new_chat failed', e); return; }
+    } else {
+      openFile = null;
+      selected = null;
+    }
     screenGen += 1; // an open that is still reading does not draw over the empty screen
-    // Only the conversation clears; the panels stay as the person left them.
+    // The panels stay as the person left them.
     turns = [];
     launcherState = { kind: 'idle' };
     previous = null;
@@ -277,9 +283,10 @@
     {/if}
   {/snippet}
   {#snippet tools()}
-    {#if dialogue}
-      <button type="button" class="new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>{newChatLabel}</button>
-    {/if}
+    <button type="button" class="new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
+      {newChatLabel}
+    </button>
     <Toolbar {status} provider={statusProvider} />
   {/snippet}
 </Shell>

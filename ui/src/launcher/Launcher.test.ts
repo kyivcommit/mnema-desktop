@@ -1206,9 +1206,8 @@ test('with tool support on, two asks draw two turns in order, each with its own 
   expect(screen.getAllByTestId('transcript')).toHaveLength(1);
 });
 
-test('with tool support off there is no New chat button and the second ask replaces the first turn', async () => {
+test('with tool support off the second ask replaces the first turn', async () => {
   await askTwice(false);
-  expect(screen.queryByTestId('new-chat')).toBeNull();
   expect(echoes()).toEqual(['second']);
   expect(screen.queryByTestId('preview-3')).toBeNull();
 });
@@ -1243,7 +1242,7 @@ test('New chat calls new_chat, empties the centre and leaves the search line alo
   expect(echoes()).toEqual(['third']);
 });
 
-test('under Mnema with the switch on the launcher shows one turn and no New chat', async () => {
+test('under Mnema with the switch on the launcher shows one turn', async () => {
   mockRecents({ chatTools: true, provider: 'mnema', asks: [generated, generatedOther] });
   render(Launcher);
   await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
@@ -1253,8 +1252,46 @@ test('under Mnema with the switch on the launcher shows one turn and no New chat
   await submit('second');
   await screen.findByTestId('preview-2');
   expect(echoes()).toEqual(['second']);
-  expect(screen.queryByTestId('new-chat')).toBeNull();
 });
+
+// «+ New» is there under every provider (D174 R4, amended 2026-10-21). Where the
+// backend keeps no conversation (tool support off, or the local Mnema provider)
+// it only clears the screen: no `new_chat`, and the opened file and its tree mark go too.
+for (const [name, opts] of [
+  ['tool support off', { chatTools: false }],
+  ['the Mnema provider', { chatTools: true, provider: 'mnema' }],
+] as const) {
+  test(`+ New under ${name} clears the screen, the opened file and the tree mark without calling new_chat`, async () => {
+    mockRecents({ ...opts, asks: [generated] });
+    render(Launcher);
+    await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+    await waitFor(() => expect(callsOf('provider_status')).toHaveLength(1));
+    const box = screen.getByRole('textbox') as HTMLInputElement;
+    await submit('first');
+    await screen.findByTestId('preview-3');
+    await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+    await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+    await screen.findByTestId('file-body');
+    expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
+    await fireEvent.input(box, { target: { value: 'a draft' } });
+    await fireEvent.click(screen.getByTestId('new-chat'));
+    await waitFor(() => expect(echoes()).toEqual([]));
+    expect(screen.queryByTestId('preview-3')).toBeNull();
+    expect(screen.queryByTestId('file-body')).toBeNull();
+    expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).not.toBe('true');
+    expect(callsOf('new_chat')).toHaveLength(0);
+    expect(box.value).toBe('a draft');
+  });
+
+  test(`+ New under ${name} is disabled while an ask is in flight`, async () => {
+    mockRecents({ ...opts, ask: new Promise(() => {}) });
+    render(Launcher);
+    const button = (await screen.findByTestId('new-chat')) as HTMLButtonElement;
+    await submit('slow');
+    await waitFor(() => expect(askCalls()).toHaveLength(1));
+    expect(button.disabled).toBe(true);
+  });
+}
 
 test('New chat keeps the panels: the tree stays, the transcript is empty', async () => {
   await askTwice(true);
@@ -1295,11 +1332,16 @@ test('the switch is read again when the window gains focus', async () => {
   mockRecents({ chatTools: false });
   render(Launcher);
   await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
-  expect(screen.queryByTestId('new-chat')).toBeNull();
   mockRecents({ chatTools: true });
   await fireEvent.focus(window);
-  await screen.findByTestId('new-chat');
-  expect(callsOf('chat_tools_enabled')).toHaveLength(2);
+  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(2));
+  // The read is what turns a conversation on: the second ask now draws two turns.
+  mockRecents({ chatTools: true, asks: [generated, generatedOther] });
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('preview-2');
+  expect(echoes()).toEqual(['first', 'second']);
 });
 
 test('opening a stored conversation draws every turn and the next ask adds a third', async () => {
