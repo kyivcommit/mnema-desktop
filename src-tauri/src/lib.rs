@@ -78,6 +78,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::job_status,
         tree::list_subfolders,
         tree::list_tree,
+        tree::set_folder_searched,
         tree::mask_preview,
         tree::open_document,
         models::provider_models,

@@ -29,7 +29,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'models_embedding_degraded' | 'models_embedding_reembed' | 'models_embedding_reembed_started'
   | 'models_embedding_reembed_ended'
   | 'models_embedding_change_failed' | 'models_job_running' | 'models_index_recover'
-  | 'refusal_no_candidates' | 'refusal_empty_completion'
+  | 'refusal_no_candidates' | 'refusal_empty_completion' | 'refusal_no_folders_searched'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
@@ -346,6 +346,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
+    refusal_no_folders_searched: 'Пошук вимкнено для всіх тек. Увімкніть хоча б одну в дереві файлів.',
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
@@ -1221,6 +1222,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',
+    refusal_no_folders_searched: 'Search is off for every folder. Turn at least one on in the file tree.',
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',

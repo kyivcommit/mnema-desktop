@@ -106,6 +106,7 @@ function root(overrides: Partial<TreeRoot> = {}): TreeRoot {
     absolutePath: '/synthetic/root',
     name: 'root',
     files: [],
+    searched: [],
     ...overrides,
   };
 }

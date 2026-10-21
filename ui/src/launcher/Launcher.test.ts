@@ -418,7 +418,7 @@ test('clicking a file in the tree opens it in the right pane at its start', asyn
 const TREE_AT_SEVEN: TreeListing = {
   roots: [{
     rootId: 7,
-    absolutePath: '/home/u/docs',
+    absolutePath: '/home/u/docs', searched: [],
     name: 'docs',
     files: [
       { relativePath: 'notes/a.md', documentId: 'doc-1' },

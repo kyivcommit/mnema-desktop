@@ -238,7 +238,7 @@ export const oneRootTwoFolders: TreeListing = {
   roots: [
     {
       rootId: 1,
-      absolutePath: '/home/u/docs',
+      absolutePath: '/home/u/docs', searched: [],
       name: 'docs',
       files: [
         { relativePath: 'notes/a.md', documentId: 'doc-1' },
@@ -254,8 +254,8 @@ export const oneRootTwoFolders: TreeListing = {
 // keying on documentId (Ruling P) can.
 export const twoRootsSameRelativePath: TreeListing = {
   roots: [
-    { rootId: 1, absolutePath: '/home/u/alpha', name: 'alpha', files: [{ relativePath: 'README.md', documentId: 'doc-a' }] },
-    { rootId: 2, absolutePath: '/home/u/beta', name: 'beta', files: [{ relativePath: 'README.md', documentId: 'doc-b' }] },
+    { rootId: 1, absolutePath: '/home/u/alpha', searched: [], name: 'alpha', files: [{ relativePath: 'README.md', documentId: 'doc-a' }] },
+    { rootId: 2, absolutePath: '/home/u/beta', searched: [], name: 'beta', files: [{ relativePath: 'README.md', documentId: 'doc-b' }] },
   ],
 };
 
@@ -267,7 +267,7 @@ export const oneRootMixedDepths: TreeListing = {
   roots: [
     {
       rootId: 4,
-      absolutePath: '/home/u/mixed',
+      absolutePath: '/home/u/mixed', searched: [],
       name: 'mixed',
       files: [
         { relativePath: 'README.md', documentId: 'doc-r' },
@@ -283,7 +283,7 @@ export const oneRootMixedDepths: TreeListing = {
 // render this: the row is on screen either way, so only `aria-current` differs
 // between them and neither test can be satisfied by an empty tree.
 export const oneRoot: TreeListing = {
-  roots: [{ rootId: 3, absolutePath: '/home/u/solo', name: 'solo', files: [{ relativePath: 'a.md', documentId: 'doc-1' }] }],
+  roots: [{ rootId: 3, absolutePath: '/home/u/solo', searched: [], name: 'solo', files: [{ relativePath: 'a.md', documentId: 'doc-1' }] }],
 };
 
 // ONE document named from TWO roots — the same `documentId` under both, which
@@ -297,7 +297,7 @@ export const oneDocumentTwoRoots: TreeListing = {
   roots: [
     {
       rootId: 1,
-      absolutePath: '/home/u/alpha',
+      absolutePath: '/home/u/alpha', searched: [],
       name: 'alpha',
       files: [
         { relativePath: 'notes/shared.md', documentId: 'doc-shared' },
@@ -306,7 +306,7 @@ export const oneDocumentTwoRoots: TreeListing = {
     },
     {
       rootId: 2,
-      absolutePath: '/home/u/beta',
+      absolutePath: '/home/u/beta', searched: [],
       name: 'beta',
       files: [{ relativePath: 'notes/shared.md', documentId: 'doc-shared' }],
     },

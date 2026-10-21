@@ -128,7 +128,7 @@ const standTree: TreeListing = {
       ],
     },
     {
-      rootId: 2, absolutePath: '/home/u/papers', name: 'papers',
+      rootId: 2, absolutePath: '/home/u/papers', searched: [], name: 'papers',
       files: [
         { relativePath: '2024/survey.pdf', documentId: 'doc-8' },
         { relativePath: 'index.md', documentId: 'doc-9' },
@@ -241,7 +241,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     add_watched_folder: (a) => {
       const rootId = s.nextRootId++;
       const path = a.path as string;
-      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, files: [] }] };
+      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, files: [], searched: [] }] };
       return rootId;
     },
     remove_watched_folder: (a) => {

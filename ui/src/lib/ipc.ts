@@ -17,7 +17,7 @@ export type Coordinate =
   | { kind: 'none' };
 
 // The wire shape of `Refused`'s `reason` field (an object, tagged `kind`).
-export type Refusal = { kind: 'noCandidates' } | { kind: 'emptyCompletion' };
+export type Refusal = { kind: 'noCandidates' } | { kind: 'emptyCompletion' } | { kind: 'noFoldersSearched' };
 // The bare discriminant value, for `refusalText(...)` in i18n.
 export type RefusalKind = Refusal['kind'];
 
@@ -76,7 +76,8 @@ export type AskAnswer =
 export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentArmReport };
 
 export type TreeFile = { relativePath: string; documentId: string };
-export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[] };
+export type SearchedFolder = { folderPath: string; searched: boolean };
+export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[]; searched: SearchedFolder[] };
 export type TreeListing = { roots: TreeRoot[] };
 
 // One question the person asked, as the sidebar's conversation list shows it
@@ -236,6 +237,8 @@ export type AskReply = { answer: AskAnswer; historyId: number | null };
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskReply>('ask', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
+export const setFolderSearched = (rootId: number, folderPath: string, searched: boolean) =>
+  invoke<void>('set_folder_searched', { rootId, folderPath, searched });
 export const listHistory = () => invoke<HistoryEntry[]>('list_history');
 export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry', { id });
 // Makes an opened entry the conversation the next question continues; false when it cannot be.

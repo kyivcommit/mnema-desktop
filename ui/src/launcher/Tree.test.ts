@@ -217,7 +217,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
     roots: [
       {
         rootId: 9,
-        absolutePath: '/home/u/ua',
+        absolutePath: '/home/u/ua', searched: [],
         name: 'ua',
         files: [{ relativePath: 'Договори/dohov-01.md', documentId: 'doc-u' }],
       },
@@ -252,8 +252,8 @@ test('two roots holding a folder of the same name open and shut independently', 
   // Local, like `mockTree` (Ruling L): nothing else consumes this shape.
   mockTree({
     roots: [
-      { rootId: 1, absolutePath: '/home/u/one', name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
-      { rootId: 2, absolutePath: '/home/u/two', name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
+      { rootId: 1, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
+      { rootId: 2, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
     ],
   });
   mount(null);

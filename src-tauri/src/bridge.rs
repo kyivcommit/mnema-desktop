@@ -1309,6 +1309,10 @@ pub enum RefusalKind {
     NoCandidates,
     /// `Ready`, chat was called, and the model answered with nothing.
     EmptyCompletion,
+    /// `Ready`, nothing found, and no indexed document is searchable under
+    /// the folder entries: every folder is off, so "nothing found" would be
+    /// a claim about the archive that was never made.
+    NoFoldersSearched,
 }
 
 /// Where a generated answer's sources came from: a search made for this turn,
@@ -1605,8 +1609,21 @@ fn answer_question(
     }
 
     if hits.is_empty() {
+        // A separate read after retrieval; its failure must not turn an
+        // empty result into an error, so it falls back to the plain refusal.
+        let searchable = state
+            .with_index(|db| db.any_document_searchable())
+            .unwrap_or_else(|e| {
+                eprintln!("mnema: could not tell whether any folder is searched: {e}");
+                true
+            });
+        let kind = if searchable {
+            RefusalKind::NoCandidates
+        } else {
+            RefusalKind::NoFoldersSearched
+        };
         return Ok(AskAnswer::Refused {
-            kind: RefusalKind::NoCandidates,
+            kind,
             text,
             content,
         });
@@ -2498,6 +2515,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RefusalKind::EmptyCompletion).unwrap(),
             json!({ "kind": "emptyCompletion" })
+        );
+        assert_eq!(
+            serde_json::to_value(RefusalKind::NoFoldersSearched).unwrap(),
+            json!({ "kind": "noFoldersSearched" })
         );
     }
 

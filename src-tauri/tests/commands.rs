@@ -1812,6 +1812,15 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     // person reaches by entering a key before the index is open.
     set_key(state.clone(), KEY.into()).unwrap();
     state.open_index().unwrap();
+    // An indexed, searchable document that nothing matches: "nothing found"
+    // is only true of an archive that has something to search.
+    state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
 
     let webview = main_webview(&app);
@@ -4597,6 +4606,22 @@ fn list_tree_enumerates_roots_and_indexed_files() {
     assert_eq!(files_a, vec!["new.txt", "notes/old.txt"]);
     // Root B: the pending doc is excluded — an empty, still-listed root.
     assert!(roots[1]["files"].as_array().unwrap().is_empty());
+
+    // Folder search entries ride along per root, camelCase; a root without
+    // entries lists none.
+    assert_eq!(roots[0]["searched"], json!([]));
+    call(
+        &webview,
+        "set_folder_searched",
+        json!({ "rootId": root_a, "folderPath": "notes", "searched": false }),
+    )
+    .expect("set_folder_searched was rejected");
+    let v2 = call(&webview, "list_tree", json!({})).unwrap();
+    assert_eq!(
+        v2["roots"][0]["searched"],
+        json!([{ "folderPath": "notes", "searched": false }])
+    );
+    assert_eq!(v2["roots"][1]["searched"], json!([]));
 
     // No recents on this wire: the launcher's Recents tab lists questions, read
     // through `list_history`.
@@ -11970,6 +11995,15 @@ fn a_refused_ask_is_not_recorded() {
     mnema_secrets::store(state.credential_ref(), "test-key-history-refused")
         .expect("the key is stored");
     state.open_index().unwrap();
+    // An indexed, searchable document that nothing matches: "nothing found"
+    // is only true of an archive that has something to search.
+    state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
+            Ok::<_, mnema_index::Error>(())
+        })
+        .unwrap();
     set_chat_model_via(&state, "openai/gpt-4o-mini");
     let webview = main_webview(&app);
     text_arm_only(&webview);
@@ -12265,6 +12299,46 @@ fn dialogue_ready(app: &tauri::App<MockRuntime>) -> (WebviewWindow<MockRuntime>,
 /// answer alone. The wrapper has its own test, `ask_returns_the_id_of_the_row_it_wrote`.
 fn ask_q(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
     call(webview, "ask", json!({ "query": query })).expect("ask was rejected")["answer"].clone()
+}
+
+/// Ready, retrieval finds nothing, and the refusal says which kind of nothing:
+/// every folder off is `noFoldersSearched`; one folder on (that matches
+/// nothing) is `noCandidates` again. Both directions, one archive.
+#[test]
+fn an_empty_answer_says_whether_any_folder_is_searched() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-no-folders").expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let root = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            seed_indexed_file(db, root, &"a".repeat(64), "a.txt");
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let set = |searched: bool| {
+        call(
+            &webview,
+            "set_folder_searched",
+            json!({ "rootId": root, "folderPath": "", "searched": searched }),
+        )
+        .expect("set_folder_searched was rejected");
+    };
+
+    set(false);
+    let off = ask_q(&webview, "nothing indexed");
+    assert_eq!(off["kind"], json!("refused"), "{off}");
+    assert_eq!(off["reason"]["kind"], json!("noFoldersSearched"), "{off}");
+
+    set(true);
+    let on = ask_q(&webview, "nothing indexed");
+    assert_eq!(on["reason"]["kind"], json!("noCandidates"), "{on}");
 }
 
 const FIRST_Q: &str = "quantum entanglement";
