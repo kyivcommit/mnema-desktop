@@ -1312,7 +1312,7 @@ pub struct IndexRead {
     /// queue, counted the way the pass itself counts it (F4, spec §9.3
     /// amended 2026-09-04).
     ///
-    /// `Db::queued_chunk_count(space_id)` (`crates/mnema-index/src/space.rs:1015`),
+    /// `Db::queued_chunk_count(space_id)` (`crates/mnema-index/src/space.rs:1032`),
     /// never `total_chunks − embedded_chunks − failed_chunks`. That
     /// subtraction's own doc comment names why: it also contains every chunk
     /// this space has given up on and every chunk of a document that is not

@@ -19,9 +19,9 @@
 
 case_ "search: no predicate at all — a first indexing answers mid-write" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
+               JOIN document d ON d.id = chunk.document_id
               WHERE chunk_fts MATCH ?1 AND 1 = 1 /* predicate removed */}" \
   "AND 1 = 1 /* predicate removed */" \
   mnema-index 'a_document_still_being_written_answers_no_search' --test visibility
@@ -32,9 +32,9 @@ case_ "search: no predicate at all — a first indexing answers mid-write" \
 # nothing, with no way to tell the two apart from the window.
 case_ "search: no predicate at all — a rebuild answers mid-write" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
+               JOIN document d ON d.id = chunk.document_id
               WHERE chunk_fts MATCH ?1 AND 1 = 1 /* predicate removed */}" \
   "AND 1 = 1 /* predicate removed */" \
   mnema-ingest 'a_document_being_rebuilt_answers_no_search_until_it_is_whole_again' --test slice
@@ -45,11 +45,11 @@ case_ "search: no predicate at all — a rebuild answers mid-write" \
 # may not.
 case_ "search: the predicate names the status that may be searched" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
-              WHERE chunk_fts MATCH ?1 AND document.status <> 'pending'}" \
-  "AND document.status <> 'pending'" \
+               JOIN document d ON d.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND d.status <> 'pending'}" \
+  "AND d.status <> 'pending'" \
   mnema-index 'a_failed_or_skipped_document_is_not_searchable_either' --test visibility
 
 # The other direction, and without it every case above is satisfied by a search
@@ -57,11 +57,11 @@ case_ "search: the predicate names the status that may be searched" \
 # instead of the unfinished ones.
 case_ "search: a finished document still answers" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
-              WHERE chunk_fts MATCH ?1 AND document.status = 'pending'}" \
-  "AND document.status = 'pending'" \
+               JOIN document d ON d.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND d.status = 'pending'}" \
+  "AND d.status = 'pending'" \
   mnema-index 'the_same_document_answers_once_it_is_declared_finished' --test visibility
 
 # The join carries the predicate from a chunk to its document, and it is the
@@ -83,9 +83,9 @@ case_ "search: the join reaches a chunk's document, not a neighbour's" \
 # `Indexed` anywhere before step 5 leaves that case green and this one red.
 case_ "search: no predicate at all — a first indexing answers mid-write, end to end" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
+               JOIN document d ON d.id = chunk.document_id
               WHERE chunk_fts MATCH ?1 AND 1 = 1 /* predicate removed */}" \
   "AND 1 = 1 /* predicate removed */" \
   mnema-ingest 'a_document_being_indexed_for_the_first_time_answers_no_search' --test slice
@@ -103,10 +103,10 @@ case_ "search: no predicate at all — a first indexing answers mid-write, end t
 # where nothing contends for the limit — stays green under it.
 case_ "search: the limit is spent before the predicate (the Rust-filter shape)" \
   crates/mnema-index/src/search.rs \
-  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document ON document\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND document\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
+  "s{SELECT chunk_fts\\.rowid FROM chunk_fts\\n               JOIN chunk ON chunk\\.id = chunk_fts\\.rowid\\n               JOIN document d ON d\\.id = chunk\\.document_id\\n              WHERE chunk_fts MATCH \\?1 AND d\\.status = 'indexed'}{SELECT chunk_fts.rowid FROM chunk_fts
                JOIN chunk ON chunk.id = chunk_fts.rowid
-               JOIN document ON document.id = chunk.document_id
-              WHERE chunk_fts MATCH ?1 AND document.status = 'indexed' AND chunk_fts.rowid IN (SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2)}" \
+               JOIN document d ON d.id = chunk.document_id
+              WHERE chunk_fts MATCH ?1 AND d.status = 'indexed' AND chunk_fts.rowid IN (SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2)}" \
   "AND chunk_fts.rowid IN (SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2)" \
   mnema-index 'a_document_being_written_does_not_spend_the_limit' --test visibility
 

@@ -32,6 +32,16 @@ pub struct TreeRoot {
     pub absolute_path: String,
     pub name: String,
     pub files: Vec<TreeFile>,
+    /// The root's folder search entries, by folder path ascending; a folder
+    /// with no entry follows its nearest entered ancestor (the spec's §3).
+    pub searched: Vec<SearchedFolder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchedFolder {
+    pub folder_path: String,
+    pub searched: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -69,11 +79,20 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
                     document_id: f.document_id,
                 })
                 .collect();
+            let searched = db
+                .search_folders(r.id)?
+                .into_iter()
+                .map(|(folder_path, searched)| SearchedFolder {
+                    folder_path,
+                    searched,
+                })
+                .collect();
             Ok(TreeRoot {
                 name: basename(&r.absolute_path),
                 root_id: r.id,
                 absolute_path: r.absolute_path,
                 files,
+                searched,
             })
         })
         .collect::<Result<Vec<_>, mnema_index::Error>>()?;
@@ -91,6 +110,19 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
 #[tauri::command(async)]
 pub fn list_tree(state: State<'_, AppState>) -> Result<TreeListing, Error> {
     state.with_index(|db| db.read_snapshot(build_tree_listing))
+}
+
+/// Turns one folder's search on or off for its whole subtree: the entries
+/// below it are cleared and its own is written, in one transaction
+/// (`Db::set_folder_searched`). Off the main thread, like [`list_tree`].
+#[tauri::command(async)]
+pub fn set_folder_searched(
+    state: State<'_, AppState>,
+    root_id: i64,
+    folder_path: String,
+    searched: bool,
+) -> Result<(), Error> {
+    state.with_index(|db| db.set_folder_searched(root_id, &folder_path, searched))
 }
 
 /// What a mask would take **beyond the rules the next scan already applies** —
@@ -1523,6 +1555,10 @@ mod tests {
                 files: vec![TreeFile {
                     relative_path: "a.txt".into(),
                     document_id: "d".repeat(64),
+                }],
+                searched: vec![SearchedFolder {
+                    folder_path: "notes".into(),
+                    searched: false,
                 }],
             }],
         }

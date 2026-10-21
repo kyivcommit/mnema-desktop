@@ -42,7 +42,7 @@ function initialState(scenario: string) {
     searchTextArm: true,
     searchContentArm: !fresh,
   };
-  const tree: TreeListing = fresh ? { roots: [] } : structuredClone(oneRootTwoFolders);
+  const tree: TreeListing = fresh ? { roots: [] } : structuredClone(standTree);
   const history: StoredQuestion[] = fresh ? [] : historyTwoQuestions.map((h) => ({ ...h, answer: generated }));
   const scan: ScanState = {
     revision: 1, files: index.indexedFiles, readSeq: 1, jobsDone: 0, lastReading: null,
@@ -110,6 +110,31 @@ const catalogue = (role: ModelRole, openRouter: boolean, mnema: boolean): RoleCa
     ],
     unreadable: 0, unreadableRecords: [],
   };
+};
+
+// The stand's tree: the fixture's rows (the answers cite them) plus enough
+// depth to show nesting, root-level files and the search checks.
+const standTree: TreeListing = {
+  roots: [
+    {
+      ...oneRootTwoFolders.roots[0],
+      files: [
+        ...oneRootTwoFolders.roots[0].files,
+        { relativePath: 'notes/drafts/idea.md', documentId: 'doc-4' },
+        { relativePath: 'notes/drafts/deep/plan.md', documentId: 'doc-5' },
+        { relativePath: 'notes/drafts/deep/quarterly-planning-meetings/2026/minutes-of-the-october-review.md', documentId: 'doc-10' },
+        { relativePath: 'README.md', documentId: 'doc-6' },
+        { relativePath: 'package.json', documentId: 'doc-7' },
+      ],
+    },
+    {
+      rootId: 2, absolutePath: '/home/u/papers', searched: [], name: 'papers',
+      files: [
+        { relativePath: '2024/survey.pdf', documentId: 'doc-8' },
+        { relativePath: 'index.md', documentId: 'doc-9' },
+      ],
+    },
+  ],
 };
 
 export function installMockBackend(win: 'settings' | 'launcher') {
@@ -213,10 +238,24 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     },
 
     list_tree: () => s.tree,
+    // The core's semantics: drop the root's entries under the folder, then set its own.
+    set_folder_searched: (a) => {
+      const f = a.folderPath as string;
+      s.tree = {
+        ...s.tree,
+        roots: s.tree.roots.map((r) => r.rootId !== a.rootId ? r : {
+          ...r,
+          searched: [
+            ...r.searched.filter((e) => f === '' ? false : !e.folderPath.startsWith(`${f}/`) && e.folderPath !== f),
+            { folderPath: f, searched: a.searched as boolean },
+          ],
+        }),
+      };
+    },
     add_watched_folder: (a) => {
       const rootId = s.nextRootId++;
       const path = a.path as string;
-      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, files: [] }] };
+      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, files: [], searched: [] }] };
       return rootId;
     },
     remove_watched_folder: (a) => {

@@ -32,11 +32,25 @@ const GIVEN_UP_ON_CURRENT_TEXT: &str = "SELECT 1 FROM chunk_embedding_state s
 /// document is `indexed`. Written once so a chunk the queue refuses to embed
 /// and a chunk search refuses to surface cannot drift into disagreeing about
 /// which one that is. [`the_embedding_queue`] builds its own `FROM`/`WHERE`
-/// on top of this exact clause; [`Db::knn_searchable`] uses it as a genuine
-/// vec0 pre-filter, nested inside the one `IN` vec0 accepts per query.
+/// on top of this exact clause; [`Db::knn_searchable`] pre-filters on
+/// [`SEARCHABLE_CHUNK`], which is this plus the folder condition, nested inside
+/// the one `IN` vec0 accepts per query.
 /// Expects the outer query to expose the candidate as `c`.
-const ELIGIBLE_CHUNK: &str =
-    "FROM chunk c JOIN document d ON d.id = c.document_id WHERE d.status = 'indexed'";
+const ELIGIBLE_CHUNK: &str = eligible_chunk!();
+
+/// [`ELIGIBLE_CHUNK`] as a literal, so [`SEARCHABLE_CHUNK`] is built from the
+/// same text by `concat!` rather than a copy that could drift.
+macro_rules! eligible_chunk {
+    () => {
+        "FROM chunk c JOIN document d ON d.id = c.document_id WHERE d.status = 'indexed'"
+    };
+}
+use eligible_chunk;
+
+/// [`ELIGIBLE_CHUNK`] narrowed to documents with a searched path (spec §5):
+/// what the two search arms read. The embedding queue and the coverage counts
+/// stay on [`ELIGIBLE_CHUNK`] — unsearched folders are still embedded.
+const SEARCHABLE_CHUNK: &str = concat!(eligible_chunk!(), crate::scope::searchable_document!());
 
 /// The queue itself: the `FROM` and `WHERE` of "which chunks does this space
 /// still owe a vector", shared by the query that hands them over and the count
@@ -56,7 +70,7 @@ const ELIGIBLE_CHUNK: &str =
 /// NULL for every row of the outer query, emptying this queue over a full
 /// archive — silently, and in the direction nobody would notice. It cannot
 /// happen: `chunk_id` is declared `INTEGER PRIMARY KEY` on the `vec0` table
-/// (`Db::create_space`'s DDL, `space.rs:220`), and every writer —
+/// (`Db::create_space`'s DDL, `space.rs:257`), and every writer —
 /// [`Db::insert_vector`], [`Db::upsert_vector`], [`Db::upsert_vector_for_text`]
 /// — binds it a real `i64`, never a NULL.
 fn the_embedding_queue(table: &str) -> String {
@@ -563,7 +577,7 @@ impl Db {
     }
 
     /// [`Db::knn`], narrowed to chunks a search is allowed to show —
-    /// [`ELIGIBLE_CHUNK`] as a genuine vec0 pre-filter, intersected with
+    /// [`SEARCHABLE_CHUNK`] as a genuine vec0 pre-filter, intersected with
     /// `restrict_to` inside the one `IN` vec0 accepts rather than a second
     /// one. A sibling of `knn`, not a change to it: every `knn` pin in
     /// `tests/space.rs` inserts vectors for ids with no `chunk` row at all,
@@ -592,7 +606,7 @@ impl Db {
                 let mut stmt = self.conn().prepare(&format!(
                     "SELECT chunk_id, distance FROM {table}
                       WHERE embedding MATCH ?1 AND k = ?2
-                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK})
+                        AND chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK})
                       ORDER BY distance NULLS LAST, chunk_id"
                 ))?;
                 stmt.query_map(params![blob, window], distance_row)?
@@ -603,7 +617,7 @@ impl Db {
                 let mut stmt = self.conn().prepare(&format!(
                     "SELECT chunk_id, distance FROM {table}
                       WHERE embedding MATCH ?1 AND k = ?2
-                        AND chunk_id IN (SELECT c.id {ELIGIBLE_CHUNK}
+                        AND chunk_id IN (SELECT c.id {SEARCHABLE_CHUNK}
                                            AND c.id IN (SELECT value FROM json_each(?3)))
                       ORDER BY distance NULLS LAST, chunk_id"
                 ))?;
@@ -746,9 +760,11 @@ impl Db {
             .query_row("SELECT count(*) FROM chunk", [], |r| r.get(0))?)
     }
 
-    /// How many chunks a search could actually reach — [`ELIGIBLE_CHUNK`],
-    /// the same predicate [`Db::knn_searchable`]'s pre-filter runs, so this
-    /// count and what the arm searches cannot drift apart. Round-3
+    /// How many chunks the index holds that a search could reach —
+    /// [`ELIGIBLE_CHUNK`]. This describes the index, not one search: the
+    /// arm's pre-filter in [`Db::knn_searchable`] runs [`SEARCHABLE_CHUNK`]
+    /// (`space.rs:609`), so while folder entries exist this count also
+    /// includes chunks in unsearched folders (spec §5). Round-3
     /// adversarial review (F-A1): the content arm's `total` used to be
     /// [`Db::chunk_count`], which does not know about `document.status`, so
     /// a document mid-rebuild made `embedded == total` claim coverage the
@@ -889,19 +905,20 @@ impl Db {
         )?)
     }
 
-    /// How many chunks the content arm could actually inspect in this space —
-    /// [`Db::knn_searchable`]'s own pool, the vector table intersected with
-    /// [`ELIGIBLE_CHUNK`] (`space.rs:595`), counted once per chunk. This is the
+    /// How many chunks of this space the index holds that the content arm
+    /// could inspect — the vector table intersected with [`ELIGIBLE_CHUNK`]
+    /// (the pool [`Db::knn_searchable`] ranks, `space.rs:609`, before its
+    /// folder narrowing), counted once per chunk. This is the
     /// honest denominator D115① asks for: [`Db::embedded_chunk_count`] counts
     /// every vector, ineligible ones included, and [`Db::eligible_chunk_count`]
     /// counts every eligible chunk whether or not it has a vector — each
     /// overstates what a search looked at, and the content arm's coverage
     /// sentence read one of them as if it were this.
     ///
-    /// **Reuses [`ELIGIBLE_CHUNK`]** — the same string [`Db::knn_searchable`]'s
-    /// pre-filter runs, not a fresh eligibility clause — so this count and what
-    /// the arm searches cannot drift into disagreeing about which chunks are
-    /// reachable.
+    /// **Reuses [`ELIGIBLE_CHUNK`]**, not a fresh eligibility clause. It
+    /// describes the index, not one search: [`Db::knn_searchable`] narrows by
+    /// [`SEARCHABLE_CHUNK`], so while folder entries exist this coverage line
+    /// also counts chunks in unsearched folders (spec §5).
     ///
     /// **The source is the vector table alone, and deliberately not the `UNION`
     /// [`Db::embedded_chunk_count`] takes.** That method also reads
@@ -912,7 +929,7 @@ impl Db {
     /// else, so a chunk with a `state = 1` row and no vector is one the arm
     /// cannot inspect, and counting it would re-introduce the very overstatement
     /// D115① removes. `count(DISTINCT chunk_id)` is defensive on top of that —
-    /// `chunk_id` is the vec0 table's `INTEGER PRIMARY KEY` (`space.rs:243`), so
+    /// `chunk_id` is the vec0 table's `INTEGER PRIMARY KEY` (`space.rs:257`), so
     /// no chunk appears in it twice today — kept so that a later move to a
     /// multi-source pool cannot silently double-count.
     ///
@@ -1140,7 +1157,7 @@ impl Db {
     /// vector, silently, which is the one direction this predicate must never
     /// be wrong in. It cannot happen, for the same reason it cannot for the
     /// queue: `chunk_id` is `INTEGER PRIMARY KEY` on the `vec0` table
-    /// (`space.rs:220`), and every writer binds it a real `i64`.
+    /// (`space.rs:257`), and every writer binds it a real `i64`.
     pub fn space_is_complete(&self, space_id: i64) -> Result<bool, Error> {
         let table = self.space(space_id)?.table;
         // `table` is never caller text: the same reasoning `embedded_chunk_count`

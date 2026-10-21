@@ -4598,6 +4598,22 @@ fn list_tree_enumerates_roots_and_indexed_files() {
     // Root B: the pending doc is excluded — an empty, still-listed root.
     assert!(roots[1]["files"].as_array().unwrap().is_empty());
 
+    // Folder search entries ride along per root, camelCase; a root without
+    // entries lists none.
+    assert_eq!(roots[0]["searched"], json!([]));
+    call(
+        &webview,
+        "set_folder_searched",
+        json!({ "rootId": root_a, "folderPath": "notes", "searched": false }),
+    )
+    .expect("set_folder_searched was rejected");
+    let v2 = call(&webview, "list_tree", json!({})).unwrap();
+    assert_eq!(
+        v2["roots"][0]["searched"],
+        json!([{ "folderPath": "notes", "searched": false }])
+    );
+    assert_eq!(v2["roots"][1]["searched"], json!([]));
+
     // No recents on this wire: the launcher's Recents tab lists questions, read
     // through `list_history`.
     assert!(
@@ -12265,6 +12281,214 @@ fn dialogue_ready(app: &tauri::App<MockRuntime>) -> (WebviewWindow<MockRuntime>,
 /// answer alone. The wrapper has its own test, `ask_returns_the_id_of_the_row_it_wrote`.
 fn ask_q(webview: &WebviewWindow<MockRuntime>, query: &str) -> Value {
     call(webview, "ask", json!({ "query": query })).expect("ask was rejected")["answer"].clone()
+}
+
+/// Ready, retrieval finds nothing, and the refusal says which kind of nothing:
+/// every folder off is `noFoldersSearched`; one folder on (that matches
+/// nothing) is `noCandidates` again. Both directions, one archive.
+#[test]
+fn an_empty_answer_says_whether_any_folder_is_searched() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-no-folders").expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let root = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            let doc = "a".repeat(64);
+            seed_indexed_file(db, root, &doc, "a.txt");
+            // A chunk, so the index has something searchable in principle.
+            rebuild_one_chunk(db, &doc, "synthetic zzz");
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let set = |searched: bool| {
+        call(
+            &webview,
+            "set_folder_searched",
+            json!({ "rootId": root, "folderPath": "", "searched": searched }),
+        )
+        .expect("set_folder_searched was rejected");
+    };
+
+    set(false);
+    let off = ask_q(&webview, "nothing indexed");
+    assert_eq!(off["kind"], json!("refused"), "{off}");
+    assert_eq!(off["reason"]["kind"], json!("noFoldersSearched"), "{off}");
+
+    set(true);
+    let on = ask_q(&webview, "nothing indexed");
+    assert_eq!(on["reason"]["kind"], json!("noCandidates"), "{on}");
+}
+
+/// One indexed file under one root, a key but NO chat model (readiness is
+/// `NoModel`); returns the window and the root, the text arm only.
+fn no_chat_model_with_one_file(
+    app: &tauri::App<MockRuntime>,
+    indexed: bool,
+) -> (WebviewWindow<MockRuntime>, i64) {
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-no-chat").expect("the key is stored");
+    state.open_index().unwrap();
+    let root = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            if indexed {
+                let doc = "a".repeat(64);
+                seed_indexed_file(db, root, &doc, "a.txt");
+                rebuild_one_chunk(db, &doc, "synthetic zzz");
+            }
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
+    let webview = main_webview(app);
+    text_arm_only(&webview);
+    (webview, root)
+}
+
+/// Every folder off says so even when no chat model is usable: the
+/// citations-only "no passages matched" would be false. The folder on, and the
+/// empty index, keep the citations-only answer (both directions).
+#[test]
+fn every_folder_off_refuses_even_without_a_chat_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let (webview, root) = no_chat_model_with_one_file(&app, true);
+    let set = |searched: bool| {
+        call(
+            &webview,
+            "set_folder_searched",
+            json!({ "rootId": root, "folderPath": "", "searched": searched }),
+        )
+        .expect("set_folder_searched was rejected");
+    };
+
+    set(false);
+    let off = ask_q(&webview, "nothing indexed");
+    assert_eq!(off["kind"], json!("refused"), "{off}");
+    assert_eq!(off["reason"]["kind"], json!("noFoldersSearched"), "{off}");
+
+    set(true);
+    let on = ask_q(&webview, "nothing indexed");
+    assert_eq!(on["kind"], json!("citationsOnly"), "{on}");
+}
+
+#[test]
+fn an_empty_index_without_a_chat_model_stays_citations_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let (webview, _) = no_chat_model_with_one_file(&app, false);
+    let answer = ask_q(&webview, "nothing indexed");
+    assert_eq!(answer["kind"], json!("citationsOnly"), "{answer}");
+}
+
+/// Every folder off and the embedding provider unreachable: the refusal is
+/// still "search is off", not the provider's failure (the all-off check runs
+/// before the unreachable-provider branch).
+#[test]
+fn every_folder_off_refuses_even_when_the_embed_provider_is_unreachable() {
+    use mnema_desktop::provider::ProviderChoice::OpenRouter;
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app_on(dir.path(), 1, &[], NO_PROVIDER);
+    let state = fx.app.state::<AppState>();
+    scan_to_completion(fx.app.handle());
+    mnema_secrets::store(state.credential_ref(), "test-key-off-unreachable").unwrap();
+    // One provider for both roles, a chat model chosen: the unreachable-
+    // provider branch is the one ask would otherwise take.
+    set_roles(&state, Some(OpenRouter), Some(OpenRouter));
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    call(
+        &fx.webview,
+        "set_search_arms",
+        json!({ "text": true, "content": true }),
+    )
+    .unwrap();
+    let root = state
+        .with_index(|db| Ok::<_, mnema_index::Error>(db.list_watched_roots()?[0].id))
+        .unwrap();
+    call(
+        &fx.webview,
+        "set_folder_searched",
+        json!({ "rootId": root, "folderPath": "", "searched": false }),
+    )
+    .unwrap();
+
+    let answer = ask_q(&fx.webview, "synthetic topic");
+    assert_eq!(answer["kind"], json!("refused"), "{answer}");
+    assert_eq!(
+        answer["reason"]["kind"],
+        json!("noFoldersSearched"),
+        "{answer}"
+    );
+}
+
+/// A follow-up (a dialogue with a generated turn) after every folder was
+/// unticked is refused like a first question; with the folder on again it is
+/// the conversation as before.
+#[test]
+fn a_follow_up_with_every_folder_off_refuses() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("It is synthetic <c>1</c>.")),
+        Reply::ok(&chat_text("Glad to help.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-follow-off").expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let root = state
+        .with_index(|db| {
+            let root = db.insert_watched_root("/tmp/alpha")?;
+            let doc = "a".repeat(64);
+            seed_indexed_file(db, root, &doc, "a.txt");
+            rebuild_one_chunk(db, &doc, "synthetic zzz");
+            Ok::<_, mnema_index::Error>(root)
+        })
+        .unwrap();
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+    let set = |searched: bool| {
+        call(
+            &webview,
+            "set_folder_searched",
+            json!({ "rootId": root, "folderPath": "", "searched": searched }),
+        )
+        .expect("set_folder_searched was rejected");
+    };
+
+    assert_eq!(ask_q(&webview, "synthetic zzz")["kind"], json!("generated"));
+    set(false);
+    let off = ask_q(&webview, "thanks, tell me more");
+    assert_eq!(off["kind"], json!("refused"), "{off}");
+    assert_eq!(off["reason"]["kind"], json!("noFoldersSearched"), "{off}");
+
+    set(true);
+    let on = ask_q(&webview, "thanks, tell me more");
+    assert_eq!(on["via"], json!("conversation"), "{on}");
+}
+
+/// A fresh index (nothing indexed at all) has no folder to blame: the plain
+/// "nothing found", not "search is off".
+#[test]
+fn an_empty_index_refuses_with_no_candidates_not_no_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    mnema_secrets::store(state.credential_ref(), "test-key-empty-index")
+        .expect("the key is stored");
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    text_arm_only(&webview);
+
+    let answer = ask_q(&webview, "nothing indexed");
+    assert_eq!(answer["reason"]["kind"], json!("noCandidates"), "{answer}");
 }
 
 const FIRST_Q: &str = "quantum entanglement";

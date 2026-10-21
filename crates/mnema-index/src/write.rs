@@ -1081,7 +1081,8 @@ impl Db {
     /// replaceable and removable, and [`Db::upsert_vector_for_text`], added
     /// by Task 6 as the one the embedding pass actually calls.
     /// [`Db::create_space`], [`Db::drop_space`] and
-    /// [`Db::delete_watched_root`] open one directly.
+    /// [`Db::delete_watched_root`] and [`Db::set_folder_searched`] open one
+    /// directly.
     /// [`Db::adopt_embedding_model`] does both at once: one transaction
     /// through [`Db::create_space`], another through `self.transaction` for
     /// the pointer write itself.
@@ -1241,7 +1242,7 @@ impl Db {
     /// [`Db::read_snapshot`]; the one offline caller that does not —
     /// `mnema-eval`'s `run.rs` — reads whatever each statement happened to see.
     pub fn citation(&self, chunk_id: i64) -> Result<Option<Citation>, Error> {
-        let mut stmt = self.conn().prepare(
+        let mut stmt = self.conn().prepare(concat!(
             "SELECT c.text, c.coordinate, c.char_span, p.section_title, pa.relative_path,
                     c.document_id, c.ord
                FROM chunk c
@@ -1250,9 +1251,11 @@ impl Db {
                JOIN document d ON d.id = c.document_id
                LEFT JOIN path pa ON pa.document_id = d.id
               WHERE c.id = ?1
-              ORDER BY pa.watched_root_id, pa.relative_path
-              LIMIT 1",
-        )?;
+              ORDER BY (CASE WHEN pa.document_id IS NOT NULL AND ",
+            crate::scope::path_is_searched!(),
+            " THEN 0 ELSE 1 END), pa.watched_root_id, pa.relative_path
+              LIMIT 1"
+        ))?;
         let mut rows = stmt.query(params![chunk_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -1375,8 +1378,8 @@ fn delete_watched_root_in(tx: &Transaction<'_>, root_id: i64) -> Result<u64, Err
         tx.execute("DELETE FROM document WHERE id = ?1", params![id])?;
     }
     // Cascades away the path rows of any document that survived — one still
-    // named from another root — and this root's tag_rule, skipped and
-    // ignore_rule rows.
+    // named from another root — and this root's tag_rule, skipped,
+    // ignore_rule and search_folder rows.
     tx.execute("DELETE FROM watched_root WHERE id = ?1", params![root_id])?;
     Ok(doomed.len() as u64)
 }

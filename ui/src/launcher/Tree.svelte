@@ -43,17 +43,19 @@
 </script>
 
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { listTree } from '../lib/ipc';
+  import { listTree, setFolderSearched } from '../lib/ipc';
   import type { TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
   // as well, which is what the backend is asked to open.
-  let { selected, onPick }: {
+  let { selected, onPick, onScopeChange }: {
     selected: TreeSelection | null;
     onPick: (pick: TreePick) => void;
+    // Called when "every root is unticked" changes; the composer says so at once.
+    onScopeChange?: (allOff: boolean) => void;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
@@ -61,7 +63,26 @@
   // Folders the person opened or shut by hand, keyed per root: two roots may
   // hold the same folder path and must not share one open flag. The root row
   // itself lives in the same map under its root's `''` path.
-  let toggled = $state<Record<string, boolean>>({});
+  // Remembered across restarts (best effort, like `layout.ts`): a malformed
+  // value, or any entry that is not a boolean, is ignored.
+  const OPEN_KEY = 'mnema.tree.open';
+  function loadOpen(): Record<string, boolean> {
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem(OPEN_KEY) ?? 'null');
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      return Object.fromEntries(Object.entries(raw).filter(([, v]) => typeof v === 'boolean'));
+    } catch {
+      return {};
+    }
+  }
+  function saveOpen(map: Record<string, boolean>) {
+    try {
+      localStorage.setItem(OPEN_KEY, JSON.stringify(map));
+    } catch {
+      // quota or a locked-down webview: the folders are not worth a crash
+    }
+  }
+  let toggled = $state<Record<string, boolean>>(loadOpen());
 
   // Ruling M holds: this card is not keyed and does not refetch on a state
   // change — `state` changes twice per question and a remount would snap shut
@@ -119,8 +140,28 @@
   function load() {
     if (loading) return;
     loading = true;
+    // A read that starts with a write on the wire may precede that write's
+    // landing in the store, so it gets an epoch no click can match.
+    const started = pending > 0 ? -1 : epoch;
     listTree()
-      .then((l) => { listing = l; failed = false; })
+      .then((l) => {
+        listing = l;
+        failed = false;
+        // Whole removed roots only: a folder missing for a moment keeps its flag.
+        const live = new Set(l.roots.map((r) => String(r.rootId)));
+        const kept = Object.entries(toggled).filter(([k]) => live.has(k.split('\0')[0]));
+        if (kept.length !== Object.keys(toggled).length) {
+          toggled = Object.fromEntries(kept);
+          saveOpen(toggled);
+        }
+        // The checks are taken only from a listing read after the last click
+        // and with no write on the wire; any other predates a write and would
+        // put the old state back under the person. It is read again once the
+        // queue is empty.
+        if (epoch === started && pending === 0) searched = fromListing(l);
+        else if (pending > 0) resync = true;
+        else reloadAfter = true;
+      })
       .catch((e) => {
         // Non-fatal, but never silent: an unreadable listing must say so
         // rather than look like an empty index (Ruling N).
@@ -130,7 +171,10 @@
         // and leave the person with a message, on an event they did not cause.
         if (listing === null) failed = true;
       })
-      .finally(() => { loading = false; });
+      .finally(() => {
+        loading = false;
+        if (reloadAfter) { reloadAfter = false; load(); }
+      });
   }
 
   onMount(load);
@@ -193,6 +237,94 @@
   function toggle(rootId: number, path: string) {
     const k = key(rootId, path);
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
+    saveOpen(toggled);
+  }
+
+  // The search filter: a folder's own flag covers the files directly in it. A
+  // folder with no entry inherits its parent's, so a folder that appears on
+  // disk under a cleared one is cleared too. The index keeps the entries; this
+  // is the shown copy, set from each listing and changed at click time.
+  let searched = $state<Record<string, boolean>>({});
+  // Writes go one after another: the command is async and two in flight could
+  // land in either order. `epoch` counts clicks, so a listing can tell it was
+  // read before one.
+  let pending = 0;
+  let epoch = 0;
+  let chain: Promise<void> = Promise.resolve();
+  // After a refused write, or a listing that predates a click, the shown
+  // checks are unknown. Once the queue is empty the index is asked again.
+  let resync = false;
+  let reloadAfter = false;
+
+  function fromListing(l: TreeListing): Record<string, boolean> {
+    const out: Record<string, boolean> = {};
+    for (const root of l.roots) for (const e of root.searched) out[key(root.rootId, e.folderPath)] = e.searched;
+    return out;
+  }
+
+  function ownOn(rootId: number, path: string): boolean {
+    for (let p = path; ; p = parentOf(p)) {
+      const k = key(rootId, p);
+      if (k in searched) return searched[k];
+      if (p === '') return true;
+    }
+  }
+
+  function folderPaths(nodes: TreeNode[], out: string[] = []): string[] {
+    for (const n of nodes) if (n.kind === 'folder') { out.push(n.path); folderPaths(n.children, out); }
+    return out;
+  }
+
+  // ✓ when the folder and every folder under it are searched, empty when none
+  // are, — otherwise.
+  function checkState(rootId: number, path: string, children: TreeNode[]): 'on' | 'off' | 'mixed' {
+    const flags = [path, ...folderPaths(children)].map((p) => ownOn(rootId, p));
+    return flags.every(Boolean) ? 'on' : flags.some(Boolean) ? 'mixed' : 'off';
+  }
+
+  // True only for a loaded listing with at least one root, every one unticked.
+  const allOff = $derived(
+    listing !== null && roots.length > 0 &&
+      roots.every(({ root, nodes }) => checkState(root.rootId, '', nodes) === 'off'),
+  );
+  $effect(() => onScopeChange?.(allOff));
+
+  // A click sets the whole branch: — and empty turn into ✓, ✓ into empty. The
+  // entries under it are dropped so the branch inherits the new value.
+  function setSearched(rootId: number, path: string, children: TreeNode[]) {
+    const on = checkState(rootId, path, children) !== 'on';
+    const inside = key(rootId, path === '' ? '' : `${path}/`);
+    const next: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(searched)) if (!k.startsWith(inside)) next[k] = v;
+    next[key(rootId, path)] = on;
+    searched = next;
+
+    pending++;
+    epoch++;
+    chain = chain
+      .then(() => setFolderSearched(rootId, path, on))
+      .catch((e) => {
+        console.error('set_folder_searched failed', e);
+        resync = true;
+      })
+      .finally(() => {
+        pending--;
+        if (pending > 0) return;
+        if (resync) {
+          resync = false;
+          if (loading) reloadAfter = true; else load();
+        }
+      });
+  }
+
+  // Read in the template, so a locale change re-labels the checks.
+  function searchIn(name: string) {
+    void $locale;
+    return t('tree_search_in', { name });
+  }
+
+  function parentOf(path: string) {
+    return path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
   }
 
   // Folders on the selected file's path that the person had shut are set open
@@ -243,21 +375,86 @@
       for (const k of onTheWay) {
         if (next[k] === false) { next[k] = true; changed = true; }
       }
-      if (changed) toggled = next;
+      if (changed) {
+        toggled = next;
+        saveOpen(next);
+      }
+    });
+  });
+
+  // The row of a NEW selection is scrolled into view in the pane's own scroller
+  // (`.pane-body`), once per selection key. `await tick()` and not a bare
+  // effect: the folders the selection opens are written by the effect above and
+  // reach the DOM a flush later. The effect reads `listing` and `toggled`, so a
+  // selection that lands before its row exists is retried when it appears; the
+  // key is stamped only once the row is found, so nothing else re-fires it.
+  // `?.` because jsdom has no `scrollIntoView` and other suites mount this card.
+  // `nearest` leaves a visible row where it is. A hidden pane (`[hidden]`
+  // ancestor) is stamped without scrolling: nothing is owed when it is shown.
+  let treeEl = $state<HTMLElement>();
+  let scrolledTo: string | null = null;
+  $effect(() => {
+    const id = selectedKey;
+    void listing;
+    void toggled;
+    if (id === null) { scrolledTo = null; return; }
+    if (id === scrolledTo) return;
+    void tick().then(() => {
+      if (id !== selectedKey || id === scrolledTo) return;
+      const row = treeEl?.querySelector('[aria-current="true"]');
+      if (!row) return;
+      scrolledTo = id;
+      if (!row.closest('[hidden]')) row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     });
   });
 </script>
+
+{#snippet chevron()}
+  <svg class="chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+{/snippet}
+
+{#snippet folderIcon(open: boolean)}
+  <svg class="ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
+    {#if open}
+      <path d="M2 12.5V4.5a1 1 0 0 1 1-1h3l1.5 1.5H12a1 1 0 0 1 1 1V7"/><path d="M2 12.5l1.8-5h10.7l-1.8 5z"/>
+    {:else}
+      <path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/>
+    {/if}
+  </svg>
+{/snippet}
+
+{#snippet fileIcon()}
+  <svg class="ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h5.5L12.5 5v8.5a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-11A.5.5 0 0 1 4 2z"/><path d="M9.5 2v3h3M5.8 8h4.4M5.8 10.5h4.4"/></svg>
+{/snippet}
+
+<!-- A sibling of the disclosure button, not inside it: a control nested in a
+     button is invalid and its click would also fold the folder. -->
+{#snippet check(rootId: number, path: string, name: string, children: TreeNode[])}
+  {@const state = checkState(rootId, path, children)}
+  <input
+    type="checkbox"
+    class="search-check"
+    data-testid={`tree-check-${rootId}-${path}`}
+    aria-label={searchIn(name)}
+    checked={state === 'on'}
+    indeterminate={state === 'mixed'}
+    onchange={() => setSearched(rootId, path, children)} />
+{/snippet}
 
 {#snippet branch(nodes: TreeNode[], rootId: number)}
   <ul>
     {#each nodes as node (node.path)}
       <li>
         {#if node.kind === 'folder'}
-          <button
-            type="button"
-            data-testid={`tree-folder-${node.path}`}
-            aria-expanded={isOpen(rootId, node.path)}
-            onclick={() => toggle(rootId, node.path)}>{node.name}</button>
+          <div class="folder-row">
+            <button
+              type="button"
+              data-testid={`tree-folder-${node.path}`}
+              aria-expanded={isOpen(rootId, node.path)}
+              onclick={() => toggle(rootId, node.path)}
+              >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(rootId, node.path))}<span class="label">{node.name}</span></button>
+            {@render check(rootId, node.path, node.name, node.children)}
+          </div>
           {#if isOpen(rootId, node.path)}
             {@render branch(node.children, rootId)}
           {/if}
@@ -270,10 +467,11 @@
           <button
             type="button"
             class="file-row"
+            class:unsearched={!ownOn(rootId, parentOf(node.path))}
             data-testid={`tree-file-${node.documentId}`}
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
             onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}
-            >{node.name}</button>
+            >{@render fileIcon()}<span class="label">{node.name}</span></button>
         {/if}
       </li>
     {/each}
@@ -282,7 +480,7 @@
 
 <svelte:window onfocus={load} />
 
-<div class="tree" data-testid="tree-body">
+<div class="tree" data-testid="tree-body" bind:this={treeEl}>
   {#if failed}
     <p data-testid="tree-failed">{failedLabel}</p>
   {:else if isEmpty}
@@ -295,11 +493,15 @@
             <!-- The root is a disclosure row like the folders below it (owner,
                  2026-10-20): a flat list under a bare heading read as a pile
                  with no way to fold it. -->
-            <button
-              type="button"
-              data-testid={`tree-root-toggle-${root.rootId}`}
-              aria-expanded={isOpen(root.rootId, '')}
-              onclick={() => toggle(root.rootId, '')}>{root.name}</button>
+            <div class="folder-row">
+              <button
+                type="button"
+                data-testid={`tree-root-toggle-${root.rootId}`}
+                aria-expanded={isOpen(root.rootId, '')}
+                onclick={() => toggle(root.rootId, '')}
+                >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(root.rootId, ''))}<span class="label">{root.name}</span></button>
+              {@render check(root.rootId, '', root.name, nodes)}
+            </div>
           </li>
         </ul>
         <!-- A sibling of the root's own list, not a child of its <li>: nested

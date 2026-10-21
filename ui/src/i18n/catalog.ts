@@ -29,7 +29,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'models_embedding_degraded' | 'models_embedding_reembed' | 'models_embedding_reembed_started'
   | 'models_embedding_reembed_ended'
   | 'models_embedding_change_failed' | 'models_job_running' | 'models_index_recover'
-  | 'refusal_no_candidates' | 'refusal_empty_completion'
+  | 'refusal_no_candidates' | 'refusal_empty_completion' | 'refusal_no_folders_searched'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
@@ -39,7 +39,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
-  | 'tree_empty' | 'tree_failed'
+  | 'tree_empty' | 'tree_failed' | 'tree_search_in'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'fresh_reindexed' | 'fresh_file_changed' | 'fresh_file_missing'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
@@ -346,6 +346,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexed_documents: '{count, plural, one {# документ} few {# документи} many {# документів} other {# документа}}',
     refusal_no_candidates: 'Нічого не знайдено за цим запитом.',
     refusal_empty_completion: 'Модель не повернула відповіді.',
+    refusal_no_folders_searched: 'Пошук вимкнено для всіх тек. Увімкніть хоча б одну в дереві файлів.',
     loc_page: 'с.', loc_line_one: 'рядок', loc_line_many: 'рядки',
     loc_row_one: 'рядок', loc_row_many: 'рядки', loc_sheet: 'аркуш',
     search_placeholder: 'Запит…',
@@ -385,6 +386,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
+    tree_search_in: 'Шукати в «{name}»',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
@@ -1220,6 +1222,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     indexed_documents: '{count, plural, one {# document} other {# documents}}',
     refusal_no_candidates: 'Nothing was found for this query.',
     refusal_empty_completion: 'The model returned no answer.',
+    refusal_no_folders_searched: 'Search is off for every folder. Turn at least one on in the file tree.',
     loc_page: 'p.', loc_line_one: 'line', loc_line_many: 'lines',
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
@@ -1253,6 +1256,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
+    tree_search_in: 'Search in “{name}”',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',

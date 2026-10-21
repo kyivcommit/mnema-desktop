@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -151,6 +151,21 @@ CREATE TABLE query_history (
 );
 CREATE INDEX query_history_asked_at ON query_history(asked_at);";
 
+/// The folders the person has switched search off (or back on) for.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` gives. `folder_path` is the
+/// root-relative path with `/` separators, `''` being the root itself, and only
+/// a change is stored: an empty table is the behaviour before this existed.
+/// `ON DELETE CASCADE` takes a removed root's entries with it, like `tag_rule`
+/// and `ignore_rule` (spec §4).
+const ADD_SEARCH_FOLDER: &str = "\
+CREATE TABLE search_folder (
+    watched_root_id INTEGER NOT NULL REFERENCES watched_root(id) ON DELETE CASCADE,
+    folder_path     TEXT NOT NULL,          -- '' = the root itself
+    searched        INTEGER NOT NULL CHECK (searched IN (0, 1)),
+    PRIMARY KEY (watched_root_id, folder_path)
+) WITHOUT ROWID;";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -167,6 +182,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_IGNORE_RULE_UNIQUE),
         M::up(ADD_FILE_MASK),
         M::up(ADD_QUERY_HISTORY),
+        M::up(ADD_SEARCH_FOLDER),
     ])
 }
 
@@ -418,11 +434,11 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 5);
+        assert_eq!(SCHEMA_VERSION, 6);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         let value: String = conn
             .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {

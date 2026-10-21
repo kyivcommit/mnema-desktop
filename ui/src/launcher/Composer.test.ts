@@ -117,3 +117,38 @@ test('state D draws no alert and no progress bar; the field is the only busy sig
   expect(screen.getByRole('textbox').getAttribute('aria-busy')).toBe('true');
   expect(screen.queryByRole('alert')).toBeNull(); // in flight is not also an error
 });
+
+// --- the live "every folder is off" state ------------------------------------
+
+test('with every folder off the send is disabled, Enter sends nothing and the line says why', async () => {
+  const onSubmit = vi.fn();
+  render(Composer, { value: 'question', state: idle, scopeOff: true, onSubmit });
+  expect(send().disabled).toBe(true);
+  key('Enter');
+  expect(onSubmit).not.toHaveBeenCalled();
+  const line = screen.getByText(t('refusal_no_folders_searched'));
+  expect(line.getAttribute('role')).toBe('status');
+  expect(line.classList.contains('guard')).toBe(true);
+});
+
+test('with a folder on there is no line and the question leaves', async () => {
+  const onSubmit = vi.fn();
+  render(Composer, { value: 'question', state: idle, scopeOff: false, onSubmit });
+  expect(screen.queryByText(t('refusal_no_folders_searched'))).toBeNull();
+  key('Enter');
+  expect(onSubmit).toHaveBeenCalledWith('question');
+});
+
+test('a no-folders refusal of the last answer is hidden once a folder is on, other refusals stay', async () => {
+  const noFolders: LauncherState = { kind: 'refused', reason: { kind: 'noFoldersSearched' } };
+  const { rerender } = render(Composer, { value: '', state: noFolders, scopeOff: true, onSubmit: vi.fn() });
+  // positive control: while everything is off the text is there (once)
+  expect(screen.getAllByText(t('refusal_no_folders_searched'))).toHaveLength(1);
+
+  await rerender({ value: '', state: noFolders, scopeOff: false, onSubmit: vi.fn() });
+  expect(screen.queryByText(t('refusal_no_folders_searched'))).toBeNull();
+
+  cleanup();
+  render(Composer, { value: '', state: { kind: 'refused', reason: { kind: 'noCandidates' } }, scopeOff: false, onSubmit: vi.fn() });
+  expect(screen.getByText(t('refusal_no_candidates'))).toBeTruthy();
+});

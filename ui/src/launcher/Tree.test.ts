@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import Tree, { buildFolderTree } from './Tree.svelte';
@@ -22,8 +22,10 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // every command would hand the listing's shape to whatever else asked, and a
 // test would pass on whichever shape happened to be wrong.
 let treeReply: () => Promise<TreeListing> = () => Promise.resolve(emptyListing);
-function route(cmd: string): Promise<unknown> {
+let setReply: (a: unknown) => Promise<void> = () => Promise.resolve();
+function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'list_tree') return treeReply();
+  if (cmd === 'set_folder_searched') return setReply(args);
   throw new Error(`unexpected command ${cmd}`);
 }
 
@@ -69,7 +71,7 @@ function mount(selected: { rootId: number; relativePath: string } | null) {
 // Everything in the card that a keyboard can reach or that claims a role, in
 // document order. Used as a closed enumeration (P5) rather than a spot check.
 function controls() {
-  return [...screen.getByTestId('tree-body').querySelectorAll('button, [tabindex], [role]')]
+  return [...screen.getByTestId('tree-body').querySelectorAll('button, input, [tabindex], [role]')]
     .map((el) => el.getAttribute('data-testid'));
 }
 
@@ -82,10 +84,25 @@ function currentRows() {
     .map((el) => el.getAttribute('data-testid'));
 }
 
+// The open folders live in `localStorage` (CLAUDE.md, Node 24): a fresh
+// in-memory store per test, so one test's toggles never reach the next.
+beforeEach(() => {
+  const map = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => { map.set(k, v); },
+      removeItem: (k: string) => { map.delete(k); },
+    },
+    configurable: true,
+  });
+});
+
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(route);
   treeReply = () => Promise.resolve(emptyListing);
+  setReply = () => Promise.resolve();
   pick.mockReset();
 });
 
@@ -93,6 +110,7 @@ beforeEach(() => {
 // shared by every test in this file, and an in-test restore is skipped when an
 // assertion fails first. Restore unconditionally.
 afterEach(() => {
+  delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   // `locale` is a module-level store shared by every test in this file, and an
   // in-test restore is skipped when an assertion fails first. Restore
   // unconditionally.
@@ -162,7 +180,9 @@ test('the controls are exactly the ones with a real action', async () => {
 
   expect(await screen.findByTestId('tree-file-doc-1')).toBeTruthy();
   expect(controls()).toEqual([
-    'tree-root-toggle-1', 'tree-folder-notes', 'tree-file-doc-1', 'tree-file-doc-2', 'tree-folder-archive',
+    'tree-root-toggle-1', 'tree-check-1-',
+    'tree-folder-notes', 'tree-check-1-notes', 'tree-file-doc-1', 'tree-file-doc-2',
+    'tree-folder-archive', 'tree-check-1-archive',
   ]);
 });
 
@@ -217,7 +237,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
     roots: [
       {
         rootId: 9,
-        absolutePath: '/home/u/ua',
+        absolutePath: '/home/u/ua', searched: [],
         name: 'ua',
         files: [{ relativePath: 'Договори/dohov-01.md', documentId: 'doc-u' }],
       },
@@ -252,8 +272,8 @@ test('two roots holding a folder of the same name open and shut independently', 
   // Local, like `mockTree` (Ruling L): nothing else consumes this shape.
   mockTree({
     roots: [
-      { rootId: 1, absolutePath: '/home/u/one', name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
-      { rootId: 2, absolutePath: '/home/u/two', name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
+      { rootId: 1, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
+      { rootId: 2, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
     ],
   });
   mount(null);
@@ -710,3 +730,383 @@ test('aria-expanded on a folder says what the folder is actually doing', async (
   expect(screen.queryByTestId('tree-file-doc-1')).toBeNull();
 });
 
+
+// --- the search checks, persisted through the index -------------------------
+
+const withNotesOff: TreeListing = {
+  roots: [{ ...oneRootTwoFolders.roots[0], searched: [{ folderPath: 'notes', searched: false }] }],
+};
+const setCalls = () => invoke.mock.calls.filter((c) => c[0] === 'set_folder_searched');
+const box = (path: string) => screen.getByTestId(`tree-check-1-${path}`) as HTMLInputElement;
+
+test('the checks are read from the listing', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await screen.findByTestId('tree-check-1-notes');
+  expect(box('notes').checked).toBe(false);
+  expect(box('archive').checked).toBe(true);
+  expect(box('').indeterminate).toBe(true);
+});
+
+test('a click on a mixed root ticks the whole branch and clears the entries under it', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: '', searched: true }]]);
+  for (const p of ['', 'notes', 'archive']) {
+    expect(box(p).checked).toBe(true);
+    expect(box(p).indeterminate).toBe(false);
+  }
+});
+
+test('a file under an unticked folder is marked unsearched, one under a ticked folder is not', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-archive'));
+  const off = screen.getByTestId('tree-file-doc-1');
+  expect(off.classList.contains('unsearched')).toBe(true);
+  expect(screen.getByTestId('tree-file-doc-3').classList.contains('unsearched')).toBe(false);
+});
+
+test('a click writes the new state once', async () => {
+  mockTree(withNotesOff);
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  expect(setCalls()).toEqual([['set_folder_searched', { rootId: 1, folderPath: 'archive', searched: false }]]);
+  expect(box('archive').checked).toBe(false);
+});
+
+test('writes run one after another', async () => {
+  mockTree(withNotesOff);
+  let release!: () => void;
+  setReply = () => new Promise<void>((r) => (release = r));
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  await fireEvent.click(box('notes'));
+  await tick();
+  expect(setCalls()).toHaveLength(1); // the second waits for the first
+  setReply = () => Promise.resolve();
+  release();
+  await waitFor(() => expect(setCalls()).toHaveLength(2));
+  expect(setCalls()[1][1]).toEqual({ rootId: 1, folderPath: 'notes', searched: true });
+});
+
+// The index is the record: `stored` is what the mock backend holds, and a
+// listing is read from it at the moment of the call.
+function storeBackedIndex() {
+  const stored: { folderPath: string; searched: boolean }[] = [{ folderPath: 'notes', searched: false }];
+  treeReply = () => Promise.resolve({ roots: [{ ...oneRootTwoFolders.roots[0], searched: stored.map((e) => ({ ...e })) }] });
+  return stored;
+}
+
+test('after a refused write and a later accepted one, the checks show what the index holds', async () => {
+  const stored = storeBackedIndex();
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const gates: Array<() => void> = [];
+  setReply = (a) => new Promise<void>((resolve, reject) => {
+    const { folderPath, searched } = a as { folderPath: string; searched: boolean };
+    gates.push(gates.length === 0 ? () => reject(new Error('disk full')) : () => {
+      const at = stored.findIndex((e) => e.folderPath === folderPath);
+      if (at >= 0) stored.splice(at, 1);
+      stored.push({ folderPath, searched });
+      resolve();
+    });
+  });
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive')); // will be refused
+  await fireEvent.click(box('notes')); // will be accepted
+  gates[0]();
+  await waitFor(() => expect(gates).toHaveLength(2));
+  await waitFor(() => expect(err).toHaveBeenCalled());
+  gates[1]();
+  await waitFor(() => expect(box('archive').checked).toBe(true)); // the refused click is not shown
+  expect(box('notes').checked).toBe(true); // the accepted one is
+});
+
+test('after a single refused write the check shows the stored value', async () => {
+  storeBackedIndex();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  setReply = () => Promise.reject(new Error('disk full'));
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-check-1-archive'));
+  expect(box('archive').checked).toBe(false); // shown at click time
+  await waitFor(() => expect(box('archive').checked).toBe(true));
+  expect(console.error).toHaveBeenCalled();
+});
+
+// A listing read before a click carries the old state. Whenever it lands, the
+// click stays and the index is read again.
+function staleLoad(extraFile = false) {
+  let land!: () => void;
+  const root = oneRootTwoFolders.roots[0];
+  const stale = { roots: [{ ...root, files: extraFile ? [...root.files, { relativePath: 'archive/new.md', documentId: 'doc-new' }] : root.files, searched: [{ folderPath: 'notes', searched: false }] }] };
+  const fresh = treeReply;
+  treeReply = () => { treeReply = fresh; return new Promise<TreeListing>((r) => (land = () => r(stale))); };
+  return { land: () => land() };
+}
+function recordingWrite(stored: { folderPath: string; searched: boolean }[]) {
+  let done!: () => void;
+  setReply = (a) => new Promise<void>((resolve) => {
+    const { folderPath, searched } = a as { folderPath: string; searched: boolean };
+    done = () => { stored.push({ folderPath, searched }); resolve(); };
+  });
+  return { done: () => done() };
+}
+
+test('a stale listing landing while the write is pending does not revert it', async () => {
+  const stored = storeBackedIndex();
+  mount(null);
+  await screen.findByTestId('tree-check-1-archive');
+  const stale = staleLoad();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  const write = recordingWrite(stored);
+  await fireEvent.click(box('archive'));
+  stale.land();
+  await tick();
+  expect(box('archive').checked).toBe(false);
+  write.done();
+  await waitFor(() => expect(treeCalls()).toHaveLength(3)); // read again after the drain
+  await tick();
+  expect(box('archive').checked).toBe(false); // the stored value, not the stale one
+});
+
+test('a stale listing landing after the write finished does not revert it', async () => {
+  const stored = storeBackedIndex();
+  mount(null);
+  await screen.findByTestId('tree-check-1-archive');
+  const stale = staleLoad();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  const write = recordingWrite(stored);
+  await fireEvent.click(box('archive'));
+  write.done();
+  await waitFor(() => expect(setCalls()).toHaveLength(1));
+  await tick(); await tick();
+  stale.land();
+  await waitFor(() => expect(treeCalls()).toHaveLength(3));
+  await tick();
+  expect(box('archive').checked).toBe(false);
+});
+
+test('a load that starts while a write is pending and lands after the drain does not revert', async () => {
+  const stored = storeBackedIndex();
+  mount(null);
+  await screen.findByTestId('tree-check-1-archive');
+  const done: Array<() => void> = [];
+  setReply = (a) => new Promise<void>((resolve) => {
+    const { folderPath, searched } = a as { folderPath: string; searched: boolean };
+    done.push(() => { stored.push({ folderPath, searched }); resolve(); });
+  });
+  await fireEvent.click(box('archive')); // write 1 in flight
+  await fireEvent.click(box('notes')); // write 2 queued
+  const stale = staleLoad();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  done[0]();
+  await waitFor(() => expect(done).toHaveLength(2));
+  done[1]();
+  await waitFor(() => expect(stored).toHaveLength(3));
+  await tick(); await tick();
+  stale.land(); // read before write 2 reached the store
+  await waitFor(() => expect(treeCalls()).toHaveLength(3));
+  await tick();
+  expect(box('archive').checked).toBe(false);
+  expect(box('notes').checked).toBe(true);
+});
+
+test('a discarded stale listing still updates the files', async () => {
+  const stored = storeBackedIndex();
+  mount(null);
+  await fireEvent.click(await screen.findByTestId('tree-folder-archive'));
+  const stale = staleLoad(true);
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  recordingWrite(stored);
+  await fireEvent.click(box('archive')); // write stays pending
+  stale.land();
+  expect(await screen.findByTestId('tree-file-doc-new')).toBeTruthy();
+});
+
+// --- the scope signal: is every root unticked? --------------------------------
+
+const allOff = (id: number) => ({ rootId: id, folderPath: '', searched: false });
+const twoRootsOff: TreeListing = {
+  roots: [
+    { ...oneRootTwoFolders.roots[0], rootId: 1, searched: [allOff(1)] },
+    { ...oneRootTwoFolders.roots[0], rootId: 2, searched: [allOff(2)] },
+  ],
+};
+const lastScope = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.at(-1)?.[0];
+function mountScope(onScopeChange: (v: boolean) => void) {
+  return render(Tree, { selected: null, onPick: pick, onScopeChange });
+}
+
+test('unticking every root reports all-off, ticking one back reports not', async () => {
+  mockTree({ roots: [{ ...oneRootTwoFolders.roots[0], rootId: 1, searched: [] }, { ...oneRootTwoFolders.roots[0], rootId: 2, searched: [] }] });
+  const onScope = vi.fn();
+  mountScope(onScope);
+  await screen.findByTestId('tree-check-1-');
+  expect(lastScope(onScope)).toBe(false);
+  await fireEvent.click(screen.getByTestId('tree-check-1-'));
+  expect(lastScope(onScope)).toBe(false); // root 2 is still on
+  await fireEvent.click(screen.getByTestId('tree-check-2-'));
+  expect(lastScope(onScope)).toBe(true);
+  await fireEvent.click(screen.getByTestId('tree-check-2-'));
+  expect(lastScope(onScope)).toBe(false);
+});
+
+test('a listing that arrives with every root off reports all-off; one root on does not', async () => {
+  mockTree(twoRootsOff);
+  const onScope = vi.fn();
+  mountScope(onScope);
+  await waitFor(() => expect(lastScope(onScope)).toBe(true));
+
+  cleanup();
+  mockTree({ roots: [twoRootsOff.roots[0], { ...twoRootsOff.roots[1], searched: [] }] });
+  const second = vi.fn();
+  mountScope(second);
+  await screen.findByTestId('tree-check-2-');
+  expect(second).toHaveBeenCalled(); // the listing was seen
+  expect(lastScope(second)).toBe(false);
+});
+
+test('a failed or empty listing is never all-off', async () => {
+  mockTreeFailure();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const failed = vi.fn();
+  mountScope(failed);
+  await screen.findByTestId('tree-failed');
+  expect(failed.mock.calls.some((c) => c[0] === true)).toBe(false);
+
+  cleanup();
+  mockTree(emptyListing);
+  const empty = vi.fn();
+  mountScope(empty);
+  await screen.findByTestId('tree-empty');
+  expect(empty.mock.calls.some((c) => c[0] === true)).toBe(false);
+});
+
+// --- the open folders survive a restart -------------------------------------
+
+test('a root the person shut stays shut after a remount', async () => {
+  mockTree(oneRootTwoFolders);
+  mount(null);
+  const toggle = await screen.findByTestId('tree-root-toggle-1');
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  await fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+  cleanup();
+  mount(null);
+  expect((await screen.findByTestId('tree-root-toggle-1')).getAttribute('aria-expanded')).toBe('false');
+});
+
+test('a malformed or foreign stored value falls back to the defaults without throwing', async () => {
+  mockTree(oneRootTwoFolders);
+  for (const bad of ['{not json', '[1,2]', '"x"', 'null', JSON.stringify({ '1\0': 'no' })]) {
+    localStorage.setItem('mnema.tree.open', bad);
+    mount(null);
+    expect((await screen.findByTestId('tree-root-toggle-1')).getAttribute('aria-expanded')).toBe('true');
+    cleanup();
+  }
+});
+
+const stored = () => JSON.parse(localStorage.getItem('mnema.tree.open') ?? '{}') as Record<string, boolean>;
+
+test('a folder re-opened by a new selection is stored as open', async () => {
+  localStorage.setItem('mnema.tree.open', JSON.stringify({ '1\0notes': false }));
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+  await waitFor(() => expect(screen.getByTestId('tree-folder-notes').getAttribute('aria-expanded')).toBe('true'));
+  expect(stored()['1\0notes']).toBe(true);
+});
+
+test('stored open flags of a root the listing no longer has are dropped; a present root keeps its own', async () => {
+  localStorage.setItem('mnema.tree.open', JSON.stringify({ '1\0': false, '99\0': true, '99\0x': false }));
+  mockTree(oneRootTwoFolders);
+  mount(null);
+  await screen.findByTestId('tree-root-toggle-1');
+  await waitFor(() => expect(Object.keys(stored()).sort()).toEqual(['1\0']));
+  expect(stored()['1\0']).toBe(false);
+});
+
+// --- scrolling to the active citation ---------------------------------------
+// jsdom has no layout and no `scrollIntoView`; the spy is installed per test and
+// removed in the unconditional `afterEach` above.
+function spyScroll() {
+  const spy = vi.fn();
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { value: spy, configurable: true, writable: true });
+  return spy;
+}
+
+test('a new selection inside a shut folder scrolls its row into view once, nearest, not smooth', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const { rerender } = mount(null);
+  await screen.findByTestId('tree-folder-notes');
+  expect(spy).not.toHaveBeenCalled();
+
+  await rerender({ selected: SELECTED });
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+  expect(spy.mock.contexts[0]).toBe(screen.getByTestId('tree-file-doc-1'));
+  expect(spy.mock.calls[0]).toEqual([{ block: 'nearest', inline: 'nearest' }]);
+});
+
+test('the same selection, a listing refresh and a check toggle do not scroll again', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  mount(SELECTED);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+
+  mockTree(withNewFile());
+  await fireEvent.focus(window);
+  await waitFor(() => expect(treeCalls()).toHaveLength(2));
+  await fireEvent.click(screen.getByTestId('tree-check-1-notes'));
+  await fireEvent.click(screen.getByTestId('tree-folder-archive'));
+  await screen.findByTestId('tree-file-doc-new');
+  await tick();
+
+  expect(spy).toHaveBeenCalledTimes(1);
+});
+
+test('a selection that arrives before the listing scrolls once the row exists', async () => {
+  const spy = spyScroll();
+  const wire = mockTreePending();
+  mount(SELECTED);
+  await tick();
+  expect(spy).not.toHaveBeenCalled();
+
+  wire.resolve(oneRootTwoFolders);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+  expect(spy.mock.contexts[0]).toBe(screen.getByTestId('tree-file-doc-1'));
+});
+
+test('a new selection moves the scroll to the new row', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const { rerender } = mount(SELECTED);
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+
+  await rerender({ selected: SELECTED_B });
+  await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+  expect(spy.mock.contexts[1]).toBe(screen.getByTestId('tree-file-doc-2'));
+});
+
+test('a tree pane that is hidden is not scrolled', async () => {
+  const spy = spyScroll();
+  mockTree(oneRootTwoFolders);
+  const host = document.createElement('div');
+  host.hidden = true;
+  document.body.appendChild(host);
+  try {
+    render(Tree, { target: host, props: { selected: SELECTED, onPick: pick } });
+    await screen.findByTestId('tree-file-doc-1');
+    await tick();
+    expect(spy).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    host.remove();
+  }
+});

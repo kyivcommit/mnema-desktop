@@ -418,7 +418,7 @@ test('clicking a file in the tree opens it in the right pane at its start', asyn
 const TREE_AT_SEVEN: TreeListing = {
   roots: [{
     rootId: 7,
-    absolutePath: '/home/u/docs',
+    absolutePath: '/home/u/docs', searched: [],
     name: 'docs',
     files: [
       { relativePath: 'notes/a.md', documentId: 'doc-1' },
@@ -1462,4 +1462,22 @@ test('a failed settings read leaves the cloud not ready, whatever the probe said
     cmd === 'model_settings' ? Promise.reject(new Error('down')) : base(cmd, ...a));
   render(Launcher);
   await waitFor(() => expect(cloud().getAttribute('data-status')).toBe('notConfigured'));
+});
+
+test('unticking the last folder says so at once and blocks the ask; ticking one back lifts it', async () => {
+  mockBackend(undefined);
+  render(Launcher);
+  const check = (await screen.findByTestId('tree-check-1-')) as HTMLInputElement;
+  const line = () => screen.queryByText(t('refusal_no_folders_searched'));
+  expect(line()).toBeNull();
+
+  await fireEvent.click(check); // the only root goes from on to off
+  await waitFor(() => expect(line()).not.toBeNull());
+  await submit('anything');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(0);
+
+  await fireEvent.click(check);
+  await waitFor(() => expect(line()).toBeNull());
+  await submit('anything');
+  expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(1);
 });

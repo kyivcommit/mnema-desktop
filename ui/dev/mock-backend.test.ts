@@ -28,3 +28,16 @@ test('open_document points the pane at a block it can show', async () => {
   expect(view.spans[0]?.blockId).toBe(view.focusBlockIds[0]);
   expect(view.spans[0]?.primary).toBe(true);
 });
+
+test('set_folder_searched drops nested entries as the core does', async () => {
+  const entries = async (rootId: number) =>
+    (await invoke<{ roots: Array<{ rootId: number; searched: Array<{ folderPath: string; searched: boolean }> }> }>('list_tree'))
+      .roots.find((r) => r.rootId === rootId)!.searched;
+  await invoke('set_folder_searched', { rootId: 2, folderPath: '2024/a', searched: false });
+  await invoke('set_folder_searched', { rootId: 2, folderPath: '2024x', searched: false });
+  await invoke('set_folder_searched', { rootId: 2, folderPath: '2024', searched: true });
+  // nested entry gone, the sibling that only shares a prefix kept, own entry set
+  expect(await entries(2)).toEqual([{ folderPath: '2024x', searched: false }, { folderPath: '2024', searched: true }]);
+  await invoke('set_folder_searched', { rootId: 2, folderPath: '', searched: false });
+  expect(await entries(2)).toEqual([{ folderPath: '', searched: false }]);
+});
