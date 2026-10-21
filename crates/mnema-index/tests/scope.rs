@@ -293,33 +293,115 @@ fn the_embedding_queue_and_coverage_ignore_entries() {
 }
 
 /// Measurement, not a check: `cargo test -p mnema-index --release --test scope
-/// scope_cost -- --ignored --nocapture`.
+/// scope_cost -- --ignored --nocapture`. Prints the median of 5 runs, in ms,
+/// for lexical (all 20k chunks match / ~100 match) and semantic arms at 0, 1, 5
+/// and 50 entries, then the same with a range-shaped per-path condition (an
+/// experiment: raw SQL here, not product code).
 #[test]
 #[ignore]
 fn scope_cost() {
+    const K: i64 = 30; // mnema_search::CANDIDATES
     let db = temp_db();
     let root = db.insert_watched_root("/r").unwrap();
+    let space = space_1024(&db);
     for i in 0..20_000u32 {
-        seed(
+        let text = if i % 200 == 0 {
+            "zebra giraffe"
+        } else {
+            "zebra"
+        };
+        let c = seed(
             &db,
             root,
             i + 1,
             &format!("dir{}/sub{}/f{i}.md", i % 100, i % 7),
-            "zebra",
+            text,
+        );
+        db.insert_vector(space, c, &unit_vector_1024()).unwrap();
+    }
+    let median = |f: &dyn Fn()| -> f64 {
+        let mut t: Vec<f64> = (0..5)
+            .map(|_| {
+                let s = std::time::Instant::now();
+                f();
+                s.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        t[2]
+    };
+    let table: String = db
+        .conn()
+        .query_row("SELECT 'vec_emb_' || ?1", [space], |r| r.get(0))
+        .unwrap();
+    let blob: Vec<u8> = unit_vector_1024()
+        .iter()
+        .flat_map(|f| f.to_ne_bytes())
+        .collect();
+    let range = "COALESCE((SELECT f.searched FROM search_folder f
+                 WHERE f.watched_root_id = pa.watched_root_id
+                   AND (f.folder_path = '' OR (pa.relative_path > f.folder_path || '/'
+                        AND pa.relative_path < f.folder_path || '0'))
+                 ORDER BY length(f.folder_path) DESC LIMIT 1), 1) = 1";
+    let gate = format!(
+        "AND (NOT EXISTS (SELECT 1 FROM search_folder) OR EXISTS (SELECT 1 FROM path pa
+          WHERE pa.document_id = d.id AND {range}))"
+    );
+    let lex_range = |q: &str| {
+        let sql = format!(
+            "SELECT chunk_fts.rowid FROM chunk_fts JOIN chunk ON chunk.id = chunk_fts.rowid
+             JOIN document d ON d.id = chunk.document_id
+             WHERE chunk_fts MATCH ?1 AND d.status = 'indexed' {gate}
+             ORDER BY rank, chunk_fts.rowid LIMIT ?2"
+        );
+        let mut st = db.conn().prepare(&sql).unwrap();
+        let n = st
+            .query_map(rusqlite::params![q, K], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .count();
+        std::hint::black_box(n);
+    };
+    let sem_range = || {
+        let sql = format!(
+            "SELECT chunk_id, distance FROM {table} WHERE embedding MATCH ?1 AND k = ?2
+             AND chunk_id IN (SELECT c.id FROM chunk c JOIN document d ON d.id = c.document_id
+                              WHERE d.status = 'indexed' {gate})
+             ORDER BY distance"
+        );
+        let mut st = db.conn().prepare(&sql).unwrap();
+        let n = st
+            .query_map(rusqlite::params![blob, K * 4], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .count();
+        std::hint::black_box(n);
+    };
+    let mut set = 0;
+    println!(
+        "entries | lex-all | lex-100 | sem | R:lex-all | R:lex-100 | R:sem   (ms, median of 5)"
+    );
+    for entries in [0, 1, 5, 50] {
+        while set < entries {
+            db.set_folder_searched(root, &format!("dir{set}/sub{}", set % 7), false)
+                .unwrap();
+            set += 1;
+        }
+        let lex = |q: &'static str| {
+            let db = &db;
+            move || {
+                db.search_lexical_with(q, QueryRule::AllTerms, K).unwrap();
+            }
+        };
+        println!(
+            "{entries:>7} | {:>7.1} | {:>7.1} | {:>5.1} | {:>9.1} | {:>9.1} | {:>6.1}",
+            median(&lex("zebra")),
+            median(&lex("giraffe")),
+            median(&|| {
+                db.knn_searchable(space, &unit_vector_1024(), K, None)
+                    .unwrap();
+            }),
+            median(&|| lex_range("zebra")),
+            median(&|| lex_range("giraffe")),
+            median(&sem_range),
         );
     }
-    let time = |label: &str| {
-        let t = std::time::Instant::now();
-        for _ in 0..10 {
-            db.search_lexical_with("zebra", QueryRule::AllTerms, 50)
-                .unwrap();
-        }
-        println!("{label}: {:?} per search", t.elapsed() / 10);
-    };
-    time("empty search_folder");
-    for i in 0..50 {
-        db.set_folder_searched(root, &format!("dir{i}/sub{}", i % 7), i % 2 == 0)
-            .unwrap();
-    }
-    time("50 entries");
 }
