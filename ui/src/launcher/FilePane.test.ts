@@ -16,8 +16,9 @@ function openCalls() {
   return invoke.mock.calls.filter(([cmd]) => cmd === 'open_document');
 }
 
-const scroll = vi.fn();
-Element.prototype.scrollIntoView = scroll; // jsdom has no layout and no scroller
+// jsdom has no layout: the pane's own scroll is observed at its one call.
+const scroll = vi.hoisted(() => vi.fn());
+vi.mock('../lib/scroll', () => ({ scrollWithin: scroll }));
 
 beforeEach(() => {
   invoke.mockReset();
@@ -139,8 +140,10 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
 
   await screen.findByTestId('hl');
   await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
-  expect(scroll.mock.contexts.at(-1)).toBe(screen.getAllByTestId('file-block')[1]);
-  expect(scroll).toHaveBeenLastCalledWith({ block: 'center' });
+  const [box, block, how] = scroll.mock.calls.at(-1)!;
+  expect(block).toBe(screen.getAllByTestId('file-block')[1]);
+  expect(box).toBe(block.closest('.file-card')!.parentElement); // the pane's own scroller, nothing above it
+  expect(how).toBe('center');
   expect(acknowledged).toHaveBeenCalledTimes(1);
 });
 

@@ -12,9 +12,6 @@ import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const invoke = vi.fn();
-// jsdom has no layout and no scroller: `FilePane` scrolls the cited block into
-// view, and every answer with a citation now opens it.
-Element.prototype.scrollIntoView = vi.fn();
 // What `provider_status` answers; a test swaps it to drive the cloud.
 const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;

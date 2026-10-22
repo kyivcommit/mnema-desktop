@@ -74,6 +74,7 @@
   import { tick } from 'svelte';
   import { locale, t } from '../i18n';
   import { openDocument } from '../lib/ipc';
+  import { scrollWithin } from '../lib/scroll';
   import type { DocumentFocus, DocumentLocation, DocumentView, Freshness } from '../lib/ipc';
 
   // The whole of one document, read out of the index through `open_document`
@@ -153,8 +154,9 @@
     if (first !== undefined) {
       // A read that worked is painted even where there is no scrolling to do
       // (a DOM without layout); the file must never be called failed for it.
-      card?.querySelector<HTMLElement>(`[data-block-id="${first}"]`)
-        ?.scrollIntoView?.({ block: 'center' });
+      const block = card?.querySelector<HTMLElement>(`[data-block-id="${first}"]`);
+      const pane = scroller();
+      if (block && pane) scrollWithin(pane, block, 'center');
     }
     if (at !== null) onFocusHandled();
   }

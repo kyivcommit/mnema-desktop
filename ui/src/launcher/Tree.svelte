@@ -67,6 +67,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
+  import { scrollWithin } from '../lib/scroll';
   import type { FoundInFile, TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
@@ -486,12 +487,11 @@
   });
 
   // The row of a NEW selection is scrolled into view in the pane's own scroller
-  // (`.tree-scroll`, found by `scrollIntoView`), once per selection key. `await tick()` and not a bare
+  // (`.tree-scroll`, and only there: `scrollWithin`), once per selection key. `await tick()` and not a bare
   // effect: the folders the selection opens are written by the effect above and
   // reach the DOM a flush later. The effect reads `listing` and `toggled`, so a
   // selection that lands before its row exists is retried when it appears; the
   // key is stamped only once the row is found, so nothing else re-fires it.
-  // `?.` because jsdom has no `scrollIntoView` and other suites mount this card.
   // `nearest` leaves a visible row where it is. A hidden pane (`[hidden]`
   // ancestor) is stamped without scrolling: nothing is owed when it is shown.
   let treeEl = $state<HTMLElement>();
@@ -507,7 +507,8 @@
       const row = treeEl?.querySelector('[aria-current="true"]');
       if (!row) return;
       scrolledTo = id;
-      if (!row.closest('[hidden]')) row.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      const box = row.closest('.tree-scroll');
+      if (box && !row.closest('[hidden]')) scrollWithin(box, row, 'nearest');
     });
   });
 </script>
