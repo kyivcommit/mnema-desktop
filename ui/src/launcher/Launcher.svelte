@@ -93,7 +93,7 @@
 
   // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
   const dialogue = $derived(chatOn && statusProvider !== 'mnema');
-  const newChatLabel = $derived.by(() => { void $locale; return t('new_chat'); });
+  const newChatLabel = $derived.by(() => { void $locale; return t('new_conversation'); });
 
   // Read on mount and again whenever the window gains focus: the key and the
   // model are changed in another window, and the launcher is hidden, not
@@ -296,9 +296,11 @@
     {/if}
   {/snippet}
   {#snippet tools()}
-    <button type="button" class="tb new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
-      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
-      {newChatLabel}
+    <!-- The sidebar's own pencil, the same action: shown only while the
+         sidebar is shut (`launcher.css`), so one of the two is ever on screen. -->
+    <button type="button" class="tb new-chat" data-testid="new-chat" aria-label={newChatLabel} title={newChatLabel}
+      disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.9 2.6a1.3 1.3 0 0 1 1.9 0l.6.6a1.3 1.3 0 0 1 0 1.9L6.3 12.2l-3 .7.7-3z"/></svg>
     </button>
     <Toolbar {status} provider={statusProvider} local={chatProvider === 'mnema'} />
   {/snippet}
