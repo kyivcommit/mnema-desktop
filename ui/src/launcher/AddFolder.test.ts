@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import AddFolder from './AddFolder.svelte';
+import { createAddFolder, type AddFolderController } from './addFolder';
 import { setLocale } from '../i18n';
 import type { ScanSnapshot, ScanState } from '../lib/ipc';
 
@@ -32,6 +33,21 @@ function route(cmd: string): Promise<unknown> {
 const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd);
 
 let onChanged: ReturnType<typeof vi.fn<() => void>>;
+// One controller per test, as the launcher holds one for both its buttons.
+// `onChanged` observes the controller's `changes` count, so every assertion
+// about "the tree was asked to reload" reads one call per bump.
+let folders: AddFolderController;
+let stops: Array<() => void> = [];
+function mountButton() {
+  folders = createAddFolder();
+  let seen = 0;
+  const unsub = folders.subscribe((v) => { if (v.changes !== seen) { seen = v.changes; onChanged(); } });
+  const stop = folders.start();
+  const r = render(AddFolder, { folders });
+  const unmount = () => { r.unmount(); stop(); unsub(); };
+  stops.push(() => { stop(); unsub(); });
+  return { unmount };
+}
 beforeEach(() => {
   setLocale('en');
   invoke.mockReset().mockImplementation(route);
@@ -42,14 +58,14 @@ beforeEach(() => {
   statusReply = () => Promise.resolve(state());
   onChanged = vi.fn<() => void>();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); stops.forEach((f) => f()); stops = []; });
 
 const button = () => screen.getByTestId('tree-add-folder');
 const press = () => fireEvent.click(button());
 
 test('cancelled dialog calls nothing', async () => {
   open.mockResolvedValue(null);
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
   await new Promise((r) => setTimeout(r, 0));
@@ -62,7 +78,7 @@ test('idle press adds the folder, reloads the tree, then starts a full scan', as
   const order: string[] = [];
   invoke.mockImplementation((cmd: string, args: unknown) => { order.push(cmd); return route(cmd); });
   onChanged.mockImplementation(() => order.push('reload'));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
   expect(calls('add_watched_folder')[0][1]).toEqual({ path: '/Users/me/Books' });
@@ -72,7 +88,7 @@ test('idle press adds the folder, reloads the tree, then starts a full scan', as
 
 test('a refused add shows the sentence and starts nothing', async () => {
   addReply = () => Promise.reject(new Error('folder already watched'));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('folder already watched'));
   expect(calls('start_scan_job')).toHaveLength(0);
@@ -81,7 +97,7 @@ test('a refused add shows the sentence and starts nothing', async () => {
 test('a scan refused while another runs shows nothing', async () => {
   startReply = () => Promise.reject('a job is already running');
   statusReply = () => Promise.resolve(state({ revision: 3, snapshot: RUNNING }));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(calls('job_status').length).toBeGreaterThan(0));
   await new Promise((r) => setTimeout(r, 0));
@@ -90,14 +106,14 @@ test('a scan refused while another runs shows nothing', async () => {
 
 test('a scan refused with nothing running shows the sentence', async () => {
   startReply = () => Promise.reject('x');
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('x'));
 });
 
 test('a second press while the first is busy does nothing', async () => {
   open.mockReturnValue(new Promise(() => {}));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await press();
   expect(open).toHaveBeenCalledTimes(1);
@@ -105,7 +121,7 @@ test('a second press while the first is busy does nothing', async () => {
 
 test('a new press clears the message', async () => {
   addReply = () => Promise.reject(new Error('nope'));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
   open.mockReturnValue(new Promise(() => {}));
@@ -115,7 +131,7 @@ test('a new press clears the message', async () => {
 
 test('the label follows the locale', async () => {
   setLocale('uk');
-  render(AddFolder, { onChanged });
+  mountButton();
   expect(button().getAttribute('aria-label')).toBe('Додати теку');
   expect(button().getAttribute('title')).toBe('Додати теку');
   setLocale('en');
@@ -147,7 +163,7 @@ const ring = () => screen.queryByTestId('tree-add-folder-ring');
 async function queued() {
   startReply = () => Promise.reject('a job is already running');
   statusReply = () => Promise.resolve(state({ revision: 1, snapshot: RUNNING }));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
   await new Promise((r) => setTimeout(r, 0));
@@ -175,7 +191,7 @@ test('a queued scan tries again after a second refusal while running', async () 
 
 test('a refusal with nothing running does not queue', async () => {
   startReply = () => Promise.reject('x');
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
   await emit(state({ revision: 5, jobsDone: 1 }));
@@ -191,7 +207,7 @@ test('an older revision is ignored', async () => {
 });
 
 test('the ring shows only while a scan reads or embeds', async () => {
-  render(AddFolder, { onChanged });
+  mountButton();
   await emit(state({ revision: 1 }));
   expect(ring()).toBeNull();
   await emit(state({ revision: 2, snapshot: reading(5, 10) }));
@@ -202,12 +218,12 @@ test('the ring shows only while a scan reads or embeds', async () => {
 
 test('the ring shows on mount in the middle of a scan', async () => {
   statusReply = () => Promise.resolve(state({ revision: 4, snapshot: reading(0, 0) }));
-  render(AddFolder, { onChanged });
+  mountButton();
   await waitFor(() => expect(ring()?.getAttribute('data-fraction')).toBe('spin'));
 });
 
 test('the tree reloads on readSeq, jobsDone and files read, not on a bare revision', async () => {
-  render(AddFolder, { onChanged });
+  mountButton();
   await emit(state({ revision: 1, snapshot: reading(1, 10) }));
   onChanged.mockClear();
   await emit(state({ revision: 2, snapshot: reading(1, 10) }));
@@ -224,7 +240,7 @@ test('the tree reloads on readSeq, jobsDone and files read, not on a bare revisi
 
 test('scan events do not clear the message', async () => {
   addReply = () => Promise.reject(new Error('nope'));
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
   await emit(state({ revision: 7, jobsDone: 1 }));
@@ -235,7 +251,7 @@ test('unmounting before listen resolves still unlistens', async () => {
   let resolve!: (u: () => void) => void;
   listen.mockReturnValue(new Promise((r) => { resolve = r; }));
   const unlisten = vi.fn();
-  const { unmount } = render(AddFolder, { onChanged });
+  const { unmount } = mountButton();
   await waitFor(() => expect(listen).toHaveBeenCalled());
   unmount();
   resolve(unlisten);
@@ -244,7 +260,7 @@ test('unmounting before listen resolves still unlistens', async () => {
 });
 
 test('the tooltip carries the phase and its counts', async () => {
-  render(AddFolder, { onChanged });
+  mountButton();
   await emit(state({ revision: 1, snapshot: embeddingAt(5, 10) }));
   expect(button().getAttribute('title')).toMatch(/^Add folder — .+ 5\/10$/);
   expect(button().getAttribute('aria-label')).toBe('Add folder');
@@ -257,7 +273,7 @@ test('the state is read again once the listener is registered', async () => {
   let resolve!: (u: () => void) => void;
   listen.mockReturnValue(new Promise((r) => { resolve = r; }));
   statusReply = () => Promise.resolve(state({ revision: 1, snapshot: reading(1, 10) }));
-  render(AddFolder, { onChanged });
+  mountButton();
   await waitFor(() => expect(ring()).not.toBeNull());
   statusReply = () => Promise.resolve(state({ revision: 2, jobsDone: 1 }));
   resolve(() => {});
@@ -267,14 +283,14 @@ test('the state is read again once the listener is registered', async () => {
 
 test('a subscription that cannot be registered says so', async () => {
   listen.mockRejectedValue(new Error('no events'));
-  render(AddFolder, { onChanged });
+  mountButton();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('no events'));
 });
 
 test('a subscription that fails after unmount says nothing and throws nothing', async () => {
   let reject!: (e: unknown) => void;
   listen.mockReturnValue(new Promise((_, r) => { reject = r; }));
-  const { unmount } = render(AddFolder, { onChanged });
+  const { unmount } = mountButton();
   await waitFor(() => expect(listen).toHaveBeenCalled());
   unmount();
   reject(new Error('gone'));
@@ -299,7 +315,7 @@ test('a queued scan starts when a later press ends without starting one', async 
 
 test('a refusal judged on a stale job_status still starts the queued scan', async () => {
   startReply = () => Promise.reject('a job is already running');
-  render(AddFolder, { onChanged });
+  mountButton();
   await waitFor(() => expect(calls('job_status')).toHaveLength(2));
   let reply!: (s: ScanState) => void;
   statusReply = () => new Promise((r) => { reply = r; });
@@ -333,8 +349,24 @@ test('a queued start refused as the blocker ends starts once and shows nothing',
 // Live run, D182: a refused folder dialog must say so, not vanish.
 test('a dialog that fails says so', async () => {
   open.mockRejectedValue('dialog.open not allowed');
-  render(AddFolder, { onChanged });
+  mountButton();
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('dialog.open not allowed'));
   expect(calls('add_watched_folder')).toHaveLength(0);
+});
+
+// One controller behind both buttons: one subscription, one reading of the
+// state, and whatever one button shows the other shows too.
+test('two buttons on one controller share one subscription and one state', async () => {
+  folders = createAddFolder();
+  const stop = folders.start();
+  stops.push(stop);
+  render(AddFolder, { folders });
+  render(AddFolder, { folders });
+  await waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(calls('job_status')).toHaveLength(2); // the mount read and the one after the listener, once
+  addReply = () => Promise.reject(new Error('nope'));
+  await fireEvent.click(screen.getAllByTestId('tree-add-folder')[0]);
+  await waitFor(() => expect(screen.getAllByTestId('tree-add-folder-error')).toHaveLength(2));
 });

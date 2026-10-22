@@ -17,12 +17,14 @@ const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;
 // The tree's add-folder button reads the scan state and listens for its
 // progress on mount; every mock below answers it the same idle way.
+const jobStatusCalls = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...a: unknown[]) => a[0] === 'job_status'
-    ? Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } })
+    ? (jobStatusCalls(), Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } }))
     : invoke(...a),
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
+const listen = vi.hoisted(() => vi.fn((..._a: unknown[]) => Promise.resolve(() => {})));
+vi.mock('@tauri-apps/api/event', () => ({ listen }));
 const open = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open }));
 
@@ -1665,4 +1667,18 @@ test('the header add-folder sits right after the cloud', async () => {
   const cloud = await screen.findByTestId('provider-cloud');
   const plus = screen.getByTestId('header-add-folder');
   expect(cloud.parentElement!.nextElementSibling).toBe(plus);
+});
+
+// Two «+» buttons, one controller: the window listens for scan progress once.
+test('the launcher listens for scan progress once for both add-folder buttons', async () => {
+  mockBackend(generated);
+  listen.mockClear();
+  jobStatusCalls.mockClear();
+  render(Launcher);
+  expect(screen.getAllByTestId('tree-add-folder')).toHaveLength(2);
+  await waitFor(() => expect(listen.mock.calls.filter(([e]) => e === 'scan-progress')).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(listen.mock.calls.filter(([e]) => e === 'scan-progress')).toHaveLength(1);
+  // The mount read and the one after the listener registered — once, not per button.
+  expect(jobStatusCalls).toHaveBeenCalledTimes(2);
 });

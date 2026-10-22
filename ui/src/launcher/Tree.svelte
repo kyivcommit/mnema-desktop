@@ -68,19 +68,22 @@
   import { locale, t } from '../i18n';
   import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
   import AddFolder from './AddFolder.svelte';
+  import type { AddFolderController } from './addFolder';
+  import { get } from 'svelte/store';
   import { scrollWithin } from '../lib/scroll';
   import type { FoundInFile, TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
   // as well, which is what the backend is asked to open.
-  let { selected, onPick, onScopeChange, reload = 0 }: {
+  let { selected, onPick, onScopeChange, folders }: {
     selected: TreeSelection | null;
     onPick: (pick: TreePick) => void;
     // Called when "every root is unticked" changes; the composer says so at once.
     onScopeChange?: (allOff: boolean) => void;
-    // A change re-reads the listing: the launcher header's «+» added a folder.
-    reload?: number;
+    // The launcher's add-folder controller: its button sits in this header, and
+    // what it reports (a folder added, files read, a job ended) re-reads the tree.
+    folders?: AddFolderController;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
@@ -205,11 +208,14 @@
       });
   }
 
-  let reloadSeen = untrack(() => reload);
   $effect(() => {
-    if (reload === reloadSeen) return;
-    reloadSeen = reload;
-    untrack(() => load(true));
+    if (!folders) return;
+    let seen = get(folders).changes;
+    return folders.subscribe((v) => {
+      if (v.changes === seen) return;
+      seen = v.changes;
+      load(true);
+    });
   });
 
   onMount(() => {
@@ -601,7 +607,7 @@
      so it moves neither with the tree's vertical scroll nor its sideways one
      (`.tree` is as wide as its deepest row). -->
 <div class="tree-column">
-<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2><AddFolder onChanged={() => load(true)} /></header>
+<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2>{#if folders}<AddFolder {folders} />{/if}</header>
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">

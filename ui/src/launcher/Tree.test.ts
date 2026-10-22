@@ -1,7 +1,8 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import Tree, { buildFolderTree, filterTree } from './Tree.svelte';
+import { createAddFolder } from './addFolder';
 import {
   oneRoot,
   oneRootTwoFolders,
@@ -1493,7 +1494,9 @@ test('a keystroke inside the window restarts it: one request, for the last text'
 
 test('the add-folder button sits in the header and a new folder reloads the tree', async () => {
   open.mockResolvedValue('/Users/me/Books');
-  render(Tree, { selected: null, onPick: pick });
+  const folders = createAddFolder();
+  onTestFinished(folders.start());
+  render(Tree, { selected: null, onPick: pick, folders });
   const button = await screen.findByTestId('tree-add-folder');
   expect(button.closest('header.pane-head')).not.toBeNull();
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(1));
@@ -1506,7 +1509,9 @@ test('the add-folder button sits in the header and a new folder reloads the tree
 test('a reload asked for by a scan while a listing is on the wire still happens', async () => {
   listen.mockClear(); // earlier tests' components registered here too
   const wire = mockTreePending();
-  render(Tree, { selected: null, onPick: pick });
+  const folders = createAddFolder();
+  onTestFinished(folders.start());
+  render(Tree, { selected: null, onPick: pick, folders });
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'job_status').length).toBeGreaterThan(0));
   await waitFor(() => expect(listen).toHaveBeenCalled());
   await tick();
@@ -1514,4 +1519,10 @@ test('a reload asked for by a scan while a listing is on the wire still happens'
   handler({ payload: { revision: 1, files: 0, readSeq: 1, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' } } });
   wire.resolve(oneRootTwoFolders);
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(2));
+});
+
+test('without a controller the tree draws no add-folder button', async () => {
+  render(Tree, { selected: null, onPick: pick });
+  await screen.findByTestId('tree-title');
+  expect(screen.queryByTestId('tree-add-folder')).toBeNull();
 });

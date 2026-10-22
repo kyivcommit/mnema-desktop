@@ -5,6 +5,7 @@
   import { checkQuery, firstCard, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import AddFolder from './AddFolder.svelte';
+  import { createAddFolder } from './addFolder';
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';
   import Tree from './Tree.svelte';
@@ -45,8 +46,9 @@
   // one document can sit at several paths, and a key on the id would mark
   // every row that names it.
   let selected = $state<TreeSelection | null>(null);
-  // Bumped by the header's «+»: the tree re-reads what it added (its own «+» calls `load` directly).
-  let treeReload = $state(0);
+  // One add-folder controller behind the Documents pane's «+» and the header's.
+  const folders = createAddFolder();
+  onMount(() => folders.start());
 
   // A click in the tree opens the file at its start: no highlight, no scroll —
   // unless the word search found it, and then at the passage that matched.
@@ -292,7 +294,7 @@
       error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
   {/snippet}
   {#snippet tree()}
-    <Tree {selected} reload={treeReload} onPick={openAtStart} onScopeChange={(v) => (scopeOff = v)} />
+    <Tree {selected} {folders} onPick={openAtStart} onScopeChange={(v) => (scopeOff = v)} />
   {/snippet}
   {#snippet file()}
     {#if openFile !== null}
@@ -311,6 +313,6 @@
     <!-- The Documents pane's «+», the same action, right after the cloud (owner,
          2026-10-22): shown only while that pane is off screen (`launcher.css`),
          like the pencil above. -->
-    <span class="header-add-folder" data-testid="header-add-folder"><AddFolder onChanged={() => treeReload++} /></span>
+    <span class="header-add-folder" data-testid="header-add-folder"><AddFolder {folders} /></span>
   {/snippet}
 </Shell>
