@@ -2,7 +2,9 @@
   import type { TreeFile } from '../lib/ipc';
 
   export type TreeNode =
-    | { kind: 'folder'; name: string; path: string; children: TreeNode[] }
+    // `full` exists only on a folder `filterTree` kept: the original children,
+    // so the tick state of the whole folder stays readable while it shows a subset.
+    | { kind: 'folder'; name: string; path: string; children: TreeNode[]; full?: TreeNode[] }
     | { kind: 'file'; name: string; path: string; documentId: string };
 
   // The selection is the (root, path) PAIR, not `documentId`: one document can
@@ -39,6 +41,22 @@
       siblings.push({ kind: 'file', name, path: file.relativePath, documentId: file.documentId });
     }
     return top;
+  }
+
+  // Keeps the files whose document is in `found` (every path of it, since the
+  // tree has one node per path) and the folders holding at least one. Pure: the
+  // input nodes are not mutated, a kept folder is a copy.
+  export function filterTree(nodes: TreeNode[], found: Set<string>): TreeNode[] {
+    const kept: TreeNode[] = [];
+    for (const node of nodes) {
+      if (node.kind === 'file') {
+        if (found.has(node.documentId)) kept.push(node);
+      } else {
+        const children = filterTree(node.children, found);
+        if (children.length) kept.push({ ...node, children, full: node.children });
+      }
+    }
+    return kept;
   }
 </script>
 

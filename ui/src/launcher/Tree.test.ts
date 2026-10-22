@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import Tree, { buildFolderTree } from './Tree.svelte';
+import Tree, { buildFolderTree, filterTree } from './Tree.svelte';
 import {
   oneRoot,
   oneRootTwoFolders,
@@ -174,6 +174,51 @@ test('buildFolderTree mixes the three depths in one root and shares one node per
 // §2) — so the closed enumeration below counts them. The root's disclosure row
 // comes first (document order), then the folders, then the files of the folder
 // the selection opened.
+// A tree of synthetic books: `tlcl.pdf` and `x.pdf` under one parent, so the
+// filter has a sibling branch to drop.
+const BOOKS = buildFolderTree([
+  { relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' },
+  { relativePath: 'Books/novels/x.pdf', documentId: 'doc-x' },
+]);
+
+test('filterTree keeps the file with every ancestor and drops the other branch', () => {
+  expect(filterTree(BOOKS, new Set(['doc-tlcl']))).toMatchObject([
+    {
+      kind: 'folder',
+      name: 'Books',
+      children: [
+        { kind: 'folder', name: 'command', children: [{ kind: 'file', path: 'Books/command/tlcl.pdf' }] },
+      ],
+    },
+  ]);
+  const [books] = filterTree(BOOKS, new Set(['doc-tlcl']));
+  expect(books.kind === 'folder' && books.children.map((c) => c.name)).toEqual(['command']);
+});
+
+test('filterTree keeps every path of a duplicate document', () => {
+  const tree = buildFolderTree([
+    { relativePath: 'Inbox/a.pdf', documentId: 'doc-a' },
+    { relativePath: 'Books/a.pdf', documentId: 'doc-a' },
+  ]);
+  const paths = filterTree(tree, new Set(['doc-a'])).flatMap((f) =>
+    f.kind === 'folder' ? f.children.map((c) => c.path) : [],
+  );
+  expect(paths).toEqual(['Inbox/a.pdf', 'Books/a.pdf']);
+});
+
+test('filterTree hands a filtered folder its full children', () => {
+  const [books] = filterTree(BOOKS, new Set(['doc-tlcl']));
+  if (books.kind !== 'folder') throw new Error('expected a folder');
+  expect(books.children).toHaveLength(1);
+  expect(books.full?.map((c) => c.name)).toEqual(['command', 'novels']);
+  // The original is untouched.
+  expect(BOOKS[0]).not.toHaveProperty('full');
+});
+
+test('filterTree skips an id the listing does not have', () => {
+  expect(filterTree(BOOKS, new Set(['doc-unknown']))).toEqual([]);
+});
+
 test('the controls are exactly the ones with a real action', async () => {
   mockTree(oneRootTwoFolders);
   mount(SELECTED); // notes/ is open, so its files are on screen
