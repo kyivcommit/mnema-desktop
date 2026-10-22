@@ -534,6 +534,28 @@ fn find_in_files_finds_a_prefix_through_the_ipc() {
     assert_eq!(found["documents"][0]["text"], json!(text));
     assert_eq!(found["documents"].as_array().unwrap().len(), 1);
     assert_eq!(found["truncated"], json!(false));
+
+    // The found passage's identity is only worth what `open_document` makes of
+    // it: handed back as it came, it must be accepted as the focus. Swapped or
+    // dropped `chunkId`/`ord` compile fine and fail only as a missing highlight.
+    let hit = &found["documents"][0];
+    let opened = call(
+        &webview,
+        "open_document",
+        json!({
+            "documentId": id,
+            "chunkId": hit["chunkId"],
+            "citedOrd": hit["ord"],
+            "citedText": hit["text"],
+        }),
+    )
+    .expect("open_document was rejected");
+    assert_eq!(opened["kind"], json!("file"), "{opened}");
+    assert_eq!(
+        opened["focusBlockIds"].as_array().map(Vec::len),
+        Some(1),
+        "the found passage was not accepted as a focus: {opened}"
+    );
 }
 
 #[test]

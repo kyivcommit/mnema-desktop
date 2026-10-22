@@ -1332,6 +1332,22 @@ test('a failed find keeps the tree and says so', async () => {
   expect(screen.getByTestId('tree-file-doc-a')).toBeTruthy();
 });
 
+test('a find that fails after one that succeeded drops the old filter', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('lease');
+  expect(screen.queryByTestId('tree-folder-Notes')).toBeNull(); // filtered
+
+  // The field now says "leasex"; the old answer was for "lease" and must not
+  // keep filtering under the failure line.
+  findReply = () => Promise.reject(new Error('find_in_files failed'));
+  await typeQuery('leasex');
+  expect(screen.getByText('The search failed.')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy();
+  expect(expanded('tree-folder-Books')).toBe('false'); // the whole tree, as it was
+});
+
 test('nothing found says so and shows no tree', async () => {
   await mountLib();
   findReply = () => Promise.resolve({ documents: [], truncated: false });

@@ -245,7 +245,11 @@
         })
         .catch((err) => {
           console.error('find_in_files failed', err);
-          if (mine === asked) findFailed = true;
+          if (mine !== asked) return;
+          // The old answer was for other words than the field now holds.
+          found = null;
+          truncated = false;
+          findFailed = true;
         });
     }, DEBOUNCE_MS);
   }

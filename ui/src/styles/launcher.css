@@ -126,7 +126,7 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 }
 .tree-search input::placeholder { color: var(--ink-soft); }
 .tree-note { margin: 0 0 6px; padding: 0 7px; font-size: 13px; color: var(--ink-soft); }
-/* As wide as its deepest row, at least the pane: `.pane-body` scrolls it
+/* As wide as its deepest row, at least the pane: `.tree-scroll` scrolls it
    sideways instead of squeezing deep names (owner, 2026-10-21). */
 .tree { font-size: 13px; width: max-content; min-width: 100%; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
