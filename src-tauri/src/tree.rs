@@ -604,6 +604,11 @@ pub enum DocumentView {
         /// neither exists — the same case `Freshness::NoPath` reports, and the
         /// pane titles itself from it rather than staying blank.
         relative_path: Option<String>,
+        /// The tree's name for the watched root that `relative_path` belongs to
+        /// (the same [`basename`] `list_tree` prints), so the head of the right
+        /// panel can show the path from its root. `None` exactly when
+        /// `relative_path` is.
+        root_name: Option<String>,
         freshness: Freshness,
     },
     /// The document cannot be shown whole, and a partial one never is.
@@ -661,6 +666,8 @@ struct FileFields {
     /// [`build_document_view`] — the pane's title, and the only place a
     /// citation that named no place on disk can get one.
     relative_path: Option<String>,
+    /// The tree's name for that path's root, read off the same occupant.
+    root_name: Option<String>,
 }
 
 impl FileFields {
@@ -670,6 +677,7 @@ impl FileFields {
             focus_block_ids: self.focus_block_ids,
             spans: self.spans,
             relative_path: self.relative_path,
+            root_name: self.root_name,
             freshness,
         }
     }
@@ -802,6 +810,8 @@ fn build_document_view(
             // Read off the occupant freshness is decided for, so the title and
             // the badge can never name two different places.
             relative_path: occupant.as_ref().map(|o| o.relative_path.clone()),
+            // The same occupant, through the rule `list_tree` names roots by.
+            root_name: occupant.as_ref().map(|o| basename(&o.root_absolute_path)),
         },
         occupant,
     })
@@ -1594,6 +1604,7 @@ mod tests {
                 primary: true,
             }],
             relative_path: Some("notes/a.md".into()),
+            root_name: Some("docs".into()),
             freshness: Freshness::FileChanged,
         }
     }
@@ -1637,6 +1648,8 @@ mod tests {
         // The pane's title, when the citation named no path on disk.
         assert_eq!(v["relativePath"], "notes/a.md");
         assert!(v.get("relative_path").is_none());
+        assert_eq!(v["rootName"], "docs");
+        assert!(v.get("root_name").is_none());
 
         // The refusal carries its reason as a bare tag — the window switches on
         // the string, not on an object.
@@ -1659,6 +1672,7 @@ mod tests {
             focus_block_ids,
             spans,
             relative_path,
+            root_name,
             freshness,
         } = sample_view()
         else {
@@ -1675,6 +1689,7 @@ mod tests {
             focus_block_ids,
             spans,
             relative_path,
+            root_name,
             freshness,
         })
         .unwrap();

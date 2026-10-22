@@ -35,6 +35,7 @@ beforeEach(() => {
       focusBlockIds: [1],
       spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
       relativePath: 'notes/a.md',
+      rootName: 'docs',
       // `fileChanged`, not `current`: the badge speaks only when it carries
       // news (owner, 2026-10-20), and the pin below needs one on screen.
       freshness: { kind: 'fileChanged' },
@@ -105,6 +106,24 @@ test('real tree: the search field sits outside the element that scrolls the tree
   expect(scroller).not.toBeNull();
   expect(scroller!.contains(body)).toBe(true);
   expect(scroller!.contains(screen.getByRole('searchbox', { name: 'Find words in files' }))).toBe(false);
+});
+
+// The open file's path lives in the right panel's head, which never scrolls:
+// the nearest scrolling ancestor of the path must not be the one that holds the
+// file's text, or the path would slide away with it.
+test('real file path sits outside the element that scrolls the file', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+  const block = await screen.findByTestId('file-block');
+  const header = await screen.findByTestId('file-header');
+  expect(header.textContent).toBe('docs/notes/a.md');
+  const scrolls = (el: Element) => /auto|scroll/.test(getComputedStyle(el).overflow);
+  let scroller: Element | null = block.parentElement;
+  while (scroller && !scrolls(scroller)) scroller = scroller.parentElement;
+  expect(scroller).not.toBeNull();
+  expect(scroller!.contains(block)).toBe(true);
+  expect(scroller!.contains(header)).toBe(false);
 });
 
 test('real tree marks the current file while leaving neighbours plain', async () => {

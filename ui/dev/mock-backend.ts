@@ -406,7 +406,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     // block an answer points at, and a span inside it. Empty ones made every
     // click say "the passage is gone" instead of lighting the passage up, so
     // this points at the demo paragraph the way a real citation would.
-    open_document: () => {
+    open_document: (a) => {
       const paragraph = 'The whole file, rendered by the pane.';
       return {
         kind: 'file',
@@ -417,6 +417,8 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         focusBlockIds: [2],
         spans: [{ blockId: 2, blockStart: 0, length: paragraph.length, primary: true }],
         relativePath: 'notes/demo.md',
+        // The tree's name for the root asked about, as the backend answers it.
+        rootName: s.tree.roots.find((r) => r.rootId === a.rootId)?.name ?? null,
         freshness: { kind: 'current' },
       } satisfies DocumentView;
     },

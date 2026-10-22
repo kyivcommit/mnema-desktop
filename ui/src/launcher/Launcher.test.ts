@@ -42,6 +42,7 @@ const OPEN_DOCUMENT = {
   focusBlockIds: [],
   spans: [],
   relativePath: 'notes/a.md',
+  rootName: 'docs',
   freshness: { kind: 'current' },
 };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
@@ -410,6 +411,22 @@ test('clicking a file in the tree opens it in the right pane at its start', asyn
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
 });
 
+// The path stands in the right panel's head from its root (the view's own
+// `rootName`), not inside the file's card; clearing the screen takes it away.
+test('the open file is named in the right head from its root, and closing it removes the name', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+
+  const path = await screen.findByTestId('file-header');
+  expect(path.textContent).toBe('docs/notes/a.md');
+  expect(document.querySelector('.right-head')!.contains(path)).toBe(true);
+  expect(screen.getByTestId('col-file').contains(path)).toBe(false);
+
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(screen.queryByTestId('file-header')).toBeNull());
+});
+
 // Drives the tree's word search the way a person does: the field, the 150 ms
 // debounce, then the found file. `find_in_files` answers the one passage that
 // matched `doc-1` best, and `open_document` is what the pane is asked for.
@@ -484,6 +501,7 @@ function answeredPane(args: Record<string, unknown>) {
     focusBlockIds: focused ? [1] : [],
     spans: focused ? [{ blockId: 1, blockStart: 0, length: [...text].length, primary: true }] : [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   };
 }

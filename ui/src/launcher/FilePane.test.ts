@@ -32,6 +32,7 @@ beforeEach(() => {
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
 });
@@ -53,6 +54,7 @@ test('blocks render in document order, each in the element its kind names', asyn
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -79,6 +81,7 @@ test('the highlight is placed by code points, not UTF-16 units', async () => {
     // one character late and end one early.
     spans: [{ blockId: 1, blockStart: 2, length: 16, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -97,6 +100,7 @@ test('a cited span is highlighted inside its block, and the rest is plain', asyn
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -124,6 +128,7 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
     focusBlockIds: [2],
     spans: [{ blockId: 2, blockStart: 0, length: 6, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -150,6 +155,7 @@ test('clearing the handled focus neither refetches nor drops the highlight', asy
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   const { rerender } = render(FilePane, {
@@ -175,6 +181,7 @@ test('a headline from a reader that is not markdown keeps its leading hash', asy
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -192,6 +199,7 @@ test('a span that starts inside the heading marker keeps its end', async () => {
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 2, length: 10, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -207,6 +215,7 @@ test('a gone file shows the badge and keeps its text', async () => {
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'fileMissing' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -226,6 +235,7 @@ test('an unchanged file draws no badge', async () => {
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -243,19 +253,22 @@ test('a file without a path opens without a badge', async () => {
     focusBlockIds: [],
     spans: [],
     relativePath: null,
+    rootName: null,
     freshness: { kind: 'noPath' },
   });
+  const onTitle = vi.fn();
   render(FilePane, {
     location: { documentId: 'doc-1', rootId: null, relativePath: null },
     focus: null,
     onFocusHandled: () => {},
+    onTitle,
   });
 
   await screen.findByTestId('file-block');
   expect(screen.queryByTestId('file-badge')).toBeNull();
   // The file really is open: this is not an empty card.
   expect(blocks()).toEqual(['Без шляху.']);
-  expect(screen.queryByTestId('file-header')).toBeNull();
+  expect(onTitle).toHaveBeenLastCalledWith(null);
 });
 
 test('an unavailable document says why instead of drawing an empty file', async () => {
@@ -282,6 +295,7 @@ test('a setext heading loses its underline and an ATX closing run its hashes', a
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, { location, focus: null, onFocusHandled: () => {} });
@@ -300,15 +314,65 @@ test('a citation with no path is titled from the path the backend resolved', asy
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
+  const onTitle = vi.fn();
   render(FilePane, {
     location: { documentId: 'doc-1', rootId: null, relativePath: null },
     focus: null,
     onFocusHandled: () => {},
+    onTitle,
   });
 
-  expect((await screen.findByTestId('file-header')).textContent).toBe('notes/a.md');
+  await waitFor(() => expect(onTitle).toHaveBeenLastCalledWith('notes/a.md'));
+});
+
+// The path is shown from the root the view answered for. The title is reported
+// upward (the right panel's head draws it), and the card keeps none of its own.
+test('the title is the root name and the path, reported through onTitle and not drawn in the card', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/b.md',
+    rootName: 'docs',
+    freshness: { kind: 'current' },
+  });
+  const onTitle = vi.fn();
+  render(FilePane, {
+    location: { documentId: 'doc-1', rootId: 1, relativePath: 'notes/b.md' },
+    focus: null,
+    onFocusHandled: () => {},
+    onTitle,
+  });
+
+  await screen.findByTestId('file-block');
+  expect(onTitle).toHaveBeenLastCalledWith('docs/notes/b.md');
+  expect(screen.queryByTestId('file-header')).toBeNull();
+});
+
+test('a view that names no root titles the file by its path alone', async () => {
+  mockView({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'notes/b.md',
+    rootName: null,
+    freshness: { kind: 'current' },
+  });
+  const onTitle = vi.fn();
+  render(FilePane, {
+    location: { documentId: 'doc-1', rootId: 1, relativePath: 'notes/b.md' },
+    focus: null,
+    onFocusHandled: () => {},
+    onTitle,
+  });
+
+  await screen.findByTestId('file-block');
+  expect(onTitle).toHaveBeenLastCalledWith('notes/b.md');
 });
 
 // A stored citation outlives the chunks it names: a reindex or a reused chunk
@@ -322,6 +386,7 @@ test('a focus the backend rejected says the passage is gone', async () => {
     focusBlockIds: [],
     spans: [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -345,6 +410,7 @@ test('an accepted focus draws no gone-passage line', async () => {
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   render(FilePane, {
@@ -368,6 +434,7 @@ test('a window focus refreshes the file and keeps the highlight and the scroll',
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' as const },
   };
   mockView(focused);
@@ -424,6 +491,7 @@ test('a window focus during the first read does not start a second one', async (
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   });
   expect((await screen.findByTestId('hl')).textContent).toBe('Ціна');

@@ -5453,6 +5453,65 @@ fn open_document_reports_current_when_the_file_still_matches_what_was_indexed() 
     );
 }
 
+/// The path in the right panel's head starts at the root's name, and the name
+/// is the one the tree prints for that root — so the answer is compared with
+/// `list_tree`, not with a second spelling of the rule in the test.
+fn tree_root_name(webview: &tauri::WebviewWindow<tauri::test::MockRuntime>, root: i64) -> String {
+    let listing = call(webview, "list_tree", json!({})).expect("list_tree was rejected");
+    listing["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .find(|r| r["rootId"] == json!(root))
+        .expect("the watched root is listed")["name"]
+        .as_str()
+        .expect("a root name")
+        .to_string()
+}
+
+#[test]
+fn open_document_names_the_root_the_tree_shows_for_the_path_it_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "5".repeat(64);
+    let (_corpus, root, _disk) = seed_document_with_file(&state, dir.path(), &doc);
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
+    )
+    .expect("open_document was rejected");
+
+    let name = tree_root_name(&webview, root);
+    assert_eq!(name, "corpus", "the fixture's root is the folder `corpus`");
+    assert_eq!(v["rootName"], json!(name), "{v}");
+}
+
+/// A citation with `rootId: null` opens the document's sole `path` row, and
+/// the root name must belong to that row rather than to nothing.
+#[test]
+fn open_document_names_the_root_of_the_sole_path_row_when_the_citation_named_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "6".repeat(64);
+    let (_corpus, root, _disk) = seed_document_with_file(&state, dir.path(), &doc);
+
+    let v = call(&webview, "open_document", json!({ "documentId": doc }))
+        .expect("open_document was rejected");
+
+    assert_eq!(v["relativePath"], json!("dohov-01.md"), "{v}");
+    assert_eq!(v["rootName"], json!(tree_root_name(&webview, root)), "{v}");
+}
+
 /// The document has no `path` row at all — indexed from inside an archive, or
 /// its last copy on disk was deleted (`write.rs:76-79`). There is nothing to
 /// compare against, and inventing a comparison is how a stale file gets shown
@@ -5488,6 +5547,10 @@ fn open_document_reports_no_path_when_the_document_has_none() {
 
     assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(v["freshness"]["kind"], json!("noPath"), "{v}");
+    assert!(
+        v["rootName"].is_null() && v.get("rootName").is_some(),
+        "no path, no root name — present as null, not absent: {v}"
+    );
     assert_eq!(
         v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
@@ -6037,6 +6100,11 @@ fn open_document_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
     )
     .expect("open_document was rejected");
     assert_eq!(named["kind"], json!("file"), "{named}");
+    assert_eq!(
+        named["rootName"],
+        json!("corpus-a"),
+        "the name is the cited root's, not another root's holding the same path: {named}"
+    );
     assert_eq!(
         named["freshness"]["kind"],
         json!("current"),

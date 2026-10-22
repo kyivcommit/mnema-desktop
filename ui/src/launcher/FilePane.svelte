@@ -84,10 +84,14 @@
   // `focus` is one citation's passage. The pane scrolls the first of its blocks
   // into view and paints `spans`; `onFocusHandled` lets the caller drop the
   // focus it passed, or every later render would scroll there again.
-  let { location, focus, onFocusHandled }: {
+  //
+  // The path is not drawn here: the pane reports it through `onTitle` and the
+  // right panel's head, which never scrolls, draws it.
+  let { location, focus, onFocusHandled, onTitle }: {
     location: DocumentLocation;
     focus: DocumentFocus | null;
     onFocusHandled: () => void;
+    onTitle?: (title: string | null) => void;
   } = $props();
 
   let view = $state<DocumentView | null>(null);
@@ -192,13 +196,20 @@
   const loadingLabel = $derived.by(() => { void $locale; return t('file_loading'); });
   const failedLabel = $derived.by(() => { void $locale; return t('file_failed'); });
   const focusGoneLabel = $derived.by(() => { void $locale; return t('file_focus_gone'); });
-  // The header names the place on disk. A citation may carry none — the backend
-  // resolves the document's sole `path` row for freshness either way, and the
-  // view answers with the path it was resolved for — so the title follows that
-  // instead of staying blank.
-  const title = $derived(
-    location.relativePath ?? (view?.kind === 'file' ? view.relativePath : null),
-  );
+  // The title names the place on disk, from its root. A citation may carry no
+  // path — the backend resolves the document's sole `path` row for freshness
+  // either way, and the view answers with the path it was resolved for — so the
+  // title follows that instead of staying blank. The root is the view's own,
+  // never the location's: only the view says which root its path belongs to.
+  const title = $derived.by(() => {
+    const path = location.relativePath ?? (view?.kind === 'file' ? view.relativePath : null);
+    if (path === null) return null;
+    const root = view?.kind === 'file' ? view.rootName : null;
+    return root === null ? path : `${root}/${path}`;
+  });
+  // After the read effect above, so a new location's `view = null` has landed
+  // before the title is reported and the old root is never joined to a new path.
+  $effect(() => onTitle?.(title));
   const badge = $derived.by(() => {
     void $locale;
     const got = view;
@@ -240,10 +251,6 @@
 <svelte:window onfocus={onWindowFocus} />
 
 <div class="file-card" data-testid="file-body" bind:this={card}>
-  {#if title !== null}
-    <h3 data-testid="file-header">{title}</h3>
-  {/if}
-
   {#if failed}
     <p data-testid="file-failed">{failedLabel}</p>
   {:else if view === null}

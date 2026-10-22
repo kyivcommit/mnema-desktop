@@ -18,6 +18,7 @@
   let {
     panels = $bindable(loadLayout()),
     fileOpen = false,
+    fileTitle = null,
     tools,
     recents,
     transcript,
@@ -28,6 +29,9 @@
     // No file open means the file stripe stays empty: the tree keeps its own
     // T beside the reserved room, as if the file were there (owner, 2026-10-20).
     fileOpen?: boolean;
+    // The open file's path, from its root: it stands in the right head, which
+    // never scrolls, so it stays in view while the file does.
+    fileTitle?: string | null;
     // The header's right cluster: the cloud and settings stay with the launcher.
     tools?: Snippet;
     recents?: Snippet;
@@ -159,6 +163,11 @@
         onclick={toggleTree}>
         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h4M3 8h7M3 12h5"/></svg>
       </button>
+      {#if fileTitle !== null}
+        <!-- Cut at the START when it does not fit (rtl + ellipsis), so the file
+             name stays visible; the inner span keeps the text itself left to right. -->
+        <span class="file-path" data-testid="file-header" title={fileTitle}><span>{fileTitle}</span></span>
+      {/if}
     </div>
     <div class="right-body" style={rightStyle}>
       <div class="tree-pane" data-testid="col-tree" hidden={!panels.tree}>
