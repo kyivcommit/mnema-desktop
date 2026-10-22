@@ -1,7 +1,7 @@
 // `scrollIntoView` scrolls every ancestor that has anything to scroll, the
-// window's own `overflow: hidden` containers included, and a citation at the
-// end of a file shifted the whole launcher up under its title bar (owner,
-// 2026-10-22). This moves `box` alone.
+// window's own `overflow: hidden` containers included. The launcher was seen
+// shifted up under its title bar after an answer opened a citation (owner,
+// 2026-10-22), and this is the one path that could do it. This moves `box` alone.
 export function scrollWithin(box: Element, el: Element, block: 'center' | 'nearest') {
   const b = box.getBoundingClientRect();
   const r = el.getBoundingClientRect();
