@@ -20,7 +20,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 const scroll = vi.hoisted(() => vi.fn());
 vi.mock('../lib/scroll', () => ({ scrollWithin: scroll }));
 // The header's add-folder button listens for scans and opens a dialog.
-vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
+const listen = vi.hoisted(() => vi.fn((..._a: unknown[]) => Promise.resolve(() => {})));
+vi.mock('@tauri-apps/api/event', () => ({ listen }));
 const open = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open }));
 
@@ -1497,5 +1498,20 @@ test('the add-folder button sits in the header and a new folder reloads the tree
   expect(button.closest('header.pane-head')).not.toBeNull();
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(1));
   await fireEvent.click(button);
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(2));
+});
+
+// Final review, finding 2: a scan's ending arrives while the previous tick's
+// listing is still on the wire, and must not be dropped with it.
+test('a reload asked for by a scan while a listing is on the wire still happens', async () => {
+  listen.mockClear(); // earlier tests' components registered here too
+  const wire = mockTreePending();
+  render(Tree, { selected: null, onPick: pick });
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'job_status').length).toBeGreaterThan(0));
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  await tick();
+  const handler = listen.mock.calls.at(-1)![1] as (e: { payload: unknown }) => void;
+  handler({ payload: { revision: 1, files: 0, readSeq: 1, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' } } });
+  wire.resolve(oneRootTwoFolders);
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(2));
 });

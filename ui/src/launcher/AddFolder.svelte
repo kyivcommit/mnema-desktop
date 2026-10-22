@@ -13,8 +13,9 @@
 
   // One press at a time, from the dialog to the scan's answer.
   let busy = false;
-  // A scan wanted after the one running now ends.
+  // A scan wanted once nothing runs, and one `start_scan_job` on the wire at a time.
   let scanAfter = false;
+  let starting = false;
   let error = $state<string | null>(null);
 
   // Every scan, whoever started it, in `revision` order (`apply`).
@@ -35,33 +36,47 @@
   const readingDone = (s: ScanState) =>
     s.snapshot.kind === 'running' && s.snapshot.phase.kind === 'reading' ? s.snapshot.phase.counts.done : null;
 
-  // The ending is `jobsDone` growing, not the snapshot leaving `running`: that
-  // edge can go unseen (`ipc.ts`, `jobsDone`). Files appear as they are read.
+  // The tree reloads when a job ends (`jobsDone`, not the snapshot leaving
+  // `running`: that edge can go unseen, `ipc.ts`) and as files are read.
   function accept(incoming: ScanState) {
     const prev = scan;
     const next = prev === null ? incoming : apply(prev, incoming);
     if (next === prev) return;
     scan = next;
-    if (prev === null) return;
-    if (next.jobsDone > prev.jobsDone) {
-      onChanged();
-      if (scanAfter && !busy) void startScan();
-    } else if (next.readSeq > prev.readSeq || readingDone(next) !== readingDone(prev)) {
-      onChanged();
-    }
+    if (prev !== null && (next.jobsDone > prev.jobsDone || next.readSeq > prev.readSeq
+      || readingDone(next) !== readingDone(prev))) onChanged();
+    kick();
+  }
+
+  // The queue is a level, not an edge: it is looked at after every state and
+  // after every press, so an ending seen while a press or a start was busy is
+  // not lost with it.
+  function kick() {
+    if (scanAfter && !busy && !starting && scan?.snapshot.kind !== 'running') void startScan();
   }
 
   // A refusal reaches the window as text (`error.rs`), so whether the slot was
   // busy is asked of `job_status` rather than read off the words.
   async function startScan() {
+    starting = true;
     try {
       await startScanJob('full');
       scanAfter = false;
     } catch (e) {
-      const now = await jobStatus();
-      accept(now);
-      scanAfter = now.snapshot.kind === 'running';
-      if (!scanAfter) error = message(e);
+      try {
+        const now = await jobStatus();
+        accept(now);
+        // Judged on the reply itself: a stale «running» keeps the scan wanted,
+        // and `kick` below starts it if a newer state already says it ended.
+        scanAfter = now.snapshot.kind === 'running';
+        if (!scanAfter) error = message(e);
+      } catch {
+        scanAfter = false;
+        error = message(e);
+      }
+    } finally {
+      starting = false;
+      kick();
     }
   }
 
@@ -100,6 +115,7 @@
       await startScan();
     } finally {
       busy = false;
+      kick();
     }
   }
 </script>

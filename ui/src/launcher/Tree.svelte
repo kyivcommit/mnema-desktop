@@ -160,8 +160,11 @@
   // next focus refreshes; queueing would trade it for a second request whose
   // answer nobody is waiting for.
   let loading = false;
-  function load() {
-    if (loading) return;
+  // `queue`: a scan's reload is not dropped behind a listing already on the
+  // wire — its last one comes right after a progress tick and is the one that
+  // brings the final files in (final review, finding 2).
+  function load(queue = false) {
+    if (loading) { if (queue) reloadAfter = true; return; }
     loading = true;
     // A read that starts with a write on the wire may precede that write's
     // landing in the store, so it gets an epoch no click can match.
@@ -583,13 +586,13 @@
   </ul>
 {/snippet}
 
-<svelte:window onfocus={load} />
+<svelte:window onfocus={() => load()} />
 
 <!-- A column that fills the pane: the title and the field are outside the scroller below it,
      so it moves neither with the tree's vertical scroll nor its sideways one
      (`.tree` is as wide as its deepest row). -->
 <div class="tree-column">
-<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2><AddFolder onChanged={load} /></header>
+<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2><AddFolder onChanged={() => load(true)} /></header>
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">

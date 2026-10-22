@@ -281,3 +281,51 @@ test('a subscription that fails after unmount says nothing and throws nothing', 
   await new Promise((r) => setTimeout(r, 0));
   expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
 });
+
+// ---------------------------------------------------------------------------
+// Final review: the queue must not be lost (findings 1, 3, 4).
+// ---------------------------------------------------------------------------
+test('a queued scan starts when a later press ends without starting one', async () => {
+  await queued();
+  let answer!: (p: string | null) => void;
+  open.mockReturnValue(new Promise((r) => { answer = r; }));
+  await press();
+  startReply = () => Promise.resolve();
+  await emit(state({ revision: 2, jobsDone: 1 }));
+  expect(calls('start_scan_job')).toHaveLength(1);
+  answer(null);
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+});
+
+test('a refusal judged on a stale job_status still starts the queued scan', async () => {
+  startReply = () => Promise.reject('a job is already running');
+  render(AddFolder, { onChanged });
+  await waitFor(() => expect(calls('job_status')).toHaveLength(2));
+  let reply!: (s: ScanState) => void;
+  statusReply = () => new Promise((r) => { reply = r; });
+  await press();
+  await waitFor(() => expect(calls('job_status')).toHaveLength(3));
+  await emit(state({ revision: 5, jobsDone: 1 }));
+  startReply = () => Promise.resolve();
+  reply(state({ revision: 1, snapshot: RUNNING }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
+});
+
+test('a queued start refused as the blocker ends starts once and shows nothing', async () => {
+  await queued();
+  let reply!: (s: ScanState) => void;
+  statusReply = () => new Promise((r) => { reply = r; });
+  await emit(state({ revision: 2, jobsDone: 1, snapshot: RUNNING }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
+  await emit(state({ revision: 3, jobsDone: 1 }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  await emit(state({ revision: 4, jobsDone: 2 }));
+  expect(calls('start_scan_job')).toHaveLength(2);
+  startReply = () => Promise.resolve();
+  reply(state({ revision: 2, jobsDone: 1, snapshot: RUNNING }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(calls('start_scan_job')).toHaveLength(3);
+  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
+});
