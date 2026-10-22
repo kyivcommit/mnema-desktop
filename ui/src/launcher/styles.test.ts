@@ -18,6 +18,22 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}
 let sheets: HTMLStyleElement[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// The panel layout lives in `localStorage` (`layout.ts`): a fresh in-memory
+// store per test, so a test that hides the tree does not hand the next one a
+// hidden tree. Node's own `localStorage` differs between versions — under
+// some it silently stores nothing — which is how this leaked on CI only.
+beforeEach(() => {
+  const map = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => { map.set(k, v); },
+      removeItem: (k: string) => { map.delete(k); },
+    },
+    configurable: true,
+  });
+});
+
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation((cmd: string) => {
