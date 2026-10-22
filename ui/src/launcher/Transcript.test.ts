@@ -62,3 +62,31 @@ test('a_turn_reports_the_card_that_was_pressed', async () => {
   await fireEvent.click(screen.getByTestId('preview-7'));
   await waitFor(() => expect(reported()).toBe(43)); // citationB, the pressed one
 });
+
+// Owner, 2026-10-22: after Enter the question waits in the transcript with dots
+// for the answer, scrolled into view. Both directions: no pending turn once the
+// ask is over.
+test('a_question_in_flight_is_drawn_with_dots_and_scrolled_to', async () => {
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  const writes: number[] = [];
+  const proto = HTMLElement.prototype;
+  Object.defineProperty(proto, 'scrollTop', { configurable: true, get: () => 0, set: (v: number) => { writes.push(v); } });
+  Object.defineProperty(proto, 'scrollHeight', { configurable: true, get: () => 900 });
+  try {
+    const { rerender } = render(Transcript, {
+      turns: [{ query: 'how much?', answer }],
+      state: { kind: 'inFlight', query: 'and then?' },
+    });
+    const pending = screen.getByTestId('pending-turn');
+    expect(getComputedStyle(pending.querySelector('.umsg')!).alignSelf).toBe('flex-end');
+    expect(pending.querySelector('.umsg')!.textContent).toBe('and then?');
+    expect(pending.querySelectorAll('.typing span')).toHaveLength(3);
+    expect(writes).toContain(900);
+
+    await rerender({ turns: [{ query: 'how much?', answer }], state: { kind: 'idle' } });
+    expect(screen.queryByTestId('pending-turn')).toBeNull();
+  } finally {
+    delete (proto as { scrollTop?: number }).scrollTop;
+    delete (proto as { scrollHeight?: number }).scrollHeight;
+  }
+});

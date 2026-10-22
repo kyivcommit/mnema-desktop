@@ -187,6 +187,9 @@
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     if (!dialogue) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
+    // The question leaves the line at once and waits in the transcript, so the
+    // Enter is seen to have landed (owner, 2026-10-22).
+    query = '';
     try {
       const reply = await inSession(() => ask(check.query));
       const answer = reply.answer;
@@ -204,19 +207,19 @@
       // the list may have a new row. A refusal records nothing, so it does not
       // reread it.
       if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
-      // §7: line clears on ready — but only if it still holds the submitted
-      // query. A draft typed while the ask was in flight is kept, not wiped
-      // (Codex #3). D171: an answer the provider failed to give keeps the
-      // query too, so asking again is one Enter away — the remedy for a lost
-      // network or a silent model, and harmless for a refused key.
+      // D171: an answer the provider failed to give puts the query back in the
+      // line, so asking again is one Enter away — the remedy for a lost network
+      // or a silent model, and harmless for a refused key. A draft typed while
+      // the ask was in flight is kept, not overwritten (Codex #3).
       const failed = answer.kind === 'citationsOnly' && answer.why.kind !== 'notAsked';
-      if (query === raw && !failed) query = '';
+      if (failed && query === '') query = raw;
       // The provider just failed this ask: the cloud asks again rather than
       // keep showing a cached "ok" beside the failure (D171 review, finding 2;
       // the backend dropped that cache for a network failure).
       if (failed) refreshProvider();
     } catch (e) {
-      console.error('ask failed', e); // query stays in the line for a retry
+      console.error('ask failed', e);
+      if (query === '') query = raw; // back in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
     }
   }

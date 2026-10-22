@@ -252,6 +252,32 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
   err.mockRestore();
 });
 
+// Owner, 2026-10-22: Enter is seen to land. The line empties at once and the
+// question waits in the transcript; a rejected ask puts it back in the line.
+test('the line empties on Enter and a rejected ask puts the query back', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let rejectAsk!: (e: unknown) => void;
+  const pending = new Promise((_, r) => { rejectAsk = r; });
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
+    if (cmd === 'ask') return pending;
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('wait for me');
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  expect(box.value).toBe('');
+  expect(screen.getByTestId('pending-turn').textContent).toContain('wait for me');
+  rejectAsk('boom');
+  await screen.findByRole('alert');
+  expect(box.value).toBe('wait for me');
+  expect(screen.queryByTestId('pending-turn')).toBeNull();
+  err.mockRestore();
+});
+
 // A failed ask is an error, not an answer: a hot launcher keeps the answer it
 // already showed and says what failed in the search line. A refusal is an
 // answer ("nothing found") and still replaces it.

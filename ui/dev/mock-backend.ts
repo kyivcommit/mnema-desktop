@@ -375,7 +375,10 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       // `AskReply`, not the bare answer: the launcher reads `reply.answer` and
       // marks `reply.historyId`, and `history_entry` below keeps the bare answer
       // because that is what a `StoredTurn` holds.
-      return { answer: generated, historyId: s.history[0].id };
+      // A model takes a while: the dots under the question are seen (owner, 2026-10-22).
+      // A fresh object per reply, as off the wire: the transcript keys turns by answer identity.
+      const reply = { answer: structuredClone(generated), historyId: s.history[0].id };
+      return new Promise((resolve) => setTimeout(() => resolve(reply), 1500));
     },
     // The backend matches the question and the WHOLE stored answer, caselessly;
     // the bench does the same over its stored `answer`, not the drawn preview.

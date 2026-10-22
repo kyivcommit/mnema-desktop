@@ -29,12 +29,25 @@
     }
     return drawn;
   });
+
+  // The question in flight is drawn at once, with dots for the answer being
+  // written, and scrolled into view: the Enter is seen to have landed. The dots
+  // are decoration; the composer's `aria-busy` says the same to a screen reader.
+  const pending = $derived(state.kind === 'inFlight' ? state.query : null);
+  let scroller: HTMLDivElement | null = null; // plain: `$state` clashes with the `state` prop
+  $effect(() => {
+    if (pending !== null && scroller) scroller.scrollTop = scroller.scrollHeight;
+  });
 </script>
 
-<div class="transcript" data-testid="transcript">
+<div class="transcript" data-testid="transcript" bind:this={scroller}>
   {#each items as item (item.answer)}
     <div class="exchange" data-testid="turn">
       <Selection answer={item.answer} query={item.query} {onSelected} />
     </div>
-  {/each}
-</div>
+  {/each}{#if pending !== null}
+    <div class="exchange" data-testid="pending-turn">
+      <div class="umsg">{pending}</div>
+      <div class="typing" aria-hidden="true"><span></span><span></span><span></span></div>
+    </div>
+  {/if}</div>
