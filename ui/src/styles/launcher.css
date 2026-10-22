@@ -113,7 +113,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    themes, so "not set up" is told by a dashed outline rather than by colour. */
 .cloud[data-status="notConfigured"] svg { stroke-dasharray: 2 2; }
 .cloud[data-status="unreachable"] { color: var(--err); }
-.cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
 /* Find in files: the pane's column. The field is a fixed row above `.tree-scroll`,
