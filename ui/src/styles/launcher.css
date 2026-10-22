@@ -269,6 +269,9 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    the plain text column on the left, without a bubble. */
 .transcript { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
 .transcript .exchange { display: flex; flex-direction: column; min-width: 0; }
+/* The newest exchange is at least a view tall, so its question can be scrolled
+   to the top even under a short answer (owner, 2026-10-22). */
+.transcript > .exchange:last-child { min-height: 100%; }
 /* The answer being written: three dots that rise in turn under the question. */
 .typing { display: flex; gap: 5px; margin-top: 13px; padding: 6px 0; }
 .typing span {

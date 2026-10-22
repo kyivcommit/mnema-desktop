@@ -122,3 +122,17 @@ test('an_arrived_answer_scrolls_its_question_to_the_top', async () => {
     Element.prototype.getBoundingClientRect = rect;
   }
 });
+
+// The room under a short answer: only the newest exchange is a view tall, so
+// its question can reach the top; the ones above keep their own height.
+test('only_the_newest_exchange_is_at_least_a_view_tall', () => {
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  render(Transcript, {
+    turns: [{ query: 'one', answer }, { query: 'two', answer: structuredClone(answer) }],
+    state: { kind: 'inFlight', query: 'three' },
+  });
+  const [first, second] = screen.getAllByTestId('turn');
+  expect(getComputedStyle(first).minHeight).not.toBe('100%');
+  expect(getComputedStyle(second).minHeight).not.toBe('100%');
+  expect(getComputedStyle(screen.getByTestId('pending-turn')).minHeight).toBe('100%');
+});
