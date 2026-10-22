@@ -138,6 +138,18 @@ const standTree: TreeListing = {
   ],
 };
 
+// What the stand's files say, by documentId, for `find_in_files` to look in.
+const standTexts: Record<string, string> = {
+  'doc-1': 'Notes on the lease: the rent is due on the first of each month.',
+  'doc-2': 'The second set of notes covers the deposit and the inspection.',
+  'doc-3': 'An archived draft of the old lease, kept for reference.',
+  'doc-4': 'An idea for a quarterly planning review.',
+  'doc-5': 'The plan for the next quarter, with milestones.',
+  'doc-10': 'Minutes of the October review: planning meetings move to Mondays.',
+  'doc-6': 'Mnema reads a folder of documents and answers with cited sources.',
+  'doc-9': 'An index of the papers in this folder.',
+};
+
 export function installMockBackend(win: 'settings' | 'launcher') {
   const query = new URLSearchParams(location.search);
   const scenario = query.get('scenario') ?? 'configured';
@@ -374,6 +386,16 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         .filter((h) => !words || `${h.query}\n${answerOf(h)}`.toLowerCase().includes(words))
         .map(({ id, query, preview, askedAt }) => ({ id, query, preview, askedAt }));
     },
+    // Substring, caseless, one best chunk per file; the backend matches word
+    // prefixes in the index, the bench only has to be close enough to draw.
+    find_in_files: (a) => {
+      const q = ((a.query as string) ?? '').trim().toLowerCase();
+      if (!/[\p{L}\p{N}]/u.test(q)) return null;
+      const documents = Object.entries(standTexts)
+        .filter(([, text]) => text.toLowerCase().includes(q))
+        .map(([documentId, text], i) => ({ documentId, chunkId: i + 1, ord: 0, text }));
+      return { documents, truncated: false };
+    },
     history_entry: (a) => {
       const hit = s.history.find((h) => h.id === a.id);
       return hit ? { kind: 'dialogue', turns: [{ query: hit.query, answer: hit.answer }] } : { kind: 'gone' };
@@ -384,7 +406,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     // block an answer points at, and a span inside it. Empty ones made every
     // click say "the passage is gone" instead of lighting the passage up, so
     // this points at the demo paragraph the way a real citation would.
-    open_document: () => {
+    open_document: (a) => {
       const paragraph = 'The whole file, rendered by the pane.';
       return {
         kind: 'file',
@@ -395,6 +417,8 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         focusBlockIds: [2],
         spans: [{ blockId: 2, blockStart: 0, length: paragraph.length, primary: true }],
         relativePath: 'notes/demo.md',
+        // The tree's name for the root asked about, as the backend answers it.
+        rootName: s.tree.roots.find((r) => r.rootId === a.rootId)?.name ?? null,
         freshness: { kind: 'current' },
       } satisfies DocumentView;
     },

@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import Tree, { buildFolderTree } from './Tree.svelte';
+import Tree, { buildFolderTree, filterTree } from './Tree.svelte';
 import {
   oneRoot,
   oneRootTwoFolders,
@@ -11,7 +11,7 @@ import {
   emptyListing,
 } from '../lib/fixtures';
 import { setLocale } from '../i18n';
-import type { TreeListing } from '../lib/ipc';
+import type { FoundInFiles, TreeListing } from '../lib/ipc';
 
 // The house pattern for the bridge (`lib/ipc.test.ts:14-15`): one shared spy,
 // the module mocked once at file scope.
@@ -23,9 +23,11 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 // test would pass on whichever shape happened to be wrong.
 let treeReply: () => Promise<TreeListing> = () => Promise.resolve(emptyListing);
 let setReply: (a: unknown) => Promise<void> = () => Promise.resolve();
+let findReply: (query: string) => Promise<FoundInFiles | null> = () => Promise.resolve(null);
 function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'list_tree') return treeReply();
   if (cmd === 'set_folder_searched') return setReply(args);
+  if (cmd === 'find_in_files') return findReply((args as { query: string }).query);
   throw new Error(`unexpected command ${cmd}`);
 }
 
@@ -103,6 +105,7 @@ beforeEach(() => {
   invoke.mockImplementation(route);
   treeReply = () => Promise.resolve(emptyListing);
   setReply = () => Promise.resolve();
+  findReply = () => Promise.resolve(null);
   pick.mockReset();
 });
 
@@ -110,6 +113,7 @@ beforeEach(() => {
 // shared by every test in this file, and an in-test restore is skipped when an
 // assertion fails first. Restore unconditionally.
 afterEach(() => {
+  vi.useRealTimers();
   delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   // `locale` is a module-level store shared by every test in this file, and an
   // in-test restore is skipped when an assertion fails first. Restore
@@ -174,6 +178,51 @@ test('buildFolderTree mixes the three depths in one root and shares one node per
 // §2) — so the closed enumeration below counts them. The root's disclosure row
 // comes first (document order), then the folders, then the files of the folder
 // the selection opened.
+// A tree of synthetic books: `tlcl.pdf` and `x.pdf` under one parent, so the
+// filter has a sibling branch to drop.
+const BOOKS = buildFolderTree([
+  { relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' },
+  { relativePath: 'Books/novels/x.pdf', documentId: 'doc-x' },
+]);
+
+test('filterTree keeps the file with every ancestor and drops the other branch', () => {
+  expect(filterTree(BOOKS, new Set(['doc-tlcl']))).toMatchObject([
+    {
+      kind: 'folder',
+      name: 'Books',
+      children: [
+        { kind: 'folder', name: 'command', children: [{ kind: 'file', path: 'Books/command/tlcl.pdf' }] },
+      ],
+    },
+  ]);
+  const [books] = filterTree(BOOKS, new Set(['doc-tlcl']));
+  expect(books.kind === 'folder' && books.children.map((c) => c.name)).toEqual(['command']);
+});
+
+test('filterTree keeps every path of a duplicate document', () => {
+  const tree = buildFolderTree([
+    { relativePath: 'Inbox/a.pdf', documentId: 'doc-a' },
+    { relativePath: 'Books/a.pdf', documentId: 'doc-a' },
+  ]);
+  const paths = filterTree(tree, new Set(['doc-a'])).flatMap((f) =>
+    f.kind === 'folder' ? f.children.map((c) => c.path) : [],
+  );
+  expect(paths).toEqual(['Inbox/a.pdf', 'Books/a.pdf']);
+});
+
+test('filterTree hands a filtered folder its full children', () => {
+  const [books] = filterTree(BOOKS, new Set(['doc-tlcl']));
+  if (books.kind !== 'folder') throw new Error('expected a folder');
+  expect(books.children).toHaveLength(1);
+  expect(books.full?.map((c) => c.name)).toEqual(['command', 'novels']);
+  // The original is untouched.
+  expect(BOOKS[0]).not.toHaveProperty('full');
+});
+
+test('filterTree skips an id the listing does not have', () => {
+  expect(filterTree(BOOKS, new Set(['doc-unknown']))).toEqual([]);
+});
+
 test('the controls are exactly the ones with a real action', async () => {
   mockTree(oneRootTwoFolders);
   mount(SELECTED); // notes/ is open, so its files are on screen
@@ -1109,4 +1158,326 @@ test('a tree pane that is hidden is not scrolled', async () => {
     cleanup();
     host.remove();
   }
+});
+
+// --- find in files ------------------------------------------------------------
+//
+// The field runs on a 150 ms debounce, so these tests mount on real timers (the
+// listing is a promise) and then switch to fake ones for the typing. `waitFor`
+// polls on a timer it cannot advance once the clock is fake, so every wait
+// below is `settle()`, which moves the clock and flushes the microtasks.
+
+const LIB: TreeListing = {
+  roots: [{
+    rootId: 1, absolutePath: '/home/u/lib', name: 'lib',
+    searched: [{ folderPath: 'Books/novels', searched: false }],
+    files: [
+      { relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' },
+      { relativePath: 'Books/novels/x.pdf', documentId: 'doc-x' },
+      { relativePath: 'Notes/a.md', documentId: 'doc-a' },
+    ],
+  }],
+};
+const hit = (documentId: string, chunkId = 1, ord = 0) => ({ documentId, chunkId, ord, text: `passage of ${documentId}` });
+const answer = (...ids: string[]): FoundInFiles => ({ documents: ids.map((id) => hit(id)), truncated: false });
+const findCalls = () => invoke.mock.calls.filter((c) => c[0] === 'find_in_files');
+
+async function settle(ms = 0) {
+  await vi.advanceTimersByTimeAsync(ms);
+  await tick();
+}
+async function mountLib(listing: TreeListing = LIB) {
+  mockTree(listing);
+  mount(null);
+  await screen.findByTestId('tree-folder-Books'); // real timers: the listing has landed
+  vi.useFakeTimers();
+}
+const field = () => screen.getByRole('searchbox', { name: 'Find words in files' });
+async function typeQuery(text: string, wait = 150) {
+  await fireEvent.input(field(), { target: { value: text } });
+  await settle(wait);
+}
+const expanded = (testid: string) => screen.getByTestId(testid).getAttribute('aria-expanded');
+const check = (testid: string) => screen.getByTestId(testid) as HTMLInputElement;
+// A promise the test settles by hand, one per request: the order the replies
+// land in is the thing under test.
+function deferredFinds() {
+  const pending: { query: string; resolve: (a: FoundInFiles | null) => void; reject: (e: Error) => void }[] = [];
+  findReply = (query) => new Promise((resolve, reject) => pending.push({ query, resolve, reject }));
+  return pending;
+}
+
+test('an empty or blank field never calls find_in_files and shows the whole tree', async () => {
+  await mountLib();
+  await typeQuery('');
+  await typeQuery('   ');
+  expect(findCalls()).toHaveLength(0);
+  expect(screen.getByTestId('tree-folder-Books')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy();
+  expect(expanded('tree-folder-Books')).toBe('false');
+});
+
+test('a null answer shows the whole tree', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(null);
+  await typeQuery('—');
+  expect(findCalls()).toEqual([['find_in_files', { query: '—' }]]);
+  expect(screen.getByTestId('tree-folder-Books')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy();
+  expect(expanded('tree-folder-Books')).toBe('false');
+  expect(screen.queryByText('Nothing found')).toBeNull();
+});
+
+test('typing filters to matches with their ancestors open', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+  expect(screen.getByTestId('tree-file-doc-tlcl')).toBeTruthy();
+  expect(screen.queryByTestId('tree-file-doc-x')).toBeNull();
+  expect(screen.queryByTestId('tree-folder-Books/novels')).toBeNull();
+  expect(screen.queryByTestId('tree-folder-Notes')).toBeNull();
+  expect(expanded('tree-folder-Books')).toBe('true');
+  expect(expanded('tree-folder-Books/command')).toBe('true');
+  expect(screen.queryByText('Showing the first 500 files')).toBeNull();
+});
+
+test("a filtered folder's check reads the full tree", async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+  // `Books/novels` is unticked and hidden by the filter: both ticks above it
+  // still say "not all of it", and a click is the ordinary click on the branch.
+  expect(check('tree-check-1-Books').indeterminate).toBe(true);
+  expect(check('tree-check-1-Books').checked).toBe(false);
+  expect(check('tree-check-1-').indeterminate).toBe(true);
+  expect(check('tree-check-1-').checked).toBe(false);
+  expect(check('tree-check-1-Books/command').checked).toBe(true);
+
+  await fireEvent.click(check('tree-check-1-Books'));
+  await settle();
+  expect(invoke).toHaveBeenCalledWith('set_folder_searched', { rootId: 1, folderPath: 'Books', searched: true });
+});
+
+test('a stale answer does not paint', async () => {
+  await mountLib();
+  const finds = deferredFinds();
+  await typeQuery('first');
+  await typeQuery('second');
+  expect(finds.map((f) => f.query)).toEqual(['first', 'second']);
+
+  finds[1].resolve(answer('doc-a'));
+  await settle();
+  finds[0].resolve(answer('doc-tlcl')); // asked first, lands last
+  await settle();
+  expect(screen.getByTestId('tree-file-doc-a')).toBeTruthy();
+  expect(screen.queryByTestId('tree-file-doc-tlcl')).toBeNull();
+});
+
+test('a stale failure does not paint', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  await mountLib();
+  const finds = deferredFinds();
+  await typeQuery('first');
+  await typeQuery('second');
+
+  finds[1].resolve(answer('doc-a'));
+  await settle();
+  finds[0].reject(new Error('find_in_files failed'));
+  await settle();
+  expect(screen.queryByText('The search failed.')).toBeNull();
+  expect(screen.getByTestId('tree-file-doc-a')).toBeTruthy();
+});
+
+test('an answer that lands after the field was cleared does not paint', async () => {
+  await mountLib();
+  const finds = deferredFinds();
+  await typeQuery('shell');
+  await typeQuery('');
+  finds[0].resolve(answer('doc-tlcl'));
+  await settle();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy(); // the whole tree
+  expect(screen.queryByTestId('tree-file-doc-tlcl')).toBeNull();
+});
+
+test('a reloaded listing keeps the filter', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+
+  mockTree({
+    roots: [{ ...LIB.roots[0], files: [...LIB.roots[0].files, { relativePath: 'Books/command/new.pdf', documentId: 'doc-new' }] }],
+  });
+  window.dispatchEvent(new Event('focus'));
+  await settle();
+  expect(treeCalls()).toHaveLength(2);
+  expect(screen.getByTestId('tree-file-doc-tlcl')).toBeTruthy();
+  expect(screen.queryByTestId('tree-file-doc-new')).toBeNull();
+  expect(screen.queryByTestId('tree-folder-Notes')).toBeNull();
+  expect(screen.queryByTestId('tree-folder-Books/novels')).toBeNull();
+});
+
+test('a failed find keeps the tree and says so', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  await mountLib();
+  findReply = () => Promise.reject(new Error('find_in_files failed'));
+  await typeQuery('shell');
+  expect(screen.getByText('The search failed.')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Books')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy();
+
+  // The next answer takes the message away.
+  findReply = () => Promise.resolve(answer('doc-a'));
+  await typeQuery('shells');
+  expect(screen.queryByText('The search failed.')).toBeNull();
+  expect(screen.getByTestId('tree-file-doc-a')).toBeTruthy();
+});
+
+test('a find that fails after one that succeeded drops the old filter', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('lease');
+  expect(screen.queryByTestId('tree-folder-Notes')).toBeNull(); // filtered
+
+  // The field now says "leasex"; the old answer was for "lease" and must not
+  // keep filtering under the failure line.
+  findReply = () => Promise.reject(new Error('find_in_files failed'));
+  await typeQuery('leasex');
+  expect(screen.getByText('The search failed.')).toBeTruthy();
+  expect(screen.getByTestId('tree-folder-Notes')).toBeTruthy();
+  expect(expanded('tree-folder-Books')).toBe('false'); // the whole tree, as it was
+});
+
+test('nothing found says so and shows no tree', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve({ documents: [], truncated: false });
+  await typeQuery('zzz');
+  expect(screen.getByText('Nothing found')).toBeTruthy();
+  expect(screen.queryByTestId('tree-folder-Books')).toBeNull();
+  expect(screen.queryByTestId('tree-root-1')).toBeNull();
+});
+
+test('a truncated answer says so beside its files', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve({ documents: [hit('doc-tlcl')], truncated: true });
+  await typeQuery('shell');
+  expect(screen.getByText('Showing the first 500 files')).toBeTruthy();
+  expect(screen.getByTestId('tree-file-doc-tlcl')).toBeTruthy();
+  expect(screen.queryByText('Nothing found')).toBeNull();
+});
+
+test('the copy is in both locales', async () => {
+  setLocale('uk');
+  mockTree(LIB);
+  mount(null);
+  await screen.findByTestId('tree-folder-Books');
+  const box = screen.getByRole('searchbox', { name: 'Пошук слів у файлах' });
+  expect(box.getAttribute('placeholder')).toBe('Пошук слів у файлах');
+  vi.useFakeTimers();
+  findReply = () => Promise.resolve({ documents: [], truncated: false });
+  await fireEvent.input(box, { target: { value: 'zzz' } });
+  await settle(150);
+  expect(screen.getByText('Нічого не знайдено')).toBeTruthy();
+  findReply = () => Promise.resolve({ documents: [hit('doc-tlcl')], truncated: true });
+  await fireEvent.input(box, { target: { value: 'shell' } });
+  await settle(150);
+  expect(screen.getByText('Показано перші 500 файлів')).toBeTruthy();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  findReply = () => Promise.reject(new Error('find_in_files failed'));
+  await fireEvent.input(box, { target: { value: 'again' } });
+  await settle(150);
+  expect(screen.getByText('Пошук не вдався.')).toBeTruthy();
+});
+
+// The title row sits above the search field so the field lines up with the
+// conversations search; it is a fixed row, outside the scroller, and it is
+// re-labelled when the locale changes.
+test('the tree is titled, above the search field and outside the scroller, in both locales', async () => {
+  mockTree(LIB);
+  mount(null);
+  await screen.findByTestId('tree-folder-Books');
+  const title = screen.getByTestId('tree-title');
+  expect(title.textContent).toBe('Documents');
+  expect(document.querySelector('.tree-scroll')!.contains(title)).toBe(false);
+  expect(title.closest('.pane-head')!.nextElementSibling)
+    .toBe(screen.getByRole('searchbox', { name: 'Find words in files' }).closest('.tree-search'));
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('tree-title').textContent).toBe('Документи');
+});
+
+test('clearing restores the saved open state', async () => {
+  await mountLib();
+  await fireEvent.click(screen.getByTestId('tree-folder-Books')); // opened by hand, saved
+  const saved = localStorage.getItem('mnema.tree.open');
+  expect(saved).not.toBeNull();
+
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+  // Shutting the root under the filter is a toggle of the filter, not of the tree.
+  await fireEvent.click(screen.getByTestId('tree-root-toggle-1'));
+  expect(expanded('tree-root-toggle-1')).toBe('false');
+  expect(localStorage.getItem('mnema.tree.open')).toBe(saved);
+
+  await typeQuery('');
+  expect(expanded('tree-root-toggle-1')).toBe('true');
+  expect(expanded('tree-folder-Books')).toBe('true');
+  expect(expanded('tree-folder-Notes')).toBe('false');
+  expect(localStorage.getItem('mnema.tree.open')).toBe(saved);
+});
+
+test('a folder shut under one answer opens again under the next', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await typeQuery('shell');
+  await fireEvent.click(screen.getByTestId('tree-folder-Books'));
+  expect(expanded('tree-folder-Books')).toBe('false');
+
+  findReply = () => Promise.resolve(answer('doc-tlcl', 'doc-a'));
+  await typeQuery('shells');
+  expect(expanded('tree-folder-Books')).toBe('true');
+});
+
+test('a found file click carries its focus; a click without the filter does not', async () => {
+  await mountLib();
+  await fireEvent.click(screen.getByTestId('tree-folder-Books'));
+  await fireEvent.click(screen.getByTestId('tree-folder-Books/command'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-tlcl'));
+  expect(pick).toHaveBeenLastCalledWith({ rootId: 1, relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' });
+  expect(pick.mock.lastCall![0]).not.toHaveProperty('focus');
+
+  findReply = () => Promise.resolve({ documents: [hit('doc-a', 7, 3)], truncated: false });
+  await typeQuery('shell');
+  await fireEvent.click(screen.getByTestId('tree-file-doc-a'));
+  expect(pick).toHaveBeenLastCalledWith({
+    rootId: 1, relativePath: 'Notes/a.md', documentId: 'doc-a',
+    focus: { chunkId: 7, ord: 3, text: 'passage of doc-a' },
+  });
+
+  await typeQuery('');
+  await fireEvent.click(screen.getByTestId('tree-folder-Notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-a'));
+  expect(pick.mock.lastCall![0]).not.toHaveProperty('focus');
+});
+
+test('the request waits for the debounce', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await fireEvent.input(field(), { target: { value: 'sh' } });
+  await settle(149);
+  expect(findCalls()).toHaveLength(0);
+  await settle(1);
+  expect(findCalls()).toEqual([['find_in_files', { query: 'sh' }]]);
+});
+
+test('a keystroke inside the window restarts it: one request, for the last text', async () => {
+  await mountLib();
+  findReply = () => Promise.resolve(answer('doc-tlcl'));
+  await fireEvent.input(field(), { target: { value: 'sh' } });
+  await settle(100);
+  await fireEvent.input(field(), { target: { value: 'she' } });
+  await settle(149);
+  expect(findCalls()).toHaveLength(0);
+  await settle(1);
+  expect(findCalls()).toEqual([['find_in_files', { query: 'she' }]]);
 });

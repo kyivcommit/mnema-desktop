@@ -58,6 +58,16 @@ main button:hover:not(:disabled):not([aria-pressed="true"]):not([aria-disabled="
 .head { padding: 0 10px; }
 main.shell[data-left="false"] .head { padding-left: 78px; }
 .right-head { padding: 0 10px; }
+/* One line, cut at the START: `direction: rtl` puts the ellipsis on the left so
+ * the file name stays visible, and the inner span (`unicode-bidi: plaintext`)
+ * keeps the text itself reading left to right. The full path is in `title`. */
+.right-head .file-path {
+  flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+  text-overflow: ellipsis; direction: rtl; text-align: left;
+  font-family: var(--mono); font-weight: 400; font-style: normal;
+  font-size: 12px; color: var(--ink-soft);
+}
+.right-head .file-path > span { unicode-bidi: plaintext; }
 .centre-body {
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column; gap: 16px;
@@ -106,7 +116,27 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
-/* As wide as its deepest row, at least the pane: `.pane-body` scrolls it
+/* Find in files: the pane's column. The field is a fixed row above `.tree-scroll`,
+   the only thing that scrolls, so it stays put in both directions. `.pane-body`
+   around it keeps its own scroller but has nothing to scroll: the column is
+   exactly its height. */
+.tree-column { height: 100%; display: flex; flex-direction: column; }
+.tree-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.tree-search { position: relative; flex: none; padding: 0 0 6px; background: var(--surface); }
+.tree-search svg {
+  position: absolute; left: 9px; top: 17px; transform: translateY(-50%);
+  color: var(--ink-soft); pointer-events: none;
+}
+.tree-search input {
+  width: 100%; height: 34px; padding: 0 9px 0 28px;
+  /* WebKit draws a native search field, which drops this border and height. */
+  appearance: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink); font-size: 13px;
+}
+.tree-search input::placeholder { color: var(--ink-soft); }
+.tree-note { margin: 0 0 6px; padding: 0 7px; font-size: 13px; color: var(--ink-soft); }
+/* As wide as its deepest row, at least the pane: `.tree-scroll` scrolls it
    sideways instead of squeezing deep names (owner, 2026-10-21). */
 .tree { font-size: 13px; width: max-content; min-width: 100%; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
@@ -149,15 +179,17 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* A file outside the search stays openable; it only reads as set aside. Italic serif
    (the bundled italic), not a paler colour: --ink-faint is under the contrast floor. */
 .tree li > button.file-row.unsearched:not([aria-current="true"]) { font-family: var(--serif); font-weight: 400; font-style: italic; }
-.tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
+.tree [aria-current="true"] { background: var(--select); border-color: transparent; color: var(--on-select); }
 /* §4: the conversations. The header is pinned above the body, which is the
    scroll container; a row is the question with one clipped line of its answer,
    and when it was asked is said once by the group's label. The × shows on hover
-   and on focus. The active row is `--select`, not the file tree's
-   `--cite-wash`: "the conversation on screen" and "the file in the tree" are
-   different selections (owner's mockup, 2026-10-21). */
-.recents-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 0 4px 7px; }
-.recents-title {
+   and on focus. The active row is `--select`, the same fill as the open file
+   in the tree (owner, 2026-10-22). */
+/* One rule for both panels' title rows. The height is explicit so the
+   conversations row (its 26px button + padding) and the documents row (no
+   button) are the same 30px, and the two search fields sit level. */
+.pane-head { flex: none; display: flex; align-items: center; gap: 4px; height: 30px; box-sizing: border-box; padding: 0 0 4px 7px; }
+.pane-title {
   flex: 1 1 auto; min-width: 0; margin: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 14px; color: var(--ink);
@@ -336,11 +368,6 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   background: var(--cite-wash); font-size: 13px; line-height: 1.55;
 }
 .file-card { display: flex; flex-direction: column; gap: 10px; }
-.file-card h3 {
-  margin: 0; padding-bottom: 9px; border-bottom: 1px solid var(--line);
-  font-family: var(--mono); font-weight: 400; font-style: normal;
-  font-size: 12px; color: var(--ink-soft); overflow-wrap: anywhere;
-}
 .file-card p, .file-card h4, .file-card pre { margin: 0; font-size: 12.5px; line-height: 1.8; color: var(--ink-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
 .file-card h4 { font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 13px; color: var(--ink); }
 .file-card pre { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; }

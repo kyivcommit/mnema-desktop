@@ -25,6 +25,10 @@ use crate::state::AppState;
 /// see `SEARCH_QUERY_RULE` and `SEARCH_FUSION_RULE` below.
 const SEARCH_LIMIT: i64 = 20;
 
+/// How many files `find_in_files` returns before it says `truncated`. The file
+/// tree filters on the answer, so this is a cap on a list, not a ranking depth.
+const FIND_LIMIT: i64 = 500;
+
 /// The query rule `search` asks the text arm with — the live sweep's winner,
 /// tied with `AllTerms` once fused but ahead of it text-only alone. See D108.
 const SEARCH_QUERY_RULE: QueryRule = QueryRule::TermsInIndex;
@@ -1279,6 +1283,52 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<SearchAnswer,
         text,
         content,
     })
+}
+
+/// One file the tree's word search found, with the chunk that matched it best.
+/// `text` is the chunk's original text: the file pane pins its focus by
+/// comparing `ord` and `text` exactly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundInFile {
+    pub document_id: String,
+    pub chunk_id: i64,
+    pub ord: i64,
+    pub text: String,
+}
+
+/// The files a query matched, best first; `truncated` when more matched than
+/// [`FIND_LIMIT`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundInFiles {
+    pub documents: Vec<FoundInFile>,
+    pub truncated: bool,
+}
+
+/// Live word search over every indexed file, for filtering the file tree.
+/// `None` when the query has no word to look for (nothing typed, or only
+/// punctuation) — the caller shows the unfiltered tree, not an empty one.
+#[tauri::command(async)]
+pub fn find_in_files(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Option<FoundInFiles>, Error> {
+    let found =
+        state.with_index(|db| db.read_snapshot(|db| db.find_documents(&query, FIND_LIMIT)))?;
+    Ok(found.map(|f| FoundInFiles {
+        documents: f
+            .documents
+            .into_iter()
+            .map(|d| FoundInFile {
+                document_id: d.document_id,
+                chunk_id: d.chunk_id,
+                ord: d.ord,
+                text: d.text,
+            })
+            .collect(),
+        truncated: f.truncated,
+    }))
 }
 
 /// A citation in a generated answer: the existing [`Hit`], plus which anchor

@@ -35,6 +35,25 @@ impl QueryRule {
     }
 }
 
+/// One document the file tree's word search found, with the chunk that
+/// matched it best.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundDocument {
+    pub document_id: String,
+    pub chunk_id: i64,
+    pub ord: i64,
+    /// The original `chunk.text`, not the prepared copy the index holds: the
+    /// file pane pins its focus by comparing `ord` and `text` exactly.
+    pub text: String,
+}
+
+/// Documents in relevance order; `truncated` when more matched than `limit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundDocuments {
+    pub documents: Vec<FoundDocument>,
+    pub truncated: bool,
+}
+
 impl Db {
     pub fn index_chunk_text(&self, chunk_id: i64, prepared: &str) -> Result<(), Error> {
         write_search_row(self.conn(), chunk_id, prepared)
@@ -100,6 +119,56 @@ impl Db {
             return Ok(Vec::new());
         }
         self.matching(&wide, limit)
+    }
+
+    /// Live word search for the file tree: every indexed document that has all
+    /// of the query's words, the last one as a prefix (it is still being typed,
+    /// and so is every other, which costs nothing and spares a rule about
+    /// which is "last"). `None` when the query holds no word at all.
+    ///
+    /// Not scoped to the folders ticked for search (D181): the tree shows what
+    /// is on disk and indexed, and a ticked folder is a statement about what
+    /// `ask` may cite, not about what exists. Separate from
+    /// `search_lexical_with` because that arm feeds `ask` and the eval sweep,
+    /// whose query rules have no prefixes and must not gain one.
+    ///
+    /// One row per document, its best-ranked chunk; ties go to the lower chunk
+    /// id so the answer is stable between keystrokes.
+    pub fn find_documents(&self, query: &str, limit: i64) -> Result<Option<FoundDocuments>, Error> {
+        let prepared = crate::prepare_for_search(query, mnema_core::SourceKind::Document);
+        let expr = crate::text_prep::terms(&prepared)
+            .map(|t| format!("{}*", quote_term(t)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if expr.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn().prepare(
+            "SELECT document_id, id, ord, text FROM (
+                 SELECT c.document_id, c.id, c.ord, c.text, chunk_fts.rank AS r,
+                        row_number() OVER (PARTITION BY c.document_id
+                                           ORDER BY chunk_fts.rank, c.id) AS n
+                   FROM chunk_fts
+                   JOIN chunk c ON c.id = chunk_fts.rowid
+                   JOIN document d ON d.id = c.document_id
+                  WHERE chunk_fts MATCH ?1 AND d.status = 'indexed')
+              WHERE n = 1 ORDER BY r, id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![expr, limit + 1], |r| {
+            Ok(FoundDocument {
+                document_id: r.get(0)?,
+                chunk_id: r.get(1)?,
+                ord: r.get(2)?,
+                text: r.get(3)?,
+            })
+        })?;
+        let mut documents = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = documents.len() as i64 > limit;
+        documents.truncate(limit.max(0) as usize);
+        Ok(Some(FoundDocuments {
+            documents,
+            truncated,
+        }))
     }
 
     /// The query's terms that occur somewhere in the index, in the order they

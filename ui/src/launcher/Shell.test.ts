@@ -112,6 +112,22 @@ test('with no file open the tree keeps its own width and the file stripe is rese
   expect(screen.getAllByRole('separator')).toHaveLength(3);
 });
 
+// The open file's path stands in the right panel's head, after the tree toggle;
+// with no file the head carries the button alone.
+test('the open file path is drawn in the right head after the tree toggle', () => {
+  const { unmount } = render(Shell, { fileOpen: true, fileTitle: 'docs/notes/b.md' });
+  const head = document.querySelector('.right-head')!;
+  const path = screen.getByTestId('file-header');
+  expect(head.contains(path)).toBe(true);
+  expect(path.textContent).toBe('docs/notes/b.md');
+  expect(path.getAttribute('title')).toBe('docs/notes/b.md');
+  expect(toggle('tree').compareDocumentPosition(path) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  unmount();
+
+  render(Shell, { fileOpen: false, fileTitle: null });
+  expect(screen.queryByTestId('file-header')).toBeNull();
+});
+
 test('the files toggle hides the right area without unmounting the tree', async () => {
   render(Shell);
   const area = screen.getByTestId('col-right');

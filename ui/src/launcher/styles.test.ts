@@ -35,6 +35,7 @@ beforeEach(() => {
       focusBlockIds: [1],
       spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],
       relativePath: 'notes/a.md',
+      rootName: 'docs',
       // `fileChanged`, not `current`: the badge speaks only when it carries
       // news (owner, 2026-10-20), and the pin below needs one on screen.
       freshness: { kind: 'fileChanged' },
@@ -93,23 +94,74 @@ test('real launcher places the three areas with the tree inside the right one', 
   expect(screen.getAllByTestId('turn')).toHaveLength(1);
 });
 
+// Both panels' title rows are one rule at one height, so the tree's search field
+// lands level with the conversations' (measured: 38-68 title, 68-102 field).
+test('real CSS: both panel titles sit in one 30px .pane-head', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
+  render(Tree, { selected: null, onPick: () => {} });
+  const heads = [await screen.findByTestId('recents-title'), await screen.findByTestId('tree-title')]
+    .map((title) => title.parentElement!);
+  for (const head of heads) {
+    expect(head.classList.contains('pane-head')).toBe(true);
+    expect(getComputedStyle(head).height).toBe('30px');
+  }
+  expect(heads[0]).not.toBe(heads[1]);
+  // Read from the sheet: base.css already sets border-box on everything, so a
+  // computed value cannot tell whether this rule keeps its own.
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.pane-head\s*\{[^}]*height:\s*30px;\s*box-sizing:\s*border-box/);
+});
+
+// The find-in-files field never scrolls, in either direction: the nearest
+// scrolling ancestor of the tree must not contain it (`.tree` is as wide as its
+// deepest row, so a field inside that scroller would slide out sideways).
+test('real tree: the search field sits outside the element that scrolls the tree', async () => {
+  render(Launcher);
+  const body = await screen.findByTestId('tree-body');
+  const scrolls = (el: Element) => /auto|scroll/.test(getComputedStyle(el).overflow);
+  let scroller: Element | null = body.parentElement;
+  while (scroller && !scrolls(scroller)) scroller = scroller.parentElement;
+  expect(scroller).not.toBeNull();
+  expect(scroller!.contains(body)).toBe(true);
+  expect(scroller!.contains(screen.getByRole('searchbox', { name: 'Find words in files' }))).toBe(false);
+});
+
+// The open file's path lives in the right panel's head, which never scrolls:
+// the nearest scrolling ancestor of the path must not be the one that holds the
+// file's text, or the path would slide away with it.
+test('real file path sits outside the element that scrolls the file', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+  const block = await screen.findByTestId('file-block');
+  const header = await screen.findByTestId('file-header');
+  expect(header.textContent).toBe('docs/notes/a.md');
+  const scrolls = (el: Element) => /auto|scroll/.test(getComputedStyle(el).overflow);
+  let scroller: Element | null = block.parentElement;
+  while (scroller && !scrolls(scroller)) scroller = scroller.parentElement;
+  expect(scroller).not.toBeNull();
+  expect(scroller!.contains(block)).toBe(true);
+  expect(scroller!.contains(header)).toBe(false);
+});
+
 test('real tree marks the current file while leaving neighbours plain', async () => {
   render(Tree, { selected: { rootId: 1, relativePath: 'notes/a.md' }, onPick: () => {} });
   const selected = await screen.findByTestId('tree-file-doc-1');
   const other = screen.getByTestId('tree-file-doc-2');
   expect(selected.getAttribute('aria-current')).toBe('true');
   expect(other.hasAttribute('aria-current')).toBe(false);
-  expect(getComputedStyle(selected).background).toBe('var(--cite-wash)');
-  expect(getComputedStyle(selected).borderColor).toBe('var(--cite-line)');
-  expect(getComputedStyle(other).background).not.toBe('var(--cite-wash)');
-  expect(getComputedStyle(other).borderColor).not.toBe('var(--cite-line)');
+  // The same selection as the conversation on screen (owner, 2026-10-22):
+  // `--select` with its own ink, and no outline the history row lacks.
+  expect(getComputedStyle(selected).background).toBe('var(--select)');
+  expect(getComputedStyle(selected).borderColor).toBe('transparent');
+  expect(getComputedStyle(other).background).not.toBe('var(--select)');
   // A file reads as secondary to a folder: same weight, `--ink-soft` — while
   // the open row above is lifted back to `--ink`.
   expect(getComputedStyle(other).color).toBe('var(--ink-soft)');
   expect(getComputedStyle(other).fontWeight).toBe('400');
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).color).toBe('var(--ink)');
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).fontWeight).toBe('500');
-  expect(getComputedStyle(selected).color).toBe('var(--ink)');
+  expect(getComputedStyle(selected).color).toBe('var(--on-select)');
   // jsdom ranks specificity by source order, so the computed colours above
   // cannot prove the open row outranks the file row. The selector is read from
   // the sheet instead: the file-row rule must exclude the current row, or a
@@ -119,8 +171,8 @@ test('real tree marks the current file while leaving neighbours plain', async ()
   expect(css).toMatch(/\.tree li > button\.file-row:not\(\[aria-current="true"\]\)\s*\{/);
 });
 
-// §4: the conversation on screen is `--select`, not the file tree's
-// `--cite-wash` — the two selection meanings stay apart on screen.
+// §4: the conversation on screen is `--select` — the same fill as the open
+// file in the tree (owner, 2026-10-22).
 test('real recents marks the conversation on screen with --select', async () => {
   render(Recents, { activeId: 1, gen: 0, onOpen: () => {} });
   const on = await screen.findByTestId('recents-row-1');
@@ -169,7 +221,7 @@ test('a conversation row is two lines: question, preview, then ×', async () => 
 // name and its compose button stay put above fifty rows.
 test('the conversations header is pinned above the scrolling body', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  expect(css).toMatch(/\.recents-head\s*\{[^}]*flex:\s*none/);
+  expect(css).toMatch(/\.pane-head\s*\{[^}]*flex:\s*none/);
   expect(css).toMatch(/\.recents-body\s*\{[^}]*overflow:\s*auto/);
 });
 

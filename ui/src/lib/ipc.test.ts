@@ -88,6 +88,16 @@ test('listHistory invokes list_history with the filter it is given', async () =>
   ]);
 });
 
+test('findInFiles invokes find_in_files with the query it is given', async () => {
+  invoke.mockResolvedValue(null);
+
+  await ipc.findInFiles('x');
+
+  expect(invoke.mock.calls.filter((c) => c[0] === 'find_in_files')).toEqual([
+    ['find_in_files', { query: 'x' }],
+  ]);
+});
+
 test('historyEntry and deleteHistoryEntry send the id they are given, under the name the command takes', async () => {
   invoke.mockResolvedValue(undefined);
 
@@ -221,7 +231,7 @@ test('forgetKey invokes forget_key with no arguments', async () => {
 
 test('DocumentView rejects Rust snake_case wire fields', () => {
   const view: DocumentView = {
-    kind: 'file', blocks: [], focusBlockIds: [], spans: [], relativePath: null,
+    kind: 'file', blocks: [], focusBlockIds: [], spans: [], relativePath: null, rootName: null,
     freshness: { kind: 'current' },
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
     focus_block_ids: [],

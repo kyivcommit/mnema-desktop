@@ -42,6 +42,7 @@ const OPEN_DOCUMENT = {
   focusBlockIds: [],
   spans: [],
   relativePath: 'notes/a.md',
+  rootName: 'docs',
   freshness: { kind: 'current' },
 };
 function mockBackend(askReply: unknown, opts: { reject?: boolean } = {}) {
@@ -410,6 +411,66 @@ test('clicking a file in the tree opens it in the right pane at its start', asyn
   expect(screen.getByTestId('tree-file-doc-1').getAttribute('aria-current')).toBe('true');
 });
 
+// The path stands in the right panel's head from its root (the view's own
+// `rootName`), not inside the file's card; clearing the screen takes it away.
+test('the open file is named in the right head from its root, and closing it removes the name', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+
+  const path = await screen.findByTestId('file-header');
+  expect(path.textContent).toBe('docs/notes/a.md');
+  expect(document.querySelector('.right-head')!.contains(path)).toBe(true);
+  expect(screen.getByTestId('col-file').contains(path)).toBe(false);
+
+  await fireEvent.click(screen.getByTestId('new-chat'));
+  await waitFor(() => expect(screen.queryByTestId('file-header')).toBeNull());
+});
+
+// Drives the tree's word search the way a person does: the field, the 150 ms
+// debounce, then the found file. `find_in_files` answers the one passage that
+// matched `doc-1` best, and `open_document` is what the pane is asked for.
+const FOUND_PASSAGE = { documentId: 'doc-1', chunkId: 41, ord: 3, text: 'The passage that matched the words.' };
+async function clickFoundFile() {
+  const base = invoke.getMockImplementation()!;
+  invoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === 'find_in_files' ? Promise.resolve({ documents: [FOUND_PASSAGE], truncated: false }) : base(cmd, args));
+  render(Launcher);
+  await screen.findByTestId('tree-folder-notes'); // real timers: the listing has landed
+  vi.useFakeTimers();
+  try {
+    await fireEvent.input(screen.getByRole('searchbox', { name: 'Find words in files' }), { target: { value: 'matched words' } });
+    await vi.advanceTimersByTimeAsync(150);
+    await fireEvent.click(await screen.findByTestId('tree-file-doc-1'));
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+// The word search found the file by one passage: a click on it opens the file at
+// that passage, so the pane scrolls to it and marks it, as for a citation.
+test('a tree pick with focus opens the file at that passage', async () => {
+  await clickFoundFile();
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
+  expect(invoke).toHaveBeenCalledWith('open_document', {
+    documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md',
+    chunkId: 41, citedOrd: 3, citedText: 'The passage that matched the words.',
+  });
+});
+
+// A click with no search behind it has no passage to go to: the file opens at
+// its start, pinned here beside its filtered twin.
+test('a tree pick without focus opens at the start', async () => {
+  render(Launcher);
+  await fireEvent.click(await screen.findByTestId('tree-folder-notes'));
+  await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
+  await waitFor(() => expect(openDocumentCalls()).toHaveLength(1));
+  expect(openDocumentCalls()[0][1]).toEqual({
+    documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md',
+    chunkId: null, citedOrd: null, citedText: null,
+  });
+});
+
 // --- Task 7: an answer opens the panel on its first citation -----------------
 //
 // Every citation fixture names root 7, and the default `list_tree` fixture is
@@ -440,6 +501,7 @@ function answeredPane(args: Record<string, unknown>) {
     focusBlockIds: focused ? [1] : [],
     spans: focused ? [{ blockId: 1, blockStart: 0, length: [...text].length, primary: true }] : [],
     relativePath: 'notes/a.md',
+    rootName: null,
     freshness: { kind: 'current' },
   };
 }

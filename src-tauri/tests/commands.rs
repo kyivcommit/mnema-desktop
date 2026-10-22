@@ -461,6 +461,117 @@ fn searching_before_the_index_is_open_says_so() {
 }
 
 #[test]
+fn finding_in_files_before_the_index_is_open_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let error = call(&webview, "find_in_files", json!({ "query": "договір" }))
+        .expect_err("a find with no index behind it must not succeed");
+
+    assert_eq!(error, json!("the index is not open"));
+}
+
+/// One indexed file with one chunk of `text`, written the way the search test
+/// below does — through a connection of its own, as a running job would.
+fn write_found_file(path: &std::path::Path, id: &str, text: &str) {
+    let writer = mnema_index::open(path).unwrap();
+    let doc = writer
+        .insert_document(id, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let page = writer.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = writer
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: None,
+                text: text.to_string(),
+                line_start: Some(1),
+                line_end: Some(1),
+            },
+        )
+        .unwrap();
+    writer
+        .insert_chunk(
+            &doc,
+            0,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    writer
+        .set_document_status(&doc, mnema_index::DocumentStatus::Indexed)
+        .unwrap();
+}
+
+#[test]
+fn find_in_files_finds_a_prefix_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let id = "e".repeat(64);
+    let text = "акт звірки взаєморозрахунків";
+    write_found_file(&path, &id, text);
+
+    let found = call(&webview, "find_in_files", json!({ "query": "взаємо" }))
+        .expect("find_in_files was rejected");
+
+    assert_eq!(found["documents"][0]["documentId"], json!(id));
+    assert_eq!(found["documents"][0]["text"], json!(text));
+    assert_eq!(found["documents"].as_array().unwrap().len(), 1);
+    assert_eq!(found["truncated"], json!(false));
+
+    // The found passage's identity is only worth what `open_document` makes of
+    // it: handed back as it came, it must be accepted as the focus. Swapped or
+    // dropped `chunkId`/`ord` compile fine and fail only as a missing highlight.
+    let hit = &found["documents"][0];
+    let opened = call(
+        &webview,
+        "open_document",
+        json!({
+            "documentId": id,
+            "chunkId": hit["chunkId"],
+            "citedOrd": hit["ord"],
+            "citedText": hit["text"],
+        }),
+    )
+    .expect("open_document was rejected");
+    assert_eq!(opened["kind"], json!("file"), "{opened}");
+    assert_eq!(
+        opened["focusBlockIds"].as_array().map(Vec::len),
+        Some(1),
+        "the found passage was not accepted as a focus: {opened}"
+    );
+}
+
+#[test]
+fn find_in_files_with_no_terms_answers_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let found = call(&webview, "find_in_files", json!({ "query": "—" }))
+        .expect("a query with no terms is an answer, not an error");
+
+    assert_eq!(found, json!(null));
+}
+
+#[test]
 fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
     // The point of the shell is two connections on one file: this test writes
     // through one and searches through the other, which is the arrangement a
@@ -5342,6 +5453,65 @@ fn open_document_reports_current_when_the_file_still_matches_what_was_indexed() 
     );
 }
 
+/// The path in the right panel's head starts at the root's name, and the name
+/// is the one the tree prints for that root — so the answer is compared with
+/// `list_tree`, not with a second spelling of the rule in the test.
+fn tree_root_name(webview: &tauri::WebviewWindow<tauri::test::MockRuntime>, root: i64) -> String {
+    let listing = call(webview, "list_tree", json!({})).expect("list_tree was rejected");
+    listing["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .find(|r| r["rootId"] == json!(root))
+        .expect("the watched root is listed")["name"]
+        .as_str()
+        .expect("a root name")
+        .to_string()
+}
+
+#[test]
+fn open_document_names_the_root_the_tree_shows_for_the_path_it_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "5".repeat(64);
+    let (_corpus, root, _disk) = seed_document_with_file(&state, dir.path(), &doc);
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
+    )
+    .expect("open_document was rejected");
+
+    let name = tree_root_name(&webview, root);
+    assert_eq!(name, "corpus", "the fixture's root is the folder `corpus`");
+    assert_eq!(v["rootName"], json!(name), "{v}");
+}
+
+/// A citation with `rootId: null` opens the document's sole `path` row, and
+/// the root name must belong to that row rather than to nothing.
+#[test]
+fn open_document_names_the_root_of_the_sole_path_row_when_the_citation_named_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "6".repeat(64);
+    let (_corpus, root, _disk) = seed_document_with_file(&state, dir.path(), &doc);
+
+    let v = call(&webview, "open_document", json!({ "documentId": doc }))
+        .expect("open_document was rejected");
+
+    assert_eq!(v["relativePath"], json!("dohov-01.md"), "{v}");
+    assert_eq!(v["rootName"], json!(tree_root_name(&webview, root)), "{v}");
+}
+
 /// The document has no `path` row at all — indexed from inside an archive, or
 /// its last copy on disk was deleted (`write.rs:76-79`). There is nothing to
 /// compare against, and inventing a comparison is how a stale file gets shown
@@ -5377,6 +5547,10 @@ fn open_document_reports_no_path_when_the_document_has_none() {
 
     assert_eq!(v["kind"], json!("file"), "{v}");
     assert_eq!(v["freshness"]["kind"], json!("noPath"), "{v}");
+    assert!(
+        v["rootName"].is_null() && v.get("rootName").is_some(),
+        "no path, no root name — present as null, not absent: {v}"
+    );
     assert_eq!(
         v["blocks"][2]["text"],
         json!(PARAGRAPHS[2]),
@@ -5926,6 +6100,11 @@ fn open_document_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
     )
     .expect("open_document was rejected");
     assert_eq!(named["kind"], json!("file"), "{named}");
+    assert_eq!(
+        named["rootName"],
+        json!("corpus-a"),
+        "the name is the cited root's, not another root's holding the same path: {named}"
+    );
     assert_eq!(
         named["freshness"]["kind"],
         json!("current"),

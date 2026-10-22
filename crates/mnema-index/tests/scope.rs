@@ -441,6 +441,44 @@ fn scope_cost() {
     }
 }
 
+/// Measurement, not a check: `cargo test -p mnema-index --release --test scope
+/// find_cost -- --ignored --nocapture`. Median of 5 runs, in ms, of
+/// `find_documents` at limit 500 over 20k one-chunk documents, 1 in 200 of
+/// which also holds `giraffe`.
+#[test]
+#[ignore]
+fn find_cost() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    for i in 0..20_000u32 {
+        let text = if i % 200 == 0 {
+            "zebra giraffe"
+        } else {
+            "zebra"
+        };
+        seed(
+            &db,
+            root,
+            i + 1,
+            &format!("dir{}/sub{}/f{i}.md", i % 100, i % 7),
+            text,
+        );
+    }
+    println!("query      | docs | ms (median of 5)");
+    for q in ["z", "ze", "zebra", "zebra gir"] {
+        let mut found = 0;
+        let mut t: Vec<f64> = (0..5)
+            .map(|_| {
+                let s = std::time::Instant::now();
+                found = db.find_documents(q, 500).unwrap().unwrap().documents.len();
+                s.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("{q:<10} | {found:>4} | {:>6.1}", t[2]);
+    }
+}
+
 // ---- citation and "is anything searched" (spec §6, §7) ----
 
 #[test]

@@ -66,6 +66,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::add_mask,
         bridge::remove_mask,
         bridge::search,
+        bridge::find_in_files,
         bridge::ask,
         bridge::new_chat,
         bridge::list_history,

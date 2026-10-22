@@ -37,15 +37,19 @@
   // and drops it through `onFocusHandled`, so it is scrolled to once.
   let openFile = $state<DocumentLocation | null>(null);
   let openFocus = $state<DocumentFocus | null>(null);
+  // The open file's path from its root, reported by the pane and drawn in the
+  // right panel's head.
+  let fileTitle = $state<string | null>(null);
   // The tree's mark is the (root, path) pair, never `documentId` (spec §3):
   // one document can sit at several paths, and a key on the id would mark
   // every row that names it.
   let selected = $state<TreeSelection | null>(null);
 
-  // A click in the tree opens the file at its start: no highlight, no scroll.
+  // A click in the tree opens the file at its start: no highlight, no scroll —
+  // unless the word search found it, and then at the passage that matched.
   function openAtStart(pick: TreePick) {
     openFile = { documentId: pick.documentId, rootId: pick.rootId, relativePath: pick.relativePath };
-    openFocus = null;
+    openFocus = pick.focus ?? null;
     selected = { rootId: pick.rootId, relativePath: pick.relativePath };
   }
 
@@ -146,6 +150,7 @@
       try { await inSession(newChat); } catch (e) { console.error('new_chat failed', e); return; }
     } else {
       openFile = null;
+      fileTitle = null;
       selected = null;
     }
     screenGen += 1; // an open that is still reading does not draw over the empty screen
@@ -264,7 +269,7 @@
 
 <svelte:window onfocus={refreshAll} onkeydown={onKeydown} />
 
-<Shell bind:panels fileOpen={openFile !== null}>
+<Shell bind:panels fileOpen={openFile !== null} {fileTitle}>
   {#snippet transcript()}
     <Transcript {turns} state={shownState} onSelected={showCitation} />
     <Composer bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
@@ -280,7 +285,8 @@
   {/snippet}
   {#snippet file()}
     {#if openFile !== null}
-      <FilePane location={openFile} focus={openFocus} onFocusHandled={() => (openFocus = null)} />
+      <FilePane location={openFile} focus={openFocus} onFocusHandled={() => (openFocus = null)}
+        onTitle={(title) => (fileTitle = title)} />
     {/if}
   {/snippet}
   {#snippet tools()}
