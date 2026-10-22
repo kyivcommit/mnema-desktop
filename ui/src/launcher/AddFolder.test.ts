@@ -122,3 +122,130 @@ test('the label follows the locale', async () => {
   await waitFor(() => expect(button().getAttribute('aria-label')).toBe('Add folder'));
   expect(button().getAttribute('title')).toBe('Add folder');
 });
+
+// ---------------------------------------------------------------------------
+// Progress: the ring, the queued scan, the tree reloads.
+// ---------------------------------------------------------------------------
+const counts = (done: number, total: number) =>
+  ({ done, total, skipped: 0, refused: 0, contended: 0, secondsLeft: null });
+const reading = (done: number, total: number): ScanSnapshot =>
+  ({ kind: 'running', cancellable: true, phase: { kind: 'reading', rootIndex: 1, rootCount: 1, rootPath: '/r', counts: counts(done, total) } });
+const embeddingAt = (done: number, total: number): ScanSnapshot =>
+  ({ kind: 'running', cancellable: true, phase: { kind: 'embedding', counts: counts(done, total) } });
+
+// The `scan-progress` handler the component registered, as the emitter would call it.
+async function emit(s: ScanState) {
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  const [name, handler] = listen.mock.calls[0];
+  expect(name).toBe('scan-progress');
+  handler({ payload: s });
+  await new Promise((r) => setTimeout(r, 0));
+}
+const ring = () => screen.queryByTestId('tree-add-folder-ring');
+
+// Mounted, pressed, refused because a scan runs: the press is queued.
+async function queued() {
+  startReply = () => Promise.reject('a job is already running');
+  statusReply = () => Promise.resolve(state({ revision: 1, snapshot: RUNNING }));
+  render(AddFolder, { onChanged });
+  await press();
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+test('a queued scan starts once when jobsDone grows', async () => {
+  await queued();
+  startReply = () => Promise.resolve();
+  await emit(state({ revision: 2, jobsDone: 1 }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  await emit(state({ revision: 3, jobsDone: 2 }));
+  expect(calls('start_scan_job')).toHaveLength(2);
+  expect(calls('start_scan_job')[1][1]).toEqual({ entry: 'full' });
+});
+
+test('a queued scan tries again after a second refusal while running', async () => {
+  await queued();
+  statusReply = () => Promise.resolve(state({ revision: 3, jobsDone: 1, snapshot: RUNNING }));
+  await emit(state({ revision: 2, jobsDone: 1 }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  startReply = () => Promise.resolve();
+  await emit(state({ revision: 4, jobsDone: 2 }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
+});
+
+test('a refusal with nothing running does not queue', async () => {
+  startReply = () => Promise.reject('x');
+  render(AddFolder, { onChanged });
+  await press();
+  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
+  await emit(state({ revision: 5, jobsDone: 1 }));
+  expect(calls('start_scan_job')).toHaveLength(1);
+});
+
+test('an older revision is ignored', async () => {
+  await queued();
+  await emit(state({ revision: 9, snapshot: reading(5, 10) }));
+  await emit(state({ revision: 8, jobsDone: 1 }));
+  expect(calls('start_scan_job')).toHaveLength(1);
+  expect(ring()?.getAttribute('data-fraction')).toBe('0.25');
+});
+
+test('the ring shows only while a scan reads or embeds', async () => {
+  render(AddFolder, { onChanged });
+  await emit(state({ revision: 1 }));
+  expect(ring()).toBeNull();
+  await emit(state({ revision: 2, snapshot: reading(5, 10) }));
+  expect(ring()?.getAttribute('data-fraction')).toBe('0.25');
+  await emit(state({ revision: 3, snapshot: { kind: 'running', cancellable: false, phase: { kind: 'removing', rootPath: '/r' } } }));
+  expect(ring()).toBeNull();
+});
+
+test('the ring shows on mount in the middle of a scan', async () => {
+  statusReply = () => Promise.resolve(state({ revision: 4, snapshot: reading(0, 0) }));
+  render(AddFolder, { onChanged });
+  await waitFor(() => expect(ring()?.getAttribute('data-fraction')).toBe('spin'));
+});
+
+test('the tree reloads on readSeq, jobsDone and files read, not on a bare revision', async () => {
+  render(AddFolder, { onChanged });
+  await emit(state({ revision: 1, snapshot: reading(1, 10) }));
+  onChanged.mockClear();
+  await emit(state({ revision: 2, snapshot: reading(1, 10) }));
+  expect(onChanged).not.toHaveBeenCalled();
+  await emit(state({ revision: 3, snapshot: reading(2, 10) }));
+  expect(onChanged).toHaveBeenCalledTimes(1);
+  await emit(state({ revision: 4, readSeq: 1, snapshot: embeddingAt(0, 3) }));
+  expect(onChanged).toHaveBeenCalledTimes(2);
+  await emit(state({ revision: 5, readSeq: 1, snapshot: embeddingAt(1, 3) }));
+  expect(onChanged).toHaveBeenCalledTimes(2);
+  await emit(state({ revision: 6, readSeq: 1, jobsDone: 1 }));
+  expect(onChanged).toHaveBeenCalledTimes(3);
+});
+
+test('scan events do not clear the message', async () => {
+  addReply = () => Promise.reject(new Error('nope'));
+  render(AddFolder, { onChanged });
+  await press();
+  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
+  await emit(state({ revision: 7, jobsDone: 1 }));
+  expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('nope');
+});
+
+test('unmounting before listen resolves still unlistens', async () => {
+  let resolve!: (u: () => void) => void;
+  listen.mockReturnValue(new Promise((r) => { resolve = r; }));
+  const unlisten = vi.fn();
+  const { unmount } = render(AddFolder, { onChanged });
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  unmount();
+  resolve(unlisten);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(unlisten).toHaveBeenCalledTimes(1);
+});
+
+test('the tooltip carries the phase and its counts', async () => {
+  render(AddFolder, { onChanged });
+  await emit(state({ revision: 1, snapshot: embeddingAt(5, 10) }));
+  expect(button().getAttribute('title')).toMatch(/^Add folder — .+ 5\/10$/);
+  expect(button().getAttribute('aria-label')).toBe('Add folder');
+});

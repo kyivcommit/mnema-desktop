@@ -114,6 +114,14 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[data-status="notConfigured"] svg { stroke-dasharray: 2 2; }
 .cloud[data-status="unreachable"] { color: var(--err); }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+/* The Documents pane's «+»: a scan's progress is a ring around it, reading the
+   first half and embedding the second. */
+.add-folder { position: relative; }
+.scan-ring { position: absolute; inset: 0; width: 26px; height: 26px; transform: rotate(-90deg); pointer-events: none; }
+.scan-ring circle { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; }
+.scan-ring.spin { animation: scan-ring-spin 1s linear infinite; }
+@keyframes scan-ring-spin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+@media (prefers-reduced-motion: reduce) { .scan-ring.spin { animation: none; } }
 
 /* Find in files: the pane's column. The field is a fixed row above `.tree-scroll`,
    the only thing that scrolls, so it stays put in both directions. `.pane-body`
@@ -185,8 +193,8 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    and on focus. The active row is `--select`, the same fill as the open file
    in the tree (owner, 2026-10-22). */
 /* One rule for both panels' title rows. The height is explicit so the
-   conversations row (its 26px button + padding) and the documents row (no
-   button) are the same 30px, and the two search fields sit level. */
+   conversations row and the documents row (each with its 26px button +
+   padding) are the same 30px, and the two search fields sit level. */
 .pane-head { flex: none; display: flex; align-items: center; gap: 4px; height: 30px; box-sizing: border-box; padding: 0 0 4px 7px; }
 .pane-title {
   flex: 1 1 auto; min-width: 0; margin: 0;
