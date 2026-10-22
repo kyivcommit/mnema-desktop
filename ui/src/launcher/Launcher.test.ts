@@ -1657,3 +1657,12 @@ test('a folder added from the header reloads the tree', async () => {
   await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'add_watched_folder')).toHaveLength(1));
   await waitFor(() => expect(listTreeCalls().length).toBeGreaterThan(before));
 });
+
+// Owner, 2026-10-22: the header's «+» stands at the right, just after the cloud.
+test('the header add-folder sits right after the cloud', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  const cloud = await screen.findByTestId('provider-cloud');
+  const plus = screen.getByTestId('header-add-folder');
+  expect(cloud.parentElement!.nextElementSibling).toBe(plus);
+});

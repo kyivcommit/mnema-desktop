@@ -307,9 +307,10 @@
       disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.9 2.6a1.3 1.3 0 0 1 1.9 0l.6.6a1.3 1.3 0 0 1 0 1.9L6.3 12.2l-3 .7.7-3z"/></svg>
     </button>
-    <!-- The Documents pane's «+», the same action: shown only while that pane is
-         off screen (`launcher.css`), like the pencil above. -->
-    <span class="header-add-folder" data-testid="header-add-folder"><AddFolder onChanged={() => treeReload++} /></span>
     <Toolbar {status} provider={statusProvider} local={chatProvider === 'mnema'} />
+    <!-- The Documents pane's «+», the same action, right after the cloud (owner,
+         2026-10-22): shown only while that pane is off screen (`launcher.css`),
+         like the pencil above. -->
+    <span class="header-add-folder" data-testid="header-add-folder"><AddFolder onChanged={() => treeReload++} /></span>
   {/snippet}
 </Shell>
