@@ -15,7 +15,14 @@ const invoke = vi.fn();
 // What `provider_status` answers; a test swaps it to drive the cloud.
 const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;
-vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+// The tree's add-folder button reads the scan state and listens for its
+// progress on mount; every mock below answers it the same idle way.
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => a[0] === 'job_status'
+    ? Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } })
+    : invoke(...a),
+}));
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 
 // Answers each command separately. `model_settings` (the launcher's mount
 // seed) always resolves so it never crashes a render; `ask` is what each

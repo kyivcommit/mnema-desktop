@@ -17,7 +17,7 @@ import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
   AppPrefs, AskAnswer, Catalogue, RoleCatalogue, DocumentView, HistoryEntry, IndexRead, KeyState, LocaleChoice,
-  ModelRole, ScanState, ThemeChoice, TreeListing, UiScale,
+  ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
 // The history as `list_history` keeps it, with the answer each question got.
@@ -166,34 +166,39 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     configured: { openRouter: s.key.kind === 'present', mnemaEmbed: local.embed?.kind === 'ready', mnemaChat: local.chat?.kind === 'ready' },
   });
 
-  // ponytail: a scan is three timer ticks, not the real phase machine; enough
-  // to draw the progress strip, add phases here when a task needs them.
+  // shortcut: a scan reads each root a file per tick, then embeds a chunk per
+  // tick; not the real phase machine — add phases here when a task needs them.
   function runScan() {
-    const total = Math.max(s.tree.roots.reduce((n, r) => n + r.files.length, 0), 1);
-    const root = s.tree.roots[0]?.absolutePath ?? '/';
-    let done = 0;
+    if (s.scan.snapshot.kind === 'running') throw 'a job is already running';
+    const counts = (done: number, total: number) =>
+      ({ done, total, skipped: 0, refused: 0, contended: 0, secondsLeft: null });
+    const roots = s.tree.roots;
+    const steps: Phase[] = roots.flatMap((r, i) => {
+      const total = Math.max(r.files.length, 1);
+      return Array.from({ length: total + 1 }, (_, done) => ({ kind: 'reading' as const,
+        rootIndex: i + 1, rootCount: roots.length, rootPath: r.absolutePath, counts: counts(done, total) }));
+    });
+    for (let done = 0; done <= 3; done++) steps.push({ kind: 'embedding', counts: counts(done, 3) });
     const tick = () => {
       if (s.scan.snapshot.kind !== 'running') return;
-      done += 1;
-      if (done > total) {
+      const phase = steps.shift();
+      if (phase === undefined) {
         s.scan = { ...s.scan, readSeq: s.scan.readSeq + 1, jobsDone: s.scan.jobsDone + 1, snapshot: {
           kind: 'ended',
-          report: { embedding: { kind: 'ran', done: total, total, refused: 0 }, endedIn: 'embedding',
+          report: { embedding: { kind: 'ran', done: 3, total: 3, refused: 0 }, endedIn: 'embedding',
             reason: 'completed', message: null, resume: null },
         } };
         s.index = { ...s.index, lastIndexedAt: Math.floor(Date.now() / 1000) };
       } else {
-        s.scan = { ...s.scan, snapshot: { kind: 'running', cancellable: true, phase: {
-          kind: 'reading', rootIndex: 0, rootCount: s.tree.roots.length, rootPath: root,
-          counts: { done, total, skipped: 0, refused: 0, contended: 0, secondsLeft: total - done },
-        } } };
-        setTimeout(tick, 1000);
+        s.scan = { ...s.scan, snapshot: { kind: 'running', cancellable: true, phase } };
+        setTimeout(tick, 700);
       }
       bump();
       void emit('scan-progress', s.scan);
     };
-    s.scan = { ...s.scan, snapshot: { kind: 'running', cancellable: true, phase: { kind: 'embedding',
-      counts: { done: 0, total, skipped: 0, refused: 0, contended: 0, secondsLeft: null } } } };
+    s.scan = { ...s.scan, snapshot: { kind: 'running', cancellable: true, phase: steps[0] } };
+    bump();
+    void emit('scan-progress', s.scan);
     setTimeout(tick, 300);
   }
 

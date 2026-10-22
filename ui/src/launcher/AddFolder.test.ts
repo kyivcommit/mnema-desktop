@@ -31,7 +31,7 @@ function route(cmd: string): Promise<unknown> {
 }
 const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd);
 
-let onChanged: ReturnType<typeof vi.fn>;
+let onChanged: ReturnType<typeof vi.fn<() => void>>;
 beforeEach(() => {
   setLocale('en');
   invoke.mockReset().mockImplementation(route);
@@ -40,7 +40,7 @@ beforeEach(() => {
   addReply = () => Promise.resolve(7);
   startReply = () => Promise.resolve();
   statusReply = () => Promise.resolve(state());
-  onChanged = vi.fn();
+  onChanged = vi.fn<() => void>();
 });
 afterEach(cleanup);
 
@@ -248,4 +248,36 @@ test('the tooltip carries the phase and its counts', async () => {
   await emit(state({ revision: 1, snapshot: embeddingAt(5, 10) }));
   expect(button().getAttribute('title')).toMatch(/^Add folder — .+ 5\/10$/);
   expect(button().getAttribute('aria-label')).toBe('Add folder');
+});
+
+// An emission between the first read and the listener's registration reaches
+// nobody (`scan-progress` has no replay), so the state is read again once the
+// listener is in — as `settings/jobs.ts` does.
+test('the state is read again once the listener is registered', async () => {
+  let resolve!: (u: () => void) => void;
+  listen.mockReturnValue(new Promise((r) => { resolve = r; }));
+  statusReply = () => Promise.resolve(state({ revision: 1, snapshot: reading(1, 10) }));
+  render(AddFolder, { onChanged });
+  await waitFor(() => expect(ring()).not.toBeNull());
+  statusReply = () => Promise.resolve(state({ revision: 2, jobsDone: 1 }));
+  resolve(() => {});
+  await waitFor(() => expect(ring()).toBeNull());
+  expect(calls('job_status')).toHaveLength(2);
+});
+
+test('a subscription that cannot be registered says so', async () => {
+  listen.mockRejectedValue(new Error('no events'));
+  render(AddFolder, { onChanged });
+  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('no events'));
+});
+
+test('a subscription that fails after unmount says nothing and throws nothing', async () => {
+  let reject!: (e: unknown) => void;
+  listen.mockReturnValue(new Promise((_, r) => { reject = r; }));
+  const { unmount } = render(AddFolder, { onChanged });
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  unmount();
+  reject(new Error('gone'));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
 });

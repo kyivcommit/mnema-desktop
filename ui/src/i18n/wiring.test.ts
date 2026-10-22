@@ -20,6 +20,8 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 // and one state further along `Tree` reads `.roots` off the settings object and
 // throws. That is the same trap Ruling Y closed in `Launcher.test.ts` and the
 // in-flight draft test closed again; this is its third home.
+// The tree's add-folder button listens for scan progress on mount.
+vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string) =>
     cmd === 'list_tree'
@@ -28,6 +30,8 @@ vi.mock('@tauri-apps/api/core', () => ({
       ? Promise.resolve([])
       : cmd === 'provider_status'
         ? Promise.resolve({ kind: 'ok' })
+      : cmd === 'job_status'
+        ? Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } })
         : Promise.resolve({ key: { kind: 'absent' }, index: { kind: 'read', embeddedChunks: 0, embeddedChunksEverywhere: 0, embeddingModel: null, searchTextArm: true, searchContentArm: false } }),
 }));
 

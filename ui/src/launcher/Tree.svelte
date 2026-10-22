@@ -67,6 +67,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
+  import AddFolder from './AddFolder.svelte';
   import { scrollWithin } from '../lib/scroll';
   import type { FoundInFile, TreeListing } from '../lib/ipc';
 
@@ -588,7 +589,7 @@
      so it moves neither with the tree's vertical scroll nor its sideways one
      (`.tree` is as wide as its deepest row). -->
 <div class="tree-column">
-<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2></header>
+<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2><AddFolder onChanged={load} /></header>
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">

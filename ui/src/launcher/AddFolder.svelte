@@ -68,9 +68,18 @@
   onMount(() => {
     let gone = false;
     let unlisten: UnlistenFn | null = null;
-    void listenScanProgress(accept).then((u) => { if (gone) u(); else unlisten = u; });
+    const read = () => jobStatus().then((s) => { if (!gone) accept(s); }, () => {});
     // A launcher opened mid-scan shows the ring before the next event.
-    jobStatus().then(accept, () => {});
+    read();
+    listenScanProgress((s) => { if (!gone) accept(s); })
+      .then((u) => {
+        if (gone) { u(); return; }
+        unlisten = u;
+        // `scan-progress` has no replay: an emission before this point reached
+        // nobody, so ask again (`settings/jobs.ts` does the same).
+        read();
+      })
+      .catch((e) => { if (!gone) error = message(e); });
     return () => { gone = true; unlisten?.(); };
   });
 
