@@ -106,6 +106,23 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
+/* Find in files: pinned to the top of `.pane-body`, so it stays while the tree
+   scrolls. The same recessed field as the conversations search (`.recents-search`)
+   and a surface behind it, so rows do not show through. */
+.tree-search { position: sticky; top: 0; z-index: 2; padding: 0 0 6px; background: var(--surface); }
+.tree-search svg {
+  position: absolute; left: 9px; top: 17px; transform: translateY(-50%);
+  color: var(--ink-soft); pointer-events: none;
+}
+.tree-search input {
+  width: 100%; height: 34px; padding: 0 9px 0 28px;
+  /* WebKit draws a native search field, which drops this border and height. */
+  appearance: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink); font-size: 13px;
+}
+.tree-search input::placeholder { color: var(--ink-soft); }
+.tree-note { margin: 0 0 6px; padding: 0 7px; font-size: 13px; color: var(--ink-soft); }
 /* As wide as its deepest row, at least the pane: `.pane-body` scrolls it
    sideways instead of squeezing deep names (owner, 2026-10-21). */
 .tree { font-size: 13px; width: max-content; min-width: 100%; }

@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import type { TreeFile } from '../lib/ipc';
+  import type { DocumentFocus, TreeFile } from '../lib/ipc';
 
   export type TreeNode =
     // `full` exists only on a folder `filterTree` kept: the original children,
@@ -12,7 +12,10 @@
   // would mark every row that shows it instead of the one that was opened.
   export type TreeSelection = { rootId: number; relativePath: string };
   // What a click carries: the selection plus the id the pane is opened by.
-  export type TreePick = TreeSelection & { documentId: string };
+  //
+  // `focus` rides only on a click on a file the find-in-files filter matched: the
+  // passage that matched, for the pane to light up. A plain click has none.
+  export type TreePick = TreeSelection & { documentId: string; focus?: DocumentFocus };
 
   // Decision 6: the folder tree is a split of `relativePath` on `/`, and
   // nothing else — the backend hands over flat paths per root. Pure and
@@ -63,8 +66,8 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { listTree, setFolderSearched } from '../lib/ipc';
-  import type { TreeListing } from '../lib/ipc';
+  import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
+  import type { FoundInFile, TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
@@ -195,10 +198,65 @@
       });
   }
 
-  onMount(load);
+  onMount(() => {
+    load();
+    return () => clearTimeout(debounce);
+  });
+
+  // Find in files: the words in the field are looked up in the index, and the
+  // tree shows only the files that hold them. `found` is null when there is no
+  // filter (an empty field, or words the backend reads as no terms), and then
+  // the whole tree shows. `roots` stays the full tree, so a listing read under
+  // a filter is filtered again without any further step.
+  let query = $state('');
+  let found = $state<Map<string, FoundInFile> | null>(null);
+  let truncated = $state(false);
+  let findFailed = $state(false);
+  // Folders opened or shut by hand under the filter. Not `toggled`: that one is
+  // remembered across restarts and describes the unfiltered tree, which must
+  // come back as it was. Dropped on every new answer, whose folders start open.
+  let searchToggled = $state<Record<string, boolean>>({});
+  const DEBOUNCE_MS = 150;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
+  // Same guard as `Recents.svelte`: only the request asked LAST may write,
+  // success or failure, and a cleared field counts as a request that is dropped.
+  let asked = 0;
+
+  function onSearchInput(e: Event) {
+    query = (e.currentTarget as HTMLInputElement).value;
+    clearTimeout(debounce);
+    const words = query.trim();
+    const mine = ++asked;
+    if (!words) {
+      found = null;
+      truncated = false;
+      findFailed = false;
+      searchToggled = {};
+      return;
+    }
+    debounce = setTimeout(() => {
+      findInFiles(words)
+        .then((r) => {
+          if (mine !== asked) return;
+          found = r === null ? null : new Map(r.documents.map((d) => [d.documentId, d]));
+          truncated = r?.truncated ?? false;
+          findFailed = false;
+          searchToggled = {};
+        })
+        .catch((err) => {
+          console.error('find_in_files failed', err);
+          if (mine === asked) findFailed = true;
+        });
+    }, DEBOUNCE_MS);
+  }
 
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
+  const searchLabel = $derived.by(() => { void $locale; return t('files_search_label'); });
+  const searchPlaceholder = $derived.by(() => { void $locale; return t('files_search_placeholder'); });
+  const nothingFoundLabel = $derived.by(() => { void $locale; return t('files_nothing_found'); });
+  const truncatedLabel = $derived.by(() => { void $locale; return t('files_truncated'); });
+  const searchFailedLabel = $derived.by(() => { void $locale; return t('files_search_failed'); });
 
   // Ruling P, reversed on purpose: the key is the (root, path) pair, never
   // `documentId` — two roots can hold the same relative path under different
@@ -209,6 +267,15 @@
   const roots = $derived(
     (listing?.roots ?? []).map((root) => ({ root, nodes: buildFolderTree(root.files) })),
   );
+  // What is drawn: under a filter, the matched files with their folders and the
+  // roots that still hold one. `full` is the root's whole tree, which its tick
+  // reads from, so the state shown is the state of everything under it.
+  const shownRoots = $derived.by(() => {
+    const ids = found === null ? null : new Set(found.keys());
+    return roots
+      .map(({ root, nodes }) => ({ root, full: nodes, nodes: ids === null ? nodes : filterTree(nodes, ids) }))
+      .filter((r) => ids === null || r.nodes.length > 0);
+  });
   const isEmpty = $derived(listing !== null && listing.roots.length === 0);
 
   // NUL as the separator because no path component can contain one, so no two
@@ -247,6 +314,8 @@
 
   function isOpen(rootId: number, path: string) {
     const k = key(rootId, path);
+    // Under a filter every folder on the way to a match starts open.
+    if (found !== null) return k in searchToggled ? searchToggled[k] : true;
     // The root row (path '') starts EXPANDED (owner, 2026-10-20): collapsing
     // is the person's option, never the default.
     return k in toggled ? toggled[k] : path === '' || openByDefault.has(k);
@@ -254,6 +323,10 @@
 
   function toggle(rootId: number, path: string) {
     const k = key(rootId, path);
+    if (found !== null) {
+      searchToggled = { ...searchToggled, [k]: !isOpen(rootId, path) };
+      return;
+    }
     toggled = { ...toggled, [k]: !isOpen(rootId, path) };
     saveOpen(toggled);
   }
@@ -339,6 +412,13 @@
   function searchIn(name: string) {
     void $locale;
     return t('tree_search_in', { name });
+  }
+
+  // The passage a found file matched; nothing at all without a filter, so the
+  // pick has no `focus` key rather than an undefined one.
+  function focusOf(documentId: string): { focus?: DocumentFocus } {
+    const hit = found?.get(documentId);
+    return hit ? { focus: { chunkId: hit.chunkId, ord: hit.ord, text: hit.text } } : {};
   }
 
   function parentOf(path: string) {
@@ -471,7 +551,7 @@
               aria-expanded={isOpen(rootId, node.path)}
               onclick={() => toggle(rootId, node.path)}
               >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(rootId, node.path))}<span class="label">{node.name}</span></button>
-            {@render check(rootId, node.path, node.name, node.children)}
+            {@render check(rootId, node.path, node.name, node.full ?? node.children)}
           </div>
           {#if isOpen(rootId, node.path)}
             {@render branch(node.children, rootId)}
@@ -488,7 +568,7 @@
             class:unsearched={!ownOn(rootId, parentOf(node.path))}
             data-testid={`tree-file-${node.documentId}`}
             aria-current={key(rootId, node.path) === selectedKey ? 'true' : undefined}
-            onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId })}
+            onclick={() => onPick({ rootId, relativePath: node.path, documentId: node.documentId, ...focusOf(node.documentId) })}
             >{@render fileIcon()}<span class="label">{node.name}</span></button>
         {/if}
       </li>
@@ -498,13 +578,30 @@
 
 <svelte:window onfocus={load} />
 
+<!-- Pinned to the top of the pane's scroller, so it stays while the tree scrolls. -->
+<div class="tree-search">
+  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
+    stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+    <circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4 14 14"/>
+  </svg>
+  <input type="search" data-testid="tree-search" aria-label={searchLabel}
+    placeholder={searchPlaceholder} value={query} oninput={onSearchInput} />
+</div>
+{#if findFailed}
+  <p class="tree-note" role="alert" data-testid="tree-search-failed">{searchFailedLabel}</p>
+{:else if found !== null && shownRoots.length === 0}
+  <p class="tree-note" data-testid="tree-nothing-found">{nothingFoundLabel}</p>
+{:else if found !== null && truncated}
+  <p class="tree-note" data-testid="tree-truncated">{truncatedLabel}</p>
+{/if}
+
 <div class="tree" data-testid="tree-body" bind:this={treeEl}>
   {#if failed}
     <p data-testid="tree-failed">{failedLabel}</p>
   {:else if isEmpty}
     <p data-testid="tree-empty">{emptyLabel}</p>
   {:else}
-    {#each roots as { root, nodes } (root.rootId)}
+    {#each shownRoots as { root, nodes, full } (root.rootId)}
       <section data-testid={`tree-root-${root.rootId}`}>
         <ul>
           <li>
@@ -518,7 +615,7 @@
                 aria-expanded={isOpen(root.rootId, '')}
                 onclick={() => toggle(root.rootId, '')}
                 >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(root.rootId, ''))}<span class="label">{root.name}</span></button>
-              {@render check(root.rootId, '', root.name, nodes)}
+              {@render check(root.rootId, '', root.name, full)}
             </div>
           </li>
         </ul>

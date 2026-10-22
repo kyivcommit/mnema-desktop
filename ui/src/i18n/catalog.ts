@@ -40,6 +40,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_empty' | 'tree_failed' | 'tree_search_in'
+  | 'files_search_placeholder' | 'files_search_label' | 'files_nothing_found' | 'files_truncated' | 'files_search_failed'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'history_search_placeholder' | 'history_search_label' | 'history_nothing_found'
   | 'history_group_today' | 'history_group_yesterday' | 'history_group_week' | 'history_group_earlier'
@@ -390,6 +391,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.',
     tree_search_in: 'Шукати в «{name}»',
+    files_search_placeholder: 'Пошук слів у файлах',
+    files_search_label: 'Пошук слів у файлах',
+    files_nothing_found: 'Нічого не знайдено',
+    files_truncated: 'Показано перші 500 файлів',
+    files_search_failed: 'Пошук не вдався.',
     history_empty: 'Тут з’являться ваші запити',
     history_remove: 'Видалити з історії: {query}',
     history_unreadable: 'Цей запис не відкривається.',
@@ -1276,6 +1282,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.',
     tree_search_in: 'Search in “{name}”',
+    files_search_placeholder: 'Find words in files',
+    files_search_label: 'Find words in files',
+    files_nothing_found: 'Nothing found',
+    files_truncated: 'Showing the first 500 files',
+    files_search_failed: 'The search failed.',
     history_empty: 'Your questions will appear here',
     history_remove: 'Remove from history: {query}',
     history_unreadable: 'This entry cannot be opened.',
