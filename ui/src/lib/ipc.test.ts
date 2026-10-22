@@ -88,6 +88,16 @@ test('listHistory invokes list_history with the filter it is given', async () =>
   ]);
 });
 
+test('findInFiles invokes find_in_files with the query it is given', async () => {
+  invoke.mockResolvedValue(null);
+
+  await ipc.findInFiles('x');
+
+  expect(invoke.mock.calls.filter((c) => c[0] === 'find_in_files')).toEqual([
+    ['find_in_files', { query: 'x' }],
+  ]);
+});
+
 test('historyEntry and deleteHistoryEntry send the id they are given, under the name the command takes', async () => {
   invoke.mockResolvedValue(undefined);
 

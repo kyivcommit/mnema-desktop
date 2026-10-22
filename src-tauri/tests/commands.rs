@@ -461,6 +461,95 @@ fn searching_before_the_index_is_open_says_so() {
 }
 
 #[test]
+fn finding_in_files_before_the_index_is_open_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let error = call(&webview, "find_in_files", json!({ "query": "договір" }))
+        .expect_err("a find with no index behind it must not succeed");
+
+    assert_eq!(error, json!("the index is not open"));
+}
+
+/// One indexed file with one chunk of `text`, written the way the search test
+/// below does — through a connection of its own, as a running job would.
+fn write_found_file(path: &std::path::Path, id: &str, text: &str) {
+    let writer = mnema_index::open(path).unwrap();
+    let doc = writer
+        .insert_document(id, "text/plain", 1, SourceKind::Document)
+        .unwrap();
+    let page = writer.insert_page(&doc, 1, "native:txt", None).unwrap();
+    let block = writer
+        .insert_block(
+            page,
+            &Block {
+                block_type: BlockType::Paragraph,
+                reading_order: 0,
+                language: None,
+                text: text.to_string(),
+                line_start: Some(1),
+                line_end: Some(1),
+            },
+        )
+        .unwrap();
+    writer
+        .insert_chunk(
+            &doc,
+            0,
+            text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.chars().count() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    writer
+        .set_document_status(&doc, mnema_index::DocumentStatus::Indexed)
+        .unwrap();
+}
+
+#[test]
+fn find_in_files_finds_a_prefix_through_the_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let id = "e".repeat(64);
+    let text = "акт звірки взаєморозрахунків";
+    write_found_file(&path, &id, text);
+
+    let found = call(&webview, "find_in_files", json!({ "query": "взаємо" }))
+        .expect("find_in_files was rejected");
+
+    assert_eq!(found["documents"][0]["documentId"], json!(id));
+    assert_eq!(found["documents"][0]["text"], json!(text));
+    assert_eq!(found["documents"].as_array().unwrap().len(), 1);
+    assert_eq!(found["truncated"], json!(false));
+}
+
+#[test]
+fn find_in_files_with_no_terms_answers_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+
+    let found = call(&webview, "find_in_files", json!({ "query": "—" }))
+        .expect("a query with no terms is an answer, not an error");
+
+    assert_eq!(found, json!(null));
+}
+
+#[test]
 fn a_search_through_the_ipc_finds_what_another_connection_wrote() {
     // The point of the shell is two connections on one file: this test writes
     // through one and searches through the other, which is the arrangement a

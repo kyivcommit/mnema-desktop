@@ -232,10 +232,18 @@ export type DocumentView =
 // recorded: a refusal, a failed chat call, or a write that failed.
 export type AskReply = { answer: AskAnswer; historyId: number | null };
 
+// What `find_in_files` answers with (`bridge.rs` `FoundInFiles`): the files a word
+// search matched, best first, each with the chunk that matched it best. `truncated`
+// when more files matched than the backend returns.
+export type FoundInFile = { documentId: string; chunkId: number; ord: number; text: string };
+export type FoundInFiles = { documents: FoundInFile[]; truncated: boolean };
+
 // Typed invoke wrappers. A rejected command rejects the promise with the
 // backend `Error`'s Display string (error.rs:407-411) — callers branch on the
 // command, not on parsed error shape.
 export const ask = (query: string) => invoke<AskReply>('ask', { query });
+// Null when the query holds no word (only punctuation): show the whole tree, not none.
+export const findInFiles = (query: string) => invoke<FoundInFiles | null>('find_in_files', { query });
 export const listTree = () => invoke<TreeListing>('list_tree');
 export const setFolderSearched = (rootId: number, folderPath: string, searched: boolean) =>
   invoke<void>('set_folder_searched', { rootId, folderPath, searched });
