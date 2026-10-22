@@ -179,13 +179,12 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* A file outside the search stays openable; it only reads as set aside. Italic serif
    (the bundled italic), not a paler colour: --ink-faint is under the contrast floor. */
 .tree li > button.file-row.unsearched:not([aria-current="true"]) { font-family: var(--serif); font-weight: 400; font-style: italic; }
-.tree [aria-current="true"] { background: var(--cite-wash); border-color: var(--cite-line); color: var(--ink); }
+.tree [aria-current="true"] { background: var(--select); border-color: transparent; color: var(--on-select); }
 /* §4: the conversations. The header is pinned above the body, which is the
    scroll container; a row is the question with one clipped line of its answer,
    and when it was asked is said once by the group's label. The × shows on hover
-   and on focus. The active row is `--select`, not the file tree's
-   `--cite-wash`: "the conversation on screen" and "the file in the tree" are
-   different selections (owner's mockup, 2026-10-21). */
+   and on focus. The active row is `--select`, the same fill as the open file
+   in the tree (owner, 2026-10-22). */
 /* One rule for both panels' title rows. The height is explicit so the
    conversations row (its 26px button + padding) and the documents row (no
    button) are the same 30px, and the two search fields sit level. */

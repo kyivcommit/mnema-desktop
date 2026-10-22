@@ -150,17 +150,18 @@ test('real tree marks the current file while leaving neighbours plain', async ()
   const other = screen.getByTestId('tree-file-doc-2');
   expect(selected.getAttribute('aria-current')).toBe('true');
   expect(other.hasAttribute('aria-current')).toBe(false);
-  expect(getComputedStyle(selected).background).toBe('var(--cite-wash)');
-  expect(getComputedStyle(selected).borderColor).toBe('var(--cite-line)');
-  expect(getComputedStyle(other).background).not.toBe('var(--cite-wash)');
-  expect(getComputedStyle(other).borderColor).not.toBe('var(--cite-line)');
+  // The same selection as the conversation on screen (owner, 2026-10-22):
+  // `--select` with its own ink, and no outline the history row lacks.
+  expect(getComputedStyle(selected).background).toBe('var(--select)');
+  expect(getComputedStyle(selected).borderColor).toBe('transparent');
+  expect(getComputedStyle(other).background).not.toBe('var(--select)');
   // A file reads as secondary to a folder: same weight, `--ink-soft` — while
   // the open row above is lifted back to `--ink`.
   expect(getComputedStyle(other).color).toBe('var(--ink-soft)');
   expect(getComputedStyle(other).fontWeight).toBe('400');
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).color).toBe('var(--ink)');
   expect(getComputedStyle(screen.getByTestId('tree-folder-archive')).fontWeight).toBe('500');
-  expect(getComputedStyle(selected).color).toBe('var(--ink)');
+  expect(getComputedStyle(selected).color).toBe('var(--on-select)');
   // jsdom ranks specificity by source order, so the computed colours above
   // cannot prove the open row outranks the file row. The selector is read from
   // the sheet instead: the file-row rule must exclude the current row, or a
@@ -170,8 +171,8 @@ test('real tree marks the current file while leaving neighbours plain', async ()
   expect(css).toMatch(/\.tree li > button\.file-row:not\(\[aria-current="true"\]\)\s*\{/);
 });
 
-// §4: the conversation on screen is `--select`, not the file tree's
-// `--cite-wash` — the two selection meanings stay apart on screen.
+// §4: the conversation on screen is `--select` — the same fill as the open
+// file in the tree (owner, 2026-10-22).
 test('real recents marks the conversation on screen with --select', async () => {
   render(Recents, { activeId: 1, gen: 0, onOpen: () => {} });
   const on = await screen.findByTestId('recents-row-1');
