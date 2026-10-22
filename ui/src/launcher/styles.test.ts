@@ -93,6 +93,20 @@ test('real launcher places the three areas with the tree inside the right one', 
   expect(screen.getAllByTestId('turn')).toHaveLength(1);
 });
 
+// The find-in-files field never scrolls, in either direction: the nearest
+// scrolling ancestor of the tree must not contain it (`.tree` is as wide as its
+// deepest row, so a field inside that scroller would slide out sideways).
+test('real tree: the search field sits outside the element that scrolls the tree', async () => {
+  render(Launcher);
+  const body = await screen.findByTestId('tree-body');
+  const scrolls = (el: Element) => /auto|scroll/.test(getComputedStyle(el).overflow);
+  let scroller: Element | null = body.parentElement;
+  while (scroller && !scrolls(scroller)) scroller = scroller.parentElement;
+  expect(scroller).not.toBeNull();
+  expect(scroller!.contains(body)).toBe(true);
+  expect(scroller!.contains(screen.getByRole('searchbox', { name: 'Find words in files' }))).toBe(false);
+});
+
 test('real tree marks the current file while leaving neighbours plain', async () => {
   render(Tree, { selected: { rootId: 1, relativePath: 'notes/a.md' }, onPick: () => {} });
   const selected = await screen.findByTestId('tree-file-doc-1');

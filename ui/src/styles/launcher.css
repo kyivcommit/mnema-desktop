@@ -106,10 +106,13 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[aria-disabled="true"] { cursor: default; }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 
-/* Find in files: pinned to the top of `.pane-body`, so it stays while the tree
-   scrolls. The same recessed field as the conversations search (`.recents-search`)
-   and a surface behind it, so rows do not show through. */
-.tree-search { position: sticky; top: 0; z-index: 2; padding: 0 0 6px; background: var(--surface); }
+/* Find in files: the pane's column. The field is a fixed row above `.tree-scroll`,
+   the only thing that scrolls, so it stays put in both directions. `.pane-body`
+   around it keeps its own scroller but has nothing to scroll: the column is
+   exactly its height. */
+.tree-column { height: 100%; display: flex; flex-direction: column; }
+.tree-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.tree-search { position: relative; flex: none; padding: 0 0 6px; background: var(--surface); }
 .tree-search svg {
   position: absolute; left: 9px; top: 17px; transform: translateY(-50%);
   color: var(--ink-soft); pointer-events: none;

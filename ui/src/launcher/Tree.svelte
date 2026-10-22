@@ -481,7 +481,7 @@
   });
 
   // The row of a NEW selection is scrolled into view in the pane's own scroller
-  // (`.pane-body`), once per selection key. `await tick()` and not a bare
+  // (`.tree-scroll`, found by `scrollIntoView`), once per selection key. `await tick()` and not a bare
   // effect: the folders the selection opens are written by the effect above and
   // reach the DOM a flush later. The effect reads `listing` and `toggled`, so a
   // selection that lands before its row exists is retried when it appears; the
@@ -578,7 +578,10 @@
 
 <svelte:window onfocus={load} />
 
-<!-- Pinned to the top of the pane's scroller, so it stays while the tree scrolls. -->
+<!-- A column that fills the pane: the field is outside the scroller below it,
+     so it moves neither with the tree's vertical scroll nor its sideways one
+     (`.tree` is as wide as its deepest row). -->
+<div class="tree-column">
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
@@ -595,6 +598,7 @@
   <p class="tree-note" data-testid="tree-truncated">{truncatedLabel}</p>
 {/if}
 
+<div class="tree-scroll">
 <div class="tree" data-testid="tree-body" bind:this={treeEl}>
   {#if failed}
     <p data-testid="tree-failed">{failedLabel}</p>
@@ -628,4 +632,6 @@
       </section>
     {/each}
   {/if}
+</div>
+</div>
 </div>
