@@ -947,6 +947,24 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
   }
 });
 
+// Owner, 2026-10-22: the status icon follows who serves the CHAT role — a
+// laptop for a local model, the cloud otherwise — whatever serves embedding.
+test('the status icon is a laptop under a local chat model and the cloud under a remote one', async () => {
+  // No OpenRouter key: an OpenRouter embed role is not ready, so the status
+  // (and its label) speaks for embedding — the icon still follows the chat.
+  for (const [chat, embed, icon] of [['mnema', 'openRouter', 'laptop'], ['openRouter', 'mnema', 'cloud']]) {
+    mockBackend(undefined);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+      cmd === 'model_settings' ? Promise.resolve({ ...SETTINGS_READY, key: { kind: 'absent' }, roles: { embed, chat }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: true } }) : base(cmd, ...a));
+    render(Launcher);
+    const b = await screen.findByTestId('provider-cloud');
+    await waitFor(() => expect(b.dataset.status, chat).toBe('notConfigured')); // the status is the OpenRouter role's
+    expect(b.querySelector('svg')!.dataset.icon, chat).toBe(icon);
+    cleanup();
+  }
+});
+
 // Owner, live run 2026-10-08: a second Enter on the emptied line put a hint
 // under a visible answer. Owner ruling: no hint at all; Enter on an empty line
 // does nothing in any state.

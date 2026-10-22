@@ -107,3 +107,21 @@ test('the status button names the provider in use', () => {
   setLocale('uk');
   expect(name({ provider: 'mnema' })[0]).toContain('Mnema');
 });
+
+// Owner, 2026-10-22: a local chat model draws a laptop, a remote one the cloud;
+// the label is the same either way.
+test('a local chat model draws a laptop and keeps the label', () => {
+  setLocale('en');
+  const drawn = (local: boolean) => {
+    const { unmount } = render(Toolbar, props({ local }));
+    const b = screen.getByTestId('provider-cloud');
+    const out = { label: b.getAttribute('aria-label'), rect: b.querySelectorAll('svg rect').length, icon: b.querySelector('svg')!.dataset.icon };
+    unmount();
+    return out;
+  };
+  const cloud = drawn(false);
+  const laptop = drawn(true);
+  expect(cloud).toMatchObject({ rect: 0, icon: 'cloud' });
+  expect(laptop).toMatchObject({ rect: 1, icon: 'laptop' });
+  expect(laptop.label).toBe(cloud.label);
+});

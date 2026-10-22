@@ -85,6 +85,8 @@
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
+  // Who serves the chat role: a local model draws a laptop instead of the cloud.
+  let chatProvider = $state<ProviderChoice | null>(null);
   // §2: the three toggles and the three widths, remembered across runs. Shell
   // clamps them to the window and owns the splitters.
   let panels = $state<PanelState>(loadLayout());
@@ -123,6 +125,7 @@
         const role: keyof RoleStatuses = s.chat.kind !== 'ok' || s.embed.kind === 'ok' ? 'chat' : 'embed';
         status = s[role];
         statusProvider = roles?.[role] ?? 'openRouter';
+        chatProvider = roles?.chat ?? null;
       })
       .catch((e) => console.error('provider_status failed', e));
   }
@@ -297,6 +300,6 @@
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
       {newChatLabel}
     </button>
-    <Toolbar {status} provider={statusProvider} />
+    <Toolbar {status} provider={statusProvider} local={chatProvider === 'mnema'} />
   {/snippet}
 </Shell>
