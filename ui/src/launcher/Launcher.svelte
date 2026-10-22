@@ -42,10 +42,11 @@
   // every row that names it.
   let selected = $state<TreeSelection | null>(null);
 
-  // A click in the tree opens the file at its start: no highlight, no scroll.
+  // A click in the tree opens the file at its start: no highlight, no scroll —
+  // unless the word search found it, and then at the passage that matched.
   function openAtStart(pick: TreePick) {
     openFile = { documentId: pick.documentId, rootId: pick.rootId, relativePath: pick.relativePath };
-    openFocus = null;
+    openFocus = pick.focus ?? null;
     selected = { rootId: pick.rootId, relativePath: pick.relativePath };
   }
 
