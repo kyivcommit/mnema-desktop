@@ -90,3 +90,35 @@ test('a_question_in_flight_is_drawn_with_dots_and_scrolled_to', async () => {
     delete (proto as { scrollHeight?: number }).scrollHeight;
   }
 });
+
+// Owner, 2026-10-22: the answer that arrives puts its question at the top of
+// the view. Both directions: an ask that drew nothing new does not move it.
+test('an_arrived_answer_scrolls_its_question_to_the_top', async () => {
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  const second = structuredClone(answer);
+  const writes: number[] = [];
+  const proto = HTMLElement.prototype;
+  const rect = Element.prototype.getBoundingClientRect;
+  Object.defineProperty(proto, 'scrollTop', { configurable: true, get: () => 100, set: (v: number) => { writes.push(v); } });
+  Object.defineProperty(proto, 'scrollHeight', { configurable: true, get: () => 900 });
+  // The scroller sits at 50; the newest exchange starts 400 below the page top.
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    const top = this.getAttribute('data-testid') === 'transcript' ? 50 : 400;
+    return { top } as DOMRect;
+  };
+  try {
+    const first = [{ query: 'how much?', answer }];
+    const { rerender } = render(Transcript, { turns: first, state: { kind: 'inFlight', query: 'and then?' } });
+    await rerender({ turns: [...first, { query: 'and then?', answer: second }], state: { kind: 'generated', query: 'and then?', answer: second } });
+    expect(writes.at(-1)).toBe(100 + 400 - 50);
+
+    writes.length = 0;
+    await rerender({ turns: [...first, { query: 'and then?', answer: second }], state: { kind: 'inFlight', query: 'refused?' } });
+    await rerender({ turns: [...first, { query: 'and then?', answer: second }], state: { kind: 'idle' } });
+    expect(writes).toEqual([900]); // the jump down on send, and nothing after
+  } finally {
+    delete (proto as { scrollTop?: number }).scrollTop;
+    delete (proto as { scrollHeight?: number }).scrollHeight;
+    Element.prototype.getBoundingClientRect = rect;
+  }
+});

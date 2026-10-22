@@ -35,8 +35,24 @@
   // are decoration; the composer's `aria-busy` says the same to a screen reader.
   const pending = $derived(state.kind === 'inFlight' ? state.query : null);
   let scroller: HTMLDivElement | null = null; // plain: `$state` clashes with the `state` prop
+  // When the answer arrives, its question goes to the top of the view, so it
+  // is read from the start (owner, 2026-10-22). Only an ask that drew a new
+  // exchange moves the view; one that drew nothing new leaves it be.
+  let drawnBefore: number | null = null;
   $effect(() => {
-    if (pending !== null && scroller) scroller.scrollTop = scroller.scrollHeight;
+    const count = items.length;
+    if (!scroller) return;
+    if (pending !== null) {
+      drawnBefore ??= count;
+      scroller.scrollTop = scroller.scrollHeight;
+      return;
+    }
+    if (drawnBefore === null) return;
+    const grew = count > drawnBefore;
+    drawnBefore = null;
+    const last = scroller.lastElementChild;
+    if (!grew || !last) return;
+    scroller.scrollTop += last.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
   });
 </script>
 
