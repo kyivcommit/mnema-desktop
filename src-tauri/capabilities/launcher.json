@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "launcher",
-  "description": "The launcher is a normal window now (§1): it dismisses nothing by itself — the close hides it to the tray from Rust — and showing it is Rust-side too (⌥Space, the tray, single-instance), so no capability is needed for either. Listening stays for the `theme-changed` broadcast. Dragging by the search panel (D155) needs start-dragging; double-click maximise is deliberately NOT granted.",
+  "description": "The launcher is a normal window now (§1): it dismisses nothing by itself — the close hides it to the tray from Rust — and showing it is Rust-side too (⌥Space, the tray, single-instance), so no capability is needed for either. Listening stays for the `theme-changed` broadcast. Dragging by the search panel (D155) needs start-dragging; double-click maximise is deliberately NOT granted. The Documents pane's «+» asks the OS for a folder to watch (D182), so the folder picker is granted here as in the settings window.",
   "windows": ["launcher"],
-  "permissions": ["core:event:allow-listen", "core:window:allow-start-dragging"]
+  "permissions": ["core:event:allow-listen", "core:window:allow-start-dragging", "dialog:allow-open"]
 }

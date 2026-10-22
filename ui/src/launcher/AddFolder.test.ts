@@ -329,3 +329,12 @@ test('a queued start refused as the blocker ends starts once and shows nothing',
   expect(calls('start_scan_job')).toHaveLength(3);
   expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
 });
+
+// Live run, D182: a refused folder dialog must say so, not vanish.
+test('a dialog that fails says so', async () => {
+  open.mockRejectedValue('dialog.open not allowed');
+  render(AddFolder, { onChanged });
+  await press();
+  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('dialog.open not allowed'));
+  expect(calls('add_watched_folder')).toHaveLength(0);
+});

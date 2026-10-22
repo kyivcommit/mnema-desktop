@@ -103,7 +103,13 @@
     busy = true;
     error = null;
     try {
-      const path = await open({ directory: true });
+      let path: string | null;
+      try {
+        path = await open({ directory: true });
+      } catch (e) {
+        error = message(e);
+        return;
+      }
       if (path === null) return;
       try {
         await addWatchedFolder(path);
