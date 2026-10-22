@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
-import { beforeEach, afterEach, expect, test, vi } from 'vitest';
+import { beforeEach, afterEach, expect, onTestFinished, test, vi } from 'vitest';
 import Launcher from './Launcher.svelte';
 import Shell from './Shell.svelte';
 import Tree from './Tree.svelte';
@@ -316,4 +316,21 @@ test('the history remove button takes no width until its row is hovered or focus
   expect(css).toMatch(/\.history-remove\s*\{\s*[^}]*width:\s*0\b/);
   expect(css).toMatch(/\.history-row:hover \.history-remove[^{]*\{[^}]*width:\s*22px/);
   expect(css).toMatch(/\.history-row:focus-within \.history-remove[^{]*\{[^}]*width:\s*22px/);
+});
+
+// Owner, 2026-10-22: the sidebar and the header carry the same pencil; only one
+// is on screen. Both directions: the header's shows once the sidebar is shut.
+test('real CSS: the header pencil hides while the sidebar is open', async () => {
+  // jsdom's 1024 is too narrow for the sidebar beside the transcript; a wide
+  // window shows all three areas (`Launcher.test.ts` lays out in 1440 too).
+  const width = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  onTestFinished(() => { if (width) Object.defineProperty(window, 'innerWidth', width); });
+  render(Launcher);
+  const pencil = screen.getByTestId('new-chat');
+  expect(screen.getByTestId('recents-new')).toBeTruthy();
+  expect(getComputedStyle(pencil).display).toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-left'));
+  expect(screen.getByTestId('shell').dataset.left).toBe('false');
+  expect(getComputedStyle(pencil).display).not.toBe('none');
 });

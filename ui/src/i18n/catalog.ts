@@ -33,7 +33,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'loc_page' | 'loc_line_one' | 'loc_line_many'
   | 'loc_row_one' | 'loc_row_many' | 'loc_sheet'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
-  | 'composer_send'
+  | 'composer_send' | 'answer_pending'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'toggle_recents' | 'toggle_files' | 'tree_title' | 'toggle_tree' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
@@ -51,7 +51,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
-  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_chat' | 'new_conversation'
+  | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
   | 'settings_folders_expand' | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
@@ -358,6 +358,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // §5: the send button's own name (its visible mark is «↵»), and the one line
     // under the field that says what the two Enter keys do.
     composer_send: 'Надіслати',
+    answer_pending: 'Відповідь пишеться…',
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
@@ -457,7 +458,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // Task 14.2: a load in flight, not an error; it goes on in the background.
     no_answer_local_loading: 'Локальні моделі ще завантажуються. Спробуйте за хвилину.',
     no_answer_no_tool_use: 'Ця модель не підтримує продовження розмови. Виберіть іншу або вимкніть «Підтримку інструментів».',
-    new_chat: 'Новий',
     // The panel's compose button is the same action as the centre «New»; a
     // screen reader listing buttons would otherwise hear the name twice.
     new_conversation: 'Нова бесіда',
@@ -1253,6 +1253,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     loc_row_one: 'row', loc_row_many: 'rows', loc_sheet: 'sheet',
     search_placeholder: 'Query…',
     composer_send: 'Send',
+    answer_pending: 'Writing the answer…',
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
@@ -1319,7 +1320,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     no_answer_failed: 'The provider returned an error ({reason}).',
     no_answer_local_loading: 'The local models are still loading. Try again in a minute.',
     no_answer_no_tool_use: 'This model cannot continue a conversation. Choose another one or turn off Tool support.',
-    new_chat: 'New',
     new_conversation: 'New conversation',
     recent_now: 'just now',
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',

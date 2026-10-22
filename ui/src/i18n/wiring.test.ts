@@ -40,7 +40,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 // locales AND across whatever cards render, which the accessible name (the very
 // thing under test) cannot be.
 const settingsLabel = (container: HTMLElement) =>
-  container.querySelector('[data-testid="new-chat"]')!.textContent!.trim();
+  container.querySelector('[data-testid="new-chat"]')!.getAttribute('aria-label');
 
 // `locale` is a module-level store shared by every test here, and the two label
 // tests switch it. An in-test restore is skipped when an assertion fails first,
@@ -58,13 +58,13 @@ describe('i18n wiring', () => {
     await tick();
     expect(input.value).toBe('draft query'); // no remount
     // the switch actually took effect, so "no remount" isn't just "nothing happened"
-    expect(settingsLabel(container)).toBe('Новий');
+    expect(settingsLabel(container)).toBe('Нова бесіда');
   });
 
   it('switches the pin label UK↔EN (spec §7)', async () => {
     const { container } = render(Launcher);
-    setLocale('uk'); await tick(); expect(settingsLabel(container)).toBe('Новий');
-    setLocale('en'); await tick(); expect(settingsLabel(container)).toBe('New');
+    setLocale('uk'); await tick(); expect(settingsLabel(container)).toBe('Нова бесіда');
+    setLocale('en'); await tick(); expect(settingsLabel(container)).toBe('New conversation');
   });
 
   it('syncs document.documentElement.lang to the locale', () => {

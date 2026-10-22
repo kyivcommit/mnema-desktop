@@ -85,13 +85,17 @@
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
+  // Who serves the chat role: a local model draws a laptop instead of the cloud.
+  let chatProvider = $state<ProviderChoice | null>(null);
   // §2: the three toggles and the three widths, remembered across runs. Shell
   // clamps them to the window and owns the splitters.
   let panels = $state<PanelState>(loadLayout());
 
   // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
-  const dialogue = $derived(chatOn && statusProvider !== 'mnema');
-  const newChatLabel = $derived.by(() => { void $locale; return t('new_chat'); });
+  // The CHAT role decides, as `dialogue_enabled` does; `statusProvider` may speak
+  // for embedding. Until settings are read, the status's provider stands in.
+  const dialogue = $derived(chatOn && (chatProvider ?? statusProvider) !== 'mnema');
+  const newChatLabel = $derived.by(() => { void $locale; return t('new_conversation'); });
 
   // Read on mount and again whenever the window gains focus: the key and the
   // model are changed in another window, and the launcher is hidden, not
@@ -123,6 +127,7 @@
         const role: keyof RoleStatuses = s.chat.kind !== 'ok' || s.embed.kind === 'ok' ? 'chat' : 'embed';
         status = s[role];
         statusProvider = roles?.[role] ?? 'openRouter';
+        chatProvider = roles?.chat ?? null;
       })
       .catch((e) => console.error('provider_status failed', e));
   }
@@ -187,6 +192,9 @@
     if (!check.ok) { launcherState = { kind: 'error', reason: check.reason }; return; }
     if (!dialogue) turns = []; // one turn at a time: the answer on screen is replaced
     launcherState = { kind: 'inFlight', query: check.query };
+    // The question leaves the line at once and waits in the transcript, so the
+    // Enter is seen to have landed (owner, 2026-10-22).
+    query = '';
     try {
       const reply = await inSession(() => ask(check.query));
       const answer = reply.answer;
@@ -204,19 +212,19 @@
       // the list may have a new row. A refusal records nothing, so it does not
       // reread it.
       if (answer.kind === 'generated' || answer.kind === 'citationsOnly') historyGen += 1;
-      // §7: line clears on ready — but only if it still holds the submitted
-      // query. A draft typed while the ask was in flight is kept, not wiped
-      // (Codex #3). D171: an answer the provider failed to give keeps the
-      // query too, so asking again is one Enter away — the remedy for a lost
-      // network or a silent model, and harmless for a refused key.
+      // D171: an answer the provider failed to give puts the query back in the
+      // line, so asking again is one Enter away — the remedy for a lost network
+      // or a silent model, and harmless for a refused key. A draft typed while
+      // the ask was in flight is kept, not overwritten (Codex #3).
       const failed = answer.kind === 'citationsOnly' && answer.why.kind !== 'notAsked';
-      if (query === raw && !failed) query = '';
+      if (failed && query === '') query = raw;
       // The provider just failed this ask: the cloud asks again rather than
       // keep showing a cached "ok" beside the failure (D171 review, finding 2;
       // the backend dropped that cache for a network failure).
       if (failed) refreshProvider();
     } catch (e) {
-      console.error('ask failed', e); // query stays in the line for a retry
+      console.error('ask failed', e);
+      if (query === '') query = raw; // back in the line for a retry
       launcherState = { kind: 'error', reason: 'askFailed' };
     }
   }
@@ -290,10 +298,12 @@
     {/if}
   {/snippet}
   {#snippet tools()}
-    <button type="button" class="tb new-chat" data-testid="new-chat" disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
-      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5.2v5.6M5.2 8h5.6"/></svg>
-      {newChatLabel}
+    <!-- The sidebar's own pencil, the same action: shown only while the
+         sidebar is shut (`launcher.css`), so one of the two is ever on screen. -->
+    <button type="button" class="tb new-chat" data-testid="new-chat" aria-label={newChatLabel} title={newChatLabel}
+      disabled={launcherState.kind === 'inFlight'} onclick={startNewChat}>
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.9 2.6a1.3 1.3 0 0 1 1.9 0l.6.6a1.3 1.3 0 0 1 0 1.9L6.3 12.2l-3 .7.7-3z"/></svg>
     </button>
-    <Toolbar {status} provider={statusProvider} />
+    <Toolbar {status} provider={statusProvider} local={chatProvider === 'mnema'} />
   {/snippet}
 </Shell>

@@ -37,19 +37,19 @@ test('every button has a non-empty title equal to its aria-label, in both langua
   expect(seen[0]).not.toEqual(seen[1]);
 });
 
-test('the cloud opens the models section only when nothing is configured', async () => {
-  const { unmount } = render(Toolbar, props({ status: { kind: 'notConfigured', missing: 'key' } }));
-  await fireEvent.click(screen.getByTestId('provider-cloud'));
-  expect(openSettings).toHaveBeenCalledTimes(1);
-  expect(openSettings).toHaveBeenCalledWith('models');
-  unmount();
-  openSettings.mockClear();
-  for (const status of [{ kind: 'unreachable', reason: 'timeout' }, OK]) {
-    const r = render(Toolbar, props({ status }));
-    await fireEvent.click(screen.getByTestId('provider-cloud'));
-    r.unmount();
+// Owner, 2026-10-22: every state opens the models section, under a cloud or a laptop.
+test('the status button opens the models section in every state', async () => {
+  const states: ProviderStatus[] = [{ kind: 'notConfigured', missing: 'key' }, { kind: 'unreachable', reason: 'timeout' }, OK];
+  for (const status of states) {
+    for (const local of [false, true]) {
+      const r = render(Toolbar, props({ status, local }));
+      const b = screen.getByTestId('provider-cloud');
+      expect(b.hasAttribute('aria-disabled'), status.kind).toBe(false);
+      await fireEvent.click(b);
+      r.unmount();
+    }
   }
-  expect(openSettings).not.toHaveBeenCalled();
+  expect(openSettings.mock.calls).toEqual(Array(states.length * 2).fill(['models']));
 });
 
 test('the cloud title says what is missing, and why it is unreachable', () => {
@@ -106,4 +106,22 @@ test('the status button names the provider in use', () => {
   expect(name({})[0]).toBe('Connected to OpenRouter');
   setLocale('uk');
   expect(name({ provider: 'mnema' })[0]).toContain('Mnema');
+});
+
+// Owner, 2026-10-22: a local chat model draws a laptop, a remote one the cloud;
+// the label is the same either way.
+test('a local chat model draws a laptop and keeps the label', () => {
+  setLocale('en');
+  const drawn = (local: boolean) => {
+    const { unmount } = render(Toolbar, props({ local }));
+    const b = screen.getByTestId('provider-cloud');
+    const out = { label: b.getAttribute('aria-label'), rect: b.querySelectorAll('svg rect').length, icon: b.querySelector('svg')!.dataset.icon };
+    unmount();
+    return out;
+  };
+  const cloud = drawn(false);
+  const laptop = drawn(true);
+  expect(cloud).toMatchObject({ rect: 0, icon: 'cloud' });
+  expect(laptop).toMatchObject({ rect: 1, icon: 'laptop' });
+  expect(laptop.label).toBe(cloud.label);
 });

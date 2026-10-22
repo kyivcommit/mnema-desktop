@@ -12,9 +12,6 @@ import { setLocale, t } from '../i18n';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const invoke = vi.fn();
-// jsdom has no layout and no scroller: `FilePane` scrolls the cited block into
-// view, and every answer with a citation now opens it.
-Element.prototype.scrollIntoView = vi.fn();
 // What `provider_status` answers; a test swaps it to drive the cloud.
 const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;
@@ -249,6 +246,32 @@ test('a rejected ask is visible and logged, not swallowed', async () => {
   await screen.findByRole('alert');
   expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
   expect(err).toHaveBeenCalled(); // logged, not a silent reset
+  err.mockRestore();
+});
+
+// Owner, 2026-10-22: Enter is seen to land. The line empties at once and the
+// question waits in the transcript; a rejected ask puts it back in the line.
+test('the line empties on Enter and a rejected ask puts the query back', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let rejectAsk!: (e: unknown) => void;
+  const pending = new Promise((_, r) => { rejectAsk = r; });
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === 'model_settings') return Promise.resolve(SETTINGS_READY);
+    if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
+    if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
+    if (cmd === 'list_history') return Promise.resolve([]);
+    if (cmd === 'ask') return pending;
+    return Promise.resolve();
+  });
+  render(Launcher);
+  await submit('wait for me');
+  const box = screen.getByRole('textbox') as HTMLInputElement;
+  expect(box.value).toBe('');
+  expect(screen.getByTestId('pending-turn').textContent).toContain('wait for me');
+  rejectAsk('boom');
+  await screen.findByRole('alert');
+  expect(box.value).toBe('wait for me');
+  expect(screen.queryByTestId('pending-turn')).toBeNull();
   err.mockRestore();
 });
 
@@ -924,6 +947,24 @@ test('under Mnema the status button names Mnema, under OpenRouter it does not', 
   }
 });
 
+// Owner, 2026-10-22: the status icon follows who serves the CHAT role — a
+// laptop for a local model, the cloud otherwise — whatever serves embedding.
+test('the status icon is a laptop under a local chat model and the cloud under a remote one', async () => {
+  // No OpenRouter key: an OpenRouter embed role is not ready, so the status
+  // (and its label) speaks for embedding — the icon still follows the chat.
+  for (const [chat, embed, icon] of [['mnema', 'openRouter', 'laptop'], ['openRouter', 'mnema', 'cloud']]) {
+    mockBackend(undefined);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string, ...a: unknown[]) =>
+      cmd === 'model_settings' ? Promise.resolve({ ...SETTINGS_READY, key: { kind: 'absent' }, roles: { embed, chat }, configured: { openRouter: true, mnemaEmbed: true, mnemaChat: true } }) : base(cmd, ...a));
+    render(Launcher);
+    const b = await screen.findByTestId('provider-cloud');
+    await waitFor(() => expect(b.dataset.status, chat).toBe('notConfigured')); // the status is the OpenRouter role's
+    expect(b.querySelector('svg')!.dataset.icon, chat).toBe(icon);
+    cleanup();
+  }
+});
+
 // Owner, live run 2026-10-08: a second Enter on the emptied line put a hint
 // under a visible answer. Owner ruling: no hint at all; Enter on an empty line
 // does nothing in any state.
@@ -968,11 +1009,16 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; embed?: string; noKey?: boolean; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
-    if (cmd === 'model_settings') return Promise.resolve({ ...SETTINGS_READY, roles: { embed: opts.provider ?? 'openRouter', chat: opts.provider ?? 'openRouter' } });
+    if (cmd === 'model_settings') return Promise.resolve({
+      ...SETTINGS_READY,
+      ...(opts.noKey ? { key: { kind: 'absent' } } : {}),
+      roles: { embed: opts.embed ?? opts.provider ?? 'openRouter', chat: opts.provider ?? 'openRouter' },
+      configured: { openRouter: true, mnemaEmbed: true, mnemaChat: true },
+    });
     if (cmd === 'provider_status') return providerReply().then((s) => ({ embed: s, chat: s }));
     if (cmd === 'list_tree') return Promise.resolve(oneRootTwoFolders);
     if (cmd === 'list_history') return Promise.resolve(entries);
@@ -1322,6 +1368,10 @@ test('under Mnema with the switch on the launcher shows one turn', async () => {
 for (const [name, opts] of [
   ['tool support off', { chatTools: false }],
   ['the Mnema provider', { chatTools: true, provider: 'mnema' }],
+  // The chat is local and ready, and the status speaks for an OpenRouter embed
+  // role with no key: the backend keeps no conversation (`dialogue_enabled`
+  // reads the chat role alone), and neither may the launcher.
+  ['a local chat beside an unset OpenRouter embedding', { chatTools: true, provider: 'mnema', embed: 'openRouter', noKey: true }],
 ] as const) {
   test(`+ New under ${name} clears the screen, the opened file and the tree mark without calling new_chat`, async () => {
     mockRecents({ ...opts, asks: [generated] });
