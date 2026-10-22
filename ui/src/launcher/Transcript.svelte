@@ -1,5 +1,6 @@
 <script lang="ts">
   import Selection from './Selection.svelte';
+  import { locale, t } from '../i18n';
   import type { AskCitation, Hit } from '../lib/ipc';
   import type { LauncherState, Turn } from './state';
 
@@ -32,8 +33,10 @@
 
   // The question in flight is drawn at once, with dots for the answer being
   // written, and scrolled into view: the Enter is seen to have landed. The dots
-  // are decoration; the composer's `aria-busy` says the same to a screen reader.
+  // are decoration; a screen reader hears the live line below, which is always
+  // in the page so its text changing is announced (a busy field is not).
   const pending = $derived(state.kind === 'inFlight' ? state.query : null);
+  const waiting = $derived.by(() => { void $locale; return pending === null ? '' : t('answer_pending'); });
   let scroller: HTMLDivElement | null = null; // plain: `$state` clashes with the `state` prop
   // When the answer arrives, its question goes to the top of the view, so it
   // is read from the start (owner, 2026-10-22). Only an ask that drew a new
@@ -57,7 +60,7 @@
 </script>
 
 <div class="transcript" data-testid="transcript" bind:this={scroller}>
-  {#each items as item (item.answer)}
+  <p class="transcript-live" aria-live="polite" data-testid="answer-pending">{waiting}</p>{#each items as item (item.answer)}
     <div class="exchange" data-testid="turn">
       <Selection answer={item.answer} query={item.query} {onSelected} />
     </div>

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import Transcript from './Transcript.svelte';
+import { setLocale } from '../i18n';
 import { generated } from '../lib/fixtures';
 import type { AskAnswer, AskCitation, Hit } from '../lib/ipc';
 
@@ -135,4 +136,24 @@ test('only_the_newest_exchange_is_at_least_a_view_tall', () => {
   expect(getComputedStyle(first).minHeight).not.toBe('100%');
   expect(getComputedStyle(second).minHeight).not.toBe('100%');
   expect(getComputedStyle(screen.getByTestId('pending-turn')).minHeight).toBe('100%');
+});
+
+// The dots are aria-hidden, and a busy field is not announced: a screen reader
+// hears the wait from a live line. It is the SAME node before, during and after
+// the ask — a live region inserted with its text already in it is not read.
+test('a_question_in_flight_is_announced_by_a_live_line_that_was_already_there', async () => {
+  setLocale('en');
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  const { rerender } = render(Transcript, { turns: [], state: { kind: 'idle' } });
+  const live = screen.getByTestId('answer-pending');
+  expect(live.getAttribute('aria-live')).toBe('polite');
+  expect(live.textContent).toBe('');
+
+  await rerender({ turns: [], state: { kind: 'inFlight', query: 'q' } });
+  expect(screen.getByTestId('answer-pending')).toBe(live);
+  expect(live.textContent).toBe('Writing the answer…');
+
+  await rerender({ turns: [{ query: 'q', answer }], state: { kind: 'generated', query: 'q', answer } });
+  expect(screen.getByTestId('answer-pending')).toBe(live);
+  expect(live.textContent).toBe('');
 });

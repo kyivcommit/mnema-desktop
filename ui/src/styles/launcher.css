@@ -271,6 +271,12 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* The newest exchange is at least a view tall, so its question can be scrolled
    to the top even under a short answer (owner, 2026-10-22). */
 .transcript > .exchange:last-child { min-height: 100%; }
+/* "Writing the answer", for a screen reader only: the dots say it on screen.
+   `.answer-card h3.sr-only`'s recipe; absolute, so it takes no gap in the column. */
+.transcript-live {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 /* The answer being written: three dots that rise in turn under the question. */
 .typing { display: flex; gap: 5px; margin-top: 13px; padding: 6px 0; }
 .typing span {
