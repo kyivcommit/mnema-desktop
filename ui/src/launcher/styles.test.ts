@@ -335,3 +335,21 @@ test('real CSS: the header pencil hides while the sidebar is open', async () => 
   expect(screen.getByTestId('shell').dataset.left).toBe('false');
   expect(getComputedStyle(pencil).display).not.toBe('none');
 });
+
+// The header's «+», like its pencil: shown only while the Documents pane is not
+// on screen — the right panel shut, or open with the tree hidden (owner, 2026-10-22).
+test('real CSS: the header add-folder hides while the Documents pane is open', async () => {
+  const width = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  onTestFinished(() => { if (width) Object.defineProperty(window, 'innerWidth', width); });
+  render(Launcher);
+  const plus = screen.getByTestId('header-add-folder');
+  expect(within(screen.getByTestId('col-tree')).getByTestId('tree-add-folder')).toBeTruthy();
+  expect(getComputedStyle(plus).display).toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(getComputedStyle(plus).display).not.toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(getComputedStyle(plus).display).toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-right'));
+  expect(getComputedStyle(plus).display).not.toBe('none');
+});

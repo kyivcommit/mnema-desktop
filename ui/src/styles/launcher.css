@@ -336,6 +336,14 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* New conversation: the sidebar has the same pencil, so the header's shows only
    while the sidebar is shut (owner, 2026-10-22). */
 main.shell[data-left="true"] .new-chat { display: none; }
+/* The Documents pane's «+» likewise: the header's shows only while that pane is
+   off screen (owner, 2026-10-22). A refused add says so under it, over the page. */
+.header-add-folder { position: relative; display: inline-flex; }
+main.shell[data-docs="true"] .header-add-folder { display: none; }
+.header-add-folder .tree-note {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 5; width: max-content; max-width: 280px;
+  margin: 0; padding: 6px 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
+}
 /* The answer's heading is for a screen reader only: the card's first block is
    the answer itself, and a visible label above it said nothing a person sees. */
 .answer-card h3.sr-only {

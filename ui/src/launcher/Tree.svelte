@@ -74,11 +74,13 @@
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
   // as well, which is what the backend is asked to open.
-  let { selected, onPick, onScopeChange }: {
+  let { selected, onPick, onScopeChange, reload = 0 }: {
     selected: TreeSelection | null;
     onPick: (pick: TreePick) => void;
     // Called when "every root is unticked" changes; the composer says so at once.
     onScopeChange?: (allOff: boolean) => void;
+    // A change re-reads the listing: the launcher header's «+» added a folder.
+    reload?: number;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
@@ -202,6 +204,13 @@
         if (reloadAfter) { reloadAfter = false; load(); }
       });
   }
+
+  let reloadSeen = untrack(() => reload);
+  $effect(() => {
+    if (reload === reloadSeen) return;
+    reloadSeen = reload;
+    untrack(() => load(true));
+  });
 
   onMount(() => {
     load();

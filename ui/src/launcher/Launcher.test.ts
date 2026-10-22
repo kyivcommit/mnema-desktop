@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { READINESS_FIXTURES } from '../lib/fixtures';
 import { roleReady } from './state';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, citationA, citationB, generated, generatedArchived, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
@@ -23,6 +23,8 @@ vi.mock('@tauri-apps/api/core', () => ({
     : invoke(...a),
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
+const open = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open }));
 
 // Answers each command separately. `model_settings` (the launcher's mount
 // seed) always resolves so it never crashes a render; `ask` is what each
@@ -1641,4 +1643,17 @@ test('unticking the last folder says so at once and blocks the ask; ticking one 
   await waitFor(() => expect(line()).toBeNull());
   await submit('anything');
   expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(1);
+});
+
+// The header's «+» is a second door to the same tree: what it adds reaches the
+// Documents pane at once, as the pane's own «+» does.
+test('a folder added from the header reloads the tree', async () => {
+  mockBackend(generated);
+  open.mockResolvedValue('/Users/me/Books');
+  render(Launcher);
+  await waitFor(() => expect(listTreeCalls().length).toBeGreaterThan(0));
+  const before = listTreeCalls().length;
+  await fireEvent.click(within(screen.getByTestId('header-add-folder')).getByRole('button'));
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'add_watched_folder')).toHaveLength(1));
+  await waitFor(() => expect(listTreeCalls().length).toBeGreaterThan(before));
 });
