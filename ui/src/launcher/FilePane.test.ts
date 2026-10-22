@@ -353,6 +353,43 @@ test('the title is the root name and the path, reported through onTitle and not 
   expect(screen.queryByTestId('file-header')).toBeNull();
 });
 
+// A → B while B's read is in flight: A's root must never be joined to B's path.
+// Every reported title is checked, not the last — the mixed one is transient
+// and a later correct title would hide it.
+test('switching files never reports the old root with the new path', async () => {
+  const fileView = (rootName: string, relativePath: string): DocumentView => ({
+    kind: 'file',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath,
+    rootName,
+    freshness: { kind: 'current' },
+  });
+  let answerB!: (v: DocumentView) => void;
+  invoke.mockImplementation((_cmd: string, args: { documentId: string }) =>
+    args.documentId === 'doc-1'
+      ? Promise.resolve(fileView('docs', 'notes/a.md'))
+      : new Promise((resolve) => { answerB = resolve; }));
+  const onTitle = vi.fn();
+  const { rerender } = render(FilePane, {
+    location: { documentId: 'doc-1', rootId: 1, relativePath: 'notes/a.md' },
+    focus: null,
+    onFocusHandled: () => {},
+    onTitle,
+  });
+  await waitFor(() => expect(onTitle).toHaveBeenLastCalledWith('docs/notes/a.md'));
+
+  await rerender({ location: { documentId: 'doc-2', rootId: 2, relativePath: 'other/b.md' } });
+  await waitFor(() => expect(onTitle).toHaveBeenLastCalledWith('other/b.md'));
+  answerB(fileView('work', 'other/b.md'));
+  await waitFor(() => expect(onTitle).toHaveBeenLastCalledWith('work/other/b.md'));
+
+  const titles = onTitle.mock.calls.map(([t]) => t);
+  expect(titles).not.toContain('docs/other/b.md');
+  expect(titles).toEqual(['notes/a.md', 'docs/notes/a.md', 'other/b.md', 'work/other/b.md']);
+});
+
 test('a view that names no root titles the file by its path alone', async () => {
   mockView({
     kind: 'file',
