@@ -149,8 +149,8 @@
 
 <!-- Pinned above the list: the panel's name, and the second way to start a
      conversation. It must not scroll away with fifty rows. -->
-<header class="recents-head">
-  <h2 class="recents-title" data-testid="recents-title">{labels.title}</h2>
+<header class="pane-head">
+  <h2 class="pane-title" data-testid="recents-title">{labels.title}</h2>
   <button type="button" class="tb" data-testid="recents-new"
     aria-label={labels.compose} title={labels.compose} disabled={newDisabled}
     onclick={() => onNew?.()}>

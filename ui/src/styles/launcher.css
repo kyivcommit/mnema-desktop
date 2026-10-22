@@ -186,8 +186,11 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    and on focus. The active row is `--select`, not the file tree's
    `--cite-wash`: "the conversation on screen" and "the file in the tree" are
    different selections (owner's mockup, 2026-10-21). */
-.recents-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 0 4px 7px; }
-.recents-title {
+/* One rule for both panels' title rows. The height is explicit so the
+   conversations row (its 26px button + padding) and the documents row (no
+   button) are the same 30px, and the two search fields sit level. */
+.pane-head { flex: none; display: flex; align-items: center; gap: 4px; height: 30px; box-sizing: border-box; padding: 0 0 4px 7px; }
+.pane-title {
   flex: 1 1 auto; min-width: 0; margin: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--sans); font-weight: 600; font-style: normal; font-size: 14px; color: var(--ink);

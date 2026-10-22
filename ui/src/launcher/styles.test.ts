@@ -94,6 +94,24 @@ test('real launcher places the three areas with the tree inside the right one', 
   expect(screen.getAllByTestId('turn')).toHaveLength(1);
 });
 
+// Both panels' title rows are one rule at one height, so the tree's search field
+// lands level with the conversations' (measured: 38-68 title, 68-102 field).
+test('real CSS: both panel titles sit in one 30px .pane-head', async () => {
+  render(Recents, { activeId: null, gen: 0, onOpen: () => {} });
+  render(Tree, { selected: null, onPick: () => {} });
+  const heads = [await screen.findByTestId('recents-title'), await screen.findByTestId('tree-title')]
+    .map((title) => title.parentElement!);
+  for (const head of heads) {
+    expect(head.classList.contains('pane-head')).toBe(true);
+    expect(getComputedStyle(head).height).toBe('30px');
+  }
+  expect(heads[0]).not.toBe(heads[1]);
+  // Read from the sheet: base.css already sets border-box on everything, so a
+  // computed value cannot tell whether this rule keeps its own.
+  const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
+  expect(css).toMatch(/\.pane-head\s*\{[^}]*height:\s*30px;\s*box-sizing:\s*border-box/);
+});
+
 // The find-in-files field never scrolls, in either direction: the nearest
 // scrolling ancestor of the tree must not contain it (`.tree` is as wide as its
 // deepest row, so a field inside that scroller would slide out sideways).
@@ -202,7 +220,7 @@ test('a conversation row is two lines: question, preview, then ×', async () => 
 // name and its compose button stay put above fifty rows.
 test('the conversations header is pinned above the scrolling body', () => {
   const css = readFileSync(join(HERE, '../styles/launcher.css'), 'utf8');
-  expect(css).toMatch(/\.recents-head\s*\{[^}]*flex:\s*none/);
+  expect(css).toMatch(/\.pane-head\s*\{[^}]*flex:\s*none/);
   expect(css).toMatch(/\.recents-body\s*\{[^}]*overflow:\s*auto/);
 });
 

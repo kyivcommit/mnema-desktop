@@ -1389,6 +1389,23 @@ test('the copy is in both locales', async () => {
   expect(screen.getByText('Пошук не вдався.')).toBeTruthy();
 });
 
+// The title row sits above the search field so the field lines up with the
+// conversations search; it is a fixed row, outside the scroller, and it is
+// re-labelled when the locale changes.
+test('the tree is titled, above the search field and outside the scroller, in both locales', async () => {
+  mockTree(LIB);
+  mount(null);
+  await screen.findByTestId('tree-folder-Books');
+  const title = screen.getByTestId('tree-title');
+  expect(title.textContent).toBe('Documents');
+  expect(document.querySelector('.tree-scroll')!.contains(title)).toBe(false);
+  expect(title.closest('.pane-head')!.nextElementSibling)
+    .toBe(screen.getByRole('searchbox', { name: 'Find words in files' }).closest('.tree-search'));
+  setLocale('uk');
+  await tick();
+  expect(screen.getByTestId('tree-title').textContent).toBe('Документи');
+});
+
 test('clearing restores the saved open state', async () => {
   await mountLib();
   await fireEvent.click(screen.getByTestId('tree-folder-Books')); // opened by hand, saved

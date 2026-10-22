@@ -35,7 +35,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'search_placeholder' | 'query_too_long' | 'query_failed'
   | 'composer_send'
   | 'phase_text' | 'phase_content' | 'phase_chat'
-  | 'toggle_recents' | 'toggle_files' | 'toggle_tree' | 'toolbar_settings'
+  | 'toggle_recents' | 'toggle_files' | 'tree_title' | 'toggle_tree' | 'toolbar_settings'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
@@ -361,7 +361,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_too_long: 'Запит задовгий (максимум {limit} символів).',
     query_failed: 'Не вдалося виконати запит.',
     phase_text: 'текст', phase_content: 'зміст', phase_chat: 'чат',
-    toggle_recents: 'Бесіди', toggle_files: 'Файли', toggle_tree: 'Дерево', toolbar_settings: 'Налаштування',
+    toggle_recents: 'Бесіди', toggle_files: 'Файли', tree_title: 'Документи', toggle_tree: 'Дерево', toolbar_settings: 'Налаштування',
     provider_ok: 'З\'єднано з OpenRouter',
     provider_ok_mnema: 'Mnema (локально) готова',
     provider_unreachable_mnema: 'Mnema (локально) не відповідає: {reason}',
@@ -1256,7 +1256,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     query_too_long: 'The query is too long (max {limit} characters).',
     query_failed: 'The query could not be run.',
     phase_text: 'text', phase_content: 'content', phase_chat: 'chat',
-    toggle_recents: 'Conversations', toggle_files: 'Files', toggle_tree: 'Tree', toolbar_settings: 'Settings',
+    toggle_recents: 'Conversations', toggle_files: 'Files', tree_title: 'Documents', toggle_tree: 'Tree', toolbar_settings: 'Settings',
     provider_ok: 'Connected to OpenRouter',
     provider_ok_mnema: 'Mnema (local) is ready',
     provider_unreachable_mnema: 'Mnema (local) is not responding: {reason}',

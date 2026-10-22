@@ -254,6 +254,7 @@
     }, DEBOUNCE_MS);
   }
 
+  const titleLabel = $derived.by(() => { void $locale; return t('tree_title'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
   const searchLabel = $derived.by(() => { void $locale; return t('files_search_label'); });
@@ -582,10 +583,11 @@
 
 <svelte:window onfocus={load} />
 
-<!-- A column that fills the pane: the field is outside the scroller below it,
+<!-- A column that fills the pane: the title and the field are outside the scroller below it,
      so it moves neither with the tree's vertical scroll nor its sideways one
      (`.tree` is as wide as its deepest row). -->
 <div class="tree-column">
+<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2></header>
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
