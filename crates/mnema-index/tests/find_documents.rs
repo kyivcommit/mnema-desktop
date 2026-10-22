@@ -182,3 +182,22 @@ fn the_text_is_the_original_not_the_prepared_copy() {
     let found = db.find_documents("zebra", 500).unwrap().unwrap();
     assert_eq!(found.documents[0].text, "Zebra Café");
 }
+
+#[test]
+fn documents_come_in_relevance_order_not_id_order() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    // The worse match is seeded first, so it has the lower chunk id.
+    seed(&db, root, 1, "worse.md", &["zebra"]);
+    seed(&db, root, 2, "better.md", &["zebra zebra zebra"]);
+    assert_eq!(ids(&db, "zebra"), vec![doc(2), doc(1)]);
+}
+
+#[test]
+fn equal_matches_come_in_chunk_id_order() {
+    let db = temp_db();
+    let root = db.insert_watched_root("/r").unwrap();
+    seed(&db, root, 1, "a.md", &["zebra"]);
+    seed(&db, root, 2, "b.md", &["zebra"]);
+    assert_eq!(ids(&db, "zebra"), vec![doc(1), doc(2)]);
+}
