@@ -92,7 +92,9 @@
   let panels = $state<PanelState>(loadLayout());
 
   // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
-  const dialogue = $derived(chatOn && statusProvider !== 'mnema');
+  // The CHAT role decides, as `dialogue_enabled` does; `statusProvider` may speak
+  // for embedding. Until settings are read, the status's provider stands in.
+  const dialogue = $derived(chatOn && (chatProvider ?? statusProvider) !== 'mnema');
   const newChatLabel = $derived.by(() => { void $locale; return t('new_conversation'); });
 
   // Read on mount and again whenever the window gains focus: the key and the
