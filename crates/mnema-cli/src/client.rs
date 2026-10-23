@@ -240,6 +240,7 @@ mod tests {
         assert_eq!(p("/usr/local/bin/mnema"), None);
         assert_eq!(p("/Apps/Mnema.app/Contents/Resources/mnema"), None);
         assert_eq!(p("/Apps/Mnema/Contents/MacOS/mnema"), None);
+        assert_eq!(p("/Apps/Mnema.dmg/Contents/MacOS/mnema"), None);
     }
 
     #[test]
