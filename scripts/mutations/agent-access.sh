@@ -533,3 +533,11 @@ case_ "mnema mcp: an err result must carry the wire error" \
   's~&serde_json::to_value\(e\)\.expect\("a WireError serialises"\)~&Value::Null~' \
   '&Value::Null' \
   mnema-cli 'mcp_turns_an_err_into_an_error_result' --test cli
+
+# Task 6 (the bundle): the application must not link the MCP stack. `rmcp` is a
+# dependency of mnema-cli only; the mutant gives it to the shell as well.
+case_ "bundle: the application must not link rmcp" \
+  src-tauri/Cargo.toml \
+  's~^mnema-index = { path = "\.\./crates/mnema-index" }~&\nrmcp = { version = "3.7.0", default-features = false, features = ["server"] }~' \
+  'rmcp = { version = "3.7.0"' \
+  mnema-desktop 'the_application_does_not_link_rmcp' --test dependency_boundary
