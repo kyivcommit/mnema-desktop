@@ -150,3 +150,114 @@ case_ "tree: freshness_of must read the cited occupant" \
   's~Ok\(decide_freshness\(occupant\.as_ref\(\), document_id\)\)~Ok(decide_freshness(None, document_id))~' \
   'decide_freshness(None, document_id)' \
   mnema-desktop "${TT}freshness_of_agrees_with_open_document" --lib
+
+# Task 3 (the handlers): src-tauri/src/agent.rs, tested by tests/agent.rs.
+A=src-tauri/src/agent.rs
+
+case_ "agent: search must pass k on, not a fixed twenty" \
+  $A \
+  's~retrieve\(state, query, arms, i64::from\(k\), embed\)~retrieve(state, query, arms, 20, embed)~' \
+  'arms, 20, embed' \
+  mnema-desktop 'search_with_k_one_answers_one_passage' --test agent
+
+case_ "agent: search must name the path the hit has" \
+  $A \
+  's~"path": h\.relative_path,~"path": Value::Null,~' \
+  '"path": Value::Null,' \
+  mnema-desktop 'search_answers_verbatim_passages_with_their_place' --test agent
+
+case_ "agent: the absolute path must end in the relative one" \
+  $A \
+  's~Path::new\(root\)\.join\(relative\)~Path::new(root).join("")~' \
+  'join("")' \
+  mnema-desktop 'search_answers_verbatim_passages_with_their_place' --test agent
+
+case_ "agent: an empty answer must say empty" \
+  $A \
+  's~"empty": passages\.is_empty\(\)~"empty": false~' \
+  '"empty": false' \
+  mnema-desktop 'search_on_an_empty_index_is_empty_not_an_error' --test agent
+
+case_ "agent: search must stat the file, not claim current" \
+  $A \
+  's~"freshness": freshness_kind\(&freshness\)\?,(\s+\}\)\)\s+\}\))~"freshness": "current",$1~s' \
+  '"freshness": "current",' \
+  mnema-desktop 'a_file_changed_after_indexing_is_marked_in_search_and_passage' --test agent
+
+case_ "agent: passage must stat the file, not claim current" \
+  $A \
+  's~"freshness": freshness_kind\(&freshness\)\?,(\s+"blocks")~"freshness": "current",$1~s' \
+  '"freshness": "current",' \
+  mnema-desktop 'a_file_changed_after_indexing_is_marked_in_search_and_passage' --test agent
+
+case_ "agent: an id from before a reindex must be stale" \
+  $A \
+  's~citation\.document_id != id\.document_id \|\| citation\.ord != id\.ord~false~' \
+  'if false {' \
+  mnema-desktop 'passage_after_reindex_is_stale_not_another_place' --test agent
+
+case_ "agent: an unknown chunk must be not_found" \
+  $A \
+  's~err\(ErrKind::NotFound, "no such passage"\)~err(ErrKind::Internal, "no such passage")~' \
+  'ErrKind::Internal, "no such passage"' \
+  mnema-desktop 'passage_of_an_unknown_chunk_is_not_found' --test agent
+
+case_ "agent: the focus blocks must be marked" \
+  $A \
+  's~focus_ids\.contains\(&b\.block_id\)~false~' \
+  '"focus": false' \
+  mnema-desktop 'passage_of_a_fresh_id_gives_that_text' --test agent
+
+case_ "agent: context 0 must not widen the window upward" \
+  $A \
+  's~first\.saturating_sub\(context\)~first.saturating_sub(context + 1)~' \
+  'context + 1' \
+  mnema-desktop 'passage_context_bounds_the_blocks' --test agent
+
+case_ "agent: context must widen the window at all" \
+  $A \
+  's~first\.saturating_sub\(context\)~first~; s~\(last \+ context\)~last~' \
+  'let hi = last' \
+  mnema-desktop 'passage_context_bounds_the_blocks' --test agent
+
+case_ "agent: context must not widen the window without bound" \
+  $A \
+  's~\(last \+ context\)\.min\(blocks\.len\(\) - 1\)~blocks.len() - 1~' \
+  'let hi = blocks.len() - 1;' \
+  mnema-desktop 'passage_context_bounds_the_blocks' --test agent
+
+case_ "agent: status must carry the scan state" \
+  $A \
+  's~"scan": serde_json::to_value\(state\.scan_state\(\)\)\.map_err\(internal\)\?~"scan": json!({})~' \
+  '"scan": json!({})' \
+  mnema-desktop 'status_carries_the_scan_state_and_folders' --test agent
+
+case_ "agent: status must stat each folder" \
+  $A \
+  's~Path::new\(&path\)\.is_dir\(\)~true~' \
+  '"available": true' \
+  mnema-desktop 'status_carries_the_scan_state_and_folders' --test agent
+
+case_ "agent: a busy slot must say started false" \
+  $A \
+  's~Err\(Error::JobAlreadyRunning\) => false~Err(Error::JobAlreadyRunning) => true~' \
+  'JobAlreadyRunning) => true' \
+  mnema-desktop 'rescan_while_running_says_running_not_error' --test agent
+
+case_ "agent: a busy slot must not be an internal error" \
+  $A \
+  's~Err\(Error::JobAlreadyRunning\) => false,~Err(Error::JobAlreadyRunning) => return Err(internal("busy")),~' \
+  'return Err(internal("busy"))' \
+  mnema-desktop 'rescan_while_running_says_running_not_error' --test agent
+
+case_ "agent: rescan wait must wait" \
+  $A \
+  's~if !wait \{~if true {~' \
+  'if true {' \
+  mnema-desktop 'rescan_wait_returns_the_report' --test agent
+
+case_ "agent: rescan wait must carry the report" \
+  $A \
+  's~"report": serde_json::to_value\(report\)\.map_err\(internal\)\?~"report": Value::Null~' \
+  '"report": Value::Null,' \
+  mnema-desktop 'rescan_wait_returns_the_report' --test agent

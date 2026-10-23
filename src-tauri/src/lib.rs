@@ -5,6 +5,7 @@
 //! this is exactly the layer where a test has to call the commands the way the
 //! webview calls them.
 
+pub mod agent;
 pub mod bridge;
 pub mod dialogue;
 pub mod embed_job;

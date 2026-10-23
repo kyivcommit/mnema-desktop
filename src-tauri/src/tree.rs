@@ -878,8 +878,6 @@ pub(crate) fn document_view_in(
 /// The freshness of one cited path alone, without composing the view. The
 /// occupant is read in a snapshot, the `stat` outside it, as in
 /// [`document_view_in`].
-// Unused until the agent socket (next task) calls it.
-#[allow(dead_code)]
 pub(crate) fn freshness_of(
     state: &AppState,
     document_id: &str,
