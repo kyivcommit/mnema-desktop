@@ -284,3 +284,13 @@ fn mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_
     );
     assert!(described("rescan").contains("`started: false` means no new scan was started."));
 }
+
+#[test]
+fn a_query_equal_to_a_flag_is_passed_after_a_double_dash() {
+    let f = fake(Some(ok(json!({"empty": true, "passages": []}))));
+    let o = mnema(&f.path, &["search", "--", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{:?}", o.stdout);
+    let sent: Value =
+        serde_json::from_str(&f.lines.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+    assert_eq!(sent["query"], "--json", "{sent}");
+}

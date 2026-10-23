@@ -11,7 +11,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const OVERRIDE: &str = "MNEMA_AGENT_SOCKET";
-const APP_ID: &str = "com.mnema.desktop";
+/// Must equal `identifier` in `src-tauri/tauri.conf.json`, which names the
+/// directory the app keeps `agent.sock` in (`app_local_data_dir`); a test below
+/// reads the file and compares.
+pub const APP_ID: &str = "com.mnema.desktop";
 const LAUNCH_WAIT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(200);
 /// `rescan` with `wait` may take 600 s on the server side; a little more here.
@@ -179,6 +182,16 @@ mod tests {
     }
 
     use std::cell::Cell;
+
+    #[test]
+    fn the_app_id_is_the_one_tauri_names_the_data_directory_after() {
+        let conf = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src-tauri/tauri.conf.json"
+        );
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(conf).unwrap()).unwrap();
+        assert_eq!(v["identifier"], APP_ID);
+    }
 
     #[test]
     fn a_running_app_without_a_socket_is_disabled_at_once_and_is_not_launched() {

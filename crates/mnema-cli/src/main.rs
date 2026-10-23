@@ -33,7 +33,17 @@ fn flag(args: &mut Vec<String>, name: &str) -> bool {
     args.len() != n
 }
 
+/// Everything after `--` is positional, so a query or id that looks like a flag
+/// can still be passed (`mnema search -- --json`).
 fn parse(mut args: Vec<String>) -> Result<Op, WireError> {
+    let tail = match args.iter().position(|a| a == "--") {
+        Some(i) => {
+            let mut t = args.split_off(i);
+            t.remove(0);
+            t
+        }
+        None => Vec::new(),
+    };
     flag(&mut args, "--json"); // output is always JSON; the flag is accepted for explicitness
     if args.is_empty() {
         return Err(usage());
@@ -42,6 +52,7 @@ fn parse(mut args: Vec<String>) -> Result<Op, WireError> {
     let op = match cmd.as_str() {
         "search" => {
             let k = number(&mut args, "--k")?;
+            args.extend(tail);
             Op::Search {
                 query: args.pop().ok_or_else(usage)?,
                 k,
@@ -49,15 +60,21 @@ fn parse(mut args: Vec<String>) -> Result<Op, WireError> {
         }
         "passage" => {
             let context = number(&mut args, "--context")?;
+            args.extend(tail);
             Op::Passage {
                 id: args.pop().ok_or_else(usage)?,
                 context,
             }
         }
-        "status" => Op::Status,
-        "rescan" => Op::Rescan {
-            wait: flag(&mut args, "--wait").then_some(true),
-        },
+        "status" => {
+            args.extend(tail);
+            Op::Status
+        }
+        "rescan" => {
+            let wait = flag(&mut args, "--wait").then_some(true);
+            args.extend(tail);
+            Op::Rescan { wait }
+        }
         _ => return Err(usage()),
     };
     if args.is_empty() {
