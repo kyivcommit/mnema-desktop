@@ -141,12 +141,12 @@ TT='tree::tests::'
 
 case_ "tree: freshness_of must stat the file, not answer a constant" \
   $V \
-  's~Ok(decide_freshness(occupant.as_ref(), document_id))~Ok(Freshness::Current)~' \
+  's~Ok\(decide_freshness\(occupant\.as_ref\(\), document_id\)\)~Ok(Freshness::Current)~' \
   'Ok(Freshness::Current)' \
   mnema-desktop "${TT}freshness_of_agrees_with_open_document" --lib
 
 case_ "tree: freshness_of must read the cited occupant" \
   $V \
-  's~Ok(decide_freshness(occupant.as_ref(), document_id))~Ok(decide_freshness(None, document_id))~' \
+  's~Ok\(decide_freshness\(occupant\.as_ref\(\), document_id\)\)~Ok(decide_freshness(None, document_id))~' \
   'decide_freshness(None, document_id)' \
   mnema-desktop "${TT}freshness_of_agrees_with_open_document" --lib
