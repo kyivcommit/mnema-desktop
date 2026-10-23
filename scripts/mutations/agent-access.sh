@@ -804,6 +804,12 @@ case_ "mnema mcp: the server must carry its instructions" \
   '.with_instructions("")' \
   mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
 
+case_ "mnema mcp: the instructions must tell the agent to search the library before the file system" \
+  $X \
+  's~ Mnema already indexes these documents: call `search_library` first, instead of searching the file system for them\.~~' \
+  '«моя бібліотека»). Answer from' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
 case_ "mnema mcp: the search tool must be named search_library" \
   $X \
   's~"search_library",(\s*)SEARCH~"search",$1SEARCH~' \
