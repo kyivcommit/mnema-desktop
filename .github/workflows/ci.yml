@@ -637,8 +637,14 @@ jobs:
     # 25, not 15: on 2026-10-08/09 the runner's `apt-get` step alone took
     # 12m43s–14m40s three times, before or during the harness, and cancelled
     # legs whose harness needed 2–5 minutes. The limit covers the mirror, not
-    # the mutants.
+    # the mutants. Since 2026-10-23 the packages come from a cache and a slow
+    # download is cut and retried (the step's own comment has the runs), so
+    # the mirror no longer reaches this number.
     timeout-minutes: 25
+    env:
+      APT_PACKAGES: >-
+        libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        librsvg2-dev patchelf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
@@ -683,11 +689,60 @@ jobs:
       # at all.
       # No `if: runner.os` here, unlike `check`: every leg of this matrix is
       # the one Linux image named above.
-      - name: Linux system dependencies
+      #
+      # The packages come from a cache, not from the mirror, and a download
+      # that does happen is retried rather than waited out. Measured on runs
+      # 39759252486, 39807426092, 39837321603, 39838156498 and 39924325315
+      # (2026-10-22/23): this step's time is bimodal — most legs 23–60 s, a
+      # few per run 90 s to 25 min — and every one of the 31 legs those runs
+      # cancelled at 25 min was still in it or had spent 1238–1470 s in it.
+      # Not a hang: the slow leg's log reads `Fetched 63.6 MB in 23min 5s
+      # (45.9 kB/s)` with `Get:` lines still arriving, while `apt-get
+      # update` on the same runner fetched 12.5 MB in 1 s and other legs
+      # started in the same second took 25 s. One runner's connection to
+      # the mirror, not the mirror, so a fresh connection is the remedy and
+      # a longer limit is not. `check` installs the same packages and took
+      # 26–51 s on each of those runs.
+      #
+      # The key is the list of archives this runner would download, so it
+      # moves when Ubuntu publishes a new version of any of them or the
+      # image changes what is preinstalled, and a moved key still restores
+      # the previous archives through the prefix, leaving only the changed
+      # ones to fetch. `Dir::Cache::Archives` points apt at a directory the
+      # cache action can write without root.
+      - name: Linux system dependencies, which archives they need
+        id: apt
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+          echo "key=$(sudo apt-get install --print-uris -qq $APT_PACKAGES | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
+          restore-keys: apt-archives-
+      # Four minutes a try against the 23–60 s this whole step takes on a
+      # healthy connection; `partial/` keeps what a killed try already fetched.
+      - name: Linux system dependencies
+        run: |
+          mkdir -p ~/apt-archives/partial
+          apt=(sudo apt-get -y -o Dir::Cache::Archives="$HOME/apt-archives")
+          for try in 1 2 3; do
+            timeout 240 "${apt[@]}" install --download-only $APT_PACKAGES && break
+            [ "$try" = 3 ] && exit 1
+            echo "::warning::apt download try $try did not finish in 240 s, retrying"
+          done
+          "${apt[@]}" install $APT_PACKAGES
+          "${apt[@]}" autoclean
+          sudo chown -R "$USER" ~/apt-archives
+      # Saved on any miss, including a prefix restore. On a moved key every
+      # leg misses at once and the first to get here saves; the others log
+      # that the key is taken and go on.
+      - if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
       # src-tauri's tests find the local-model stand-in in target/<profile>/
