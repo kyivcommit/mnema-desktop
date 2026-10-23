@@ -440,7 +440,7 @@ case_ "mnema cli: the ok payload must be printed" \
 
 case_ "mnema cli: an err must exit one" \
   $M \
-  's~(serde_json::to_string\(&e\)[^\n]*\n\s*)ExitCode::FAILURE~$1ExitCode::from(0)~' \
+  's~(serialises"\)\n\s*\);\n\s*)ExitCode::FAILURE~$1ExitCode::from(0)~' \
   'ExitCode::from(0)' \
   mnema-cli 'an_err_reply_prints_the_error_and_exits_one' --test cli
 
@@ -470,14 +470,14 @@ case_ "mnema client: a hang-up before any reply must read as disabled" \
 
 case_ "mnema cli: the request must state the protocol version" \
   $M \
-  's~Request \{ v: VERSION, client~Request { v: 2, client~' \
-  'v: 2, client' \
+  's~(Request \{\s*v: )VERSION~${1}2~' \
+  'v: 2,' \
   mnema-cli 'the_request_carries_v_and_the_op' --test cli
 
 case_ "mnema cli: --k must reach the request" \
   $M \
-  's~(Op::Search \{ query: args\.pop\(\)\.ok_or_else\(usage\)\?, )k \}~${1}k: None }~' \
-  'k: None }' \
+  's~(query: args\.pop\(\)\.ok_or_else\(usage\)\?,\s*)k,~${1}k: None,~' \
+  'k: None,' \
   mnema-cli 'the_request_carries_v_and_the_op' --test cli
 
 case_ "mnema cli: --wait must reach the request" \
