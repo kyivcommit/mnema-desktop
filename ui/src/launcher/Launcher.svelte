@@ -46,6 +46,7 @@
   // one document can sit at several paths, and a key on the id would mark
   // every row that names it.
   let selected = $state<TreeSelection | null>(null);
+  let composer = $state<{ focus(): void } | undefined>();
   // One add-folder controller behind the Documents pane's «+» and the header's.
   const folders = createAddFolder();
   onMount(() => folders.start());
@@ -169,6 +170,7 @@
     launcherState = { kind: 'idle' };
     previous = null;
     historyId = null;
+    composer?.focus();
   }
 
   onMount(() => {
@@ -285,7 +287,7 @@
 <Shell bind:panels fileOpen={openFile !== null} {fileTitle}>
   {#snippet transcript()}
     <Transcript {turns} state={shownState} onSelected={showCitation} />
-    <Composer bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
+    <Composer bind:this={composer} bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
   {/snippet}
   {#snippet recents()}
     <Recents activeId={historyId} gen={historyGen} onOpen={openHistory}

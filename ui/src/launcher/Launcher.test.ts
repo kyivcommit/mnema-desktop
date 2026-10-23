@@ -1682,3 +1682,16 @@ test('the launcher listens for scan progress once for both add-folder buttons', 
   // The mount read and the one after the listener registered — once, not per button.
   expect(jobStatusCalls).toHaveBeenCalledTimes(2);
 });
+
+// Owner, 2026-10-23: a new conversation puts the cursor in the question field,
+// from either pencil — the header's and the sidebar's.
+for (const id of ['new-chat', 'recents-new']) {
+  test(`a new conversation from ${id} puts the cursor in the question field`, async () => {
+    render(Launcher);
+    const search = await screen.findByLabelText(/search conversations/i);
+    search.focus();
+    await fireEvent.click(await screen.findByTestId(id));
+    await waitFor(() => expect(document.activeElement?.tagName).toBe('TEXTAREA'));
+    expect(document.activeElement!.closest('.composer')).not.toBeNull();
+  });
+}

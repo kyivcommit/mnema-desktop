@@ -73,6 +73,11 @@
   // §7.3: the window is hidden, not closed. Bringing it back must not pull the
   // cursor out of the tree, the conversation list, a splitter or the file the
   // person was reading — only a window with no focus inside it gets the field.
+  // A new conversation hands the cursor here (owner, 2026-10-23).
+  export function focus() {
+    box?.focus();
+  }
+
   function onWindowFocus() {
     const active = document.activeElement;
     if (active === null || active === document.body) box?.focus();
