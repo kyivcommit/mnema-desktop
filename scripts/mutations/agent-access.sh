@@ -548,8 +548,8 @@ AT=src/settings/Agents.test.ts
 
 case_ "Agents.svelte: the command shows although access is off" \
   $A \
-  's~\{#if on\}~{#if true}~' \
-  '{#if true}' \
+  's~\{:else if on && path\}~{:else if true}~' \
+  '{:else if true}' \
   $AT 'access is off by default and no command is shown' runner=vitest
 
 case_ "Agents.svelte: turning access on asks for off" \
@@ -560,8 +560,8 @@ case_ "Agents.svelte: turning access on asks for off" \
 
 case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
   $A \
-  's~-- "\$\{path\}" mcp~-- "mnema" mcp~' \
-  '-- "mnema" mcp' \
+  's~-- \$\{quoted\} mcp~-- mnema mcp~' \
+  '-- mnema mcp' \
   $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
@@ -624,3 +624,46 @@ case_ "Settings.svelte: the Agents section is left out of the navigation" \
   "s~const SECTIONS: SectionId\[\] = \['models', 'folders', 'indexing', 'agents', 'application'\];~const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'application'];~" \
   "'indexing', 'application'];" \
   src/settings/Settings.test.ts 'the agents section is reachable from the settings navigation' runner=vitest
+
+case_ "Agents.svelte: the path is quoted without escaping the quote" \
+  $A \
+  's~path\.replaceAll\([^\n]*?\)\}~path}~' \
+  "const quoted = \$derived(\`'\${path}'\`);" \
+  $AT 'a path with a space, a quote and a dollar sign is quoted for the shell' runner=vitest
+
+case_ "Agents.svelte: the command is drawn for an empty path" \
+  $A \
+  's~\{:else if on && path\}~{:else if on}~' \
+  '{:else if on}' \
+  $AT 'while the path is pending there is no command and no copy button' runner=vitest
+
+case_ "Agents.svelte: a rejected path read is swallowed" \
+  $A \
+  's~\(\) => \(pathFailed = true\)~() => {}~' \
+  'agentCommandPath().then((p) => (path = p), () => {});' \
+  $AT 'a rejected path read shows an error line and no copyable command' runner=vitest
+
+case_ "Agents.svelte: a failed read of the switch turns it off" \
+  $A \
+  's~catch \(err\) \{ failure = String\(err\); \}\n  \}\n\n  async function toggle~catch (err) { failure = String(err); on = false; }\n  }\n\n  async function toggle~' \
+  'on = false; }' \
+  $AT 'a failed read of the switch keeps the last known state and shows the error' runner=vitest
+
+case_ "Agents.svelte: the switch stays enabled during a change" \
+  $A \
+  's~ disabled=\{busy\}~~' \
+  'checked={on} onchange' \
+  $AT 'the switch is disabled while a change is pending' runner=vitest
+
+case_ "Agents.svelte: the log is polled while access is off" \
+  $A \
+  's~    if \(!on\) return;\n~~' \
+  '  $effect(() => {
+    void pollLog();' \
+  $AT 'the log is not polled while access is off' runner=vitest
+
+case_ "Agents.svelte: the box shows what was asked, not what the socket says" \
+  $A \
+  's~box\.checked = on;~box.checked = want;~' \
+  'box.checked = want;' \
+  $AT 'a start that answers false without an error leaves the switch unchecked' runner=vitest

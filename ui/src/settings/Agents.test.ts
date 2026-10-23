@@ -43,7 +43,7 @@ test('turning access on calls set_agent_access with true and shows the command w
   agentAccessEnabled.mockResolvedValue(true);
   await fireEvent.click(screen.getByTestId('agents-access'));
   expect(setAgentAccess).toHaveBeenCalledWith(true);
-  await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent).toBe(`claude mcp add mnema -- "${PATH}" mcp`));
+  await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent).toBe(`claude mcp add mnema -- '${PATH}' mcp`));
   expect(screen.getByTestId('agents-json').textContent)
     .toBe(`{"mcpServers":{"mnema":{"command":"${PATH}","args":["mcp"]}}}`);
 });
@@ -65,11 +65,12 @@ test('the copy buttons put the command and the fragment on the clipboard', async
   await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent).toContain(PATH));
   await fireEvent.click(screen.getByTestId('agents-copy-cmd'));
   await fireEvent.click(screen.getByTestId('agents-copy-json'));
-  expect(writeText).toHaveBeenNthCalledWith(1, `claude mcp add mnema -- "${PATH}" mcp`);
+  expect(writeText).toHaveBeenNthCalledWith(1, `claude mcp add mnema -- '${PATH}' mcp`);
   expect(writeText).toHaveBeenNthCalledWith(2, `{"mcpServers":{"mnema":{"command":"${PATH}","args":["mcp"]}}}`);
 });
 
 test('the log lists entries newest first with the claimed client name', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
   agentLog.mockResolvedValue([
     entry({ op: 'search', query: 'newest question', passages: 3, client: 'synthetic-agent' }),
     entry({ op: 'open', query: 'older question' }),
@@ -92,6 +93,7 @@ test('an empty log says no agent has asked yet', async () => {
 
 test('the log is polled every two seconds while mounted, and no longer after', async () => {
   vi.useFakeTimers();
+  agentAccessEnabled.mockResolvedValue(true);
   const { unmount } = render(Agents);
   await vi.advanceTimersByTimeAsync(0);
   const base = agentLog.mock.calls.length;
@@ -102,4 +104,71 @@ test('the log is polled every two seconds while mounted, and no longer after', a
   unmount();
   await vi.advanceTimersByTimeAsync(10000);
   expect(agentLog.mock.calls.length).toBe(base + 2);
+});
+
+test('the log is not polled while access is off', async () => {
+  vi.useFakeTimers();
+  render(Agents);
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(agentLog).not.toHaveBeenCalled();
+});
+
+test('a path with a space, a quote and a dollar sign is quoted for the shell', async () => {
+  const odd = `/Apps/My "App" $HOME/it's/mnema`;
+  agentCommandPath.mockResolvedValue(odd);
+  agentAccessEnabled.mockResolvedValue(true);
+  render(Agents);
+  await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent)
+    .toBe(`claude mcp add mnema -- '/Apps/My "App" $HOME/it'\\''s/mnema' mcp`));
+  expect(screen.getByTestId('agents-json').textContent)
+    .toBe(JSON.stringify({ mcpServers: { mnema: { command: odd, args: ['mcp'] } } }));
+});
+
+test('while the path is pending there is no command and no copy button', async () => {
+  agentCommandPath.mockReturnValue(new Promise(() => {}));
+  agentAccessEnabled.mockResolvedValue(true);
+  render(Agents);
+  await waitFor(() => expect((screen.getByTestId('agents-access') as HTMLInputElement).checked).toBe(true));
+  expect(screen.queryByTestId('agents-cmd')).toBeNull();
+  expect(screen.queryByTestId('agents-copy-cmd')).toBeNull();
+});
+
+test('a rejected path read shows an error line and no copyable command', async () => {
+  agentCommandPath.mockRejectedValue('boom');
+  agentAccessEnabled.mockResolvedValue(true);
+  render(Agents);
+  expect(await screen.findByTestId('agents-path-failed')).toBeTruthy();
+  expect(screen.queryByTestId('agents-copy-cmd')).toBeNull();
+  expect(screen.queryByTestId('agents-copy-json')).toBeNull();
+});
+
+test('a failed read of the switch keeps the last known state and shows the error', async () => {
+  agentAccessEnabled.mockResolvedValueOnce(true).mockRejectedValue('read failed');
+  render(Agents);
+  const box = screen.getByTestId('agents-access') as HTMLInputElement;
+  await waitFor(() => expect(box.checked).toBe(true));
+  await fireEvent.click(box); // asks for off; the re-read then fails
+  await waitFor(() => expect(screen.getByTestId('agents-failure').textContent).toContain('read failed'));
+  expect(box.checked).toBe(true);
+});
+
+test('a start that answers false without an error leaves the switch unchecked', async () => {
+  setAgentAccess.mockResolvedValue(false);
+  render(Agents);
+  const box = screen.getByTestId('agents-access') as HTMLInputElement;
+  await fireEvent.click(box);
+  await waitFor(() => expect(agentAccessEnabled.mock.calls.length).toBeGreaterThan(1));
+  expect(box.checked).toBe(false);
+  expect(screen.queryByTestId('agents-failure')).toBeNull();
+});
+
+test('the switch is disabled while a change is pending', async () => {
+  let release!: (v: boolean) => void;
+  setAgentAccess.mockReturnValue(new Promise<boolean>((r) => (release = r)));
+  render(Agents);
+  const box = screen.getByTestId('agents-access') as HTMLInputElement;
+  await fireEvent.click(box);
+  expect(box.disabled).toBe(true);
+  release(false);
+  await waitFor(() => expect(box.disabled).toBe(false));
 });

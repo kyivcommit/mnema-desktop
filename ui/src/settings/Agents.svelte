@@ -15,19 +15,23 @@
   let path = $state('');
   let log = $state<AgentLogEntry[]>([]);
   let failure = $state<string | null>(null);
+  let pathFailed = $state(false);
+  let busy = $state(false);
 
   // The socket's real state, never the value we last asked for: a refused start
   // leaves it closed, and the switch must say so.
   async function readEnabled() {
-    try { on = await agentAccessEnabled(); } catch { on = false; }
+    try { on = await agentAccessEnabled(); } catch (err) { failure = String(err); }
   }
 
   async function toggle(e: Event) {
     const box = e.currentTarget as HTMLInputElement;
     const want = box.checked;
     failure = null;
+    busy = true;
     try { await setAgentAccess(want); } catch (err) { failure = String(err); }
     await readEnabled();
+    busy = false;
     // `on` may not have changed (a refused start), so Svelte would leave the
     // box the person just ticked; put it back to what the socket says.
     box.checked = on;
@@ -39,27 +43,37 @@
 
   onMount(() => {
     void readEnabled();
-    agentCommandPath().then((p) => (path = p), () => {});
+    agentCommandPath().then((p) => (path = p), () => (pathFailed = true));
+  });
+
+  // Only while access is on: closing the window hides it, it does not unmount
+  // the section, and an off switch has nothing to log.
+  $effect(() => {
+    if (!on) return;
     void pollLog();
     const timer = setInterval(() => void pollLog(), POLL_MS);
     return () => clearInterval(timer);
   });
 
   const accessLabel = $derived.by(() => { void $locale; return t('agents_access_label'); });
-  const cmd = $derived(`claude mcp add mnema -- "${path}" mcp`);
+  // POSIX single quotes: nothing inside them is special but the quote itself.
+  const quoted = $derived(`'${path.replaceAll("'", "'\\''")}'`);
+  const cmd = $derived(`claude mcp add mnema -- ${quoted} mcp`);
   const json = $derived(JSON.stringify({ mcpServers: { mnema: { command: path, args: ['mcp'] } } }));
 
   const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => {});
 </script>
 
 <label class="agents-switch">
-  <input type="checkbox" data-testid="agents-access" checked={on} onchange={toggle} /> {accessLabel}
+  <input type="checkbox" data-testid="agents-access" checked={on} disabled={busy} onchange={toggle} /> {accessLabel}
 </label>
 {#if failure}
   <p role="alert" data-testid="agents-failure">{#key $locale}{t('agents_access_failed')}{/key} {failure}</p>
 {/if}
 
-{#if on}
+{#if on && pathFailed}
+  <p role="alert" data-testid="agents-path-failed">{#key $locale}{t('agents_path_failed')}{/key}</p>
+{:else if on && path}
   <div role="group" aria-label={$locale && t('agents_setup_cmd')}>
     <p>{#key $locale}{t('agents_setup_cmd')}{/key}</p>
     <code data-testid="agents-cmd">{cmd}</code>
