@@ -579,8 +579,8 @@ case_ "Agents.svelte: a refused start leaves the box ticked" \
 
 case_ "Agents.svelte: a refused start is not shown" \
   $A \
-  's~failure = String\(err\)~failure = null~' \
-  'failure = null; }' \
+  's~(setAgentAccess\(want\); \} catch \(err\) \{) failure = String\(err\);~$1 failure = null;~' \
+  'catch (err) { failure = null; }' \
   $AT 'a refused start shows the error and does not claim access is on' runner=vitest
 
 case_ "Agents.svelte: the fragment button copies the command" \
