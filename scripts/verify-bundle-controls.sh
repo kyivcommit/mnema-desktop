@@ -62,7 +62,7 @@ LAB="$(mktemp -d "${TMPDIR:-/tmp}/mnema-controls.XXXXXX")"
 # with what it is actually testing. The path is a constant, so it costs nothing
 # on the normal exit, where 13b has already removed it and this `rm -f` is a
 # no-op.
-trap 'chmod -R u+w "$LAB" 2>/dev/null; rm -rf "$LAB"; rm -f "${REPO}/src-tauri/binaries/mnema-extract-worker-second-triple"' EXIT
+trap 'chmod -R u+w "$LAB" 2>/dev/null; rm -rf "$LAB"; rm -f "${REPO}/src-tauri/binaries/mnema-extract-worker-second-triple" "${REPO}/src-tauri/binaries/mnema-x86_64-apple-darwin"' EXIT
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "verify-bundle-controls: macOS only." >&2
@@ -347,6 +347,51 @@ if must copy_app_out "${LAB}/dead-worker" \
     "a worker that cannot be executed" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-worker-img"
 fi
+
+echo "### 12b. the bundle carries no mnema agent binary"
+if must copy_app_out "${LAB}/no-agent" \
+  && must rm -f "${LAB}/no-agent/Mnema.app/Contents/MacOS/mnema" \
+  && gone "${LAB}/no-agent/Mnema.app/Contents/MacOS/mnema" \
+  && must image_from "${LAB}/no-agent" "${LAB}/no-agent-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no mnema binary" \
+    "a packaged build an agent cannot launch" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-agent-img"
+fi
+
+echo "### 12c. the mnema agent binary is there and is not executable"
+if must copy_app_out "${LAB}/dead-agent" \
+  && must chmod a-x "${LAB}/dead-agent/Mnema.app/Contents/MacOS/mnema" \
+  && must image_from "${LAB}/dead-agent" "${LAB}/dead-agent-img/dmg/Mnema.dmg"; then
+  expect_red -m "mnema exists and is not executable" \
+    "an agent binary that cannot be executed" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-agent-img"
+fi
+
+echo "### 12d. the staged mnema is not the one this build produced"
+# Same prelude as control 13: the worker must pass first, so its built and staged copies go in too.
+if must copy_repo "${LAB}/stale-agent" \
+  && must mkdir -p "${LAB}/stale-agent/target/release" "${LAB}/stale-agent/src-tauri/binaries" \
+  && must cp -p "${REPO}/target/release/mnema-extract-worker" "${LAB}/stale-agent/target/release/" \
+  && must cp "${REPO}/target/release/mnema-extract-worker" \
+       "${LAB}/stale-agent/src-tauri/binaries/mnema-extract-worker-aarch64-apple-darwin" \
+  && must cp -p "${REPO}/target/release/mnema" "${LAB}/stale-agent/target/release/mnema" \
+  && must cp "${REPO}/target/release/mnema" "${LAB}/stale-agent/src-tauri/binaries/mnema-aarch64-apple-darwin" \
+  && must printf 'not the binary you built\n' >> "${LAB}/stale-agent/src-tauri/binaries/mnema-aarch64-apple-darwin"; then
+  expect_red -m "the staged agent binary is not the one this build produced" \
+    "a stale mnema must not ship inside a green build" \
+    "${LAB}/stale-agent/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+
+echo "### 12e. a second staged mnema for another triple"
+# Mutates the real, git-ignored src-tauri/binaries/ like 13b, and the EXIT trap removes it too.
+extra_agent="${REPO}/src-tauri/binaries/mnema-x86_64-apple-darwin"
+if must cp "${REPO}/target/release/mnema" "${extra_agent}" && there "${extra_agent}"; then
+  expect_red -m "files matching mnema-<triple> in" \
+    "a stale sibling of the staged mnema must not be ignored" \
+    "${REPO}/scripts/verify-bundle.sh" "${BUNDLE}"
+fi
+must rm -f "${extra_agent}"
+gone "${extra_agent}"
 
 echo "### 13. the staged worker is not the one this build produced"
 # copy_repo carries tracked files only, so target/ — git-ignored — does not come

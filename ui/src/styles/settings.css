@@ -314,6 +314,8 @@ main select:focus-visible {
 .nav-icon[data-section="models"] { background: color-mix(in srgb, var(--accent), var(--surface) var(--tile-wash)); }
 .nav-icon[data-section="folders"] { background: color-mix(in srgb, var(--cite), var(--surface) var(--tile-wash)); }
 .nav-icon[data-section="indexing"] { background: color-mix(in srgb, var(--ok), var(--surface) var(--tile-wash)); }
+/* No violet token: accent and err mixed give a hue none of the other tiles use. */
+.nav-icon[data-section="agents"] { background: color-mix(in srgb, color-mix(in srgb, var(--accent), var(--err)), var(--surface) var(--tile-wash)); }
 .nav-icon[data-section="application"] { background: color-mix(in srgb, var(--ink-soft), var(--surface) var(--tile-wash)); }
 
 .spane {
@@ -397,7 +399,8 @@ main select:focus-visible {
 /* the chat tab's «Tool support» checkbox: box and words on one line. The
  * generic `main input` rule sizes text fields (37px, 13px padding) and would
  * turn the box into a tall field and push the words to the next line. */
-.tools-switch {
+.tools-switch,
+.agents-switch {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -405,7 +408,8 @@ main select:focus-visible {
   color: var(--ink);
 }
 
-.tools-switch input[type="checkbox"] {
+.tools-switch input[type="checkbox"],
+.agents-switch input[type="checkbox"] {
   width: 16px;
   height: 16px;
   margin: 0;

@@ -4,6 +4,7 @@ resolver = "3"
 # exists makes every cargo command in the workspace fail, so the list grows.
 members = [
     "crates/mnema-chunk",
+    "crates/mnema-cli",
     "crates/mnema-core",
     "crates/mnema-embed",
     "crates/mnema-eval",

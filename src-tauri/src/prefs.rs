@@ -732,6 +732,55 @@ pub fn set_autostart(
     Ok(read_autostart(&state))
 }
 
+/// Whether agents may reach the application over the socket (`agent_access`):
+/// a bool, else off. Off by default because it is an access boundary.
+pub fn agent_access(data_dir: &Path) -> bool {
+    read_all(data_dir)
+        .get("agent_access")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether the socket is open, which is what "on" means to the person; the
+/// stored value says only what was last asked for.
+#[tauri::command(async)]
+pub fn agent_access_enabled(server: tauri::State<'_, crate::agent::AgentServer>) -> bool {
+    server.is_running()
+}
+
+/// Opens or closes the socket and persists the switch, under one lock so two
+/// changes cannot interleave, and answers with whether the socket is open.
+///
+/// Off stops first: `stop` cannot fail, a prefs write can, and a failed write
+/// must not leave the socket answering. On starts first, and a start that fails
+/// writes the stored value back to off; the start error is the one returned.
+#[tauri::command(async)]
+pub fn set_agent_access<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    server: tauri::State<'_, crate::agent::AgentServer>,
+    on: bool,
+) -> Result<bool, Error> {
+    let _toggle = server.toggle_lock();
+    let key = |v: bool| write_key(state.data_dir(), "agent_access", serde_json::Value::Bool(v));
+    if !on {
+        crate::agent::stop(&app);
+        key(false)?;
+        return Ok(false);
+    }
+    if let Err(e) = crate::agent::start(&app) {
+        if let Err(w) = key(false) {
+            eprintln!("mnema: agent access could not be switched off in the prefs: {w}");
+        }
+        return Err(e);
+    }
+    if let Err(e) = key(true) {
+        crate::agent::stop(&app);
+        return Err(e.into());
+    }
+    Ok(true)
+}
+
 /// Whether the chat list shows only models that take tools (`chat_tools`): a
 /// bool, else on.
 pub fn chat_tools(data_dir: &Path) -> bool {

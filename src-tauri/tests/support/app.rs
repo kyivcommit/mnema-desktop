@@ -76,6 +76,7 @@ pub fn app_in(dir: &std::path::Path) -> tauri::App<MockRuntime> {
         .expect("failed to build the mock application")
 }
 
+#[allow(dead_code)]
 pub fn main_webview(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime> {
     WebviewWindowBuilder::new(app, "main", Default::default())
         .build()
@@ -101,6 +102,7 @@ pub fn main_webview(app: &tauri::App<MockRuntime>) -> WebviewWindow<MockRuntime>
 /// the_database_leave_the_main_thread` compared a thread id against itself,
 /// because a refusal answers inline and never reaches a worker. One constant,
 /// six red tests, and no message pointing at it.
+#[allow(dead_code)]
 pub(crate) fn local_origin() -> &'static str {
     if cfg!(windows) {
         "http://tauri.localhost"
@@ -111,6 +113,7 @@ pub(crate) fn local_origin() -> &'static str {
 
 /// Invokes a command the way the webview does. `Err` carries what the webview
 /// would receive, which for this shell is always a string.
+#[allow(dead_code)]
 pub fn call(webview: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
     tauri::test::get_ipc_response(
         webview,

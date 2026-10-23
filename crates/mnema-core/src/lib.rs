@@ -1,5 +1,6 @@
 //! Types shared by every other crate, with no I/O of its own.
 
+pub mod agent_wire;
 mod block;
 mod locator;
 pub mod manifest;

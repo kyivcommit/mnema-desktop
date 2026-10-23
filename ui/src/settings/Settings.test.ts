@@ -165,6 +165,10 @@ vi.mock('../lib/ipc', () => ({
   // fixture is enough — nothing here exercises Application's own behaviour,
   // that lives in Application.test.ts.
   appPrefs: () => Promise.resolve(APP_PREFS),
+  agentAccessEnabled: () => Promise.resolve(false),
+  setAgentAccess: vi.fn(),
+  agentLog: () => Promise.resolve([]),
+  agentCommandPath: () => Promise.resolve(''),
   setHotkey: vi.fn(),
   setAutostart: vi.fn(),
 }));
@@ -216,13 +220,21 @@ async function emit(state: ScanState) {
   await tick();
 }
 
-test('shows all four section names, in the spec order', () => {
+test('shows all five section names, in the spec order', () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Settings);
   const nav = screen.getByRole('navigation');
-  // spec order: Models, Folders, Scanning, Application — read as one string so
-  // a swap in order fails even though all four words are still present.
-  expect(nav.textContent).toBe('ModelsFoldersScanningApplication');
+  // spec order: Models, Folders, Scanning, Agents, Application — read as one string so
+  // a swap in order fails even though all five words are still present.
+  expect(nav.textContent).toBe('ModelsFoldersScanningAgentsApplication');
+});
+
+test('the agents section is reachable from the settings navigation', async () => {
+  setLocale('en');
+  render(Settings);
+  await fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
+  expect(screen.getByRole('heading', { name: 'Agents' })).toBeTruthy();
+  expect(await screen.findByTestId('agents-access')).toBeTruthy();
 });
 
 // Task 4 (review P2-1): Models joins Folders as mounted-hidden rather than
@@ -301,7 +313,7 @@ test('no section claims to be disabled, and no button carries aria-describedby',
   setLocale('en'); // seed, do not inherit
   render(Settings);
 
-  for (const name of ['Models', 'Folders', 'Scanning', 'Application']) {
+  for (const name of ['Models', 'Folders', 'Scanning', 'Agents', 'Application']) {
     await fireEvent.click(screen.getByRole('button', { name }));
     const button = screen.getByRole('button', { name });
     expect(button.getAttribute('aria-disabled')).toBeNull();
@@ -507,7 +519,7 @@ test('labels stay correct across a language switch after mount', async () => {
   expect(screen.queryByText('Nothing has been indexed yet.')).toBeNull();
 
   const nav = screen.getByRole('navigation');
-  expect(nav.textContent).toBe(['Моделі', 'Теки', 'Сканування', 'Застосунок'].join(''));
+  expect(nav.textContent).toBe(['Моделі', 'Теки', 'Сканування', 'Агенти', 'Застосунок'].join(''));
   await fireEvent.click(screen.getByRole('button', { name: 'Моделі' }));
   expect(screen.getByRole('heading', { name: 'Моделі' })).toBeTruthy();
 

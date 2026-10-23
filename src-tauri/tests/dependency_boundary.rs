@@ -126,6 +126,25 @@ fn the_application_does_not_link_the_pdf_library() {
     }
 }
 
+/// MCP lives in the `mnema` binary (`crates/mnema-cli`) and nowhere else: the application
+/// serves the agent socket in plain JSON lines, and `rmcp` would drag an async protocol
+/// stack into a process that does not speak it.
+#[test]
+fn the_application_does_not_link_rmcp() {
+    let tree = shipped_graph();
+    let packages = packages_in(&tree);
+    assert!(
+        packages.contains(&"mnema-index"),
+        "the tree does not contain a dependency known to be present, so it is not the \
+         tree this test means to read:\n{tree}"
+    );
+    assert!(
+        !packages.contains(&"rmcp"),
+        "rmcp is in the application's dependency graph. MCP belongs to the `mnema` binary \
+         (crates/mnema-cli), which the bundle carries beside the application.\n{tree}"
+    );
+}
+
 /// Two things the shipped graph must *have*, both of them decisions that live
 /// in a manifest and were, until this test, enforced by nothing.
 ///

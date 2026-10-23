@@ -843,25 +843,50 @@ pub fn open_document(
         (Some(chunk_id), Some(ord), Some(text)) => Some((chunk_id, ord, text)),
         _ => None,
     };
+    document_view_in(
+        &state,
+        &document_id,
+        root_id,
+        relative_path.as_deref(),
+        focus,
+    )
+}
+
+/// [`open_document`] for a caller that has an `&AppState` and no IPC `State`
+/// (the agent socket).
+pub(crate) fn document_view_in(
+    state: &AppState,
+    document_id: &str,
+    root_id: Option<i64>,
+    relative_path: Option<&str>,
+    focus: Option<(i64, i64, &str)>,
+) -> Result<DocumentView, Error> {
     let composed = state.with_index(|db| {
         db.read_snapshot(|db| {
-            build_document_view(
-                db,
-                &document_id,
-                root_id,
-                relative_path.as_deref(),
-                focus,
-                MAX_BLOCKS,
-            )
+            build_document_view(db, document_id, root_id, relative_path, focus, MAX_BLOCKS)
         })
     })?;
     Ok(match composed {
         ComposedView::Settled(view) => view,
         ComposedView::Pending { file, occupant } => {
-            let freshness = decide_freshness(occupant.as_ref(), &document_id);
+            let freshness = decide_freshness(occupant.as_ref(), document_id);
             file.with(freshness)
         }
     })
+}
+
+/// The freshness of one cited path alone, without composing the view. The
+/// occupant is read in a snapshot, the `stat` outside it, as in
+/// [`document_view_in`].
+pub(crate) fn freshness_of(
+    state: &AppState,
+    document_id: &str,
+    root_id: Option<i64>,
+    relative_path: Option<&str>,
+) -> Result<Freshness, Error> {
+    let occupant =
+        state.with_index(|db| db.read_snapshot(|db| cited_occupant(db, root_id, relative_path)))?;
+    Ok(decide_freshness(occupant.as_ref(), document_id))
 }
 
 /// One level of a watched folder's tree as the exclusion screen needs it.
@@ -1379,6 +1404,73 @@ pub fn list_subfolders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `freshness_of` must give the verdict `document_view_in` stamps on the same
+    /// citation: on an untouched file (`Current`) and, with no rescan, after the
+    /// file is rewritten (`FileChanged`). The second state is the one that tells
+    /// a real `stat` from a constant.
+    #[test]
+    fn freshness_of_agrees_with_open_document() {
+        let data = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let file = root_dir.path().join("note.txt");
+        std::fs::write(&file, "alpha").unwrap();
+        let disk = mnema_walk::stat(&file).unwrap();
+        let state = AppState::new(
+            data.path().to_path_buf(),
+            std::path::PathBuf::new(),
+            "http://127.0.0.1:1".to_string(),
+            format!("mnema-desktop-tree-test-{}", data.path().display()),
+        );
+        state.open_index().unwrap();
+        let root = state
+            .with_index(|db| {
+                let root = db.insert_watched_root(root_dir.path().to_str().unwrap())?;
+                db.insert_document("h1", "text/plain", 1, mnema_core::SourceKind::Document)?;
+                let page = db.insert_page("h1", 1, "native:txt", None)?;
+                db.insert_block(
+                    page,
+                    &mnema_core::Block {
+                        block_type: mnema_core::BlockType::Paragraph,
+                        reading_order: 1,
+                        language: None,
+                        text: "alpha".to_string(),
+                        line_start: None,
+                        line_end: None,
+                    },
+                )?;
+                db.set_document_status("h1", mnema_index::DocumentStatus::Indexed)?;
+                db.insert_path(
+                    root,
+                    "note.txt",
+                    "h1",
+                    mnema_core::OnDisk {
+                        size_bytes: disk.size_bytes,
+                        mtime: disk.mtime,
+                    },
+                    "text",
+                    1,
+                )?;
+                Ok(root)
+            })
+            .unwrap();
+        let both = |state: &AppState| {
+            let view = document_view_in(state, "h1", Some(root), Some("note.txt"), None).unwrap();
+            let DocumentView::File { freshness, .. } = &view else {
+                panic!("the document did not open as a file: {view:?}");
+            };
+            let alone = freshness_of(state, "h1", Some(root), Some("note.txt")).unwrap();
+            (freshness.clone(), alone)
+        };
+        let (view, alone) = both(&state);
+        assert_eq!((view, alone), (Freshness::Current, Freshness::Current));
+        std::fs::write(&file, "alpha, rewritten and longer").unwrap();
+        let (view, alone) = both(&state);
+        assert_eq!(
+            (view, alone),
+            (Freshness::FileChanged, Freshness::FileChanged)
+        );
+    }
 
     /// One [`Entry`] as `read_dir` would have produced it, from raw bytes.
     ///

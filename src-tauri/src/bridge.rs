@@ -993,7 +993,7 @@ pub(crate) fn arm_is_on(value: Option<String>) -> bool {
 /// either way, since every command answers a poisoned state alike).
 /// Pinned by `an_index_failure_inside_the_content_arm_stays_local_to_it`.
 fn resolve_content_query(
-    state: &State<'_, AppState>,
+    state: &AppState,
     provider: &Option<Provider>,
     query: &str,
     content_on: bool,
@@ -1147,7 +1147,7 @@ fn chat_readiness(
 
 /// The two arm rows, read the one way `search` and `ask` must agree on.
 /// `meta`'s own rule (`arm_is_on`, D106) decides on/off.
-fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
+pub(crate) fn read_arms(state: &AppState) -> Result<Arms, Error> {
     state.with_index(|db| {
         Ok(Arms {
             text: arm_is_on(db.meta_get(mnema_index::META_SEARCH_TEXT_ARM)?),
@@ -1163,7 +1163,7 @@ fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
 /// duplicated at each caller.
 ///
 /// The content arm's network embed runs in [`resolve_content_query`] *before*
-/// the read snapshot opens (I5, spec §5): `retrieve` takes `&State`, not an
+/// the read snapshot opens (I5, spec §5): `retrieve` takes `&AppState`, not an
 /// already-open `&Db`, precisely so it can hold the "embed → snapshot" order
 /// itself. Pinned by `the_content_arm_embeds_the_query_before_it_locks_the_index`.
 ///
@@ -1172,8 +1172,8 @@ fn read_arms(state: &State<'_, AppState>) -> Result<Arms, Error> {
 /// no credential store and a broken one costs only the content arm — pinned by
 /// `a_text_only_search_does_not_touch_a_credential_store_it_does_not_need` and
 /// `a_broken_credential_store_does_not_take_the_text_arm_down_with_it`.
-fn retrieve(
-    state: &State<'_, AppState>,
+pub(crate) fn retrieve(
+    state: &AppState,
     query: &str,
     arms: Arms,
     limit: i64,
