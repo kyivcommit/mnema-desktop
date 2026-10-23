@@ -895,9 +895,9 @@ case_ "mnema cli: the app id must be the one tauri.conf.json names" \
   $CC \
   's~APP_ID: &str = "com.mnema.desktop"~APP_ID: \&str = "com.mnema.desktop2"~' \
   'com.mnema.desktop2' \
-  mnema-cli the_app_id_is_the_one_tauri_names_the_data_directory_after --bin mnema
+  mnema-cli client::tests::the_app_id_is_the_one_tauri_names_the_data_directory_after --bin mnema
 
-case_ "mnema cli: `--` must end the options" \
+case_ "mnema cli: a double dash must end the options" \
   crates/mnema-cli/src/main.rs \
   's~a == "--"\)~a == "---")~' \
   'a == "---")' \
