@@ -134,3 +134,19 @@ case_ "agent_wire: the error kind is spelled in snake_case" \
   's~\n    StaleId,~\n    #[serde(rename = "staleId")]\n    StaleId,~' \
   '#[serde(rename = "staleId")]' \
   mnema-core "${T}the_wire_shape_is_pinned" --lib
+
+# Task 2 (the &AppState seams).
+V=src-tauri/src/tree.rs
+TT='tree::tests::'
+
+case_ "tree: freshness_of must stat the file, not answer a constant" \
+  $V \
+  's~Ok(decide_freshness(occupant.as_ref(), document_id))~Ok(Freshness::Current)~' \
+  'Ok(Freshness::Current)' \
+  mnema-desktop "${TT}freshness_of_agrees_with_open_document" --lib
+
+case_ "tree: freshness_of must read the cited occupant" \
+  $V \
+  's~Ok(decide_freshness(occupant.as_ref(), document_id))~Ok(decide_freshness(None, document_id))~' \
+  'decide_freshness(None, document_id)' \
+  mnema-desktop "${TT}freshness_of_agrees_with_open_document" --lib
