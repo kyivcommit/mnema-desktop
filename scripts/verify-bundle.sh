@@ -209,10 +209,10 @@ built_agent="${repo_root}/target/release/${agent_name}"
   || fail "no ${built_agent}, so the agent binary's freshness is UNANSWERED. Run
   scripts/stage-sidecar.sh, or build with cargo tauri build, which calls it."
 
-# Matched by the triples this project builds for, not by `mnema-*`: that glob also matches
-# the worker and the MLX sidecar staged in the same directory.
-agent_staged_count="$(find -E "${staged_dir}" -maxdepth 1 -type f \
-  -regex ".*/${agent_name}-(aarch64|x86_64)-apple-darwin" | wc -l | tr -d ' ')"
+# `mnema-*` also matches the worker and the MLX sidecar staged in the same directory, so
+# those two prefixes are excluded; any other `mnema-<triple>` counts, stale ones included.
+agent_staged_count="$(find "${staged_dir}" -maxdepth 1 -type f -name "${agent_name}-*" \
+  ! -name "${worker_name}-*" ! -name "${agent_name}-mlx-*" | wc -l | tr -d ' ')"
 case "${agent_staged_count}" in
   0) fail "no ${agent_name} staged in ${staged_dir}.
   scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script." ;;
@@ -221,8 +221,8 @@ case "${agent_staged_count}" in
   Remove the stale ones: a check that verifies whichever one sorted first proves
   nothing about the new build." ;;
 esac
-staged_agent="$(find -E "${staged_dir}" -maxdepth 1 -type f \
-  -regex ".*/${agent_name}-(aarch64|x86_64)-apple-darwin")"
+staged_agent="$(find "${staged_dir}" -maxdepth 1 -type f -name "${agent_name}-*" \
+  ! -name "${worker_name}-*" ! -name "${agent_name}-mlx-*")"
 [ "$(shasum -a 256 "${staged_agent}" | cut -d' ' -f1)" = "$(shasum -a 256 "${built_agent}" | cut -d' ' -f1)" ] \
   || fail "the staged agent binary is not the one this build produced:
     staged ${staged_agent}
@@ -231,6 +231,7 @@ staged_agent="$(find -E "${staged_dir}" -maxdepth 1 -type f \
 [ "${dmg}" -nt "${built_agent}" ] \
   || fail "${dmg} is older than the ${agent_name} binary this checkout built, so it cannot be
   carrying it. Re-run cargo tauri build."
+echo "verify-bundle: ${agent_name} is bundled, executable, and is the staged binary this build produced"
 
 # --- the signature ------------------------------------------------------------
 #

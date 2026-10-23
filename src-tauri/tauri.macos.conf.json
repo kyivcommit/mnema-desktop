@@ -1,6 +1,6 @@
 {
   "bundle": {
-    "externalBin": ["binaries/mnema-extract-worker", "binaries/mnema-mlx"],
+    "externalBin": ["binaries/mnema-extract-worker", "binaries/mnema-mlx", "binaries/mnema"],
     "resources": {
       "binaries/mlx-swift_Cmlx.bundle": "mlx-swift_Cmlx.bundle"
     },
