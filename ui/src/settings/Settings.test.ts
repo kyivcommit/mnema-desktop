@@ -220,12 +220,12 @@ async function emit(state: ScanState) {
   await tick();
 }
 
-test('shows all four section names, in the spec order', () => {
+test('shows all five section names, in the spec order', () => {
   setLocale('en'); // seed, do not inherit: an earlier sibling switching the language must not decide this test
   render(Settings);
   const nav = screen.getByRole('navigation');
   // spec order: Models, Folders, Scanning, Agents, Application — read as one string so
-  // a swap in order fails even though all four words are still present.
+  // a swap in order fails even though all five words are still present.
   expect(nav.textContent).toBe('ModelsFoldersScanningAgentsApplication');
 });
 

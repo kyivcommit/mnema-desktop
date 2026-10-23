@@ -95,6 +95,23 @@ test('the log lists entries newest first with the claimed client name', async ()
   expect(items[1].textContent).not.toContain('identified as');
 });
 
+test('the log names an op in the language of the window, and dates it the same way', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  agentLog.mockResolvedValue([entry({ op: 'passage' })]);
+  setLocale('uk');
+  render(Agents);
+  const item = (await screen.findByTestId('agents-log')).querySelector('li')!;
+  expect(item.textContent).toContain('уривок');
+  expect(item.textContent).not.toContain('passage');
+  expect(item.querySelector('time')!.textContent).toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('uk'));
+  cleanup();
+  setLocale('en');
+  render(Agents);
+  const en = (await screen.findByTestId('agents-log')).querySelector('li')!;
+  expect(en.textContent).toContain('passage');
+  expect(en.querySelector('time')!.textContent).toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('en'));
+});
+
 test('an empty log says no agent has asked yet', async () => {
   render(Agents);
   expect(await screen.findByText('No agent has asked yet')).toBeTruthy();

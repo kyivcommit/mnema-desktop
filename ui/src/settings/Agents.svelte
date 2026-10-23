@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
+  import type { Key } from '../i18n/catalog';
   import {
     agentAccessEnabled, setAgentAccess, agentLog, agentCommandPath, type AgentLogEntry,
   } from '../lib/ipc';
@@ -10,6 +11,10 @@
   // poll below lives exactly as long as it is visible.
 
   const POLL_MS = 2000;
+
+  const OPS = ['search', 'passage', 'status', 'rescan'] as const;
+  // An op this window does not know (a newer app, an older window) shows as the app sent it.
+  const opLabel = (op: string) => (OPS as readonly string[]).includes(op) ? t(`agents_op_${op}` as Key) : op;
 
   let on = $state(false);
   let path = $state('');
@@ -100,8 +105,8 @@
   <ul data-testid="agents-log">
     {#each log as entry, i (i)}
       <li>
-        <time datetime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
-        <span>{entry.op}</span>
+        <time datetime={entry.at}>{new Date(entry.at).toLocaleString($locale)}</time>
+        <span>{#key $locale}{opLabel(entry.op)}{/key}</span>
         {#if entry.query}<span>{entry.query}</span>{/if}
         {#if entry.passages != null}<span>{#key $locale}{t('agents_log_passages', { n: entry.passages })}{/key}</span>{/if}
         {#if entry.client}<span>{#key $locale}{t('agents_log_client', { client: entry.client })}{/key}</span>{/if}

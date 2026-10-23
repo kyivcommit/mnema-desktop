@@ -839,3 +839,78 @@ case_ "Agents.svelte: the opencode line must write the global config" \
   's~opencode mcp add --global mnema~opencode mcp add mnema~' \
   'opencode mcp add mnema -- ${quoted}' \
   $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+
+# Owner review fix wave: unavailable documents, the app id, `--`, the slot guard,
+# the log's op labels and locale.
+AGR=src-tauri/src/agent.rs
+AGI='agent::tests::'
+
+case_ "agent passage: a document being re-indexed must be stale_id" \
+  $AGR \
+  's~(Rebuilding => err\(\s*ErrKind::)StaleId~${1}NotFound~' \
+  'Rebuilding => err(
+            ErrKind::NotFound' \
+  mnema-desktop "${AGI}every_unavailable_reason_has_its_own_kind_and_words" --lib
+
+case_ "agent passage: a too-large document must say so, not internal" \
+  $AGR \
+  's~(TooLarge => err\(\s*ErrKind::)NotFound~${1}Internal~' \
+  'TooLarge => err(
+            ErrKind::Internal' \
+  mnema-desktop "${AGI}every_unavailable_reason_has_its_own_kind_and_words" --lib
+
+case_ "agent passage: a document with no text left must be not_found" \
+  $AGR \
+  's~(NoBlocks => err\(\s*ErrKind::)NotFound~${1}Internal~' \
+  'NoBlocks => err(
+            ErrKind::Internal' \
+  mnema-desktop "${AGI}every_unavailable_reason_has_its_own_kind_and_words" --lib
+
+case_ "agent passage: the re-indexing message must reach the wire (pending document)" \
+  $AGR \
+  's~being re-indexed~being re-indexd~' \
+  'being re-indexd' \
+  mnema-desktop passage_of_a_document_being_reindexed_is_stale --test agent
+
+case_ "agent passage: the no-text message must reach the wire (failed document)" \
+  $AGR \
+  's~no indexed text any more~no text any more~' \
+  'no text any more' \
+  mnema-desktop passage_of_a_document_with_no_text_left_is_not_found --test agent
+
+case_ "agent socket: a connection's slot must be freed when its handler ends" \
+  $AGR \
+  's~self\.server\.lock\(\)\.streams\.remove\(&self\.id\);~let _ = \&self.id;~' \
+  'let _ = &self.id;' \
+  mnema-desktop "${AGI}a_dropped_slot_frees_its_connection" --lib
+
+case_ "agent socket: the slot must be freed on a panic too" \
+  $AGR \
+  's~let _slot = Slot \{ server: &server, id \};\s*serve~let _ = Slot { server: \&server, id };\n            serve~' \
+  'let _ = Slot' \
+  mnema-desktop "${AGI}a_panicking_holder_still_frees_its_slot" --lib
+
+CC=crates/mnema-cli/src/client.rs
+case_ "mnema cli: the app id must be the one tauri.conf.json names" \
+  $CC \
+  's~APP_ID: &str = "com.mnema.desktop"~APP_ID: \&str = "com.mnema.desktop2"~' \
+  'com.mnema.desktop2' \
+  mnema-cli the_app_id_is_the_one_tauri_names_the_data_directory_after --bin mnema
+
+case_ "mnema cli: `--` must end the options" \
+  crates/mnema-cli/src/main.rs \
+  's~a == "--"\)~a == "---")~' \
+  'a == "---")' \
+  mnema-cli a_query_equal_to_a_flag_is_passed_after_a_double_dash --test cli
+
+case_ "Agents.svelte: an op must be labelled in the window's language" \
+  $AG2 \
+  's~t\(`agents_op_\$\{op\}` as Key\)~op~' \
+  ': op;' \
+  $AGT 'the log names an op in the language of the window, and dates it the same way' runner=vitest
+
+case_ "Agents.svelte: the timestamp must follow the window's language" \
+  $AG2 \
+  's~toLocaleString\(\$locale\)~toLocaleString()~' \
+  'toLocaleString()' \
+  $AGT 'the log names an op in the language of the window, and dates it the same way' runner=vitest

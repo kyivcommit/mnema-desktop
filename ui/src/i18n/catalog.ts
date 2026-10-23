@@ -2,6 +2,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application' | 'settings_nav_agents'
   | 'agents_access_label' | 'agents_access_failed' | 'agents_path_failed' | 'agents_setup_cmd' | 'agents_setup_claude' | 'agents_setup_codex' | 'agents_setup_opencode' | 'agents_setup_json'
   | 'agents_copy' | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
+  | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -180,6 +181,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_log_empty: 'Агенти ще не зверталися',
     agents_log_passages: '{n, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}',
     agents_log_client: 'назвався: {client}',
+    agents_op_search: 'пошук',
+    agents_op_passage: 'уривок',
+    agents_op_status: 'стан',
+    agents_op_rescan: 'пересканування',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
     // empty are the same value on the wire — so this sentence names only the
@@ -1202,6 +1207,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_log_empty: 'No agent has asked yet',
     agents_log_passages: '{n, plural, one {# passage} other {# passages}}',
     agents_log_client: 'identified as: {client}',
+    agents_op_search: 'search',
+    agents_op_passage: 'passage',
+    agents_op_status: 'status',
+    agents_op_rescan: 'rescan',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_load_failed: 'The list of folders could not be read.',
