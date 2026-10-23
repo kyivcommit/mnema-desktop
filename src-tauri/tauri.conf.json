@@ -43,7 +43,7 @@
   "bundle": {
     "active": true,
     "targets": ["dmg"],
-    "externalBin": ["binaries/mnema-extract-worker"],
+    "externalBin": ["binaries/mnema-extract-worker", "binaries/mnema"],
     "resources": {
       "../vendor/pdfium/lib/libpdfium.dylib": "pdfium/lib/libpdfium.dylib",
       "../vendor/pdfium/VERSION": "pdfium/VERSION",

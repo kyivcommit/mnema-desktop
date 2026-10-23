@@ -348,6 +348,25 @@ if must copy_app_out "${LAB}/dead-worker" \
     "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-worker-img"
 fi
 
+echo "### 12b. the bundle carries no mnema agent binary"
+if must copy_app_out "${LAB}/no-agent" \
+  && must rm -f "${LAB}/no-agent/Mnema.app/Contents/MacOS/mnema" \
+  && gone "${LAB}/no-agent/Mnema.app/Contents/MacOS/mnema" \
+  && must image_from "${LAB}/no-agent" "${LAB}/no-agent-img/dmg/Mnema.dmg"; then
+  expect_red -m "carries no mnema binary" \
+    "a packaged build an agent cannot launch" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/no-agent-img"
+fi
+
+echo "### 12c. the mnema agent binary is there and is not executable"
+if must copy_app_out "${LAB}/dead-agent" \
+  && must chmod a-x "${LAB}/dead-agent/Mnema.app/Contents/MacOS/mnema" \
+  && must image_from "${LAB}/dead-agent" "${LAB}/dead-agent-img/dmg/Mnema.dmg"; then
+  expect_red -m "mnema exists and is not executable" \
+    "an agent binary that cannot be executed" \
+    "${REPO}/scripts/verify-bundle.sh" "${LAB}/dead-agent-img"
+fi
+
 echo "### 13. the staged worker is not the one this build produced"
 # copy_repo carries tracked files only, so target/ — git-ignored — does not come
 # along; the built binary is copied in here by hand so the check reaches the

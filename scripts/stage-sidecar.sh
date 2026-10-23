@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Builds the extraction worker so that the application can find it — in a packaged
+# Builds the extraction worker (and the `mnema` agent binary, staged the same way and bundled as
+# Contents/MacOS/mnema) so that the application can find it — in a packaged
 # build and in a development one, which are two different places.
 #
 # `cargo tauri build` never builds this binary on its own: src-tauri deliberately
@@ -42,7 +43,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-name="mnema-extract-worker"
 profile="${1:-release}"
 
 case "${profile}" in
@@ -60,40 +60,48 @@ flags=()
 # `flags[@]: unbound variable` for the debug one, which is the profile the
 # development hook uses. bash 5 from Homebrew does not reproduce it, so the trap
 # only appears where `/usr/bin/env bash` finds the system shell.
-cargo build ${flags[@]+"${flags[@]}"} --manifest-path "${repo_root}/Cargo.toml" \
-  -p mnema-extract --bin "${name}"
+stage() {
+  local pkg="$1" name="$2"
+  cargo build ${flags[@]+"${flags[@]}"} --manifest-path "${repo_root}/Cargo.toml" \
+    -p "${pkg}" --bin "${name}"
 
-built="${repo_root}/target/${profile}/${name}"
-[ -x "${built}" ] || {
-  echo "stage-sidecar: ${built} is missing after a successful build." >&2
-  exit 1
+  built="${repo_root}/target/${profile}/${name}"
+  [ -x "${built}" ] || {
+    echo "stage-sidecar: ${built} is missing after a successful build." >&2
+    exit 1
+  }
+
+  triple="$(rustc -vV | sed -n 's/^host: //p')"
+  [ -n "${triple}" ] || {
+    echo "stage-sidecar: rustc did not report a host triple." >&2
+    exit 1
+  }
+
+  dest_dir="${repo_root}/src-tauri/binaries"
+  mkdir -p "${dest_dir}"
+  # Always overwrite. The whole point is that a stale copy cannot survive a build.
+  #
+  # Written to a temporary name and moved into place, rather than copied over the
+  # destination: `mv` within one directory is atomic, `cp` is not. This matters
+  # because tauri-build READS this path while the debug profile may be writing it —
+  # Tauri does not wait for beforeDevCommand, so a `cargo tauri dev` has both
+  # running at once. A half-copied file still satisfies an existence check, and
+  # cargo would not rebuild the copy tauri-build then makes at
+  # target/debug/mnema-extract-worker, because its fingerprint cannot see a file
+  # overwritten from outside; a truncated worker would survive until a source
+  # change. Not observed — derived from the interleaving that was.
+  tmp="${dest_dir}/.${name}-${triple}.tmp"
+  cp -f "${built}" "${tmp}"
+  chmod +x "${tmp}"
+  mv -f "${tmp}" "${dest_dir}/${name}-${triple}"
+
+  echo "stage-sidecar: ${dest_dir}/${name}-${triple}"
 }
 
-triple="$(rustc -vV | sed -n 's/^host: //p')"
-[ -n "${triple}" ] || {
-  echo "stage-sidecar: rustc did not report a host triple." >&2
-  exit 1
-}
-
-dest_dir="${repo_root}/src-tauri/binaries"
-mkdir -p "${dest_dir}"
-# Always overwrite. The whole point is that a stale copy cannot survive a build.
-#
-# Written to a temporary name and moved into place, rather than copied over the
-# destination: `mv` within one directory is atomic, `cp` is not. This matters
-# because tauri-build READS this path while the debug profile may be writing it —
-# Tauri does not wait for beforeDevCommand, so a `cargo tauri dev` has both
-# running at once. A half-copied file still satisfies an existence check, and
-# cargo would not rebuild the copy tauri-build then makes at
-# target/debug/mnema-extract-worker, because its fingerprint cannot see a file
-# overwritten from outside; a truncated worker would survive until a source
-# change. Not observed — derived from the interleaving that was.
-tmp="${dest_dir}/.${name}-${triple}.tmp"
-cp -f "${built}" "${tmp}"
-chmod +x "${tmp}"
-mv -f "${tmp}" "${dest_dir}/${name}-${triple}"
-
-echo "stage-sidecar: ${dest_dir}/${name}-${triple}"
+stage mnema-extract mnema-extract-worker
+# The agent binary (CLI + stdio MCP) rides beside the app as Contents/MacOS/mnema; the app itself
+# does not link it (src-tauri/tests/dependency_boundary.rs).
+stage mnema-cli mnema
 
 # The MLX sidecar (macOS only: externalBin lives in tauri.macos.conf.json). `tauri-build` checks the
 # declared file while src-tauri compiles, so every macOS `cargo test` / `cargo tauri dev` needs one in

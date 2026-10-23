@@ -188,6 +188,50 @@ built_sha="$(shasum -a 256 "${built_worker}" | cut -d' ' -f1)"
   perfectly fresh while this image predates both. What is stale here is the image —
   something was rebuilt after it was written. Re-run cargo tauri build."
 
+# --- the agent binary --------------------------------------------------------
+#
+# `mnema` (crates/mnema-cli: the CLI and the stdio MCP server an agent launches) rides
+# beside the application as Contents/MacOS/mnema, staged by the same script and carried by
+# the same bundle.externalBin. The application does not link it, so nothing but this
+# section notices a bundle that left it out. The checks have the worker's shape: present,
+# executable, the staged file is the one cargo built, and the image is newer than it.
+agent_name="mnema"
+agent="${app}/Contents/MacOS/${agent_name}"
+
+[ -f "${agent}" ] || fail "${product}.app carries no ${agent_name} binary.
+  bundle.externalBin in src-tauri/tauri.conf.json is what puts it there, and
+  scripts/stage-sidecar.sh is what builds it. Without it an agent has nothing to launch."
+[ -x "${agent}" ] || fail "${agent} exists and is not executable. An agent's command
+  would fail with a permission error, not a missing file."
+
+built_agent="${repo_root}/target/release/${agent_name}"
+[ -f "${built_agent}" ] \
+  || fail "no ${built_agent}, so the agent binary's freshness is UNANSWERED. Run
+  scripts/stage-sidecar.sh, or build with cargo tauri build, which calls it."
+
+# Matched by the triples this project builds for, not by `mnema-*`: that glob also matches
+# the worker and the MLX sidecar staged in the same directory.
+agent_staged_count="$(find -E "${staged_dir}" -maxdepth 1 -type f \
+  -regex ".*/${agent_name}-(aarch64|x86_64)-apple-darwin" | wc -l | tr -d ' ')"
+case "${agent_staged_count}" in
+  0) fail "no ${agent_name} staged in ${staged_dir}.
+  scripts/stage-sidecar.sh puts it there and beforeBuildCommand calls that script." ;;
+  1) : ;;
+  *) fail "${agent_staged_count} files matching ${agent_name}-<triple> in ${staged_dir}.
+  Remove the stale ones: a check that verifies whichever one sorted first proves
+  nothing about the new build." ;;
+esac
+staged_agent="$(find -E "${staged_dir}" -maxdepth 1 -type f \
+  -regex ".*/${agent_name}-(aarch64|x86_64)-apple-darwin")"
+[ "$(shasum -a 256 "${staged_agent}" | cut -d' ' -f1)" = "$(shasum -a 256 "${built_agent}" | cut -d' ' -f1)" ] \
+  || fail "the staged agent binary is not the one this build produced:
+    staged ${staged_agent}
+    built  ${built_agent}
+  A stale copy in src-tauri/binaries/ ships inside an otherwise green build."
+[ "${dmg}" -nt "${built_agent}" ] \
+  || fail "${dmg} is older than the ${agent_name} binary this checkout built, so it cannot be
+  carrying it. Re-run cargo tauri build."
+
 # --- the signature ------------------------------------------------------------
 #
 # Before anything out of the image is executed, not after. This script is pointed at

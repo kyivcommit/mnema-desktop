@@ -538,6 +538,6 @@ case_ "mnema mcp: an err result must carry the wire error" \
 # dependency of mnema-cli only; the mutant gives it to the shell as well.
 case_ "bundle: the application must not link rmcp" \
   src-tauri/Cargo.toml \
-  's~^mnema-index = { path = "\.\./crates/mnema-index" }~&\nrmcp = { version = "3.7.0", default-features = false, features = ["server"] }~' \
+  's~(mnema-index = \{ path = "\.\./crates/mnema-index" \}\n)~$1rmcp = { version = "3.7.0", default-features = false, features = ["server"] }\n~' \
   'rmcp = { version = "3.7.0"' \
   mnema-desktop 'the_application_does_not_link_rmcp' --test dependency_boundary
