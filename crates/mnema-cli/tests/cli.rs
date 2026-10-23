@@ -249,3 +249,34 @@ fn mcp_turns_an_err_into_an_error_result() {
         "disabled"
     );
 }
+
+#[test]
+fn mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean() {
+    let f = fake(None);
+    let mut m = Mcp::start(&f.path);
+    m.handshake();
+    m.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    let tools = m.recv();
+    let described = |name: &str| -> String {
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(
+        described("search").contains(
+            "If there are no passages and `empty` is false, the search could not run: report the reason given in `arms`."
+        )
+    );
+    assert!(
+        described("passage").contains(
+            "`stale_id` or `not_found` means the document was re-indexed or the passage is gone: run `search` again."
+        )
+    );
+    assert!(described("rescan").contains("`started: false` means no new scan was started."));
+}

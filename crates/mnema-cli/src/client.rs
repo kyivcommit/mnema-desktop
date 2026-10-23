@@ -4,7 +4,7 @@
 
 use mnema_core::agent_wire::{Envelope, ErrKind, MAX_LINE, Reply, Request, VERSION, WireError};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -78,6 +78,10 @@ fn connect(path: &PathBuf) -> Result<UnixStream, WireError> {
 }
 
 pub fn call(req: &Request) -> Result<Value, WireError> {
+    call_on(&socket_path(), req, READ_TIMEOUT)
+}
+
+fn call_on(path: &PathBuf, req: &Request, read_timeout: Duration) -> Result<Value, WireError> {
     let mut line = serde_json::to_string(req).expect("a Request always serialises");
     // The server refuses a longer line and closes; our write would then fail
     // with EPIPE and its reply would be lost, so refuse here.
@@ -88,15 +92,19 @@ pub fn call(req: &Request) -> Result<Value, WireError> {
         ));
     }
     line.push('\n');
-    let mut stream = connect(&socket_path())?;
+    let mut stream = connect(path)?;
     let internal = |what: &str, e: std::io::Error| err(ErrKind::Internal, &format!("{what}: {e}"));
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(read_timeout));
     // A write the app closed on is the same event as a read it closed on.
     if stream.write_all(line.as_bytes()).is_err() {
         return Err(disabled());
     }
     let mut reply = String::new();
     match BufReader::new(stream).read_line(&mut reply) {
+        // A hung app is not an app with access off.
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            return Err(err(ErrKind::Internal, "the app did not answer in time"));
+        }
         // The app closes connections when access is turned off.
         Ok(0) | Err(_) if reply.is_empty() => return Err(disabled()),
         Err(e) => return Err(internal("reading the reply", e)),
@@ -113,5 +121,48 @@ pub fn call(req: &Request) -> Result<Value, WireError> {
     match env.reply {
         Reply::Ok(v) => Ok(v),
         Reply::Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mnema_core::agent_wire::Op;
+    use std::os::unix::net::UnixListener;
+
+    fn status() -> Request {
+        Request {
+            v: VERSION,
+            client: None,
+            op: Op::Status,
+        }
+    }
+
+    #[test]
+    fn an_app_that_never_answers_is_internal_not_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let hold = std::thread::spawn(move || {
+            // Accept and keep the stream open without a word.
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            drop(stream);
+        });
+        let e = call_on(&path, &status(), Duration::from_millis(100)).unwrap_err();
+        assert_eq!(e.kind, ErrKind::Internal, "{e:?}");
+        assert!(e.message.contains("did not answer in time"), "{e:?}");
+        hold.join().unwrap();
+    }
+
+    #[test]
+    fn an_app_that_closes_without_answering_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let hold = std::thread::spawn(move || drop(listener.accept().unwrap().0));
+        let e = call_on(&path, &status(), Duration::from_secs(5)).unwrap_err();
+        assert_eq!(e.kind, ErrKind::Disabled, "{e:?}");
+        hold.join().unwrap();
     }
 }

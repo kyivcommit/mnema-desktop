@@ -59,6 +59,8 @@
   // POSIX single quotes: nothing inside them is special but the quote itself.
   const quoted = $derived(`'${path.replaceAll("'", "'\\''")}'`);
   const cmd = $derived(`claude mcp add mnema -- ${quoted} mcp`);
+  const codex = $derived(`codex mcp add mnema -- ${quoted} mcp`);
+  const opencode = $derived(`opencode mcp add mnema -- ${quoted} mcp`);
   const json = $derived(JSON.stringify({ mcpServers: { mnema: { command: path, args: ['mcp'] } } }));
 
   const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => {});
@@ -76,8 +78,15 @@
 {:else if on && path}
   <div role="group" aria-label={$locale && t('agents_setup_cmd')}>
     <p>{#key $locale}{t('agents_setup_cmd')}{/key}</p>
+    <p>{#key $locale}{t('agents_setup_claude')}{/key}</p>
     <code data-testid="agents-cmd">{cmd}</code>
     <button type="button" data-testid="agents-copy-cmd" onclick={() => copy(cmd)}>{#key $locale}{t('agents_copy')}{/key}</button>
+    <p>{#key $locale}{t('agents_setup_codex')}{/key}</p>
+    <code data-testid="agents-codex">{codex}</code>
+    <button type="button" data-testid="agents-copy-codex" onclick={() => copy(codex)}>{#key $locale}{t('agents_copy')}{/key}</button>
+    <p>{#key $locale}{t('agents_setup_opencode')}{/key}</p>
+    <code data-testid="agents-opencode">{opencode}</code>
+    <button type="button" data-testid="agents-copy-opencode" onclick={() => copy(opencode)}>{#key $locale}{t('agents_copy')}{/key}</button>
     <p>{#key $locale}{t('agents_setup_json')}{/key}</p>
     <code data-testid="agents-json">{json}</code>
     <button type="button" data-testid="agents-copy-json" onclick={() => copy(json)}>{#key $locale}{t('agents_copy')}{/key}</button>

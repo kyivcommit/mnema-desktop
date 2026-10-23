@@ -1,6 +1,6 @@
 export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application' | 'settings_nav_agents'
-  | 'agents_access_label' | 'agents_access_failed' | 'agents_path_failed' | 'agents_setup_cmd' | 'agents_setup_json'
+  | 'agents_access_label' | 'agents_access_failed' | 'agents_path_failed' | 'agents_setup_cmd' | 'agents_setup_claude' | 'agents_setup_codex' | 'agents_setup_opencode' | 'agents_setup_json'
   | 'agents_copy' | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
@@ -171,7 +171,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_access_failed: 'Не вдалося змінити доступ:',
     agents_path_failed: 'Не вдалося визначити шлях до команди.',
     agents_setup_cmd: 'Команда для налаштування агента:',
-    agents_setup_json: 'Або фрагмент налаштувань:',
+    agents_setup_claude: 'Claude Code:',
+    agents_setup_codex: 'Codex:',
+    agents_setup_opencode: 'opencode:',
+    agents_setup_json: 'Claude Desktop, Cursor (фрагмент файлу налаштувань):',
     agents_copy: 'Копіювати',
     agents_log_heading: 'Звернення агентів',
     agents_log_empty: 'Агенти ще не зверталися',
@@ -1190,7 +1193,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_access_failed: 'Could not change access:',
     agents_path_failed: 'Could not find the command to set up.',
     agents_setup_cmd: 'Command that sets up your agent:',
-    agents_setup_json: 'Or the settings fragment:',
+    agents_setup_claude: 'Claude Code:',
+    agents_setup_codex: 'Codex:',
+    agents_setup_opencode: 'opencode:',
+    agents_setup_json: 'Claude Desktop, Cursor (settings file fragment):',
     agents_copy: 'Copy',
     agents_log_heading: 'Agent requests',
     agents_log_empty: 'No agent has asked yet',

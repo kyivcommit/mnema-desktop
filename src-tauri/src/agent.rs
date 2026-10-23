@@ -25,7 +25,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use mnema_core::agent_wire::{ErrKind, Op, PassageId, WireError};
 use serde_json::{Value, json};
 
-use crate::bridge::{Hit, read_arms, retrieve};
+use crate::bridge::{ContentArmReport, Hit, TextArmReport, read_arms, retrieve};
 use crate::error::Error;
 use crate::scan_state::{Entry, ScanSnapshot};
 use crate::state::AppState;
@@ -114,8 +114,12 @@ fn search(state: &AppState, query: &str, k: u32) -> Result<Value, WireError> {
             }))
         })
         .collect::<Result<Vec<_>, WireError>>()?;
+    // "Nothing here" is a finding only if an arm actually looked; with none run
+    // (text off, content not configured or failed) it is "could not search".
+    let looked = matches!(text, TextArmReport::Answered { .. })
+        || matches!(content, ContentArmReport::Answered { .. });
     Ok(json!({
-        "empty": passages.is_empty(),
+        "empty": passages.is_empty() && looked,
         "passages": passages,
         "arms": { "text": text, "content": content },
     }))
@@ -127,7 +131,7 @@ fn passage(state: &AppState, id: &str, context: u32) -> Result<Value, WireError>
     let citation = state
         .with_index(|db| db.read_snapshot(|db| db.citation(id.chunk_id)))
         .map_err(internal)?
-        .ok_or_else(|| err(ErrKind::NotFound, "no such passage"))?;
+        .ok_or_else(|| err(ErrKind::NotFound, "no such passage — run search again"))?;
     let stale = || {
         err(
             ErrKind::StaleId,
@@ -200,17 +204,35 @@ fn status(state: &AppState) -> Result<Value, WireError> {
 }
 
 /// `poll` and `cap` are parameters so a test need not wait the real ten minutes.
-fn rescan(state: &AppState, wait: bool, poll: Duration, cap: Duration) -> Result<Value, WireError> {
-    // Only the busy slot is an answer; any other refusal is a fault.
-    let started = match crate::scan_job::start(state, Entry::Full) {
-        Ok(()) => true,
-        Err(Error::JobAlreadyRunning) => false,
-        Err(e) => return Err(internal(e)),
+///
+/// With `wait`, a scan that is refused because some job holds the slot (an
+/// embedding-only resume, say) is retried until the slot frees, and the reply
+/// says `started: true` only for a scan this call started and waited for.
+pub fn rescan(
+    state: &AppState,
+    wait: bool,
+    poll: Duration,
+    cap: Duration,
+) -> Result<Value, WireError> {
+    let deadline = Instant::now() + cap;
+    let started = loop {
+        // Only the busy slot is an answer; any other refusal is a fault.
+        match crate::scan_job::start(state, Entry::Full) {
+            Ok(()) => break true,
+            Err(Error::JobAlreadyRunning) => {}
+            Err(e) => return Err(internal(e)),
+        }
+        if !wait {
+            return Ok(json!({ "started": false, "running": true }));
+        }
+        if Instant::now() >= deadline {
+            return Ok(json!({ "started": false, "running": true, "report": Value::Null }));
+        }
+        std::thread::sleep(poll);
     };
     if !wait {
         return Ok(json!({ "started": started, "running": true }));
     }
-    let deadline = Instant::now() + cap;
     loop {
         let scan = state.scan_state();
         match scan.snapshot {

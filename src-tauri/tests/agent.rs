@@ -11,11 +11,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mnema_core::agent_wire::{ErrKind, Op};
-use mnema_desktop::agent::{AgentServer, agent_log, handle, socket_path};
+use mnema_desktop::agent::{AgentServer, agent_log, handle, rescan, socket_path};
 use mnema_desktop::scan_state::{Entry, ScanSnapshot};
 use mnema_desktop::state::AppState;
 use serde_json::Value;
@@ -136,6 +137,33 @@ fn search_on_an_empty_index_is_empty_not_an_error() {
 }
 
 #[test]
+fn a_search_where_no_arm_ran_is_not_empty() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    let state = app.state::<AppState>();
+    state
+        .with_index(|db| db.meta_set("search_text_arm", "off"))
+        .unwrap();
+    let reply = search(&state, "fox", 8);
+    assert_eq!(reply["passages"].as_array().unwrap().len(), 0, "{reply}");
+    assert_eq!(reply["arms"]["text"]["kind"], "off", "{reply}");
+    assert_ne!(reply["arms"]["content"]["kind"], "answered", "{reply}");
+    assert_eq!(reply["empty"], false, "{reply}");
+}
+
+#[test]
+fn a_text_search_with_no_match_is_empty() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    let reply = search(&app.state::<AppState>(), "zzzxqv", 8);
+    assert_eq!(reply["passages"].as_array().unwrap().len(), 0, "{reply}");
+    assert_eq!(reply["arms"]["text"]["kind"], "answered", "{reply}");
+    assert_eq!(reply["empty"], true, "{reply}");
+}
+
+#[test]
 fn a_file_changed_after_indexing_is_marked_in_search_and_passage() {
     let data = tempfile::tempdir().unwrap();
     let dir = fixture_dir();
@@ -196,6 +224,7 @@ fn passage_of_an_unknown_chunk_is_not_found() {
     let app = unfolded(data.path());
     let e = passage(&app.state::<AppState>(), "999999:deadbeef:0", 2).unwrap_err();
     assert_eq!(e.kind, ErrKind::NotFound, "{e:?}");
+    assert_eq!(e.message, "no such passage — run search again");
 }
 
 #[test]
@@ -280,6 +309,95 @@ fn rescan_wait_returns_the_report() {
     assert_eq!(reply["started"], true, "{reply}");
     assert_eq!(reply["running"], false, "{reply}");
     assert!(reply["report"]["reason"].is_string(), "{reply}");
+}
+
+#[test]
+fn rescan_wait_behind_an_embedding_job_starts_a_scan_of_its_own() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    let waiter: Arc<Mutex<Option<std::thread::JoinHandle<Value>>>> = Arc::default();
+    let slot = Arc::clone(&waiter);
+    let fired = Arc::new(AtomicBool::new(false));
+    let handle_ = app.handle().clone();
+    run_scan_watching(
+        app.handle(),
+        Entry::EmbedOnly,
+        Duration::from_secs(60),
+        move |_, now| {
+            if matches!(now.snapshot, ScanSnapshot::Running { .. })
+                && !fired.swap(true, Ordering::SeqCst)
+            {
+                let h = handle_.clone();
+                *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let state = h.state::<AppState>();
+                    rescan(
+                        &state,
+                        true,
+                        Duration::from_millis(20),
+                        Duration::from_secs(60),
+                    )
+                    .expect("busy is not an error")
+                }));
+                // This is the job's own thread and the slot is held: give the
+                // waiter time to be refused before the job lets go.
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        },
+    );
+    let reply = waiter
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the embedding job never reported Running")
+        .join()
+        .unwrap();
+    assert_eq!(reply["started"], true, "{reply}");
+    assert_eq!(reply["running"], false, "{reply}");
+    assert!(reply["report"]["reason"].is_string(), "{reply}");
+}
+
+#[test]
+fn rescan_wait_gives_up_at_the_cap_still_running() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = unfolded(data.path());
+    app.state::<AppState>()
+        .with_index(|db| db.insert_watched_root(dir.path().to_str().unwrap()))
+        .unwrap();
+    let seen: Arc<Mutex<Option<Value>>> = Arc::default();
+    let slot = Arc::clone(&seen);
+    run_scan_watching(
+        app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |state, now| {
+            let mut slot = slot.lock().unwrap();
+            if slot.is_none() && matches!(now.snapshot, ScanSnapshot::Running { .. }) {
+                // The job thread is here, so the slot stays held for the whole wait.
+                *slot = Some(
+                    rescan(
+                        state,
+                        true,
+                        Duration::from_millis(5),
+                        Duration::from_millis(60),
+                    )
+                    .expect("busy is not an error"),
+                );
+            }
+        },
+    );
+    let reply = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the scan never reported Running");
+    assert_eq!(reply["started"], false, "{reply}");
+    assert_eq!(reply["running"], true, "{reply}");
+    assert!(
+        reply["report"].is_null() && reply.get("report").is_some(),
+        "{reply}"
+    );
 }
 
 // ── The socket ───────────────────────────────────────────────────────────────

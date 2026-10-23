@@ -46,6 +46,11 @@ test('turning access on calls set_agent_access with true and shows the command w
   await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent).toBe(`claude mcp add mnema -- '${PATH}' mcp`));
   expect(screen.getByTestId('agents-json').textContent)
     .toBe(`{"mcpServers":{"mnema":{"command":"${PATH}","args":["mcp"]}}}`);
+  expect(screen.getByTestId('agents-codex').textContent).toBe(`codex mcp add mnema -- '${PATH}' mcp`);
+  for (const label of ['Claude Code:', 'Codex:', 'opencode:', 'Claude Desktop, Cursor']) {
+    expect(screen.getByRole('group').textContent).toContain(label);
+  }
+  expect(screen.getByTestId('agents-opencode').textContent).toBe(`opencode mcp add mnema -- '${PATH}' mcp`);
 });
 
 test('a refused start shows the error and does not claim access is on', async () => {
@@ -65,6 +70,10 @@ test('the copy buttons put the command and the fragment on the clipboard', async
   await waitFor(() => expect(screen.getByTestId('agents-cmd').textContent).toContain(PATH));
   await fireEvent.click(screen.getByTestId('agents-copy-cmd'));
   await fireEvent.click(screen.getByTestId('agents-copy-json'));
+  await fireEvent.click(screen.getByTestId('agents-copy-codex'));
+  await fireEvent.click(screen.getByTestId('agents-copy-opencode'));
+  expect(writeText).toHaveBeenNthCalledWith(3, `codex mcp add mnema -- '${PATH}' mcp`);
+  expect(writeText).toHaveBeenNthCalledWith(4, `opencode mcp add mnema -- '${PATH}' mcp`);
   expect(writeText).toHaveBeenNthCalledWith(1, `claude mcp add mnema -- '${PATH}' mcp`);
   expect(writeText).toHaveBeenNthCalledWith(2, `{"mcpServers":{"mnema":{"command":"${PATH}","args":["mcp"]}}}`);
 });
@@ -122,6 +131,9 @@ test('a path with a space, a quote and a dollar sign is quoted for the shell', a
     .toBe(`claude mcp add mnema -- '/Apps/My "App" $HOME/it'\\''s/mnema' mcp`));
   expect(screen.getByTestId('agents-json').textContent)
     .toBe(JSON.stringify({ mcpServers: { mnema: { command: odd, args: ['mcp'] } } }));
+  const quotedOdd = `'/Apps/My "App" $HOME/it'\\''s/mnema'`;
+  expect(screen.getByTestId('agents-codex').textContent).toBe(`codex mcp add mnema -- ${quotedOdd} mcp`);
+  expect(screen.getByTestId('agents-opencode').textContent).toBe(`opencode mcp add mnema -- ${quotedOdd} mcp`);
 });
 
 test('while the path is pending there is no command and no copy button', async () => {

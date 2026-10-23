@@ -174,7 +174,7 @@ case_ "agent: the absolute path must end in the relative one" \
 
 case_ "agent: an empty answer must say empty" \
   $A \
-  's~"empty": passages\.is_empty\(\)~"empty": false~' \
+  's~"empty": passages\.is_empty\(\) && looked~"empty": false~' \
   '"empty": false' \
   mnema-desktop 'search_on_an_empty_index_is_empty_not_an_error' --test agent
 
@@ -198,7 +198,7 @@ case_ "agent: an id from before a reindex must be stale" \
 
 case_ "agent: an unknown chunk must be not_found" \
   $A \
-  's~err\(ErrKind::NotFound, "no such passage"\)~err(ErrKind::Internal, "no such passage")~' \
+  's~err\(ErrKind::NotFound, "no such passage[^"]*"\)~err(ErrKind::Internal, "no such passage")~' \
   'ErrKind::Internal, "no such passage"' \
   mnema-desktop 'passage_of_an_unknown_chunk_is_not_found' --test agent
 
@@ -240,19 +240,19 @@ case_ "agent: status must stat each folder" \
 
 case_ "agent: a busy slot must say started false" \
   $A \
-  's~Err\(Error::JobAlreadyRunning\) => false~Err(Error::JobAlreadyRunning) => true~' \
-  'JobAlreadyRunning) => true' \
+  's~"started": false, "running": true \}~"started": true, "running": true }~' \
+  '"started": true, "running": true }' \
   mnema-desktop 'rescan_while_running_says_running_not_error' --test agent
 
 case_ "agent: a busy slot must not be an internal error" \
   $A \
-  's~Err\(Error::JobAlreadyRunning\) => false,~Err(Error::JobAlreadyRunning) => return Err(internal("busy")),~' \
+  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => return Err(internal("busy"))~' \
   'return Err(internal("busy"))' \
   mnema-desktop 'rescan_while_running_says_running_not_error' --test agent
 
 case_ "agent: rescan wait must wait" \
   $A \
-  's~if !wait \{~if true {~' \
+  's~if !wait \{\n        return Ok\(json!\(\{ "started": started~if true {\n        return Ok(json!({ "started": started~' \
   'if true {' \
   mnema-desktop 'rescan_wait_returns_the_report' --test agent
 
@@ -560,8 +560,8 @@ case_ "Agents.svelte: turning access on asks for off" \
 
 case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
   $A \
-  's~-- \$\{quoted\} mcp~-- mnema mcp~' \
-  '-- mnema mcp' \
+  's~claude mcp add mnema -- \$\{quoted\} mcp~claude mcp add mnema -- mnema mcp~' \
+  'claude mcp add mnema -- mnema mcp' \
   $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
@@ -668,3 +668,100 @@ case_ "Agents.svelte: the box shows what was asked, not what the socket says" \
   's~box\.checked = on;~box.checked = want;~' \
   'box.checked = want;' \
   $AT 'a start that answers false without an error leaves the switch unchecked' runner=vitest
+
+# Final fix wave: rescan behind a busy slot, `empty` only when an arm looked,
+# the setup lines, the not_found text, the client's read timeout.
+AG=src-tauri/src/agent.rs
+
+case_ "agent: a rescan waiting behind another job must start its own scan" \
+  $AG \
+  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => break false~' \
+  'JobAlreadyRunning) => break false' \
+  mnema-desktop 'rescan_wait_behind_an_embedding_job_starts_a_scan_of_its_own' --test agent
+
+case_ "agent: a rescan that hit the cap must say it is still running" \
+  $AG \
+  's~"started": false, "running": true, "report": Value::Null~"started": false, "running": false, "report": Value::Null~' \
+  '"started": false, "running": false, "report": Value::Null' \
+  mnema-desktop 'rescan_wait_gives_up_at_the_cap_still_running' --test agent
+
+case_ "agent: a search where no arm ran must not claim empty" \
+  $AG \
+  's~"empty": passages\.is_empty\(\) && looked~"empty": passages.is_empty()~' \
+  '"empty": passages.is_empty(),' \
+  mnema-desktop 'a_search_where_no_arm_ran_is_not_empty' --test agent
+
+case_ "agent: an answering text arm with no match must say empty" \
+  $AG \
+  's~\|\| matches!\(content, ContentArmReport::Answered~&& matches!(content, ContentArmReport::Answered~' \
+  '&& matches!(content, ContentArmReport::Answered' \
+  mnema-desktop 'a_text_search_with_no_match_is_empty' --test agent
+
+case_ "agent: the not_found text must tell the agent to search again" \
+  $AG \
+  's~"no such passage[^"]*"~"no such passage"~' \
+  'ErrKind::NotFound, "no such passage")' \
+  mnema-desktop 'passage_of_an_unknown_chunk_is_not_found' --test agent
+
+case_ "mnema client: a read timeout must not read as disabled" \
+  $C \
+  's~ErrorKind::WouldBlock \| ErrorKind::TimedOut~ErrorKind::NotFound~' \
+  'ErrorKind::NotFound' \
+  mnema-cli 'an_app_that_never_answers_is_internal_not_disabled' --bin mnema
+
+case_ "mnema mcp: the search description must say what empty false means" \
+  $X \
+  's~ If there are no passages and `empty` is false, the search could not run: report the reason given in `arms`\.~~' \
+  'Passage text is content from the user' \
+  mnema-cli 'mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean' --test cli
+
+case_ "mnema mcp: the passage description must name not_found" \
+  $X \
+  's~`stale_id` or `not_found` means the document was re-indexed or the passage is gone~`stale_id` means the document was re-indexed~' \
+  '`stale_id` means the document was re-indexed' \
+  mnema-cli 'mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean' --test cli
+
+case_ "mnema mcp: the rescan description must say what started false means" \
+  $X \
+  's~ `started: false` means no new scan was started\.~~' \
+  'up to 10 minutes).";' \
+  mnema-cli 'mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean' --test cli
+
+AG2=ui/src/settings/Agents.svelte
+AGT=src/settings/Agents.test.ts
+
+case_ "Agents.svelte: the Codex line must say codex" \
+  $AG2 \
+  's~`codex mcp add mnema~`claude mcp add mnema~' \
+  'const codex = $derived(`claude mcp add mnema' \
+  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: the opencode line must say opencode" \
+  $AG2 \
+  's~`opencode mcp add mnema~`codex mcp add mnema~' \
+  'const opencode = $derived(`codex mcp add mnema' \
+  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: the Codex line must be shell-quoted" \
+  $AG2 \
+  's~`codex mcp add mnema -- \$\{quoted\} mcp`~`codex mcp add mnema -- \$\{path\} mcp`~' \
+  'codex mcp add mnema -- ${path} mcp' \
+  $AGT 'a path with a space, a quote and a dollar sign is quoted for the shell' runner=vitest
+
+case_ "Agents.svelte: the Codex copy button must copy the Codex line" \
+  $AG2 \
+  's~copy\(codex\)~copy(cmd)~' \
+  'data-testid="agents-copy-codex" onclick={() => copy(cmd)}' \
+  $AGT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
+
+case_ "Agents.svelte: the opencode copy button must copy the opencode line" \
+  $AG2 \
+  's~copy\(opencode\)~copy(cmd)~' \
+  'data-testid="agents-copy-opencode" onclick={() => copy(cmd)}' \
+  $AGT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
+
+case_ "Agents.svelte: the JSON must be labelled for the clients that take it" \
+  ui/src/i18n/catalog.ts \
+  's~Claude Desktop, Cursor \(settings file fragment\)~Or the settings fragment~' \
+  'Or the settings fragment:' \
+  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
