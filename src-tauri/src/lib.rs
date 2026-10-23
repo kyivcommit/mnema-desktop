@@ -110,6 +110,10 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::set_cold_after,
         prefs::chat_tools_enabled,
         prefs::set_chat_tools,
+        prefs::agent_access_enabled,
+        prefs::set_agent_access,
+        agent::agent_log,
+        agent::agent_command_path,
         open_settings,
     ]
 }
@@ -809,6 +813,8 @@ pub fn run() -> anyhow::Result<()> {
             // defaults it applies are wanted by the next command, not by the
             // next line of this closure. See `boot_index`'s own doc.
             drop(boot_index(app.handle()));
+            app.manage(agent::AgentServer::default());
+            agent::start_if_enabled(app.handle());
             // §D129: resolve the interface language once at start-up (prefs → OS
             // → EN) and seed it into `AppState` BEFORE the tray is built, which
             // reads it back to label its menu (`tray::build_tray`).

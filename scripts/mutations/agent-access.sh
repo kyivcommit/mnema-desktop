@@ -261,3 +261,133 @@ case_ "agent: rescan wait must carry the report" \
   's~"report": serde_json::to_value\(report\)\.map_err\(internal\)\?~"report": Value::Null~' \
   '"report": Value::Null,' \
   mnema-desktop 'rescan_wait_returns_the_report' --test agent
+
+# Task 4 (the socket, the switch, the log): src-tauri/src/agent.rs and
+# src-tauri/src/prefs.rs, tested by tests/agent.rs.
+P=src-tauri/src/prefs.rs
+
+case_ "agent socket: the file must be mode 0600" \
+  $A \
+  's~from_mode\(0o600\)~from_mode(0o666)~' \
+  'from_mode(0o666)' \
+  mnema-desktop 'turning_access_on_creates_a_socket_only_the_user_can_open' --test agent
+
+case_ "agent access: the switch must default to off" \
+  $P \
+  's~(\.get\("agent_access"\)[^;]*?)unwrap_or\(false\)~$1unwrap_or(true)~' \
+  'unwrap_or(true)' \
+  mnema-desktop 'access_is_off_by_default_and_no_socket_exists' --test agent
+
+case_ "agent access: a boot must not open the socket whatever the switch says" \
+  $A \
+  's~if crate::prefs::agent_access\(&data_dir\) \{~if true {~' \
+  'if true {' \
+  mnema-desktop 'access_is_off_by_default_and_no_socket_exists' --test agent
+
+case_ "agent access: a boot with the switch on must open the socket" \
+  $A \
+  's~if crate::prefs::agent_access\(&data_dir\) \{~if !crate::prefs::agent_access(\&data_dir) {~' \
+  'if !crate::prefs::agent_access' \
+  mnema-desktop 'a_boot_with_access_left_on_opens_the_socket' --test agent
+
+case_ "agent access: a boot with the switch off must remove a crash's socket" \
+  $A \
+  's~let _ = std::fs::remove_file\(socket_path\(&data_dir\)\);~let _ = ();~' \
+  'let _ = ();' \
+  mnema-desktop 'a_boot_with_access_off_removes_a_socket_a_crash_left' --test agent
+
+case_ "agent access: turning off must remove the socket file" \
+  $A \
+  's~let _ = std::fs::remove_file\(&path\);~let _ = ();~' \
+  'let _ = ();' \
+  mnema-desktop 'turning_access_off_removes_the_socket_and_cuts_an_open_connection' --test agent
+
+case_ "agent access: turning off must shut open connections down" \
+  $A \
+  's~let _ = stream\.shutdown\(std::net::Shutdown::Both\);~let _ = \&stream;~' \
+  'let _ = &stream;' \
+  mnema-desktop 'turning_access_off_removes_the_socket_and_cuts_an_open_connection' --test agent
+
+case_ "agent access: a rescan waiting when access goes off must be cut" \
+  $A \
+  's~let _ = stream\.shutdown\(std::net::Shutdown::Both\);~let _ = \&stream;~' \
+  'let _ = &stream;' \
+  mnema-desktop 'turning_access_off_during_rescan_wait_cuts_the_client_but_not_the_scan' --test agent
+
+case_ "agent access: the switch must close the socket when it goes off" \
+  $P \
+  's~crate::agent::stop\(&app\);~();~' \
+  '();' \
+  mnema-desktop 'turning_access_off_removes_the_socket_and_cuts_an_open_connection' --test agent
+
+case_ "agent socket: a leftover temporary file must not block start" \
+  $A \
+  's~(make `bind` fail\.\n\s*)let _ = std::fs::remove_file\(&tmp\);~$1let _ = ();~' \
+  'let _ = ();' \
+  mnema-desktop 'a_socket_left_by_a_crash_is_replaced_on_start' --test agent
+
+case_ "agent socket: a line of limit plus one bytes must be refused" \
+  $A \
+  's~\.take\(MAX_LINE as u64 \+ 1\)~.take(MAX_LINE as u64 + 2)~' \
+  'MAX_LINE as u64 + 2' \
+  mnema-desktop 'an_overlong_line_is_refused_and_the_connection_closed' --test agent
+
+case_ "agent socket: a line of exactly the limit must be served" \
+  $A \
+  's~\.take\(MAX_LINE as u64 \+ 1\)~.take(MAX_LINE as u64)~' \
+  'take(MAX_LINE as u64)' \
+  mnema-desktop 'an_overlong_line_is_refused_and_the_connection_closed' --test agent
+
+case_ "agent socket: the ninth connection must be refused" \
+  $A \
+  's~inner\.streams\.len\(\) >= MAX_CONNECTIONS~inner.streams.len() > MAX_CONNECTIONS~' \
+  'streams.len() > MAX_CONNECTIONS' \
+  mnema-desktop 'a_ninth_connection_is_refused' --test agent
+
+case_ "agent socket: a path of 104 bytes must be refused with the limit named" \
+  $A \
+  's~len\(\) > MAX_SOCKET_PATH~len() > MAX_SOCKET_PATH + 1~' \
+  '> MAX_SOCKET_PATH + 1' \
+  mnema-desktop 'a_socket_path_too_long_is_an_error_not_a_panic' --test agent
+
+case_ "agent socket: a path of 103 bytes must be accepted" \
+  $A \
+  's~len\(\) > MAX_SOCKET_PATH~len() >= MAX_SOCKET_PATH~' \
+  '>= MAX_SOCKET_PATH' \
+  mnema-desktop 'a_socket_path_too_long_is_an_error_not_a_panic' --test agent
+
+case_ "agent access: a socket that cannot open must leave the switch off" \
+  $P \
+  's~serde_json::Value::Bool\(false\),~serde_json::Value::Bool(true),~' \
+  'Value::Bool(true),' \
+  mnema-desktop 'a_socket_path_too_long_is_an_error_not_a_panic' --test agent
+
+case_ "agent log: it must keep fifty entries" \
+  $A \
+  's~const LOG_CAP: usize = 50;~const LOG_CAP: usize = 51;~' \
+  'LOG_CAP: usize = 51' \
+  mnema-desktop 'the_log_keeps_the_last_fifty_newest_first' --test agent
+
+case_ "agent log: the newest entry must come first" \
+  $A \
+  's~inner\.log\.push_front\(~inner.log.push_back(~' \
+  'push_back(' \
+  mnema-desktop 'the_log_keeps_the_last_fifty_newest_first' --test agent
+
+case_ "agent socket: the reply must carry what handle answered" \
+  $A \
+  's~Ok\(v\) => Reply::Ok\(v\),~Ok(_) => Reply::Ok(Value::Null),~' \
+  'Ok(_) => Reply::Ok(Value::Null)' \
+  mnema-desktop 'a_request_round_trips_over_the_socket' --test agent
+
+case_ "agent socket: a request that fails to parse must be a bad request" \
+  $A \
+  's~(let reply = match parsed \{\n\s*)Err\(e\) => Reply::Err\(e\),~$1Err(_) => Reply::Err(WireError { kind: ErrKind::Internal, message: String::new() }),~' \
+  'kind: ErrKind::Internal, message: String::new()' \
+  mnema-desktop 'a_malformed_request_over_the_socket_is_a_bad_request_and_the_connection_lives' --test agent
+
+case_ "agent log: the date must carry the year past February" \
+  $A \
+  's~i64::from\(m <= 2\)~0~' \
+  'yoe + era * 400 + 0' \
+  mnema-desktop 'agent::tests::a_time_is_written_as_rfc_3339_utc' --lib

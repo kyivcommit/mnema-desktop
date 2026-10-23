@@ -7,11 +7,15 @@ mod app;
 use app::app_in;
 use support::scan::{run_scan_watching, scan_to_completion};
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mnema_core::agent_wire::{ErrKind, Op};
-use mnema_desktop::agent::handle;
+use mnema_desktop::agent::{AgentServer, agent_log, handle, socket_path};
 use mnema_desktop::scan_state::{Entry, ScanSnapshot};
 use mnema_desktop::state::AppState;
 use serde_json::Value;
@@ -276,4 +280,313 @@ fn rescan_wait_returns_the_report() {
     assert_eq!(reply["started"], true, "{reply}");
     assert_eq!(reply["running"], false, "{reply}");
     assert!(reply["report"]["reason"].is_string(), "{reply}");
+}
+
+// ── The socket ───────────────────────────────────────────────────────────────
+
+/// An app with the index open and the agent server managed, as `.setup` does.
+fn served(data: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
+    let app = unfolded(data);
+    app.manage(AgentServer::default());
+    app
+}
+
+fn set_access(
+    app: &tauri::App<tauri::test::MockRuntime>,
+    on: bool,
+) -> Result<bool, mnema_desktop::error::Error> {
+    mnema_desktop::prefs::set_agent_access(app.handle().clone(), app.state::<AppState>(), on)
+}
+
+fn access_on(app: &tauri::App<tauri::test::MockRuntime>) -> PathBuf {
+    assert!(set_access(app, true).expect("access could not be turned on"));
+    socket_path(app.state::<AppState>().data_dir())
+}
+
+struct Client {
+    w: UnixStream,
+    r: BufReader<UnixStream>,
+}
+
+impl Client {
+    fn connect(path: &std::path::Path) -> Client {
+        let w = UnixStream::connect(path).expect("connect");
+        w.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let r = BufReader::new(w.try_clone().unwrap());
+        Client { w, r }
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        self.w.write_all(bytes).expect("write");
+    }
+
+    /// The next reply line, or the error the read ended in.
+    fn read(&mut self) -> std::io::Result<Option<Value>> {
+        let mut line = String::new();
+        match self.r.read_line(&mut line)? {
+            0 => Ok(None),
+            _ => Ok(Some(serde_json::from_str(&line).expect("a reply is JSON"))),
+        }
+    }
+
+    fn ask(&mut self, line: &str) -> Value {
+        self.send(format!("{line}\n").as_bytes());
+        self.read().expect("read").expect("the server closed")
+    }
+
+    /// True when the next read ends the way a cut connection does, and false
+    /// when it gave data or only timed out.
+    fn is_cut(&mut self) -> bool {
+        match self.r.fill_buf() {
+            Ok(b) => b.is_empty(),
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        }
+    }
+}
+
+const STATUS: &str = r#"{"v":1,"op":"status"}"#;
+
+#[test]
+fn turning_access_on_creates_a_socket_only_the_user_can_open() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = access_on(&app);
+    let mode = std::fs::metadata(&path)
+        .expect("no socket")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(mnema_desktop::prefs::agent_access(data.path()));
+}
+
+#[test]
+fn access_is_off_by_default_and_no_socket_exists() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    assert!(!mnema_desktop::prefs::agent_access(data.path()));
+    // A boot with the switch never touched must not open anything.
+    mnema_desktop::agent::start_if_enabled(app.handle());
+    assert!(!socket_path(data.path()).exists());
+}
+
+#[test]
+fn a_boot_with_access_left_on_opens_the_socket() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    mnema_desktop::prefs::write_key(data.path(), "agent_access", Value::Bool(true)).unwrap();
+    mnema_desktop::agent::start_if_enabled(app.handle());
+    let mut c = Client::connect(&socket_path(data.path()));
+    assert_eq!(c.ask(STATUS)["v"], 1);
+}
+
+#[test]
+fn a_boot_with_access_off_removes_a_socket_a_crash_left() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    std::fs::write(socket_path(data.path()), b"left over").unwrap();
+    mnema_desktop::agent::start_if_enabled(app.handle());
+    assert!(!socket_path(data.path()).exists());
+}
+
+#[test]
+fn turning_access_off_removes_the_socket_and_cuts_an_open_connection() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = access_on(&app);
+    let mut c = Client::connect(&path);
+    // A reply proves the server has this stream registered.
+    assert_eq!(c.ask(STATUS)["v"], 1);
+    assert!(!set_access(&app, false).unwrap());
+    assert!(!path.exists(), "the socket file survived");
+    assert!(c.is_cut(), "the open connection was not cut");
+    assert!(!mnema_desktop::prefs::agent_access(data.path()));
+}
+
+#[test]
+fn a_socket_left_by_a_crash_is_replaced_on_start() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = socket_path(data.path());
+    std::fs::write(&path, b"left over").unwrap();
+    std::fs::write(data.path().join("agent.tmp"), b"left over").unwrap();
+    access_on(&app);
+    let mut c = Client::connect(&path);
+    assert_eq!(c.ask(STATUS)["v"], 1);
+}
+
+#[test]
+fn an_overlong_line_is_refused_and_the_connection_closed() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let mut c = Client::connect(&access_on(&app));
+
+    // Exactly the limit is a line like any other: it fails as JSON, not as long,
+    // and the connection serves the next request.
+    c.send(&[b'a'; mnema_core::agent_wire::MAX_LINE]);
+    c.send(b"\n");
+    let at_limit = c.read().unwrap().unwrap();
+    assert_eq!(at_limit["err"]["kind"], "bad_request");
+    assert!(
+        !at_limit["err"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("longer"),
+        "{at_limit}"
+    );
+    assert_eq!(c.ask(STATUS)["v"], 1);
+
+    // One byte more is refused as long, and nothing further is served.
+    c.send(&[b'a'; mnema_core::agent_wire::MAX_LINE + 1]);
+    let over = c.read().unwrap().unwrap();
+    assert_eq!(over["err"]["kind"], "bad_request");
+    assert!(
+        over["err"]["message"].as_str().unwrap().contains("longer"),
+        "{over}"
+    );
+    assert!(c.is_cut(), "the connection stayed open");
+}
+
+#[test]
+fn a_ninth_connection_is_refused() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = access_on(&app);
+    let mut held: Vec<Client> = (0..8).map(|_| Client::connect(&path)).collect();
+    for c in &mut held {
+        assert_eq!(c.ask(STATUS)["v"], 1, "one of the first eight was refused");
+    }
+    let mut ninth = Client::connect(&path);
+    let refusal = ninth.read().unwrap().expect("no refusal");
+    assert_eq!(refusal["err"]["kind"], "internal");
+    assert_eq!(refusal["err"]["message"], "too many connections");
+    assert!(ninth.is_cut());
+}
+
+#[test]
+fn a_socket_path_too_long_is_an_error_not_a_panic() {
+    let base = tempfile::tempdir().unwrap();
+    // `agent.sock` is 10 bytes and one `/` precedes it; the limit is 103.
+    let nested = |total: usize| {
+        let fixed = base.path().as_os_str().len() + 1 + 1 + "agent.sock".len();
+        let dir = base.path().join("d".repeat(total - fixed));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let ok = nested(103);
+    assert_eq!(socket_path(&ok).as_os_str().len(), 103);
+    let app = served(&ok);
+    set_access(&app, true).expect("a path at the limit must work");
+
+    let too_long = nested(104);
+    let app = served(&too_long);
+    let e = set_access(&app, true).expect_err("a path over the limit was accepted");
+    assert!(e.to_string().contains("limit"), "{e}");
+    assert!(!mnema_desktop::prefs::agent_access(&too_long));
+    let way_over = nested(120);
+    let app = served(&way_over);
+    assert!(set_access(&app, true).is_err());
+}
+
+#[test]
+fn turning_access_off_during_rescan_wait_cuts_the_client_but_not_the_scan() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = served(data.path());
+    app.state::<AppState>()
+        .with_index(|db| db.insert_watched_root(dir.path().to_str().unwrap()))
+        .unwrap();
+    let path = access_on(&app);
+    let handle_for_watcher = app.handle().clone();
+    let cut: Arc<Mutex<Option<bool>>> = Arc::default();
+    let slot = Arc::clone(&cut);
+    let (_, ended) = run_scan_watching(
+        app.handle(),
+        Entry::Full,
+        Duration::from_secs(60),
+        move |_, now| {
+            let mut slot = slot.lock().unwrap();
+            if slot.is_some() || !matches!(now.snapshot, ScanSnapshot::Running { .. }) {
+                return;
+            }
+            // The announcing thread is the scan's own and is held here, so the
+            // scan cannot end while the request waits on it.
+            let mut c = Client::connect(&path);
+            c.send(b"{\"v\":1,\"op\":\"rescan\",\"wait\":true}\n");
+            std::thread::sleep(Duration::from_millis(300));
+            mnema_desktop::prefs::set_agent_access(
+                handle_for_watcher.clone(),
+                handle_for_watcher.state::<AppState>(),
+                false,
+            )
+            .unwrap();
+            *slot = Some(c.is_cut());
+        },
+    );
+    assert_eq!(
+        *cut.lock().unwrap(),
+        Some(true),
+        "the waiting client was not cut"
+    );
+    assert!(
+        matches!(ended.snapshot, ScanSnapshot::Ended { .. }),
+        "the scan did not run to its end"
+    );
+}
+
+#[test]
+fn the_log_keeps_the_last_fifty_newest_first() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    std::fs::write(dir.path().join("more.txt"), "another fox in another file").unwrap();
+    let app = indexed(data.path(), dir.path());
+    app.manage(AgentServer::default());
+    let mut c = Client::connect(&access_on(&app));
+    for i in 0..51 {
+        // Two passages exist; the last request asks for one of them.
+        let k = if i == 50 { 1 } else { 2 };
+        let r = c.ask(&format!(
+            r#"{{"v":1,"op":"search","query":"fox","k":{k},"client":"c{i}"}}"#
+        ));
+        assert!(r["ok"].is_object(), "{r}");
+    }
+    let log = agent_log(app.state::<AgentServer>());
+    assert_eq!(log.len(), 50);
+    assert_eq!(log[0].client.as_deref(), Some("c50"));
+    assert_eq!(log[0].passages, Some(1));
+    assert_eq!(log[0].op, "search");
+    assert_eq!(log[0].query.as_deref(), Some("fox"));
+    assert_eq!(log[1].passages, Some(2));
+    assert_eq!(log[49].client.as_deref(), Some("c1"));
+    assert!(
+        log[0].at.ends_with('Z') && log[0].at.contains('T'),
+        "{}",
+        log[0].at
+    );
+}
+
+#[test]
+fn a_request_round_trips_over_the_socket() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    app.manage(AgentServer::default());
+    let mut c = Client::connect(&access_on(&app));
+    let over_socket = c.ask(r#"{"v":1,"op":"search","query":"fox","k":8}"#);
+    let direct = search(&app.state::<AppState>(), "fox", 8);
+    assert_eq!(over_socket["v"], 1);
+    assert_eq!(over_socket["ok"], direct);
+    assert!(!direct["passages"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_malformed_request_over_the_socket_is_a_bad_request_and_the_connection_lives() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let mut c = Client::connect(&access_on(&app));
+    let r = c.ask("not json");
+    assert_eq!(r["err"]["kind"], "bad_request");
+    assert_eq!(c.ask(STATUS)["v"], 1);
 }

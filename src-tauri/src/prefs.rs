@@ -732,6 +732,49 @@ pub fn set_autostart(
     Ok(read_autostart(&state))
 }
 
+/// Whether agents may reach the application over the socket (`agent_access`):
+/// a bool, else off. Off by default because it is an access boundary.
+pub fn agent_access(data_dir: &Path) -> bool {
+    read_all(data_dir)
+        .get("agent_access")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+#[tauri::command(async)]
+pub fn agent_access_enabled(state: tauri::State<'_, AppState>) -> bool {
+    agent_access(state.data_dir())
+}
+
+/// Persists the switch, then opens or closes the socket, and answers with the
+/// stored value. A socket that cannot open leaves the switch off rather than
+/// showing "on" with nothing behind it.
+#[tauri::command(async)]
+pub fn set_agent_access<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    on: bool,
+) -> Result<bool, Error> {
+    write_key(
+        state.data_dir(),
+        "agent_access",
+        serde_json::Value::Bool(on),
+    )?;
+    if on {
+        if let Err(e) = crate::agent::start(&app) {
+            write_key(
+                state.data_dir(),
+                "agent_access",
+                serde_json::Value::Bool(false),
+            )?;
+            return Err(e);
+        }
+    } else {
+        crate::agent::stop(&app);
+    }
+    Ok(agent_access(state.data_dir()))
+}
+
 /// Whether the chat list shows only models that take tools (`chat_tools`): a
 /// bool, else on.
 pub fn chat_tools(data_dir: &Path) -> bool {

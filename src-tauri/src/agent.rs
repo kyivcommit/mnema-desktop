@@ -1,10 +1,26 @@
 //! The agent API's handlers: one function per request, answering with the
 //! functions the launcher uses (`bridge::retrieve`, `tree::document_view_in`),
-//! so retrieval never forks. No socket here; the wire format is
-//! `mnema_core::agent_wire`.
+//! so retrieval never forks. The socket that carries requests to them lives
+//! below; the wire format is `mnema_core::agent_wire`.
+//!
+//! **The socket exists only while the person has agent access on.** `start`
+//! binds, `stop` removes the file and shuts every open stream down, and a
+//! connection is registered under the same lock `stop` takes, so none can slip
+//! in after it.
 
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use mnema_core::agent_wire::{
+    Checked, Envelope, MAX_LINE, Reply, VERSION, parse_request, reply_line,
+};
+use serde::Serialize;
+use tauri::{AppHandle, Manager, Runtime};
 
 use mnema_core::agent_wire::{ErrKind, Op, PassageId, WireError};
 use serde_json::{Value, json};
@@ -213,5 +229,288 @@ fn rescan(state: &AppState, wait: bool, poll: Duration, cap: Duration) -> Result
                 return Ok(json!({ "started": started, "running": false, "report": Value::Null }));
             }
         }
+    }
+}
+
+const MAX_CONNECTIONS: usize = 8;
+const LOG_CAP: usize = 50;
+/// `sun_path` on macOS holds 104 bytes, the terminator included.
+const MAX_SOCKET_PATH: usize = 103;
+
+/// `<data_dir>/agent.sock`.
+pub fn socket_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("agent.sock")
+}
+
+/// One served request, as the settings window lists it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogEntry {
+    /// RFC 3339, UTC.
+    pub at: String,
+    pub op: String,
+    pub query: Option<String>,
+    pub passages: Option<usize>,
+    pub client: Option<String>,
+}
+
+#[derive(Default)]
+struct Inner {
+    running: bool,
+    /// Bumped by every `start` and `stop`; an accept thread serves only the
+    /// generation that spawned it.
+    generation: u64,
+    next_id: u64,
+    streams: HashMap<u64, UnixStream>,
+    log: VecDeque<LogEntry>,
+}
+
+#[derive(Default)]
+pub struct AgentServer(Mutex<Inner>);
+
+impl AgentServer {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        // Nothing here is left half-written by a panic.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+fn rfc3339(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from a day count (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+pub fn start_if_enabled<R: Runtime>(app: &AppHandle<R>) {
+    let data_dir = app.state::<AppState>().data_dir().to_path_buf();
+    if crate::prefs::agent_access(&data_dir) {
+        if let Err(e) = start(app) {
+            eprintln!("mnema: agent access could not start: {e}");
+        }
+    } else {
+        // A crash can leave the file of a session that had access on.
+        let _ = std::fs::remove_file(socket_path(&data_dir));
+    }
+}
+
+pub fn start<R: Runtime>(app: &AppHandle<R>) -> Result<(), Error> {
+    let server = app.state::<AgentServer>();
+    let path = socket_path(app.state::<AppState>().data_dir());
+    // Bound under another name and renamed once it is 0600, so the socket never
+    // answers at its public path with a looser mode.
+    let tmp = path.with_file_name("agent.tmp");
+    let mut inner = server.lock();
+    if inner.running {
+        return Ok(());
+    }
+    if path.as_os_str().len() > MAX_SOCKET_PATH {
+        return Err(Error::AgentSocket(format!(
+            "the socket path is {} bytes long and the limit is {MAX_SOCKET_PATH}",
+            path.as_os_str().len()
+        )));
+    }
+    // `rename` replaces whatever a crash left at `path`; a leftover `tmp` would
+    // make `bind` fail.
+    let _ = std::fs::remove_file(&tmp);
+    let listener = UnixListener::bind(&tmp).map_err(|e| Error::AgentSocket(e.to_string()))?;
+    let published = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(e) = published {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::AgentSocket(e.to_string()));
+    }
+    inner.running = true;
+    inner.generation += 1;
+    let generation = inner.generation;
+    drop(inner);
+    let app = app.clone();
+    std::thread::spawn(move || accept_loop(app, listener, generation));
+    Ok(())
+}
+
+pub fn stop<R: Runtime>(app: &AppHandle<R>) {
+    let server = app.state::<AgentServer>();
+    let path = socket_path(app.state::<AppState>().data_dir());
+    let mut inner = server.lock();
+    inner.running = false;
+    inner.generation += 1;
+    // The accept thread is blocked in `accept`; a connection wakes it and it
+    // finds the generation changed.
+    let _ = UnixStream::connect(&path);
+    let _ = std::fs::remove_file(&path);
+    for (_, stream) in inner.streams.drain() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+fn refuse(mut stream: UnixStream, kind: ErrKind, message: &str) {
+    let line = reply_line(&Envelope {
+        v: VERSION,
+        reply: Reply::Err(WireError {
+            kind,
+            message: message.into(),
+        }),
+    });
+    let _ = stream.write_all(line.as_bytes());
+}
+
+fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation: u64) {
+    for conn in listener.incoming() {
+        let server = app.state::<AgentServer>();
+        let Ok(stream) = conn else {
+            if server.lock().generation != generation {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        let mut inner = server.lock();
+        if !inner.running || inner.generation != generation {
+            return;
+        }
+        if inner.streams.len() >= MAX_CONNECTIONS {
+            drop(inner);
+            refuse(stream, ErrKind::Internal, "too many connections");
+            continue;
+        }
+        let Ok(registered) = stream.try_clone() else {
+            continue;
+        };
+        inner.next_id += 1;
+        let id = inner.next_id;
+        inner.streams.insert(id, registered);
+        drop(inner);
+        let app = app.clone();
+        let spawned = std::thread::Builder::new().spawn(move || {
+            serve(&app, &stream);
+            app.state::<AgentServer>().lock().streams.remove(&id);
+        });
+        if spawned.is_err() {
+            server.lock().streams.remove(&id);
+        }
+    }
+}
+
+fn serve<R: Runtime>(app: &AppHandle<R>, stream: &UnixStream) {
+    let mut reader = BufReader::new(stream);
+    let mut writer = stream;
+    loop {
+        let mut buf = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut buf);
+        match read {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let ended = buf.last() == Some(&b'\n');
+        if ended {
+            buf.pop();
+        }
+        let reply = if buf.len() > MAX_LINE {
+            let line = reply_line(&Envelope {
+                v: VERSION,
+                reply: Reply::Err(WireError {
+                    kind: ErrKind::BadRequest,
+                    message: format!("request longer than {MAX_LINE} bytes"),
+                }),
+            });
+            let _ = writer.write_all(line.as_bytes());
+            return;
+        } else {
+            answer(app, &buf)
+        };
+        if writer.write_all(reply.as_bytes()).is_err() || !ended {
+            return;
+        }
+    }
+}
+
+fn answer<R: Runtime>(app: &AppHandle<R>, line: &[u8]) -> String {
+    let parsed = std::str::from_utf8(line)
+        .map_err(|_| WireError {
+            kind: ErrKind::BadRequest,
+            message: "request is not UTF-8".into(),
+        })
+        .and_then(|l| parse_request(l.trim_end_matches('\r')));
+    let reply = match parsed {
+        Err(e) => Reply::Err(e),
+        Ok(Checked { client, op }) => {
+            let (name, query) = match &op {
+                Op::Search { query, .. } => ("search", Some(query.clone())),
+                Op::Passage { .. } => ("passage", None),
+                Op::Status => ("status", None),
+                Op::Rescan { .. } => ("rescan", None),
+            };
+            let result = handle(&app.state::<AppState>(), op);
+            let passages = match (&result, name) {
+                (Ok(v), "search") => v["passages"].as_array().map(Vec::len),
+                _ => None,
+            };
+            let server = app.state::<AgentServer>();
+            let mut inner = server.lock();
+            inner.log.push_front(LogEntry {
+                at: rfc3339(SystemTime::now()),
+                op: name.into(),
+                query,
+                passages,
+                client,
+            });
+            inner.log.truncate(LOG_CAP);
+            drop(inner);
+            match result {
+                Ok(v) => Reply::Ok(v),
+                Err(e) => Reply::Err(e),
+            }
+        }
+    };
+    reply_line(&Envelope { v: VERSION, reply })
+}
+
+/// Newest first.
+#[tauri::command]
+pub fn agent_log(server: tauri::State<'_, AgentServer>) -> Vec<LogEntry> {
+    server.lock().log.iter().cloned().collect()
+}
+
+/// Where the `mnema` command-line tool sits: beside the application binary.
+#[tauri::command]
+pub fn agent_command_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mnema")))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn a_time_is_written_as_rfc_3339_utc() {
+        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        // A leap day, so the month/day arithmetic is exercised past February.
+        let t = UNIX_EPOCH + Duration::from_secs(1_709_210_096);
+        assert_eq!(rfc3339(t), "2024-02-29T12:34:56Z");
     }
 }

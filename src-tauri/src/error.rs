@@ -46,6 +46,9 @@ pub enum Error {
     /// first variant that needs `From<std::io::Error>` at all.
     #[error("could not write preferences: {0}")]
     Prefs(#[from] std::io::Error),
+    /// The agent socket could not be opened (`agent::start`).
+    #[error("the agent socket could not be opened: {0}")]
+    AgentSocket(String),
     /// `set_hotkey` refused the string **before the parser ran**, by a guard of
     /// this application's own: an empty or whitespace-only shortcut, one made
     /// of modifiers with no key (`"Alt"`, `"Ctrl+Alt"`), or one with a key and
