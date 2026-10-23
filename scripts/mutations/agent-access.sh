@@ -391,3 +391,36 @@ case_ "agent log: the date must carry the year past February" \
   's~i64::from\(m <= 2\)~0~' \
   'yoe + era * 400 + 0' \
   mnema-desktop 'agent::tests::a_time_is_written_as_rfc_3339_utc' --lib
+
+# Task 4 fix round: the switch is serialised, off stops first, a failed start
+# switches the stored value off, and "enabled" reports the socket.
+
+case_ "agent access: off must stop the socket before it writes the prefs" \
+  $P \
+  's~(crate::agent::stop\(&app\);)(\s*)(key\(false\)\?;)~$3$2$1~' \
+  'key(false)?;' \
+  mnema-desktop 'turning_access_off_cuts_the_socket_even_when_the_prefs_write_fails' --test agent
+
+case_ "agent access: two changes of the switch must not interleave" \
+  $P \
+  's~let _toggle = server\.toggle_lock\(\);~let _toggle = ();~' \
+  'let _toggle = ();' \
+  mnema-desktop 'concurrent_toggles_leave_the_prefs_and_the_socket_in_agreement' --test agent
+
+case_ "agent access: a boot that cannot start must switch the stored value off" \
+  $A \
+  's~serde_json::Value::Bool\(false\),~serde_json::Value::Bool(true),~' \
+  'Value::Bool(true),' \
+  mnema-desktop 'a_boot_that_cannot_open_the_socket_switches_access_off' --test agent
+
+case_ "agent access: enabled must say whether the socket is open" \
+  $P \
+  's~server\.is_running\(\)~true~' \
+  '    true' \
+  mnema-desktop 'the_switch_reports_the_socket_and_not_the_stored_value' --test agent
+
+case_ "agent access: a failed write-back must not hide the start error" \
+  $P \
+  's~(if let Err\(e\) = crate::agent::start\(&app\) \{\n\s*)if let Err\(w\) = key\(false\) \{~$1key(false)?; if let Err(w) = Ok::<(), std::io::Error>(()) {~' \
+  'key(false)?; if let Err(w)' \
+  mnema-desktop 'a_failed_start_with_a_failed_write_back_reports_the_start' --test agent

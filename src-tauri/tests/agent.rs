@@ -295,7 +295,12 @@ fn set_access(
     app: &tauri::App<tauri::test::MockRuntime>,
     on: bool,
 ) -> Result<bool, mnema_desktop::error::Error> {
-    mnema_desktop::prefs::set_agent_access(app.handle().clone(), app.state::<AppState>(), on)
+    mnema_desktop::prefs::set_agent_access(
+        app.handle().clone(),
+        app.state::<AppState>(),
+        app.state::<AgentServer>(),
+        on,
+    )
 }
 
 fn access_on(app: &tauri::App<tauri::test::MockRuntime>) -> PathBuf {
@@ -519,6 +524,7 @@ fn turning_access_off_during_rescan_wait_cuts_the_client_but_not_the_scan() {
             mnema_desktop::prefs::set_agent_access(
                 handle_for_watcher.clone(),
                 handle_for_watcher.state::<AppState>(),
+                handle_for_watcher.state::<AgentServer>(),
                 false,
             )
             .unwrap();
@@ -589,4 +595,99 @@ fn a_malformed_request_over_the_socket_is_a_bad_request_and_the_connection_lives
     let r = c.ask("not json");
     assert_eq!(r["err"]["kind"], "bad_request");
     assert_eq!(c.ask(STATUS)["v"], 1);
+}
+
+// ── The switch ───────────────────────────────────────────────────────────────
+
+/// A directory whose socket path is `total` bytes.
+fn dir_for_socket_path_of(base: &std::path::Path, total: usize) -> PathBuf {
+    let fixed = base.as_os_str().len() + 1 + 1 + "agent.sock".len();
+    let dir = base.join("d".repeat(total - fixed));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn enabled(app: &tauri::App<tauri::test::MockRuntime>) -> bool {
+    mnema_desktop::prefs::agent_access_enabled(app.state::<AgentServer>())
+}
+
+#[test]
+fn turning_access_off_cuts_the_socket_even_when_the_prefs_write_fails() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = access_on(&app);
+    let mut c = Client::connect(&path);
+    assert_eq!(c.ask(STATUS)["v"], 1);
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let off = set_access(&app, false);
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(off.is_err(), "the prefs write was expected to fail here");
+    assert!(c.is_cut(), "the connection outlived a failed switch-off");
+    assert!(!enabled(&app));
+}
+
+#[test]
+fn concurrent_toggles_leave_the_prefs_and_the_socket_in_agreement() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let threads: Vec<_> = [true, false]
+        .into_iter()
+        .map(|on| {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                for _ in 0..150 {
+                    let _ = mnema_desktop::prefs::set_agent_access(
+                        handle.clone(),
+                        handle.state::<AppState>(),
+                        handle.state::<AgentServer>(),
+                        on,
+                    );
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let stored = mnema_desktop::prefs::agent_access(data.path());
+    let listening = UnixStream::connect(socket_path(data.path())).is_ok();
+    assert_eq!(stored, listening, "prefs and socket disagree");
+    assert_eq!(stored, enabled(&app));
+}
+
+#[test]
+fn a_boot_that_cannot_open_the_socket_switches_access_off() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = dir_for_socket_path_of(base.path(), 120);
+    let app = served(&dir);
+    mnema_desktop::prefs::write_key(&dir, "agent_access", Value::Bool(true)).unwrap();
+    mnema_desktop::agent::start_if_enabled(app.handle());
+    assert!(!enabled(&app));
+    assert!(!mnema_desktop::prefs::agent_access(&dir));
+}
+
+#[test]
+fn the_switch_reports_the_socket_and_not_the_stored_value() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    mnema_desktop::prefs::write_key(data.path(), "agent_access", Value::Bool(true)).unwrap();
+    assert!(mnema_desktop::prefs::agent_access(data.path()));
+    assert!(!enabled(&app), "stored on, nothing listening");
+    access_on(&app);
+    assert!(enabled(&app));
+}
+
+#[test]
+fn a_failed_start_with_a_failed_write_back_reports_the_start() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = dir_for_socket_path_of(base.path(), 120);
+    let app = served(&dir);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let on = set_access(&app, true);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let e = on.expect_err("start cannot succeed on this path");
+    assert!(
+        e.to_string().contains("limit"),
+        "the start error was lost: {e}"
+    );
 }

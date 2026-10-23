@@ -741,38 +741,44 @@ pub fn agent_access(data_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the socket is open, which is what "on" means to the person; the
+/// stored value says only what was last asked for.
 #[tauri::command(async)]
-pub fn agent_access_enabled(state: tauri::State<'_, AppState>) -> bool {
-    agent_access(state.data_dir())
+pub fn agent_access_enabled(server: tauri::State<'_, crate::agent::AgentServer>) -> bool {
+    server.is_running()
 }
 
-/// Persists the switch, then opens or closes the socket, and answers with the
-/// stored value. A socket that cannot open leaves the switch off rather than
-/// showing "on" with nothing behind it.
+/// Opens or closes the socket and persists the switch, under one lock so two
+/// changes cannot interleave, and answers with whether the socket is open.
+///
+/// Off stops first: `stop` cannot fail, a prefs write can, and a failed write
+/// must not leave the socket answering. On starts first, and a start that fails
+/// writes the stored value back to off; the start error is the one returned.
 #[tauri::command(async)]
 pub fn set_agent_access<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
+    server: tauri::State<'_, crate::agent::AgentServer>,
     on: bool,
 ) -> Result<bool, Error> {
-    write_key(
-        state.data_dir(),
-        "agent_access",
-        serde_json::Value::Bool(on),
-    )?;
-    if on {
-        if let Err(e) = crate::agent::start(&app) {
-            write_key(
-                state.data_dir(),
-                "agent_access",
-                serde_json::Value::Bool(false),
-            )?;
-            return Err(e);
-        }
-    } else {
+    let _toggle = server.toggle_lock();
+    let key = |v: bool| write_key(state.data_dir(), "agent_access", serde_json::Value::Bool(v));
+    if !on {
         crate::agent::stop(&app);
+        key(false)?;
+        return Ok(false);
     }
-    Ok(agent_access(state.data_dir()))
+    if let Err(e) = crate::agent::start(&app) {
+        if let Err(w) = key(false) {
+            eprintln!("mnema: agent access could not be switched off in the prefs: {w}");
+        }
+        return Err(e);
+    }
+    if let Err(e) = key(true) {
+        crate::agent::stop(&app);
+        return Err(e.into());
+    }
+    Ok(true)
 }
 
 /// Whether the chat list shows only models that take tools (`chat_tools`): a

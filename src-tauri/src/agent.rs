@@ -266,12 +266,26 @@ struct Inner {
 }
 
 #[derive(Default)]
-pub struct AgentServer(Mutex<Inner>);
+pub struct AgentServer {
+    inner: Mutex<Inner>,
+    /// Held by whoever changes the switch across persist + start/stop, which
+    /// `start` and `stop` (locking `inner` themselves) cannot do alone.
+    toggle: Mutex<()>,
+}
 
 impl AgentServer {
+    pub fn toggle_lock(&self) -> MutexGuard<'_, ()> {
+        self.toggle.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the socket is open right now.
+    pub fn is_running(&self) -> bool {
+        self.lock().running
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // Nothing here is left half-written by a panic.
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -300,9 +314,17 @@ fn rfc3339(t: SystemTime) -> String {
 
 pub fn start_if_enabled<R: Runtime>(app: &AppHandle<R>) {
     let data_dir = app.state::<AppState>().data_dir().to_path_buf();
+    let server = app.state::<AgentServer>();
+    let _toggle = server.toggle_lock();
     if crate::prefs::agent_access(&data_dir) {
         if let Err(e) = start(app) {
             eprintln!("mnema: agent access could not start: {e}");
+            // The switch must not say on with nothing behind it.
+            if let Err(w) =
+                crate::prefs::write_key(&data_dir, "agent_access", serde_json::Value::Bool(false))
+            {
+                eprintln!("mnema: agent access could not be switched off in the prefs: {w}");
+            }
         }
     } else {
         // A crash can leave the file of a session that had access on.
@@ -336,6 +358,11 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) -> Result<(), Error> {
         let _ = std::fs::remove_file(&tmp);
         return Err(Error::AgentSocket(e.to_string()));
     }
+    // Polled rather than blocked in `accept`, so `stop` need not wake it.
+    if let Err(e) = listener.set_nonblocking(true) {
+        let _ = std::fs::remove_file(&path);
+        return Err(Error::AgentSocket(e.to_string()));
+    }
     inner.running = true;
     inner.generation += 1;
     let generation = inner.generation;
@@ -351,9 +378,6 @@ pub fn stop<R: Runtime>(app: &AppHandle<R>) {
     let mut inner = server.lock();
     inner.running = false;
     inner.generation += 1;
-    // The accept thread is blocked in `accept`; a connection wakes it and it
-    // finds the generation changed.
-    let _ = UnixStream::connect(&path);
     let _ = std::fs::remove_file(&path);
     for (_, stream) in inner.streams.drain() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -372,15 +396,22 @@ fn refuse(mut stream: UnixStream, kind: ErrKind, message: &str) {
 }
 
 fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation: u64) {
-    for conn in listener.incoming() {
+    loop {
         let server = app.state::<AgentServer>();
-        let Ok(stream) = conn else {
-            if server.lock().generation != generation {
-                return;
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(_) => {
+                if server.lock().generation != generation {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
             }
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
         };
+        // An accepted socket inherits the listener's non-blocking mode on macOS.
+        if stream.set_nonblocking(false).is_err() {
+            continue;
+        }
         let mut inner = server.lock();
         if !inner.running || inner.generation != generation {
             return;
@@ -391,6 +422,12 @@ fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation
             continue;
         }
         let Ok(registered) = stream.try_clone() else {
+            drop(inner);
+            refuse(
+                stream,
+                ErrKind::Internal,
+                "could not register the connection",
+            );
             continue;
         };
         inner.next_id += 1;
