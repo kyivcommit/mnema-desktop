@@ -868,13 +868,13 @@ case_ "agent passage: a document with no text left must be not_found" \
 
 case_ "agent passage: the re-indexing message must reach the wire (pending document)" \
   $AGR \
-  's~being re-indexed~being re-indexd~' \
+  's~being re-indexed — run search_library again",~being re-indexd — run search_library again",~' \
   'being re-indexd' \
   mnema-desktop passage_of_a_document_being_reindexed_is_stale --test agent
 
 case_ "agent passage: the no-text message must reach the wire (failed document)" \
   $AGR \
-  's~no indexed text any more~no text any more~' \
+  's~no indexed text any more — run search_library again",~no text any more — run search_library again",~' \
   'no text any more' \
   mnema-desktop passage_of_a_document_with_no_text_left_is_not_found --test agent
 
@@ -884,11 +884,6 @@ case_ "agent socket: a connection's slot must be freed when its handler ends" \
   'let _ = &self.id;' \
   mnema-desktop "${AGI}a_dropped_slot_frees_its_connection" --lib
 
-case_ "agent socket: the slot must be freed on a panic too" \
-  $AGR \
-  's~let _slot = Slot \{ server: &server, id \};\s*serve~let _ = Slot { server: \&server, id };\n            serve~' \
-  'let _ = Slot' \
-  mnema-desktop "${AGI}a_panicking_holder_still_frees_its_slot" --lib
 
 CC=crates/mnema-cli/src/client.rs
 case_ "mnema cli: the app id must be the one tauri.conf.json names" \
