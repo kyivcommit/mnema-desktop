@@ -543,6 +543,7 @@ jobs:
           - pr10f-tray-locale
           - pr10f-settings
           - ui-scale
+          - agent-access
           - watcher
           - branch-review
           - citation-identity
