@@ -458,8 +458,8 @@ case_ "mnema client: no socket with the override must not wait" \
 
 case_ "mnema client: no socket with the override must say not_running" \
   $C \
-  's~(if std::env::var_os\(OVERRIDE\)\.is_some\(\) \{\n\s*return Err\()not_running\(\)~$1disabled()~' \
-  'return Err(disabled())' \
+  's~map_err\(\|_\| not_running\(\)\)~map_err(|_| disabled())~' \
+  'map_err(|_| disabled())' \
   mnema-cli 'no_socket_with_the_override_set_is_not_running_without_launching' --test cli
 
 case_ "mnema client: a hang-up before any reply must read as disabled" \
@@ -560,8 +560,8 @@ case_ "Agents.svelte: turning access on asks for off" \
 
 case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
   $A \
-  's~claude mcp add mnema -- \$\{quoted\} mcp~claude mcp add mnema -- mnema mcp~' \
-  'claude mcp add mnema -- mnema mcp' \
+  's~claude mcp add --scope user mnema -- \$\{quoted\} mcp~claude mcp add --scope user mnema -- mnema mcp~' \
+  'claude mcp add --scope user mnema -- mnema mcp' \
   $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
@@ -738,8 +738,8 @@ case_ "Agents.svelte: the Codex line must say codex" \
 
 case_ "Agents.svelte: the opencode line must say opencode" \
   $AG2 \
-  's~`opencode mcp add mnema~`codex mcp add mnema~' \
-  'const opencode = $derived(`codex mcp add mnema' \
+  's~`opencode mcp add --global mnema~`codex mcp add --global mnema~' \
+  'const opencode = $derived(`codex mcp add --global mnema' \
   $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the Codex line must be shell-quoted" \
@@ -764,4 +764,72 @@ case_ "Agents.svelte: the JSON must be labelled for the clients that take it" \
   ui/src/i18n/catalog.ts \
   's~Claude Desktop, Cursor \(settings file fragment\)~Or the settings fragment~' \
   'Or the settings fragment:' \
+  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+
+# ── Live-stand fixes ──────────────────────────────────────────────────────────
+
+case_ "mnema client: a running app without a socket must not be launched" \
+  $C \
+  's~if running\(\) \{\n        return Err\(disabled\(\)\);~if false \&\& running() {\n        return Err(disabled());~' \
+  'if false && running()' \
+  mnema-cli 'client::tests::a_running_app_without_a_socket_is_disabled_at_once_and_is_not_launched' --bin mnema
+
+case_ "mnema client: an app that is not running must be launched" \
+  $C \
+  's~\n    launch\(\);~\n    let _ = launch;~' \
+  'let _ = launch;' \
+  mnema-cli 'client::tests::an_app_that_is_not_running_is_launched_and_then_reported_not_running' --bin mnema
+
+case_ "mnema client: a socket that appears after the launch must be used" \
+  $C \
+  's~while start\.elapsed\(\) < wait~while false \&\& start.elapsed() < wait~' \
+  'while false && start.elapsed() < wait' \
+  mnema-cli 'client::tests::a_launched_app_that_opens_its_socket_is_connected_to' --bin mnema
+
+case_ "mnema client: a path outside a bundle must give no bundle" \
+  $C \
+  's~app\.extension\(\)\? == "app"~app.extension().is_some()~' \
+  'app.extension().is_some()' \
+  mnema-cli 'client::tests::the_bundle_is_derived_from_the_executable_path' --bin mnema
+
+case_ "mnema client: a bundle path must name the .app" \
+  $C \
+  's~\.then\(\|\| app\.to_path_buf\(\)\)~.then(|| contents.to_path_buf())~' \
+  '.then(|| contents.to_path_buf())' \
+  mnema-cli 'client::tests::the_bundle_is_derived_from_the_executable_path' --bin mnema
+
+case_ "mnema mcp: the server must carry its instructions" \
+  $X \
+  's~\.with_instructions\(INSTRUCTIONS\)~.with_instructions("")~' \
+  '.with_instructions("")' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: the search tool must be named search_library" \
+  $X \
+  's~"search_library",(\s*)SEARCH~"search",$1SEARCH~' \
+  '"search",' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: search_library must forward as the search op" \
+  $X \
+  's~if name == "search_library" \{~if name == "search_librar" {~' \
+  'name == "search_librar"' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: the passage description must point at search_library" \
+  $X \
+  's~run `search_library` again~run `search` again~' \
+  'run `search` again' \
+  mnema-cli 'mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean' --test cli
+
+case_ "Agents.svelte: the Claude Code line must register for the user, not the directory" \
+  $AG2 \
+  's~claude mcp add --scope user mnema~claude mcp add mnema~' \
+  'claude mcp add mnema -- ${quoted}' \
+  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: the opencode line must write the global config" \
+  $AG2 \
+  's~opencode mcp add --global mnema~opencode mcp add mnema~' \
+  'opencode mcp add mnema -- ${quoted}' \
   $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest

@@ -202,6 +202,10 @@ fn mcp_lists_four_tools_and_calls_search() {
     let mut m = Mcp::start(&f.path);
     let init = m.handshake();
     assert_eq!(init["result"]["serverInfo"]["name"], "mnema");
+    assert_eq!(
+        init["result"]["instructions"],
+        "Mnema is the user's local document library: their own books, papers and files, indexed on this machine. Use `search_library` whenever the user asks what their documents, books or library say about something, or asks to find something in them — in any language (e.g. «мої книжки», «мої документи», «моя бібліотека»). Answer from the passages it returns and cite each fact with its path and locator."
+    );
 
     m.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
     let tools = m.recv();
@@ -212,10 +216,10 @@ fn mcp_lists_four_tools_and_calls_search() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     names.sort();
-    assert_eq!(names, ["passage", "rescan", "search", "status"]);
+    assert_eq!(names, ["passage", "rescan", "search_library", "status"]);
 
     m.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-        "params":{"name":"search","arguments":{"query":"лис","k":2}}}));
+        "params":{"name":"search_library","arguments":{"query":"лис","k":2}}}));
     let res = m.recv();
     assert_ne!(res["result"]["isError"], json!(true));
     let text = res["result"]["content"][0]["text"].as_str().unwrap();
@@ -269,13 +273,13 @@ fn mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_
             .to_string()
     };
     assert!(
-        described("search").contains(
+        described("search_library").contains(
             "If there are no passages and `empty` is false, the search could not run: report the reason given in `arms`."
         )
     );
     assert!(
         described("passage").contains(
-            "`stale_id` or `not_found` means the document was re-indexed or the passage is gone: run `search` again."
+            "`stale_id` or `not_found` means the document was re-indexed or the passage is gone: run `search_library` again."
         )
     );
     assert!(described("rescan").contains("`started: false` means no new scan was started."));

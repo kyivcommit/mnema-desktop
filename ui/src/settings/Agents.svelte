@@ -58,9 +58,9 @@
   const accessLabel = $derived.by(() => { void $locale; return t('agents_access_label'); });
   // POSIX single quotes: nothing inside them is special but the quote itself.
   const quoted = $derived(`'${path.replaceAll("'", "'\\''")}'`);
-  const cmd = $derived(`claude mcp add mnema -- ${quoted} mcp`);
+  const cmd = $derived(`claude mcp add --scope user mnema -- ${quoted} mcp`);
   const codex = $derived(`codex mcp add mnema -- ${quoted} mcp`);
-  const opencode = $derived(`opencode mcp add mnema -- ${quoted} mcp`);
+  const opencode = $derived(`opencode mcp add --global mnema -- ${quoted} mcp`);
   const json = $derived(JSON.stringify({ mcpServers: { mnema: { command: path, args: ['mcp'] } } }));
 
   const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => {});
