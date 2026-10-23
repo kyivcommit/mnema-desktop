@@ -14,7 +14,7 @@
 # walk's progress actually ask, rather than sending a constant the window would
 # draw as a measured claim. The `ui/src/settings/JobStrip.svelte` cases pin what
 # the strip SAYS about a contended write, and they run vitest — which is why
-# this file's matrix leg carries `node: true` in `.github/workflows/ci.yml`.
+# the CI leg that runs this file installs node (`.github/workflows/ci.yml`).
 #
 # 🔴 **The one that is not a bug-hunt but a decision guard.** `indexed_file_count`
 # counts `path` rows, so one file present in two watched folders counts twice.
