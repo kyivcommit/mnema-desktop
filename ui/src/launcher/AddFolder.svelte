@@ -17,12 +17,14 @@
     const p = s.phase;
     if (p.kind !== 'reading' && p.kind !== 'embedding') return label;
     const l = phaseLabel(p);
-    return `${label} — ${t(l.key, l.params)} ${p.counts.done}/${p.counts.total}`;
+    // A phase whose total is still unknown claims no count.
+    const counts = p.counts.total === 0 ? '' : ` ${p.counts.done}/${p.counts.total}`;
+    return `${label} — ${t(l.key, l.params)}${counts}`;
   });
 </script>
 
 <button type="button" class="tb add-folder" data-testid="tree-add-folder"
-  aria-label={label} title={title} onclick={() => folders.press()}>
+  aria-label={title} title={title} onclick={() => folders.press()}>
   {#if fraction !== null}
     <svg class="scan-ring" class:spin={fraction === 'spin'} data-testid="tree-add-folder-ring"
       data-fraction={String(fraction)} viewBox="0 0 26 26" aria-hidden="true">

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import AddFolder from './AddFolder.svelte';
 import { createAddFolder, type AddFolderController } from './addFolder';
 import { setLocale } from '../i18n';
@@ -223,6 +223,10 @@ test('the ring shows on mount in the middle of a scan', async () => {
 });
 
 test('the tree reloads on readSeq, jobsDone and files read, not on a bare revision', async () => {
+  // Each step a second apart, so the once-a-second hold on files read (below) is not what is tested here.
+  let clock = Date.now();
+  const now = vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1000));
+  onTestFinished(() => now.mockRestore());
   mountButton();
   await emit(state({ revision: 1, snapshot: reading(1, 10) }));
   onChanged.mockClear();
@@ -263,7 +267,16 @@ test('the tooltip carries the phase and its counts', async () => {
   mountButton();
   await emit(state({ revision: 1, snapshot: embeddingAt(5, 10) }));
   expect(button().getAttribute('title')).toMatch(/^Add folder — .+ 5\/10$/);
-  expect(button().getAttribute('aria-label')).toBe('Add folder');
+  // PR #76 review, 6: a screen reader hears the scan too, not only a mouse.
+  expect(button().getAttribute('aria-label')).toBe(button().getAttribute('title'));
+});
+
+// PR #76 review, 5: a phase whose total is unknown claims no count.
+test('the tooltip claims no count while the total is unknown', async () => {
+  mountButton();
+  await emit(state({ revision: 1, snapshot: reading(0, 0) }));
+  expect(button().getAttribute('title')).toMatch(/^Add folder — /);
+  expect(button().getAttribute('title')).not.toMatch(/\d+\/\d+$/);
 });
 
 // An emission between the first read and the listener's registration reaches
@@ -369,4 +382,73 @@ test('two buttons on one controller share one subscription and one state', async
   addReply = () => Promise.reject(new Error('nope'));
   await fireEvent.click(screen.getAllByTestId('tree-add-folder')[0]);
   await waitFor(() => expect(screen.getAllByTestId('tree-add-folder-error')).toHaveLength(2));
+});
+
+// ---------------------------------------------------------------------------
+// PR #76 review (owner's reviewer, 2026-10-23).
+// ---------------------------------------------------------------------------
+
+// 1: a reading tick arrives up to four times a second and each reload reads the
+// whole index; files read move the tree at most once a second, while a pass or
+// a job ending still reloads at once.
+test('files read reload the tree at most once a second; endings at once', async () => {
+  const t0 = Date.now();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(t0);
+  onTestFinished(() => now.mockRestore());
+  mountButton();
+  await emit(state({ revision: 1, snapshot: reading(1, 100) }));
+  expect(onChanged).toHaveBeenCalledTimes(1); // files read, a second since nothing
+  now.mockReturnValue(t0 + 400);
+  await emit(state({ revision: 2, snapshot: reading(2, 100) }));
+  await emit(state({ revision: 3, snapshot: reading(3, 100) }));
+  expect(onChanged).toHaveBeenCalledTimes(1); // inside the second: held
+  await emit(state({ revision: 4, readSeq: 1, snapshot: reading(3, 100) }));
+  expect(onChanged).toHaveBeenCalledTimes(2); // a pass ended: at once
+  now.mockReturnValue(t0 + 1500);
+  await emit(state({ revision: 5, readSeq: 1, snapshot: reading(4, 100) }));
+  expect(onChanged).toHaveBeenCalledTimes(3); // a second after the last reload
+});
+
+// 2: a failed read of the scan state is logged, not swallowed.
+test('a failed job_status read is logged', async () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  onTestFinished(() => err.mockRestore());
+  statusReply = () => Promise.reject(new Error('index locked'));
+  mountButton();
+  await waitFor(() => expect(err).toHaveBeenCalledWith('job_status failed', expect.any(Error)));
+});
+
+// 3: the blocker ended inside the refusal's round trip — `job_status` says idle,
+// but `jobsDone` grew past what was known before the start, so the slot was
+// busy: the scan is started again, and no failure is shown.
+test('a refusal whose blocker ended meanwhile starts again and shows nothing', async () => {
+  startReply = () => Promise.reject('a job is already running');
+  statusReply = () => Promise.resolve(state({ revision: 1, snapshot: RUNNING }));
+  mountButton();
+  await waitFor(() => expect(calls('job_status').length).toBeGreaterThan(0));
+  await new Promise((r) => setTimeout(r, 0));
+  statusReply = () => {
+    startReply = () => Promise.resolve();
+    return Promise.resolve(state({ revision: 2, jobsDone: 1 }));
+  };
+  await press();
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
+});
+
+// 4: one start on the wire at a time, even when a press lands while a queued
+// start is still waiting for its answer.
+test('a press during a start in flight does not send a second start', async () => {
+  await queued();
+  let answer!: () => void;
+  startReply = () => new Promise<void>((r) => { answer = r; });
+  await emit(state({ revision: 2, jobsDone: 1 }));
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
+  await press();
+  await waitFor(() => expect(calls('add_watched_folder')).toHaveLength(2));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(calls('start_scan_job')).toHaveLength(2);
+  startReply = () => Promise.resolve();
+  answer();
+  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
 });

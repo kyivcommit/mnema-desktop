@@ -32,6 +32,11 @@ export function createAddFolder(): AddFolderController {
   // A scan wanted once nothing runs, and one `start_scan_job` on the wire at a time.
   let scanAfter = false;
   let starting = false;
+  // A reading tick comes up to four times a second (`REPORT_INTERVAL`) and a
+  // reload reads the whole index (`list_tree`), so files read move the tree at
+  // most once a second; a pass or a job ending reloads at once.
+  const READ_RELOAD_MS = 1000;
+  let lastReload = 0;
 
   // The tree reloads when a job ends (`jobsDone`, not the snapshot leaving
   // `running`: that edge can go unseen, `ipc.ts`) and as files are read.
@@ -40,8 +45,14 @@ export function createAddFolder(): AddFolderController {
     const next = prev === null ? incoming : apply(prev, incoming);
     if (next === prev) return;
     set({ scan: next });
-    if (prev !== null && (next.jobsDone > prev.jobsDone || next.readSeq > prev.readSeq
-      || readingDone(next) !== readingDone(prev))) changed();
+    if (prev !== null) {
+      const now = Date.now();
+      if (next.jobsDone > prev.jobsDone || next.readSeq > prev.readSeq
+        || (readingDone(next) !== readingDone(prev) && now - lastReload >= READ_RELOAD_MS)) {
+        lastReload = now;
+        changed();
+      }
+    }
     kick();
   }
 
@@ -55,20 +66,27 @@ export function createAddFolder(): AddFolderController {
   // A refusal reaches the window as text (`error.rs`), so whether the slot was
   // busy is asked of `job_status` rather than read off the words.
   async function startScan() {
+    // One start on the wire at a time: a press landing while one is waiting
+    // for its answer leaves its scan to the queue.
+    if (starting) { scanAfter = true; return; }
     starting = true;
+    // Taken on the way in, not cleared on success: a press that queued its scan
+    // while this one was on the wire added a folder this scan has not read.
+    scanAfter = false;
+    const before = get(view).scan?.jobsDone;
     try {
       await startScanJob('full');
-      scanAfter = false;
     } catch (e) {
       try {
         const now = await jobStatus();
         accept(now);
         // Judged on the reply itself: a stale «running» keeps the scan wanted,
         // and `kick` below starts it if a newer state already says it ended.
-        scanAfter = now.snapshot.kind === 'running';
-        if (!scanAfter) set({ error: message(e) });
+        // A job that ended inside this round trip (`jobsDone` grew past what was
+        // known before the start) means the slot was busy too.
+        if (now.snapshot.kind === 'running' || (before !== undefined && now.jobsDone > before)) scanAfter = true;
+        else set({ error: message(e) });
       } catch {
-        scanAfter = false;
         set({ error: message(e) });
       }
     } finally {
@@ -107,7 +125,9 @@ export function createAddFolder(): AddFolderController {
   function start() {
     let gone = false;
     let unlisten: UnlistenFn | null = null;
-    const read = () => jobStatus().then((s) => { if (!gone) accept(s); }, () => {});
+    // Non-fatal, but never silent: without it the ring just never shows.
+    const read = () => jobStatus().then((s) => { if (!gone) accept(s); },
+      (e) => console.error('job_status failed', e));
     // A launcher opened mid-scan shows the ring before the next event.
     read();
     listenScanProgress((s) => { if (!gone) accept(s); })
