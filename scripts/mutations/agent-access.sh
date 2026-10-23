@@ -566,15 +566,16 @@ case_ "Agents.svelte: the command carries a placeholder instead of the real path
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
   $A \
-  's~    await readEnabled\(\);\n    // `on` may~    // `on` may~' \
-  '    // `on` may' \
+  's~    await readEnabled\(\);\n    busy = false;~    busy = false;~' \
+  '    try { await setAgentAccess(want); } catch (err) { failure = String(err); }
+    busy = false;' \
   $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: a refused start leaves the box ticked" \
   $A \
   's~    box\.checked = on;\n~~' \
-  'await readEnabled();
-    // `on` may' \
+  'what the socket says.
+  }' \
   $AT 'a refused start shows the error and does not claim access is on' runner=vitest
 
 case_ "Agents.svelte: a refused start is not shown" \
