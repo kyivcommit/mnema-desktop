@@ -1,0 +1,18 @@
+[package]
+name = "mnema-cli"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mnema"
+path = "src/main.rs"
+
+[dependencies]
+mnema-core = { path = "../mnema-core" }
+serde_json = { workspace = true }
+rmcp = { version = "3.7.0", default-features = false, features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

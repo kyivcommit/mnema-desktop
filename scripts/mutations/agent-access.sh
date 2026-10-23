@@ -424,3 +424,112 @@ case_ "agent access: a failed write-back must not hide the start error" \
   's~(if let Err\(e\) = crate::agent::start\(&app\) \{\n\s*)if let Err\(w\) = key\(false\) \{~$1key(false)?; if let Err(w) = Ok::<(), std::io::Error>(()) {~' \
   'key(false)?; if let Err(w)' \
   mnema-desktop 'a_failed_start_with_a_failed_write_back_reports_the_start' --test agent
+
+# Task 5 (the `mnema` binary): CLI and stdio MCP. The tests are integration
+# tests in crates/mnema-cli/tests/cli.rs, which spawn the built binary.
+
+M=crates/mnema-cli/src/main.rs
+C=crates/mnema-cli/src/client.rs
+X=crates/mnema-cli/src/mcp.rs
+
+case_ "mnema cli: the ok payload must be printed" \
+  $M \
+  's~println!\("\{v\}"\);~println!("null");~' \
+  'println!("null")' \
+  mnema-cli 'search_prints_the_ok_payload_and_exits_zero' --test cli
+
+case_ "mnema cli: an err must exit one" \
+  $M \
+  's~(serde_json::to_string\(&e\)[^\n]*\n\s*)ExitCode::FAILURE~$1ExitCode::from(0)~' \
+  'ExitCode::from(0)' \
+  mnema-cli 'an_err_reply_prints_the_error_and_exits_one' --test cli
+
+case_ "mnema cli: an err must be printed as the wire error" \
+  $M \
+  's~serde_json::to_string\(&e\)\.expect~serde_json::to_string(&e.message).expect~' \
+  'to_string(&e.message)' \
+  mnema-cli 'an_err_reply_prints_the_error_and_exits_one' --test cli
+
+case_ "mnema client: no socket with the override must not wait" \
+  $C \
+  's~(if std::env::var_os\(OVERRIDE\)\.is_some\(\) \{)~$1 std::thread::sleep(POLL * 10);~' \
+  'POLL * 10' \
+  mnema-cli 'no_socket_with_the_override_set_is_not_running_without_launching' --test cli
+
+case_ "mnema client: no socket with the override must say not_running" \
+  $C \
+  's~(if std::env::var_os\(OVERRIDE\)\.is_some\(\) \{\n\s*return Err\()not_running\(\)~$1disabled()~' \
+  'return Err(disabled())' \
+  mnema-cli 'no_socket_with_the_override_set_is_not_running_without_launching' --test cli
+
+case_ "mnema client: a hang-up before any reply must read as disabled" \
+  $C \
+  's~return Err\(disabled\(\)\),~return Err(err(ErrKind::Internal, "closed")),~' \
+  'ErrKind::Internal, "closed"' \
+  mnema-cli 'a_dropped_connection_reads_as_disabled' --test cli
+
+case_ "mnema cli: the request must state the protocol version" \
+  $M \
+  's~Request \{ v: VERSION, client~Request { v: 2, client~' \
+  'v: 2, client' \
+  mnema-cli 'the_request_carries_v_and_the_op' --test cli
+
+case_ "mnema cli: --k must reach the request" \
+  $M \
+  's~(Op::Search \{ query: args\.pop\(\)\.ok_or_else\(usage\)\?, )k \}~${1}k: None }~' \
+  'k: None }' \
+  mnema-cli 'the_request_carries_v_and_the_op' --test cli
+
+case_ "mnema cli: --wait must reach the request" \
+  $M \
+  's~\.then_some\(true\)~.then_some(false)~' \
+  'then_some(false)' \
+  mnema-cli 'the_request_carries_v_and_the_op' --test cli
+
+case_ "mnema client: an oversized request must be refused before connecting" \
+  $C \
+  's~if line\.len\(\) > MAX_LINE \{~if line.len() > MAX_LINE * 2 {~' \
+  'MAX_LINE * 2' \
+  mnema-cli 'a_request_over_the_limit_is_refused_locally_without_connecting' --test cli
+
+case_ "mnema mcp: the server must name itself mnema" \
+  $X \
+  's~Implementation::new\("mnema"~Implementation::new("mnemo"~' \
+  'Implementation::new("mnemo"' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: all four tools must be listed" \
+  $X \
+  's~"rescan",(\s*)RESCAN~"rescan2",$1RESCAN~' \
+  '"rescan2"' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: the client name must come from clientInfo" \
+  $X \
+  's~\.map\(\|i\| i\.client_info\.name\.clone\(\)\)~.map(|_| "mcp".to_string())~' \
+  '"mcp".to_string()' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: the op must follow the tool name" \
+  $X \
+  's~Value::String\(name\.into\(\)\)~Value::String("status".into())~' \
+  'Value::String("status".into())' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: the payload text must reach the agent byte for byte" \
+  $X \
+  's~value\.to_string\(\)\)~value.to_string().replace("\\\\n", " "))~' \
+  'replace("\\n", " ")' \
+  mnema-cli 'mcp_lists_four_tools_and_calls_search' --test cli
+
+case_ "mnema mcp: an err must be an error result" \
+  $X \
+  's~CallToolResult::error\(vec!\[text\]\)~CallToolResult::success(vec![text])~' \
+  'CallToolResult::success(vec![text])' \
+  mnema-cli 'mcp_turns_an_err_into_an_error_result' --test cli
+
+case_ "mnema mcp: an err result must carry the wire error" \
+  $X \
+  's~&serde_json::to_value\(e\)\.expect\("a WireError serialises"\)~&Value::Null~' \
+  '&Value::Null' \
+  mnema-cli 'mcp_turns_an_err_into_an_error_result' --test cli
