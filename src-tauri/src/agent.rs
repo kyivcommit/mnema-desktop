@@ -29,7 +29,7 @@ use crate::bridge::{ContentArmReport, Hit, TextArmReport, read_arms, retrieve};
 use crate::error::Error;
 use crate::scan_state::{Entry, ScanSnapshot};
 use crate::state::AppState;
-use crate::tree::{DocumentView, freshness_of};
+use crate::tree::{DocumentView, UnavailableReason, freshness_of};
 
 const DEFAULT_K: u32 = 8;
 const DEFAULT_CONTEXT: u32 = 2;
@@ -125,6 +125,29 @@ fn search(state: &AppState, query: &str, k: u32) -> Result<Value, WireError> {
     }))
 }
 
+/// Why a passage's document cannot be shown around it, in words the agent can
+/// act on. Every variant is named: a new reason must be decided here.
+fn unavailable(reason: UnavailableReason) -> WireError {
+    match reason {
+        UnavailableReason::Rebuilding => err(
+            ErrKind::StaleId,
+            "the document is being re-indexed — run search_library again",
+        ),
+        UnavailableReason::TooLarge => err(
+            ErrKind::NotFound,
+            "the document is too large to show around the passage — use the passage text from search_library",
+        ),
+        UnavailableReason::NoBlocks => err(
+            ErrKind::NotFound,
+            "the document has no indexed text any more — run search_library again",
+        ),
+        UnavailableReason::NoSuchDocument => err(
+            ErrKind::NotFound,
+            "the document is no longer indexed — run search_library again",
+        ),
+    }
+}
+
 fn passage(state: &AppState, id: &str, context: u32) -> Result<Value, WireError> {
     let id =
         PassageId::parse(id).ok_or_else(|| err(ErrKind::BadRequest, "malformed passage id"))?;
@@ -156,9 +179,7 @@ fn passage(state: &AppState, id: &str, context: u32) -> Result<Value, WireError>
             freshness,
             ..
         } => (blocks, focus_block_ids, freshness),
-        DocumentView::Unavailable { reason } => {
-            return Err(internal(format!("the document is unavailable: {reason:?}")));
-        }
+        DocumentView::Unavailable { reason } => return Err(unavailable(reason)),
     };
     let at = |block_id: i64| blocks.iter().position(|b| b.block_id == block_id);
     let (Some(first), Some(last)) = (
@@ -458,12 +479,29 @@ fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation
         drop(inner);
         let app = app.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
+            let server = app.state::<AgentServer>();
+            let _slot = Slot {
+                server: &server,
+                id,
+            };
             serve(&app, &stream);
-            app.state::<AgentServer>().lock().streams.remove(&id);
         });
         if spawned.is_err() {
             server.lock().streams.remove(&id);
         }
+    }
+}
+
+/// Frees a connection's slot and its registered clone however `serve` ends,
+/// a panic included.
+struct Slot<'a> {
+    server: &'a AgentServer,
+    id: u64,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.server.lock().streams.remove(&self.id);
     }
 }
 
@@ -562,7 +600,7 @@ pub fn agent_command_path() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::rfc3339;
+    use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -571,5 +609,70 @@ mod tests {
         // A leap day, so the month/day arithmetic is exercised past February.
         let t = UNIX_EPOCH + Duration::from_secs(1_709_210_096);
         assert_eq!(rfc3339(t), "2024-02-29T12:34:56Z");
+    }
+
+    #[test]
+    fn a_dropped_slot_frees_its_connection() {
+        let server = AgentServer::default();
+        let (a, _b) = UnixStream::pair().unwrap();
+        server.lock().streams.insert(7, a);
+        assert_eq!(server.lock().streams.len(), 1);
+        drop(Slot {
+            server: &server,
+            id: 7,
+        });
+        assert_eq!(server.lock().streams.len(), 0);
+    }
+
+    #[test]
+    fn a_panicking_holder_still_frees_its_slot() {
+        let server = AgentServer::default();
+        let (a, _b) = UnixStream::pair().unwrap();
+        server.lock().streams.insert(7, a);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = Slot {
+                server: &server,
+                id: 7,
+            };
+            panic!("handler");
+        }));
+        assert!(r.is_err());
+        assert_eq!(server.lock().streams.len(), 0);
+    }
+
+    #[test]
+    fn every_unavailable_reason_has_its_own_kind_and_words() {
+        let say = |r| {
+            let e = unavailable(r);
+            (e.kind, e.message)
+        };
+        assert_eq!(
+            say(UnavailableReason::Rebuilding),
+            (
+                ErrKind::StaleId,
+                "the document is being re-indexed — run search_library again".to_string()
+            )
+        );
+        assert_eq!(
+            say(UnavailableReason::TooLarge),
+            (
+                ErrKind::NotFound,
+                "the document is too large to show around the passage — use the passage text from search_library".to_string()
+            )
+        );
+        assert_eq!(
+            say(UnavailableReason::NoBlocks),
+            (
+                ErrKind::NotFound,
+                "the document has no indexed text any more — run search_library again".to_string()
+            )
+        );
+        assert_eq!(
+            say(UnavailableReason::NoSuchDocument),
+            (
+                ErrKind::NotFound,
+                "the document is no longer indexed — run search_library again".to_string()
+            )
+        );
     }
 }

@@ -218,6 +218,41 @@ fn passage_after_reindex_is_stale_not_another_place() {
     assert_eq!(e.kind, ErrKind::StaleId, "{e:?}");
 }
 
+fn passage_with_document_status(
+    status: mnema_index::DocumentStatus,
+) -> mnema_core::agent_wire::WireError {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    let state = app.state::<AppState>();
+    let id = first_id(&search(&state, "fox", 8));
+    let doc = id.split(':').nth(1).unwrap().to_string();
+    state
+        .with_index(|db| db.set_document_status(&doc, status))
+        .unwrap();
+    passage(&state, &id, 2).expect_err("an unavailable document answered")
+}
+
+#[test]
+fn passage_of_a_document_being_reindexed_is_stale() {
+    let e = passage_with_document_status(mnema_index::DocumentStatus::Pending);
+    assert_eq!(e.kind, ErrKind::StaleId, "{e:?}");
+    assert_eq!(
+        e.message,
+        "the document is being re-indexed — run search_library again"
+    );
+}
+
+#[test]
+fn passage_of_a_document_with_no_text_left_is_not_found() {
+    let e = passage_with_document_status(mnema_index::DocumentStatus::Failed);
+    assert_eq!(e.kind, ErrKind::NotFound, "{e:?}");
+    assert_eq!(
+        e.message,
+        "the document has no indexed text any more — run search_library again"
+    );
+}
+
 #[test]
 fn passage_of_an_unknown_chunk_is_not_found() {
     let data = tempfile::tempdir().unwrap();
