@@ -475,6 +475,21 @@ jobs:
     # concurrency ceiling (a paid plan or a self-hosted runner) or splitting
     # the six-minute files.
     #
+    # Since 2026-10-23 a leg is a BUCKET of files, not one file: 16 legs, so
+    # every leg starts at once beside the four other jobs inside the
+    # 20-job ceiling and there is no queue at all. Measured on run
+    # 39694536173 (main, 2026-10-21): 50 legs, wall 11m43s, the last legs
+    # starting at 6–7 minutes; each leg paid about 65 s of setup (`apt-get`
+    # 36 s median, toolchain, cache, sidecar), 3 000 of the matrix's 9 150
+    # runner-seconds, and 14 legs ran under 30 s of cases behind that setup.
+    # The buckets were packed longest-first from that run's harness times,
+    # about 6m05s of cases each; the slowest single file is 5m30s
+    # (`pr9-shell`). A file still runs on its own `mutation-check.sh` in its
+    # own worktree, and every file of a leg runs even after one fails — see
+    # the harness step. A new file goes into the leg with the least time;
+    # re-derive from the leg durations of a recent run, not from this
+    # comment.
+    #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
     # `sweeps` proves each case still APPLIES; a job here proves a case still
     # KILLS, and only for what is named here. A file left out is local
@@ -504,108 +519,57 @@ jobs:
     # `pr8-ui-folders.sh` has no such split and needs none: its tests run in
     # jsdom, nothing in them is behind a platform condition, and the whole
     # file is green on this leg. What it does need is a node and
-    # `ui/node_modules`, provisioned below for the legs whose entry asks for
-    # it — a case whose runner is not installed fails its baseline for a
+    # `ui/node_modules`, provisioned below for the legs that hold a vitest
+    # case — a case whose runner is not installed fails its baseline for a
     # reason that is not the mutation, which is the same defect the vendored
     # libraries and the staged sidecar are copied into the worktree to avoid.
     #
-    # ⚠️ **The flag belongs to whichever files HOLD a vitest case, and a file
-    # can gain one after the flag was placed.** `pr9-index.sh` did: it was
-    # Rust-only when its entry was written and now carries cases that mutate
-    # `ui/src/settings/JobStrip.svelte`, which without `node: true` fail their
-    # baseline with `127` and take the whole file's Rust cases down with them
-    # (`mutation-check.sh` exits 1 for the FILE before pass two). Re-derive
-    # rather than trust this sentence:
+    # Which legs those are is read from the files at run time, not written
+    # here. A per-file `node: true` flag used to sit in this matrix, and a
+    # file could gain a vitest case after its flag was placed: `pr9-index.sh`
+    # did, and without the flag its `ui/src/settings/JobStrip.svelte` cases
+    # failed their baseline with `127` and took the whole file's Rust cases
+    # down with them (`mutation-check.sh` exits 1 for the FILE before pass
+    # two). The step below asks the same question this used to tell readers
+    # to ask by hand:
     #
-    #   grep -l 'runner=vitest' scripts/mutations/*.sh
+    #   grep -l '^[^#]*runner=vitest' scripts/mutations/*.sh
+    #
+    # (`^[^#]*`: a file whose comment only mentions the runner, as
+    # `debt-rust-mutants.sh`'s does, holds no vitest case.)
+    #
+    # Each entry of `leg:` is the file names of one bucket, space-separated,
+    # and the job's display name is that entry. Guard 5 reads every name of
+    # every entry, and refuses a name written in two entries.
     strategy:
-      # One file's survivor must not cancel the others: they are
+      # One leg's survivor must not cancel the others: they are
       # independent evidence, and the second failure is the one a cancelled
       # run hides.
       fail-fast: false
       matrix:
-        file:
-          - source
-          - embedding
-          - pr8-exclusions
-          - pr8-subfolders
-          - pr8-subfolders-linux
-          - pr8-ui-folders
-          - pr8-ui-masks
-          - pr9-shell
-          - pr9-index
-          - pr9-ui
-          - pr9b-scan
-          - pr10b-theme
-          - pr10c-fonts
-          - pr10e-settings
-          - pr10d-launcher
-          - pr10f-tray-locale
-          - pr10f-settings
-          - ui-scale
-          - watcher
-          - branch-review
-          - citation-identity
-          - model-config
-          - pr7-boot-index
-          - pr7-default-models
-          - pr8-masks
-          - pr8c-mask-differential
-          - refuse-by-content
-          - task-1
-          - task-2
-          - task-3
-          - task-4
-          - task-5
-          - task-6
-          - task-7
-          - task-8
-          - task-8-pdf
-          - task-9
-          - task-9-notextlayer
-          - task-10
-          - task-11
-          - task-12
-          - task-13
-          - task-13-xlsx
-          - task-14
-          - task-d61
-          - task-d64
-          - tree
-          - debt-ui-blind-tests
-          - debt-rust-mutants
-          - wayland-shortcut
-        include:
-          - file: pr8-ui-folders
-            node: true
-          - file: pr8-ui-masks
-            node: true
-          - file: pr9-index
-            node: true
-          - file: pr9-ui
-            node: true
-          - file: pr9b-scan
-            node: true
-          - file: pr10b-theme
-            node: true
-          - file: pr10c-fonts
-            node: true
-          - file: pr10e-settings
-            node: true
-          - file: pr10d-launcher
-            node: true
-          - file: pr10f-settings
-            node: true
-          - file: debt-ui-blind-tests
-            node: true
-          - file: wayland-shortcut
-            node: true
+        leg:
+          - pr8-subfolders debt-ui-blind-tests task-8-pdf
+          - embedding pr8-ui-folders task-5
+          - model-config pr10e-settings task-3
+          - pr9-index pr8-subfolders-linux
+          - wayland-shortcut branch-review refuse-by-content task-d61
+          - pr7-default-models pr10f-tray-locale task-11 task-4
+          - pr8c-mask-differential pr9-ui task-10 task-7
+          - pr8-exclusions citation-identity
+          - task-9 tree task-12 task-2
+          - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer
+          - watcher source debt-rust-mutants
+          - pr9-shell pr10c-fonts task-13
+          - pr8-masks task-d64 task-6
+          - pr9b-scan task-13-xlsx task-1
+          - pr10b-theme pr8-ui-masks pr10d-launcher
+          - task-8 task-14
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
     # leg first executed: pull request #7, 6m17s on 119 cases; later 9m52s on
     # run 33235659149, 24m07s on 33671866360 with six files in one job, and
     # 13m42s on 33684364310 with the target directory shared. One file per
-    # job, measured on run 33687863920 with the cache warm: the longest legs
+    # job (before the buckets), measured on run 33687863920 with the cache warm: the longest legs
     # were `embedding` at 4m12s (3:06 of harness) and `source` at 4m09s, the
     # shortest `pr8-subfolders-linux` at 1m33s; with 47 files on run
     # 35158566979 the longest leg was `model-config` at 6m07s and the wall
@@ -637,8 +601,16 @@ jobs:
     # 25, not 15: on 2026-10-08/09 the runner's `apt-get` step alone took
     # 12m43s–14m40s three times, before or during the harness, and cancelled
     # legs whose harness needed 2–5 minutes. The limit covers the mirror, not
-    # the mutants.
+    # the mutants. Since 2026-10-23 the packages come from a cache and a slow
+    # download is cut and retried (the step's own comment has the runs), so
+    # the mirror no longer reaches this number. A bucket of files is about
+    # six minutes of cases plus a minute of setup (see the matrix), so 25 is
+    # still over three times a leg.
     timeout-minutes: 25
+    env:
+      APT_PACKAGES: >-
+        libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+        librsvg2-dev patchelf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Provision the toolchain named in rust-toolchain.toml
@@ -683,11 +655,92 @@ jobs:
       # at all.
       # No `if: runner.os` here, unlike `check`: every leg of this matrix is
       # the one Linux image named above.
+      #
+      # The packages come from a cache, not from the mirror, and a download
+      # that does happen is retried rather than waited out. Measured on runs
+      # 39759252486, 39807426092, 39837321603, 39838156498 and 39924325315
+      # (2026-10-22/23): this step's time is bimodal — most legs 23–60 s, a
+      # few per run 90 s to 25 min — and every one of the 31 legs those runs
+      # cancelled at 25 min was still in it or had spent 1238–1470 s in it.
+      # Not a hang: the slow leg's log reads `Fetched 63.6 MB in 23min 5s
+      # (45.9 kB/s)` with `Get:` lines still arriving, while `apt-get
+      # update` on the same runner fetched 12.5 MB in 1 s and other legs
+      # started in the same second took 25 s. `check` installs the same
+      # packages and took 26–51 s on each of those runs.
+      #
+      # A fresh connection to the same mirror is NOT the remedy: on run
+      # 39930541892 (PR #77) the one leg that missed the cache got three
+      # 240-second tries, each a new `apt-get`, and had 4.3 MB of 63.6
+      # after the first and 12.5 MB after the second — one runner slow to
+      # `azure.archive.ubuntu.com` however often it reconnects. What that run did show is that a miss
+      # is short-lived: the first leg saved the archives 9 s after that leg
+      # restored nothing, and every leg after it restored them exactly and
+      # spent 14–30 s here. So a try that runs out first asks the cache
+      # again, and the tries after it leave the Azure mirror for the next
+      # one in `/etc/apt/apt-mirrors.txt`.
+      #
+      # The key is the list of archives this runner would download, so it
+      # moves when Ubuntu publishes a new version of any of them or the
+      # image changes what is preinstalled, and a moved key still restores
+      # the previous archives through the prefix, leaving only the changed
+      # ones to fetch. `Dir::Cache::Archives` points apt at a directory the
+      # cache action can write without root.
+      - name: Linux system dependencies, which archives they need
+        id: apt
+        run: |
+          read -ra pkgs <<< "$APT_PACKAGES"
+          sudo apt-get update
+          echo "key=$(sudo apt-get install --print-uris -qq "${pkgs[@]}" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
+          restore-keys: apt-archives-
+      # Four minutes a try against the 23–60 s this whole step takes on a
+      # healthy connection; `partial/` keeps what a killed try already fetched.
+      - name: Linux system dependencies, first download try
+        id: apt-first
+        run: |
+          read -ra pkgs <<< "$APT_PACKAGES"
+          mkdir -p ~/apt-archives/partial
+          if timeout 240 sudo apt-get -y -o Dir::Cache::Archives="$HOME/apt-archives" \
+              install --download-only "${pkgs[@]}"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::apt download did not finish in 240 s; asking the cache again"
+            sudo chown -R "$USER" ~/apt-archives
+          fi
+      - id: apt-cache-again
+        if: steps.apt-first.outputs.ok != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
       - name: Linux system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+          read -ra pkgs <<< "$APT_PACKAGES"
+          apt=(sudo apt-get -y -o Dir::Cache::Archives="$HOME/apt-archives")
+          if [ "${{ steps.apt-first.outputs.ok }}" != true ]; then
+            cat /etc/apt/apt-mirrors.txt
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            for try in 2 3; do
+              timeout 240 "${apt[@]}" install --download-only "${pkgs[@]}" && break
+              [ "$try" = 3 ] && exit 1
+              echo "::warning::apt download try $try did not finish in 240 s, retrying"
+            done
+          fi
+          "${apt[@]}" install "${pkgs[@]}"
+          "${apt[@]}" autoclean
+          sudo chown -R "$USER" ~/apt-archives
+      # Saved on any miss, including a prefix restore. On a moved key every
+      # leg misses at once and the first to get here saves; the others log
+      # that the key is taken and go on.
+      - if: steps.apt-cache.outputs.cache-hit != 'true' && steps.apt-cache-again.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
       - name: Stage the extraction worker that src-tauri declares as a sidecar
         run: scripts/stage-sidecar.sh debug
       # src-tauri's tests find the local-model stand-in in target/<profile>/
@@ -697,10 +750,9 @@ jobs:
         run: cargo build -p mnema-local --bin mnema-local-fake-mlx
       - name: Vendor the pinned Pdfium build, which src-tauri now needs to compile
         run: scripts/fetch-pdfium.sh
-      # For the legs whose matrix entry says `node: true` and no other —
-      # `pr8-ui-folders`, `pr8-ui-masks`, `pr9-index` and `pr9-ui` today, and the flag lives on
-      # the entry so a renamed file cannot leave the gate pointing at the old
-      # name: their cases run
+      # For the legs that hold a `runner=vitest` case and no other — asked
+      # of the leg's files here, so a file that gains one cannot leave the
+      # gate without a node (see the matrix comment): those cases run
       # vitest, and `mutation-check.sh` links `ui/node_modules` into its
       # worktree rather than installing there, so the directory has to exist
       # in this checkout first. Same `lts/*` and same `npm ci` as `check` —
@@ -708,13 +760,23 @@ jobs:
       # test` are deliberately NOT repeated here: `check` already runs both,
       # and this leg needs the dependency tree, not a second opinion about
       # the frontend. Measured on run 33684364310: setup-node 2s, `npm ci` 3s.
+      - name: Which of this leg's files hold a vitest case
+        id: leg
+        env:
+          LEG: ${{ matrix.leg }}
+        run: |
+          node=false
+          for f in $LEG; do
+            grep -q '^[^#]*runner=vitest' "scripts/mutations/$f.sh" && node=true
+          done
+          echo "node=$node" >> "$GITHUB_OUTPUT"
       - name: Node.js, for the mutation cases that run vitest
-        if: matrix.node
+        if: steps.leg.outputs.node == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 'lts/*'
       - name: Install the frontend dependencies the vitest cases run against
-        if: matrix.node
+        if: steps.leg.outputs.node == 'true'
         run: npm ci --prefix ui
       # The target directory is the checkout's own, shared with the sidecar
       # build above and restored by the cache; `mutation-check.sh` keeps its
@@ -723,14 +785,31 @@ jobs:
       # 16m05s of 24m07s on run 33671866360, 2m41s of it in front of the
       # one-case `pr8-subfolders-linux.sh`. With it, 5m38s of baselines on
       # run 33684364310, whose disk step read 6.2 GB in `target/` after six
-      # files against 79 GB free — which one file per job can only lower.
-      # The step after this one
-      # prints each leg's size and headroom whatever happened here.
-      - name: Run the mutation cases in scripts/mutations/${{ matrix.file }}.sh
+      # files against 79 GB free — and a leg runs at most four. The step
+      # after this one prints each leg's size and headroom whatever happened
+      # here.
+      #
+      # The leg's files run one after another, each through its own
+      # `mutation-check.sh`, and a file that fails does not stop the next:
+      # they are independent evidence, the same reason the matrix has
+      # `fail-fast: false`. The step fails at the end if any file did, and
+      # names them; a missing file is a failure, not a skip.
+      - name: Run the mutation cases of this leg's files
         env:
           MNEMA_MUTATION_TARGET_DIR: ${{ github.workspace }}/target
           CARGO_INCREMENTAL: 1
-        run: scripts/mutation-check.sh "scripts/mutations/${{ matrix.file }}.sh"
+          LEG: ${{ matrix.leg }}
+        run: |
+          failed=()
+          for f in $LEG; do
+            echo "::group::scripts/mutations/$f.sh"
+            { [ -f "scripts/mutations/$f.sh" ] && scripts/mutation-check.sh "scripts/mutations/$f.sh"; } || failed+=("$f")
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::mutation-check.sh failed for: ${failed[*]}"
+            exit 1
+          fi
       # `if: always()`, because the run that fills the disk is the one whose
       # harness step fails, and a `run:` under GitHub's default `bash -e`
       # would never reach a `du` placed after the failing line.

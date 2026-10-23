@@ -1,8 +1,8 @@
 # Wayland shortcut block (D165, `wayland-shortcut`) — the RED probes run
 # against `ui/src/settings/Application.svelte`, `ui/src/locale-choice.ts`
 # and their catalogue keys, pinned so the mutant each one caught cannot come
-# back unnoticed. All vitest, so this file's matrix leg carries `node: true`
-# in `.github/workflows/ci.yml`. Run with:
+# back unnoticed. All vitest, so the CI leg that runs this file installs node
+# (`.github/workflows/ci.yml`). Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/wayland-shortcut.sh
 #
