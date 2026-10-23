@@ -38,7 +38,7 @@ test('access is off by default and no command is shown', async () => {
   expect(screen.queryByTestId('agents-json')).toBeNull();
 });
 
-test('turning access on calls set_agent_access(true) and shows the command with the real path', async () => {
+test('turning access on calls set_agent_access with true and shows the command with the real path', async () => {
   render(Agents);
   agentAccessEnabled.mockResolvedValue(true);
   await fireEvent.click(screen.getByTestId('agents-access'));

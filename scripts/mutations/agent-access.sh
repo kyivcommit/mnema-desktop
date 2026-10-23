@@ -556,19 +556,19 @@ case_ "Agents.svelte: turning access on asks for off" \
   $A \
   's~setAgentAccess\(want\)~setAgentAccess(false)~' \
   'setAgentAccess(false)' \
-  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
   $A \
   's~-- "\$\{path\}" mcp~-- "mnema" mcp~' \
   '-- "mnema" mcp' \
-  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
   $A \
   's~    await readEnabled\(\);\n    // `on` may~    // `on` may~' \
   '    // `on` may' \
-  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 case_ "Agents.svelte: a refused start leaves the box ticked" \
   $A \
