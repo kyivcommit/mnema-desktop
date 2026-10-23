@@ -1,5 +1,7 @@
 export type Key = 'settings_title' | 'indexed_documents'
-  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application'
+  | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application' | 'settings_nav_agents'
+  | 'agents_access_label' | 'agents_access_failed' | 'agents_setup_cmd' | 'agents_setup_json'
+  | 'agents_copy' | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
@@ -164,6 +166,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // pressing it does.
     settings_nav_scanning: 'Сканування',
     settings_nav_application: 'Застосунок',
+    settings_nav_agents: 'Агенти',
+    agents_access_label: 'Доступ агентам',
+    agents_access_failed: 'Не вдалося змінити доступ:',
+    agents_setup_cmd: 'Команда для налаштування агента:',
+    agents_setup_json: 'Або фрагмент налаштувань:',
+    agents_copy: 'Копіювати',
+    agents_log_heading: 'Звернення агентів',
+    agents_log_empty: 'Агенти ще не зверталися',
+    agents_log_passages: '{n, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}',
+    agents_log_client: 'назвався: {client}',
     // §9.2, Task 7. `TreeRoot` (ipc.ts) carries no flag for "walked and found
     // empty" vs. "not walked yet" — a folder just added and one genuinely
     // empty are the same value on the wire — so this sentence names only the
@@ -1172,6 +1184,16 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_folders: 'Folders',
     settings_nav_scanning: 'Scanning',
     settings_nav_application: 'Application',
+    settings_nav_agents: 'Agents',
+    agents_access_label: 'Agent access',
+    agents_access_failed: 'Could not change access:',
+    agents_setup_cmd: 'Command that sets up your agent:',
+    agents_setup_json: 'Or the settings fragment:',
+    agents_copy: 'Copy',
+    agents_log_heading: 'Agent requests',
+    agents_log_empty: 'No agent has asked yet',
+    agents_log_passages: '{n, plural, one {# passage} other {# passages}}',
+    agents_log_client: 'identified as: {client}',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_load_failed: 'The list of folders could not be read.',

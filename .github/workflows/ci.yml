@@ -599,6 +599,8 @@ jobs:
             node: true
           - file: debt-ui-blind-tests
             node: true
+          - file: agent-access
+            node: true
           - file: wayland-shortcut
             node: true
     runs-on: ubuntu-24.04

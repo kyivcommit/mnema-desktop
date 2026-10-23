@@ -10,14 +10,15 @@
   import JobStrip from './JobStrip.svelte';
   import Scanning from './Scanning.svelte';
   import Application from './Application.svelte';
+  import Agents from './Agents.svelte';
   import { createJobController } from './jobs';
   import { modelSettings, type ModelSettings } from '../lib/ipc';
 
   // All four sections render; hiding one not yet built would make the window
   // claim the product has fewer sections than the spec does. Order matches the
   // spec and the mockup's `snav` column.
-  type SectionId = 'models' | 'folders' | 'indexing' | 'application';
-  const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'application'];
+  type SectionId = 'models' | 'folders' | 'indexing' | 'agents' | 'application';
+  const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'agents', 'application'];
 
   let section = $state<SectionId>('models');
 
@@ -258,6 +259,7 @@
   // renamed, not the `SectionId` — `'indexing'` is a machine id, not prose, and
   // nothing reads it as a word.
   const scanningLabel = $derived.by(() => { void $locale; return t('settings_nav_scanning'); });
+  const agentsLabel = $derived.by(() => { void $locale; return t('settings_nav_agents'); });
   const applicationLabel = $derived.by(() => { void $locale; return t('settings_nav_application'); });
 
   function labelFor(id: SectionId): string {
@@ -265,6 +267,7 @@
       case 'models': return modelsLabel;
       case 'folders': return foldersLabel;
       case 'indexing': return scanningLabel;
+      case 'agents': return agentsLabel;
       case 'application': return applicationLabel;
     }
   }
@@ -324,6 +327,8 @@
             <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
           {:else if id === 'indexing'}
             <circle cx="11" cy="11" r="6" /><path d="M16 16l4 4" />
+          {:else if id === 'agents'}
+            <rect x="5" y="8" width="14" height="11" rx="2" /><path d="M12 4v4M9 13h.01M15 13h.01" />
           {:else}
             <path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" />
           {/if}
@@ -433,6 +438,9 @@
              projection the bottom disclosure draws off the same snapshot, not
              a second account of it. -->
         <Scanning {jobs} {settings} {loadError} />
+      {:else if section === 'agents'}
+        <h2>{agentsLabel}</h2>
+        <Agents />
       {:else if section === 'application'}
         <h2>{applicationLabel}</h2>
         <!-- §9.4 — the shortcut, autostart, and the version. It takes no

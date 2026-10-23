@@ -70,6 +70,7 @@ function initialState(scenario: string) {
     locale: 'auto' as LocaleChoice,
     nextRootId: 100,
     chatTools: true,
+    agentAccess: false,
   };
 }
 
@@ -350,6 +351,10 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const choice = a.choice as UiScale;
       s.prefs = { ...s.prefs, uiScale: ['small', 'medium', 'large'].includes(choice) ? choice : 'medium' };
     },
+    agent_access_enabled: () => s.agentAccess,
+    set_agent_access: (a) => (s.agentAccess = a.on as boolean),
+    agent_log: () => [],
+    agent_command_path: () => '/Applications/Mnema.app/Contents/MacOS/mnema',
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},
     set_chat_tools: (a) => ({ kind: 'stored', on: (s.chatTools = a.on as boolean) }),

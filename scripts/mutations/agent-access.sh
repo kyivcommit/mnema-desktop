@@ -541,3 +541,86 @@ case_ "bundle: the application must not link rmcp" \
   's~(mnema-index = \{ path = "\.\./crates/mnema-index" \}\n)~$1rmcp = { version = "3.7.0", default-features = false, features = ["server"] }\n~' \
   'rmcp = { version = "3.7.0"' \
   mnema-desktop 'the_application_does_not_link_rmcp' --test dependency_boundary
+
+# Task 7 (the Agents section, vitest): one case per test in Agents.test.ts.
+A=ui/src/settings/Agents.svelte
+AT=src/settings/Agents.test.ts
+
+case_ "Agents.svelte: the command shows although access is off" \
+  $A \
+  's~\{#if on\}~{#if true}~' \
+  '{#if true}' \
+  $AT 'access is off by default and no command is shown' runner=vitest
+
+case_ "Agents.svelte: turning access on asks for off" \
+  $A \
+  's~setAgentAccess\(want\)~setAgentAccess(false)~' \
+  'setAgentAccess(false)' \
+  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
+  $A \
+  's~-- "\$\{path\}" mcp~-- "mnema" mcp~' \
+  '-- "mnema" mcp' \
+  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: the switch is not re-read after a change" \
+  $A \
+  's~    await readEnabled\(\);\n    // `on` may~    // `on` may~' \
+  '    // `on` may' \
+  $AT 'turning access on calls set_agent_access(true) and shows the command with the real path' runner=vitest
+
+case_ "Agents.svelte: a refused start leaves the box ticked" \
+  $A \
+  's~    box\.checked = on;\n~~' \
+  'await readEnabled();
+    // `on` may' \
+  $AT 'a refused start shows the error and does not claim access is on' runner=vitest
+
+case_ "Agents.svelte: a refused start is not shown" \
+  $A \
+  's~failure = String\(err\)~failure = null~' \
+  'failure = null; }' \
+  $AT 'a refused start shows the error and does not claim access is on' runner=vitest
+
+case_ "Agents.svelte: the fragment button copies the command" \
+  $A \
+  's~copy\(json\)\}~copy(cmd)}~' \
+  'copy(cmd)}>{#key $locale}{t(' \
+  $AT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
+
+case_ "Agents.svelte: the log is listed oldest first" \
+  $A \
+  's~\{#each log as entry~{#each [...log].reverse() as entry~' \
+  '[...log].reverse()' \
+  $AT 'the log lists entries newest first with the claimed client name' runner=vitest
+
+case_ "Agents.svelte: the claimed client name is replaced by the operation" \
+  $A \
+  's~client: entry\.client~client: entry.op~' \
+  'client: entry.op' \
+  $AT 'the log lists entries newest first with the claimed client name' runner=vitest
+
+case_ "Agents.svelte: an empty log draws no sentence" \
+  $A \
+  's~log\.length === 0~log.length === 99~' \
+  'log.length === 99' \
+  $AT 'an empty log says no agent has asked yet' runner=vitest
+
+case_ "Agents.svelte: the poll runs every five seconds" \
+  $A \
+  's~POLL_MS = 2000~POLL_MS = 5000~' \
+  'POLL_MS = 5000' \
+  $AT 'the log is polled every two seconds while mounted, and no longer after' runner=vitest
+
+case_ "Agents.svelte: the poll outlives the section" \
+  $A \
+  's~return \(\) => clearInterval\(timer\);~return () => {};~' \
+  'return () => {};' \
+  $AT 'the log is polled every two seconds while mounted, and no longer after' runner=vitest
+
+case_ "Settings.svelte: the Agents section is left out of the navigation" \
+  ui/src/settings/Settings.svelte \
+  "s~const SECTIONS: SectionId\[\] = \['models', 'folders', 'indexing', 'agents', 'application'\];~const SECTIONS: SectionId[] = ['models', 'folders', 'indexing', 'application'];~" \
+  "'indexing', 'application'];" \
+  src/settings/Settings.test.ts 'the agents section is reachable from the settings navigation' runner=vitest

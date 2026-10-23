@@ -995,6 +995,16 @@ export const newChat = () => invoke<void>('new_chat');
 export const setChatTools = (on: boolean, cloud = false) =>
   invoke<ToolsSwitch>('set_chat_tools', { on, cloud });
 
+// Agent access (`agent.rs`, `prefs.rs`): whether the socket is actually open, not
+// the stored switch; a refused start rejects with a sentence.
+export type AgentLogEntry = {
+  at: string; op: string; query?: string | null; passages?: number | null; client?: string | null;
+};
+export const agentAccessEnabled = () => invoke<boolean>('agent_access_enabled');
+export const setAgentAccess = (on: boolean) => invoke<boolean>('set_agent_access', { on });
+export const agentLog = () => invoke<AgentLogEntry[]>('agent_log');
+export const agentCommandPath = () => invoke<string>('agent_command_path');
+
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is
 // local to `Settings.svelte`.
