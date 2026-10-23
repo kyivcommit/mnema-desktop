@@ -246,7 +246,7 @@ case_ "agent: a busy slot must say started false" \
 
 case_ "agent: a busy slot must not be an internal error" \
   $A \
-  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => return Err(internal("busy"))~' \
+  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => return Err(internal("busy")),~' \
   'return Err(internal("busy"))' \
   mnema-desktop 'rescan_while_running_says_running_not_error' --test agent
 
@@ -675,7 +675,7 @@ AG=src-tauri/src/agent.rs
 
 case_ "agent: a rescan waiting behind another job must start its own scan" \
   $AG \
-  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => break false~' \
+  's~Err\(Error::JobAlreadyRunning\) => \{\}~Err(Error::JobAlreadyRunning) => break false,~' \
   'JobAlreadyRunning) => break false' \
   mnema-desktop 'rescan_wait_behind_an_embedding_job_starts_a_scan_of_its_own' --test agent
 
