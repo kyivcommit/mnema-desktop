@@ -247,18 +247,21 @@ expr_wants_every_match() {
 # a stale marker waiting to excuse a future accidental removal; neither is
 # a file nobody runs.
 #
-# `matrix_files <ci.yml>` prints the names in `jobs.mutations.strategy.matrix.file`,
-# one per line. It is not a YAML parser: it reads one block of a fixed shape
-# (`  mutations:` at two spaces, `        file:` at eight, entries at ten as
-# `          - name`) — the shape `mutations`'s own `run:` line relies on by
-# name. The list is bare `          - name` entries and ends at the first line
-# that is not one, so a comment or a quoted entry written between two entries
-# truncates it — those files then land in NOT IN MATRIX, which is red and
-# visible, not a silent pass. What it refuses outright, exit 2 with the reason
-# on stderr, is exactly five things: no such file, no `  mutations:` job, no
-# `      matrix:` under it, a matrix key other than `file:` or `include:`, and
-# a `file:` list that is not there exactly once or comes back empty. Loud on a
-# reformat, never quietly zero.
+# `matrix_files <ci.yml>` prints the names in `jobs.mutations.strategy.matrix.leg`,
+# one per line. Each entry of that list is one leg: the names of the files it
+# runs, separated by spaces — the shape the harness step's `for f in $LEG`
+# relies on. It is not a YAML parser: it reads one block of a fixed shape
+# (`  mutations:` at two spaces, `        leg:` at eight, entries at ten as
+# `          - name name …`). The list is bare `          - ` entries and ends
+# at the first line that is not one, so a comment or a quoted entry written
+# between two entries truncates it — those files then land in NOT IN MATRIX,
+# which is red and visible, not a silent pass. What it refuses outright, exit
+# 2 with the reason on stderr, is exactly six things: no such file, no
+# `  mutations:` job, no `      matrix:` under it, a matrix key other than
+# `leg:`, a `leg:` list that is not there exactly once or comes back empty,
+# and a name written in two entries — two legs running one file is not a
+# hole, but it is a bucket list nobody re-derived. Loud on a reformat, never
+# quietly zero.
 #
 # The job-block terminator is spelled `[A-Za-z_]` rather than `[a-z]`: a
 # GitHub Actions job id may begin with a letter of either case or `_`, and a
@@ -281,12 +284,12 @@ matrix_files() {
     echo "guard 5 cannot read the matrix: no \`  mutations:\` job in $yml" >&2
     return 2
   fi
-  # Under `matrix:` this guard knows two keys, `file:` and `include:`, and
-  # interprets only the first. Any OTHER key is refused by name rather than
+  # Under `matrix:` this guard knows one key, `leg:`. Any OTHER key —
+  # `include:` among them, which could add a leg — is refused by name rather than
   # matched by name: a blacklist of `exclude:` would be satisfied by
   # `exclude :` (a space before the colon is the same key to YAML — measured
   # with Ruby's parser in the plan review), so the question asked is "is
-  # every key one of the two", not "is the one I fear absent". The matrix
+  # every key the one", not "is the one I fear absent". The matrix
   # sub-block runs from `      matrix:` to the next line indented less than
   # eight columns that is neither blank nor a comment; keys are the lines
   # indented exactly eight.
@@ -299,22 +302,28 @@ matrix_files() {
     echo "guard 5 cannot read the matrix: no \`      matrix:\` under the mutations job" >&2
     return 2
   fi
-  keys=$(printf '%s\n' "$matrix" | grep -E '^ {8}[^ #]' | grep -vE '^        (file|include):$' || true)
+  keys=$(printf '%s\n' "$matrix" | grep -E '^ {8}[^ #]' | grep -vE '^        leg:$' || true)
   if [ -n "$keys" ]; then
     echo "guard 5 cannot read the matrix: the mutations matrix has a key this guard does not interpret:" >&2
     printf '%s\n' "$keys" | sed 's/^/   /' >&2
     return 2
   fi
   local lists
-  lists=$(printf '%s\n' "$block" | grep -c '^        file:$')
+  lists=$(printf '%s\n' "$block" | grep -c '^        leg:$')
   if [ "$lists" -ne 1 ]; then
-    echo "guard 5 cannot read the matrix: expected exactly one \`        file:\` list in the mutations job, found $lists" >&2
+    echo "guard 5 cannot read the matrix: expected exactly one \`        leg:\` list in the mutations job, found $lists" >&2
     return 2
   fi
-  local names
-  names=$(printf '%s\n' "$block" | awk '/^        file:$/ { f = 1; next } f && /^          - / { sub(/^          - /, ""); print; next } f { exit }')
+  local names dups
+  names=$(printf '%s\n' "$block" | awk '/^        leg:$/ { f = 1; next } f && /^          - / { sub(/^          - /, ""); n = split($0, w, " "); for (i = 1; i <= n; i++) print w[i]; next } f { exit }')
   if [ -z "$names" ]; then
-    echo "guard 5 cannot read the matrix: the \`file:\` list under the mutations job is empty" >&2
+    echo "guard 5 cannot read the matrix: the \`leg:\` list under the mutations job is empty" >&2
+    return 2
+  fi
+  dups=$(printf '%s\n' "$names" | sort | uniq -d)
+  if [ -n "$dups" ]; then
+    echo "guard 5 cannot read the matrix: a file is named in more than one leg:" >&2
+    printf '%s\n' "$dups" | sed 's/^/   /' >&2
     return 2
   fi
   printf '%s\n' "$names"
@@ -354,7 +363,7 @@ matrix_verdict() {
   if [ "$marked" -eq 1 ]; then
     echo "   its '# not-in-matrix:' line has no reason after a colon and a space; write '# not-in-matrix: <reason>', or add the file to ci.yml's mutations matrix"
   else
-    echo "   nothing proves its cases still kill: add '          - $name' to the mutations matrix in .github/workflows/ci.yml, or write '# not-in-matrix: <reason>' in the file"
+    echo "   nothing proves its cases still kill: add $name to the leg with the least time in the mutations matrix's \`leg:\` list in .github/workflows/ci.yml, or write '# not-in-matrix: <reason>' in the file"
   fi
   return 1
 }
@@ -703,7 +712,7 @@ case_() {
   return 0
 }
 
-# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Twelve
+# `--self-test`: guard 5 and MISPLACED RUNNER against fixtures. Fourteen
 # controls, each with the line it expects (or expects NOT to see); a control
 # that gets the other answer is named by number on stderr. Three of them are
 # positive ("silent", or "refused for the right reason only") so a guard that
@@ -721,7 +730,8 @@ if [ "${1:-}" = "--self-test" ]; then
   fail() { echo "self-test FAILED control $1: $2" >&2; failed=$((failed + 1)); }
 
   # A minimal workflow with the real shape: another job that also names
-  # `tree`, then the mutations job with a `file:` list and an `include:`.
+  # `tree`, then the mutations job with a `leg:` list. `tree` is the SECOND
+  # name of its entry, so control 1 holds the split of an entry into names.
   cat > "$T/ci.yml" <<'YML'
 jobs:
   sweeps:
@@ -730,20 +740,36 @@ jobs:
   mutations:
     strategy:
       matrix:
-        file:
+        leg:
           - source
-          - tree
-        include:
-          - file: source
-            node: true
+          - other tree
     runs-on: ubuntu-24.04
+YML
+  cat > "$T/ci-twice.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        leg:
+          - source tree
+          - tree
+YML
+  cat > "$T/ci-include.yml" <<'YML'
+jobs:
+  mutations:
+    strategy:
+      matrix:
+        leg:
+          - source
+        include:
+          - leg: tree
 YML
   cat > "$T/ci-exclude.yml" <<'YML'
 jobs:
   mutations:
     strategy:
       matrix:
-        file:
+        leg:
           - source
           - tree
         exclude:
@@ -754,7 +780,7 @@ jobs:
   mutations:
     strategy:
       matrix:
-        file:
+        leg:
           - source
           - tree
         exclude :
@@ -764,24 +790,24 @@ YML
   # it is the only thing in these fixtures that can tell `[A-Za-z_]` from
   # `[a-z]` in the job-block terminator. With the correct class the block
   # ends at `Bundle:` and the matrix is `source` alone; with `[a-z]` it reads
-  # straight on into `Bundle:`'s own list, finds two `file:` lists, and
+  # straight on into `Bundle:`'s own list, finds two `leg:` lists, and
   # refuses — which is control 3 going red.
   cat > "$T/ci-other-job-only.yml" <<'YML'
 jobs:
   other:
     strategy:
       matrix:
-        file:
+        leg:
           - tree
   mutations:
     strategy:
       matrix:
-        file:
+        leg:
           - source
   Bundle:
     strategy:
       matrix:
-        file:
+        leg:
           - tree
 YML
   printf 'case_ "x" a b c d e\n' > "$T/mutations/tree.sh"
@@ -803,9 +829,9 @@ YML
   names="$T/names"
   matrix_files "$T/ci.yml" > "$names" || fail 0 "the fixture matrix should be readable"
 
-  # 1. in the matrix → silent
+  # 1. in the matrix, as the second name of a leg → silent
   out=$(matrix_verdict "$names" "$T/mutations/tree.sh"); rc=$?
-  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 1 "a file in matrix.file is silent (got rc=$rc: $out)"
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail 1 "a file named anywhere in a matrix.leg entry is silent (got rc=$rc: $out)"
   # 2. nowhere → NOT IN MATRIX. The name is a strict prefix of the listed
   #    `tree`, so this control is also the one that holds `-x` on the lookup.
   out=$(matrix_verdict "$names" "$T/mutations/tre.sh"); rc=$?
@@ -863,10 +889,17 @@ YML
   { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q '^NOT IN MATRIX: indented.sh' \
     && printf '%s' "$out" | grep -q 'nothing proves its cases still kill'; } || fail 12 "a marker that is not at the start of a line is not a marker (got rc=$rc: $out)"
 
+  # 13. one name in two legs → refused with 2, naming it
+  matrix_files "$T/ci-twice.yml" > /dev/null 2> "$T/err13"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'more than one leg' "$T/err13" && grep -qx '   tree' "$T/err13"; } || fail 13 "a file named in two legs is refused with exit 2 and named (got rc=$rc: $(cat "$T/err13"))"
+  # 14. `include:` → refused with 2: it could add a leg the list does not show
+  matrix_files "$T/ci-include.yml" > /dev/null 2> "$T/err14"; rc=$?
+  { [ "$rc" -eq 2 ] && grep -q 'include:' "$T/err14"; } || fail 14 "a matrix with include: is refused with exit 2 (got rc=$rc)"
+
   if [ "$failed" -ne 0 ]; then
     exit 1
   fi
-  echo "self-test: 12 controls, all as expected"
+  echo "self-test: 14 controls, all as expected"
   exit 0
 fi
 

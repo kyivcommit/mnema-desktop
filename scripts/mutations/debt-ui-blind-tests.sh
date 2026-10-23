@@ -1,6 +1,6 @@
 # Debt PR B (§15.5, 2026-09-17) — five UI tests that were green under the
 # change they existed to catch, and the tests that replaced them. All vitest,
-# so this file's matrix leg carries `node: true` in `.github/workflows/ci.yml`.
+# so the CI leg that runs this file installs node (`.github/workflows/ci.yml`).
 # Run with:
 #
 #   scripts/mutation-check.sh scripts/mutations/debt-ui-blind-tests.sh
