@@ -487,6 +487,7 @@ fn a_socket_path_too_long_is_an_error_not_a_panic() {
 
     let too_long = nested(104);
     let app = served(&too_long);
+    mnema_desktop::prefs::write_key(&too_long, "agent_access", Value::Bool(true)).unwrap();
     let e = set_access(&app, true).expect_err("a path over the limit was accepted");
     assert!(e.to_string().contains("limit"), "{e}");
     assert!(!mnema_desktop::prefs::agent_access(&too_long));
@@ -626,33 +627,33 @@ fn turning_access_off_cuts_the_socket_even_when_the_prefs_write_fails() {
     assert!(!enabled(&app));
 }
 
+/// A change of the switch waits for one already under way. The interleaving the
+/// lock prevents (one change persisting between the other's persist and its
+/// start/stop) has a window too narrow to hit by racing threads, so the test
+/// holds the lock itself and asks whether a change gets past it.
 #[test]
-fn concurrent_toggles_leave_the_prefs_and_the_socket_in_agreement() {
+fn a_change_of_the_switch_waits_for_the_one_under_way() {
     let data = tempfile::tempdir().unwrap();
     let app = served(data.path());
-    let threads: Vec<_> = [true, false]
-        .into_iter()
-        .map(|on| {
-            let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                for _ in 0..150 {
-                    let _ = mnema_desktop::prefs::set_agent_access(
-                        handle.clone(),
-                        handle.state::<AppState>(),
-                        handle.state::<AgentServer>(),
-                        on,
-                    );
-                }
-            })
-        })
-        .collect();
-    for t in threads {
-        t.join().unwrap();
-    }
-    let stored = mnema_desktop::prefs::agent_access(data.path());
-    let listening = UnixStream::connect(socket_path(data.path())).is_ok();
-    assert_eq!(stored, listening, "prefs and socket disagree");
-    assert_eq!(stored, enabled(&app));
+    let held = app.state::<AgentServer>();
+    let guard = held.toggle_lock();
+    let handle = app.handle().clone();
+    let other = std::thread::spawn(move || {
+        mnema_desktop::prefs::set_agent_access(
+            handle.clone(),
+            handle.state::<AppState>(),
+            handle.state::<AgentServer>(),
+            true,
+        )
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !socket_path(data.path()).exists(),
+        "a second change ran while the first was still under way"
+    );
+    drop(guard);
+    assert!(other.join().unwrap().unwrap());
+    assert!(socket_path(data.path()).exists());
 }
 
 #[test]

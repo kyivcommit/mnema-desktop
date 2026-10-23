@@ -298,7 +298,7 @@ case_ "agent access: a boot with the switch off must remove a crash's socket" \
 
 case_ "agent access: turning off must remove the socket file" \
   $A \
-  's~let _ = std::fs::remove_file\(&path\);~let _ = ();~' \
+  's~(inner\.generation \+= 1;\n\s*)let _ = std::fs::remove_file\(&path\);~$1let _ = ();~' \
   'let _ = ();' \
   mnema-desktop 'turning_access_off_removes_the_socket_and_cuts_an_open_connection' --test agent
 
@@ -316,7 +316,7 @@ case_ "agent access: a rescan waiting when access goes off must be cut" \
 
 case_ "agent access: the switch must close the socket when it goes off" \
   $P \
-  's~crate::agent::stop\(&app\);~();~' \
+  's~(if !on \{\n\s*)crate::agent::stop\(&app\);~$1();~' \
   '();' \
   mnema-desktop 'turning_access_off_removes_the_socket_and_cuts_an_open_connection' --test agent
 
@@ -358,8 +358,8 @@ case_ "agent socket: a path of 103 bytes must be accepted" \
 
 case_ "agent access: a socket that cannot open must leave the switch off" \
   $P \
-  's~serde_json::Value::Bool\(false\),~serde_json::Value::Bool(true),~' \
-  'Value::Bool(true),' \
+  's~(start\(&app\) \{\n\s*if let Err\(w\) = )key\(false\)~$1key(true)~' \
+  'if let Err(w) = key(true)' \
   mnema-desktop 'a_socket_path_too_long_is_an_error_not_a_panic' --test agent
 
 case_ "agent log: it must keep fifty entries" \
@@ -405,12 +405,12 @@ case_ "agent access: two changes of the switch must not interleave" \
   $P \
   's~let _toggle = server\.toggle_lock\(\);~let _toggle = ();~' \
   'let _toggle = ();' \
-  mnema-desktop 'concurrent_toggles_leave_the_prefs_and_the_socket_in_agreement' --test agent
+  mnema-desktop 'a_change_of_the_switch_waits_for_the_one_under_way' --test agent
 
 case_ "agent access: a boot that cannot start must switch the stored value off" \
   $A \
-  's~serde_json::Value::Bool\(false\),~serde_json::Value::Bool(true),~' \
-  'Value::Bool(true),' \
+  's~serde_json::Value::Bool\(false\)~serde_json::Value::Bool(true)~' \
+  'Value::Bool(true))' \
   mnema-desktop 'a_boot_that_cannot_open_the_socket_switches_access_off' --test agent
 
 case_ "agent access: enabled must say whether the socket is open" \
