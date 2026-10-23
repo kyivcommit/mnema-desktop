@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { READINESS_FIXTURES } from '../lib/fixtures';
 import { roleReady } from './state';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import { vi, expect, test, beforeEach } from 'vitest';
 import Launcher from './Launcher.svelte';
 import { refusedNoCandidates, citationA, citationB, generated, generatedArchived, generatedOther, citationsOnly, emptyCitationsOnly, oneRootTwoFolders } from '../lib/fixtures';
@@ -15,7 +15,18 @@ const invoke = vi.fn();
 // What `provider_status` answers; a test swaps it to drive the cloud.
 const okStatus = () => Promise.resolve({ kind: 'ok' });
 let providerReply: () => Promise<unknown> = okStatus;
-vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+// The tree's add-folder button reads the scan state and listens for its
+// progress on mount; every mock below answers it the same idle way.
+const jobStatusCalls = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => a[0] === 'job_status'
+    ? (jobStatusCalls(), Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } }))
+    : invoke(...a),
+}));
+const listen = vi.hoisted(() => vi.fn((..._a: unknown[]) => Promise.resolve(() => {})));
+vi.mock('@tauri-apps/api/event', () => ({ listen }));
+const open = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open }));
 
 // Answers each command separately. `model_settings` (the launcher's mount
 // seed) always resolves so it never crashes a render; `ask` is what each
@@ -1635,3 +1646,52 @@ test('unticking the last folder says so at once and blocks the ask; ticking one 
   await submit('anything');
   expect(invoke.mock.calls.filter((c) => c[0] === 'ask')).toHaveLength(1);
 });
+
+// The header's «+» is a second door to the same tree: what it adds reaches the
+// Documents pane at once, as the pane's own «+» does.
+test('a folder added from the header reloads the tree', async () => {
+  mockBackend(generated);
+  open.mockResolvedValue('/Users/me/Books');
+  render(Launcher);
+  await waitFor(() => expect(listTreeCalls().length).toBeGreaterThan(0));
+  const before = listTreeCalls().length;
+  await fireEvent.click(within(screen.getByTestId('header-add-folder')).getByRole('button'));
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'add_watched_folder')).toHaveLength(1));
+  await waitFor(() => expect(listTreeCalls().length).toBeGreaterThan(before));
+});
+
+// Owner, 2026-10-22: the header's «+» stands at the right, just after the cloud.
+test('the header add-folder sits right after the cloud', async () => {
+  mockBackend(generated);
+  render(Launcher);
+  const cloud = await screen.findByTestId('provider-cloud');
+  const plus = screen.getByTestId('header-add-folder');
+  expect(cloud.parentElement!.nextElementSibling).toBe(plus);
+});
+
+// Two «+» buttons, one controller: the window listens for scan progress once.
+test('the launcher listens for scan progress once for both add-folder buttons', async () => {
+  mockBackend(generated);
+  listen.mockClear();
+  jobStatusCalls.mockClear();
+  render(Launcher);
+  expect(screen.getAllByTestId('tree-add-folder')).toHaveLength(2);
+  await waitFor(() => expect(listen.mock.calls.filter(([e]) => e === 'scan-progress')).toHaveLength(1));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(listen.mock.calls.filter(([e]) => e === 'scan-progress')).toHaveLength(1);
+  // The mount read and the one after the listener registered — once, not per button.
+  expect(jobStatusCalls).toHaveBeenCalledTimes(2);
+});
+
+// Owner, 2026-10-23: a new conversation puts the cursor in the question field,
+// from either pencil — the header's and the sidebar's.
+for (const id of ['new-chat', 'recents-new']) {
+  test(`a new conversation from ${id} puts the cursor in the question field`, async () => {
+    render(Launcher);
+    const search = await screen.findByLabelText(/search conversations/i);
+    search.focus();
+    await fireEvent.click(await screen.findByTestId(id));
+    await waitFor(() => expect(document.activeElement?.tagName).toBe('TEXTAREA'));
+    expect(document.activeElement!.closest('.composer')).not.toBeNull();
+  });
+}

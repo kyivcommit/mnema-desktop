@@ -4,6 +4,8 @@
   import { ask, chatTools, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
   import { checkQuery, firstCard, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
+  import AddFolder from './AddFolder.svelte';
+  import { createAddFolder } from './addFolder';
   import Transcript from './Transcript.svelte';
   import Composer from './Composer.svelte';
   import Tree from './Tree.svelte';
@@ -44,6 +46,10 @@
   // one document can sit at several paths, and a key on the id would mark
   // every row that names it.
   let selected = $state<TreeSelection | null>(null);
+  let composer = $state<{ focus(): void } | undefined>();
+  // One add-folder controller behind the Documents pane's «+» and the header's.
+  const folders = createAddFolder();
+  onMount(() => folders.start());
 
   // A click in the tree opens the file at its start: no highlight, no scroll —
   // unless the word search found it, and then at the passage that matched.
@@ -164,6 +170,7 @@
     launcherState = { kind: 'idle' };
     previous = null;
     historyId = null;
+    composer?.focus();
   }
 
   onMount(() => {
@@ -280,7 +287,7 @@
 <Shell bind:panels fileOpen={openFile !== null} {fileTitle}>
   {#snippet transcript()}
     <Transcript {turns} state={shownState} onSelected={showCitation} />
-    <Composer bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
+    <Composer bind:this={composer} bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
   {/snippet}
   {#snippet recents()}
     <Recents activeId={historyId} gen={historyGen} onOpen={openHistory}
@@ -289,7 +296,7 @@
       error={launcherState.kind === 'error' && (launcherState.reason === 'historyUnreadable' || launcherState.reason === 'historyFailed') ? launcherState.reason : null} />
   {/snippet}
   {#snippet tree()}
-    <Tree {selected} onPick={openAtStart} onScopeChange={(v) => (scopeOff = v)} />
+    <Tree {selected} {folders} onPick={openAtStart} onScopeChange={(v) => (scopeOff = v)} />
   {/snippet}
   {#snippet file()}
     {#if openFile !== null}
@@ -305,5 +312,9 @@
       <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.9 2.6a1.3 1.3 0 0 1 1.9 0l.6.6a1.3 1.3 0 0 1 0 1.9L6.3 12.2l-3 .7.7-3z"/></svg>
     </button>
     <Toolbar {status} provider={statusProvider} local={chatProvider === 'mnema'} />
+    <!-- The Documents pane's «+», the same action, right after the cloud (owner,
+         2026-10-22): shown only while that pane is off screen (`launcher.css`),
+         like the pencil above. -->
+    <span class="header-add-folder" data-testid="header-add-folder"><AddFolder {folders} /></span>
   {/snippet}
 </Shell>

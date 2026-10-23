@@ -1,7 +1,8 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest';
 import Tree, { buildFolderTree, filterTree } from './Tree.svelte';
+import { createAddFolder } from './addFolder';
 import {
   oneRoot,
   oneRootTwoFolders,
@@ -19,6 +20,11 @@ const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 const scroll = vi.hoisted(() => vi.fn());
 vi.mock('../lib/scroll', () => ({ scrollWithin: scroll }));
+// The header's add-folder button listens for scans and opens a dialog.
+const listen = vi.hoisted(() => vi.fn((..._a: unknown[]) => Promise.resolve(() => {})));
+vi.mock('@tauri-apps/api/event', () => ({ listen }));
+const open = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open }));
 
 // The card's one read. A reply is answered by its own command name: one reply for
 // every command would hand the listing's shape to whatever else asked, and a
@@ -30,6 +36,9 @@ function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'list_tree') return treeReply();
   if (cmd === 'set_folder_searched') return setReply(args);
   if (cmd === 'find_in_files') return findReply((args as { query: string }).query);
+  if (cmd === 'job_status') return Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
+  if (cmd === 'add_watched_folder') return Promise.resolve(9);
+  if (cmd === 'start_scan_job') return Promise.resolve();
   throw new Error(`unexpected command ${cmd}`);
 }
 
@@ -1481,4 +1490,39 @@ test('a keystroke inside the window restarts it: one request, for the last text'
   expect(findCalls()).toHaveLength(0);
   await settle(1);
   expect(findCalls()).toEqual([['find_in_files', { query: 'she' }]]);
+});
+
+test('the add-folder button sits in the header and a new folder reloads the tree', async () => {
+  open.mockResolvedValue('/Users/me/Books');
+  const folders = createAddFolder();
+  onTestFinished(folders.start());
+  render(Tree, { selected: null, onPick: pick, folders });
+  const button = await screen.findByTestId('tree-add-folder');
+  expect(button.closest('header.pane-head')).not.toBeNull();
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(1));
+  await fireEvent.click(button);
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(2));
+});
+
+// Final review, finding 2: a scan's ending arrives while the previous tick's
+// listing is still on the wire, and must not be dropped with it.
+test('a reload asked for by a scan while a listing is on the wire still happens', async () => {
+  listen.mockClear(); // earlier tests' components registered here too
+  const wire = mockTreePending();
+  const folders = createAddFolder();
+  onTestFinished(folders.start());
+  render(Tree, { selected: null, onPick: pick, folders });
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'job_status').length).toBeGreaterThan(0));
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  await tick();
+  const handler = listen.mock.calls.at(-1)![1] as (e: { payload: unknown }) => void;
+  handler({ payload: { revision: 1, files: 0, readSeq: 1, jobsDone: 1, lastReading: null, snapshot: { kind: 'idle' } } });
+  wire.resolve(oneRootTwoFolders);
+  await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'list_tree')).toHaveLength(2));
+});
+
+test('without a controller the tree draws no add-folder button', async () => {
+  render(Tree, { selected: null, onPick: pick });
+  await screen.findByTestId('tree-title');
+  expect(screen.queryByTestId('tree-add-folder')).toBeNull();
 });

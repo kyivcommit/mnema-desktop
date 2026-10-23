@@ -4332,6 +4332,27 @@ fn the_settings_window_may_reach_the_folder_picker() {
     );
 }
 
+/// D182: the launcher's Documents pane opens the same folder picker. Found
+/// on the live app, not by the UI tests (they mock the dialog): without the
+/// grant the press did nothing at all.
+#[test]
+fn the_launcher_window_may_reach_the_folder_picker() {
+    let app = app_with_real_capabilities();
+    let webview = WebviewWindowBuilder::new(&app, "launcher", Default::default())
+        .build()
+        .expect("failed to build the launcher mock webview");
+
+    let error = call(&webview, "plugin:dialog|open", malformed_open_dialog_args())
+        .expect_err("a non-boolean `directory` must not deserialize into `OpenDialogOptions`");
+    let message = error.as_str().unwrap_or_default();
+    // The same shape the settings test turns on: only reachable once the ACL
+    // has let the call through and the plugin is registered.
+    assert!(
+        message.contains("invalid type") && message.contains("expected a boolean"),
+        "the `launcher` window did not reach `OpenDialogOptions` deserialization: {message}"
+    );
+}
+
 /// The counterweight to the test above: without it, a capability that
 /// granted `dialog:allow-open` to every window regardless of `windows: [
 /// "settings"]` would pass the positive test for the same reason a capability

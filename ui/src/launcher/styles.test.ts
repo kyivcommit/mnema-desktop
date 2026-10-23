@@ -18,6 +18,22 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}
 let sheets: HTMLStyleElement[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+// The panel layout lives in `localStorage` (`layout.ts`): a fresh in-memory
+// store per test, so a test that hides the tree does not hand the next one a
+// hidden tree. Node's own `localStorage` differs between versions — under
+// some it silently stores nothing — which is how this leaked on CI only.
+beforeEach(() => {
+  const map = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => { map.set(k, v); },
+      removeItem: (k: string) => { map.delete(k); },
+    },
+    configurable: true,
+  });
+});
+
 beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation((cmd: string) => {
@@ -41,6 +57,7 @@ beforeEach(() => {
       freshness: { kind: 'fileChanged' },
     });
     if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
+    if (cmd === 'job_status') return Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
     throw new Error(`unexpected command ${cmd}`);
   });
   for (const path of ['base.css', 'launcher.css']) {
@@ -333,4 +350,22 @@ test('real CSS: the header pencil hides while the sidebar is open', async () => 
   await fireEvent.click(screen.getByTestId('toggle-left'));
   expect(screen.getByTestId('shell').dataset.left).toBe('false');
   expect(getComputedStyle(pencil).display).not.toBe('none');
+});
+
+// The header's «+», like its pencil: shown only while the Documents pane is not
+// on screen — the right panel shut, or open with the tree hidden (owner, 2026-10-22).
+test('real CSS: the header add-folder hides while the Documents pane is open', async () => {
+  const width = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  onTestFinished(() => { if (width) Object.defineProperty(window, 'innerWidth', width); });
+  render(Launcher);
+  const plus = screen.getByTestId('header-add-folder');
+  expect(within(screen.getByTestId('col-tree')).getByTestId('tree-add-folder')).toBeTruthy();
+  expect(getComputedStyle(plus).display).toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(getComputedStyle(plus).display).not.toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-tree'));
+  expect(getComputedStyle(plus).display).toBe('none');
+  await fireEvent.click(screen.getByTestId('toggle-right'));
+  expect(getComputedStyle(plus).display).not.toBe('none');
 });

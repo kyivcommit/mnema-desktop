@@ -114,6 +114,14 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .cloud[data-status="notConfigured"] svg { stroke-dasharray: 2 2; }
 .cloud[data-status="unreachable"] { color: var(--err); }
 .tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+/* The Documents pane's «+»: a scan's progress is a ring around it, reading the
+   first half and embedding the second. */
+.add-folder { position: relative; }
+.scan-ring { position: absolute; inset: 0; width: 26px; height: 26px; transform: rotate(-90deg); pointer-events: none; }
+.scan-ring circle { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; }
+.scan-ring.spin { animation: scan-ring-spin 1s linear infinite; }
+@keyframes scan-ring-spin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+@media (prefers-reduced-motion: reduce) { .scan-ring.spin { animation: none; } }
 
 /* Find in files: the pane's column. The field is a fixed row above `.tree-scroll`,
    the only thing that scrolls, so it stays put in both directions. `.pane-body`
@@ -185,9 +193,13 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
    and on focus. The active row is `--select`, the same fill as the open file
    in the tree (owner, 2026-10-22). */
 /* One rule for both panels' title rows. The height is explicit so the
-   conversations row (its 26px button + padding) and the documents row (no
-   button) are the same 30px, and the two search fields sit level. */
+   conversations row and the documents row (each with its 26px button +
+   padding) are the same 30px, and the two search fields sit level. */
 .pane-head { flex: none; display: flex; align-items: center; gap: 4px; height: 30px; box-sizing: border-box; padding: 0 0 4px 7px; }
+/* A refused add says so on its own line under the title, inside the header —
+   the one case the row grows past 30px. */
+.pane-head:has(.tree-note) { flex-wrap: wrap; height: auto; }
+.pane-head .tree-note { flex: 1 0 100%; margin: 0; padding: 0 7px 0 0; }
 .pane-title {
   flex: 1 1 auto; min-width: 0; margin: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -324,6 +336,14 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 /* New conversation: the sidebar has the same pencil, so the header's shows only
    while the sidebar is shut (owner, 2026-10-22). */
 main.shell[data-left="true"] .new-chat { display: none; }
+/* The Documents pane's «+» likewise: the header's shows only while that pane is
+   off screen (owner, 2026-10-22). A refused add says so under it, over the page. */
+.header-add-folder { position: relative; display: inline-flex; }
+main.shell[data-docs="true"] .header-add-folder { display: none; }
+.header-add-folder .tree-note {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 5; width: max-content; max-width: 280px;
+  margin: 0; padding: 6px 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
+}
 /* The answer's heading is for a screen reader only: the card's first block is
    the answer itself, and a visible label above it said nothing a person sees. */
 .answer-card h3.sr-only {

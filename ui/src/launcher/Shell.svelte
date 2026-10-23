@@ -108,7 +108,7 @@
 
 <svelte:window onresize={() => (windowWidth = window.innerWidth)} />
 
-<main class="shell" data-testid="shell" data-left={view.left > 0} style={shellStyle}>
+<main class="shell" data-testid="shell" data-left={view.left > 0} data-docs={view.right > 0 && panels.tree} style={shellStyle}>
   {#if view.left}
     <aside class="recents" data-testid="col-recents" aria-label={labels.recents}>
       {@render recents?.()}

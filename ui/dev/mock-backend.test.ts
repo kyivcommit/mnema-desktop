@@ -41,3 +41,12 @@ test('set_folder_searched drops nested entries as the core does', async () => {
   await invoke('set_folder_searched', { rootId: 2, folderPath: '', searched: false });
   expect(await entries(2)).toEqual([{ folderPath: '', searched: false }]);
 });
+
+test('start_scan_job refuses while a scan runs, and reading roots count from one', async () => {
+  await invoke('start_scan_job', { entry: 'full' });
+  await expect(invoke('start_scan_job', { entry: 'full' })).rejects.toBe('a job is already running');
+  await new Promise((r) => setTimeout(r, 400));
+  const s = await invoke<{ snapshot: { kind: string; phase?: { kind: string; rootIndex?: number } } }>('job_status');
+  expect(s.snapshot.phase?.kind).toBe('reading');
+  expect(s.snapshot.phase?.rootIndex).toBe(1);
+});

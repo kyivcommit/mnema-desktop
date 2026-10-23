@@ -67,17 +67,23 @@
   import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
   import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
+  import AddFolder from './AddFolder.svelte';
+  import type { AddFolderController } from './addFolder';
+  import { get } from 'svelte/store';
   import { scrollWithin } from '../lib/scroll';
   import type { FoundInFile, TreeListing } from '../lib/ipc';
 
   // Ruling O, restated for the pair: the selection is the file's place on
   // disk — `{ rootId, relativePath }` — and the click carries its `documentId`
   // as well, which is what the backend is asked to open.
-  let { selected, onPick, onScopeChange }: {
+  let { selected, onPick, onScopeChange, folders }: {
     selected: TreeSelection | null;
     onPick: (pick: TreePick) => void;
     // Called when "every root is unticked" changes; the composer says so at once.
     onScopeChange?: (allOff: boolean) => void;
+    // The launcher's add-folder controller: its button sits in this header, and
+    // what it reports (a folder added, files read, a job ended) re-reads the tree.
+    folders?: AddFolderController;
   } = $props();
 
   let listing = $state<TreeListing | null>(null);
@@ -159,8 +165,11 @@
   // next focus refreshes; queueing would trade it for a second request whose
   // answer nobody is waiting for.
   let loading = false;
-  function load() {
-    if (loading) return;
+  // `queue`: a scan's reload is not dropped behind a listing already on the
+  // wire — its last one comes right after a progress tick and is the one that
+  // brings the final files in (final review, finding 2).
+  function load(queue = false) {
+    if (loading) { if (queue) reloadAfter = true; return; }
     loading = true;
     // A read that starts with a write on the wire may precede that write's
     // landing in the store, so it gets an epoch no click can match.
@@ -198,6 +207,16 @@
         if (reloadAfter) { reloadAfter = false; load(); }
       });
   }
+
+  $effect(() => {
+    if (!folders) return;
+    let seen = get(folders).changes;
+    return folders.subscribe((v) => {
+      if (v.changes === seen) return;
+      seen = v.changes;
+      load(true);
+    });
+  });
 
   onMount(() => {
     load();
@@ -582,13 +601,13 @@
   </ul>
 {/snippet}
 
-<svelte:window onfocus={load} />
+<svelte:window onfocus={() => load()} />
 
 <!-- A column that fills the pane: the title and the field are outside the scroller below it,
      so it moves neither with the tree's vertical scroll nor its sideways one
      (`.tree` is as wide as its deepest row). -->
 <div class="tree-column">
-<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2></header>
+<header class="pane-head"><h2 class="pane-title" data-testid="tree-title">{titleLabel}</h2>{#if folders}<AddFolder {folders} />{/if}</header>
 <div class="tree-search">
   <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
     stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
