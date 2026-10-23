@@ -707,7 +707,7 @@ case_ "mnema client: a read timeout must not read as disabled" \
   $C \
   's~ErrorKind::WouldBlock \| ErrorKind::TimedOut~ErrorKind::NotFound~' \
   'ErrorKind::NotFound' \
-  mnema-cli 'an_app_that_never_answers_is_internal_not_disabled' --bin mnema
+  mnema-cli 'client::tests::an_app_that_never_answers_is_internal_not_disabled' --bin mnema
 
 case_ "mnema mcp: the search description must say what empty false means" \
   $X \
