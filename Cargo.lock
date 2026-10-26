@@ -2821,6 +2821,7 @@ name = "mnema-desktop"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "libc",
  "mnema-chunk",
  "mnema-core",
  "mnema-embed",

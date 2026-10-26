@@ -634,3 +634,9 @@ case_ "Agents.svelte: before the first answer no empty box is drawn" \
   's~\{#if states === null && readFailure === null\}~{#if false}~' \
   '{#if false}' \
   $AT 'before the first answer no box is drawn, only a line saying the agents are being checked' runner=vitest
+
+case_ "agent_clients: kill_group must signal the whole group (CI, PR #79)" \
+  $W \
+  's~        unsafe \{ libc::killpg\(pgid, libc::SIGKILL\) \};\n~        let _ = pgid;\n~' \
+  'let _ = pgid;' \
+  mnema-desktop "${T}a_child_that_outlives_the_timeout_is_killed_with_its_group" --lib

@@ -803,16 +803,13 @@ fn run(
 /// with it and the pipes it holds close.
 #[cfg(unix)]
 fn kill_group(child: &mut Child) {
-    // The `kill` utility and not `libc::kill`: `libc` is not a dependency of this
-    // crate, and one short-lived process costs less than a new dependency. A
-    // group with no members left answers `ESRCH`, which is nothing to report.
-    let _ = Command::new("kill")
-        .arg("-KILL")
-        .arg(format!("-{}", child.id()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // `killpg`, not the `kill` utility: Linux procps took `kill -KILL -<pgid>`'s
+    // pid for an option and the group lived on (CI on PR #79). A group with no
+    // members left answers `ESRCH`, which is nothing to report.
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: plain syscall on a pid we spawned as a group leader.
+        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    }
     let _ = child.kill();
 }
 
