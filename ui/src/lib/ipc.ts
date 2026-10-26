@@ -1003,7 +1003,30 @@ export type AgentLogEntry = {
 export const agentAccessEnabled = () => invoke<boolean>('agent_access_enabled');
 export const setAgentAccess = (on: boolean) => invoke<boolean>('set_agent_access', { on });
 export const agentLog = () => invoke<AgentLogEntry[]>('agent_log');
-export const agentCommandPath = () => invoke<string>('agent_command_path');
+
+// The four agent CLIs and the `mnema` MCP server each one holds
+// (`agent_clients.rs`). `link` is the CLI's own record — `absent` when it holds
+// no such server — and null when the record could not be read at all, which is
+// what `error` then carries. Mirrored IN FULL, field for field; `ipc.test.ts`
+// pins both structs and both enums against that file.
+export type ClientId = 'claude' | 'codex' | 'pi' | 'opencode';
+export type Link =
+  | { kind: 'absent' }
+  | { kind: 'current' }
+  | { kind: 'stale'; command: string };
+export type ClientState = { id: ClientId; installed: boolean; link: Link | null; error: string | null };
+// One answer per client `apply_agent_clients` touched; a client it did not touch
+// is absent from the array. `error` is the CLI's own words.
+export type Applied = { id: ClientId; error: string | null };
+
+// All four, in `ALL` order. Can take seconds — a login shell that will not answer
+// is given five, each CLI fifteen — so the section draws itself first and
+// disables the boxes until this answers.
+export const agentClients = () => invoke<ClientState[]>('agent_clients');
+// Connects the clients in `want` and disconnects every other installed one. The
+// answer is NOT the new state: the caller re-reads `agentClients()` and draws
+// that, because one client's refusal says nothing about the other three.
+export const applyAgentClients = (want: ClientId[]) => invoke<Applied[]>('apply_agent_clients', { want });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is

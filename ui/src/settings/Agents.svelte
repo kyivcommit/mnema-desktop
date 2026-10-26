@@ -3,12 +3,14 @@
   import { locale, t } from '../i18n';
   import type { Key } from '../i18n/catalog';
   import {
-    agentAccessEnabled, setAgentAccess, agentLog, agentCommandPath, type AgentLogEntry,
+    agentAccessEnabled, setAgentAccess, agentLog, agentClients, applyAgentClients,
+    type AgentLogEntry, type ClientId, type ClientState,
   } from '../lib/ipc';
 
-  // The «Agents» section: the access switch, the line that sets an agent up, and
+  // The «Agents» section: the access switch, the four agents it connects, and
   // what agents have asked. The section is torn down by every nav click, so the
-  // poll below lives exactly as long as it is visible.
+  // poll below lives exactly as long as it is visible — and the state read on
+  // mount lives no longer than that either.
 
   const POLL_MS = 2000;
 
@@ -16,17 +18,50 @@
   // An op this window does not know (a newer app, an older window) shows as the app sent it.
   const opLabel = (op: string) => (OPS as readonly string[]).includes(op) ? t(`agents_op_${op}` as Key) : op;
 
+  // The four agents, in the order `agent_clients.rs` answers them.
+  const CLIENTS: readonly ClientId[] = ['claude', 'codex', 'pi', 'opencode'];
+  // Product names, untranslated: the same four words in both languages.
+  const CLIENT_NAME: Record<ClientId, Key> = {
+    claude: 'agents_client_claude', codex: 'agents_client_codex',
+    pi: 'agents_client_pi', opencode: 'agents_client_opencode',
+  };
+
   let on = $state(false);
-  let path = $state('');
   let log = $state<AgentLogEntry[]>([]);
   let failure = $state<string | null>(null);
-  let pathFailed = $state(false);
   let busy = $state(false);
+
+  // What each CLI said about the `mnema` server, or null until the first answer
+  // arrives. Read on mount and after every Apply, never derived from what was
+  // asked for: one client's refusal says nothing about the other three.
+  let states = $state<ClientState[] | null>(null);
+  // The person's own pick, per client, while they have one. Cleared when a
+  // re-read answers, so a box goes back to the record that refused it instead of
+  // staying where the person put it.
+  let choice = $state<Partial<Record<ClientId, boolean>> | null>(null);
+  // One sentence per client `apply_agent_clients` answered with an error, and
+  // whether that client was being connected or disconnected.
+  let failures = $state<{ id: ClientId; connecting: boolean; error: string }[]>([]);
+  let applying = $state(false);
+  // An answer this window did not get at all, verbatim.
+  let readFailure = $state<string | null>(null);
+
+  const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
   // The socket's real state, never the value we last asked for: a refused start
   // leaves it closed, and the switch must say so.
   async function readEnabled() {
-    try { on = await agentAccessEnabled(); } catch (err) { failure = String(err); }
+    try { on = await agentAccessEnabled(); } catch (err) { failure = message(err); }
+  }
+
+  async function readClients() {
+    try {
+      states = await agentClients();
+      readFailure = null;
+    } catch (err) {
+      // The previous answer, if any, stays on screen: it was true a moment ago.
+      readFailure = message(err);
+    }
   }
 
   async function toggle(e: Event) {
@@ -34,12 +69,13 @@
     const want = box.checked;
     failure = null;
     busy = true;
-    try { await setAgentAccess(want); } catch (err) { failure = String(err); }
+    try { await setAgentAccess(want); } catch (err) { failure = message(err); }
     await readEnabled();
     busy = false;
     // `on` may not have changed (a refused start), so Svelte would leave the
     // box the person just ticked; put it back to what the socket says.
     box.checked = on;
+    if (on) void readClients();
   }
 
   async function pollLog() {
@@ -47,8 +83,7 @@
   }
 
   onMount(() => {
-    void readEnabled();
-    agentCommandPath().then((p) => (path = p), () => (pathFailed = true));
+    void readEnabled().then(() => { if (on) void readClients(); });
   });
 
   // Only while access is on: closing the window hides it, it does not unmount
@@ -60,15 +95,79 @@
     return () => clearInterval(timer);
   });
 
-  const accessLabel = $derived.by(() => { void $locale; return t('agents_access_label'); });
-  // POSIX single quotes: nothing inside them is special but the quote itself.
-  const quoted = $derived(`'${path.replaceAll("'", "'\\''")}'`);
-  const cmd = $derived(`claude mcp add --scope user mnema -- ${quoted} mcp`);
-  const codex = $derived(`codex mcp add mnema -- ${quoted} mcp`);
-  const opencode = $derived(`opencode mcp add --global mnema -- ${quoted} mcp`);
-  const json = $derived(JSON.stringify({ mcpServers: { mnema: { command: path, args: ['mcp'] } } }));
+  // Ticked means the CLI holds a record of `mnema` at all — the spec's own
+  // "connected" — not that the record names this build: an outdated path is
+  // ticked, and Apply is what rewrites it.
+  const connected = (state: ClientState | undefined) =>
+    state !== undefined && state.link !== null && state.link.kind !== 'absent';
 
-  const copy = (text: string) => navigator.clipboard.writeText(text).catch(() => {});
+  const rows = $derived.by(() => {
+    void $locale;
+    return CLIENTS.map((id) => {
+      const state = states?.find((one) => one.id === id);
+      return {
+        id,
+        name: t(CLIENT_NAME[id]),
+        state,
+        checked: choice?.[id] ?? connected(state),
+        // Nothing is offered until the first answer arrives, and a client the
+        // shell could not even look for is not a client this window may touch.
+        disabled: applying || state === undefined || !state.installed || state.error !== null,
+        note: state === undefined || state.error !== null ? null
+          : !state.installed ? t('agents_not_installed')
+            : state.link?.kind === 'stale' ? t('agents_stale')
+              : null,
+      };
+    });
+  });
+
+  // Apply is owed only when something would change: a box that differs from the
+  // record, or a record naming another path, which only an add can correct.
+  const canApply = $derived(
+    states !== null && !applying
+    && rows.some((row) => row.state !== undefined && row.state.error === null
+      && (row.checked !== connected(row.state) || row.state.link?.kind === 'stale')),
+  );
+
+  const failureOf = $derived(new Map(failures.map((one) => [one.id, one])));
+  const failureText = $derived.by(() => {
+    void $locale;
+    return new Map(failures.map((one) => [one.id, t(
+      one.connecting ? 'agents_apply_failed' : 'agents_disconnect_failed',
+      { name: t(CLIENT_NAME[one.id]) },
+    )]));
+  });
+
+  function pick(id: ClientId, checked: boolean) {
+    choice = { ...(choice ?? {}), [id]: checked };
+  }
+
+  async function runApply() {
+    if (!canApply) return;
+    const want = rows.filter((row) => row.checked).map((row) => row.id);
+    applying = true;
+    failures = [];
+    let rejected: string | null = null;
+    try {
+      const applied = await applyAgentClients(want);
+      failures = applied.flatMap((one) => one.error === null ? []
+        : [{ id: one.id, connecting: want.includes(one.id), error: one.error }]);
+    } catch (err) {
+      // A command that never answered changed nothing this window knows of; the
+      // re-read below still draws the record, and the press is not left silent.
+      rejected = message(err);
+    }
+    await readClients();
+    if (rejected !== null) readFailure = rejected;
+    if (readFailure === null) choice = null;
+    applying = false;
+  }
+
+  const accessLabel = $derived.by(() => { void $locale; return t('agents_access_label'); });
+  const clientsHeading = $derived.by(() => { void $locale; return t('agents_clients_heading'); });
+  const applyLabel = $derived.by(() => { void $locale; return t('agents_apply'); });
+  const detailsLabel = $derived.by(() => { void $locale; return t('agents_details'); });
+  const readFailedLabel = $derived.by(() => { void $locale; return t('agents_read_failed'); });
 </script>
 
 <label class="agents-switch">
@@ -78,24 +177,40 @@
   <p role="alert" data-testid="agents-failure">{#key $locale}{t('agents_access_failed')}{/key} {failure}</p>
 {/if}
 
-{#if on && pathFailed}
-  <p role="alert" data-testid="agents-path-failed">{#key $locale}{t('agents_path_failed')}{/key}</p>
-{:else if on && path}
-  <div role="group" aria-label={$locale && t('agents_setup_cmd')}>
-    <p>{#key $locale}{t('agents_setup_cmd')}{/key}</p>
-    <p>{#key $locale}{t('agents_setup_claude')}{/key}</p>
-    <code data-testid="agents-cmd">{cmd}</code>
-    <button type="button" data-testid="agents-copy-cmd" onclick={() => copy(cmd)}>{#key $locale}{t('agents_copy')}{/key}</button>
-    <p>{#key $locale}{t('agents_setup_codex')}{/key}</p>
-    <code data-testid="agents-codex">{codex}</code>
-    <button type="button" data-testid="agents-copy-codex" onclick={() => copy(codex)}>{#key $locale}{t('agents_copy')}{/key}</button>
-    <p>{#key $locale}{t('agents_setup_opencode')}{/key}</p>
-    <code data-testid="agents-opencode">{opencode}</code>
-    <button type="button" data-testid="agents-copy-opencode" onclick={() => copy(opencode)}>{#key $locale}{t('agents_copy')}{/key}</button>
-    <p>{#key $locale}{t('agents_setup_json')}{/key}</p>
-    <code data-testid="agents-json">{json}</code>
-    <button type="button" data-testid="agents-copy-json" onclick={() => copy(json)}>{#key $locale}{t('agents_copy')}{/key}</button>
+{#if on}
+  <div role="group" aria-labelledby="agents-clients-heading">
+    <h3 id="agents-clients-heading">{clientsHeading}</h3>
+    {#each rows as row (row.id)}
+      <label class="agents-switch">
+        <input
+          type="checkbox"
+          data-testid={`agents-client-${row.id}`}
+          checked={row.checked}
+          disabled={row.disabled}
+          onchange={(e) => pick(row.id, e.currentTarget.checked)}
+        /> {row.name}
+      </label>
+      {#if row.state?.error}
+        <details data-testid={`agents-error-${row.id}`}>
+          <summary>{detailsLabel}</summary>
+          <p>{row.state.error}</p>
+        </details>
+      {:else if row.note}
+        <p class="fc" data-testid={`agents-note-${row.id}`}>{row.note}</p>
+      {/if}
+      {#if failureOf.has(row.id)}
+        <p role="alert" data-testid={`agents-failed-${row.id}`}>{failureText.get(row.id)}</p>
+        <details data-testid={`agents-failed-details-${row.id}`}>
+          <summary>{detailsLabel}</summary>
+          <p>{failureOf.get(row.id)?.error}</p>
+        </details>
+      {/if}
+    {/each}
+    <button type="button" data-testid="agents-apply" disabled={!canApply} onclick={runApply}>{applyLabel}</button>
   </div>
+  {#if readFailure}
+    <p role="alert" data-testid="agents-read-failed">{readFailedLabel} {readFailure}</p>
+  {/if}
 {/if}
 
 <h3>{#key $locale}{t('agents_log_heading')}{/key}</h3>

@@ -8,11 +8,15 @@ import {
 } from './rust-enum';
 import type {
   AppPrefs,
+  Applied,
   AutostartState,
+  ClientId,
+  ClientState,
   Counts,
   HotkeyState,
   HotkeyStatus,
   IndexSettings,
+  Link,
   LocaleApplyError,
   OtherJob,
   ReadingOutcome,
@@ -1017,4 +1021,85 @@ test('set_chat_model and set_embedding_model carry the role\'s provider', async 
   expect(invoke).toHaveBeenLastCalledWith('set_embedding_model', {
     model: 'e', provider: 'openRouter', existingVectors: 'keep',
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 4 of agent-connect: the two commands the Agents section calls, and the
+// wire shapes they answer with (`src-tauri/src/agent_clients.rs`).
+//
+// Both structs are pinned field for field and both enums variant for variant,
+// because a rename on either side compiles cleanly on the other — there is no
+// shared compiler — and what it leaves behind is a checkbox reading `undefined`
+// or a client nobody can tick. The fixtures are typed as the very types they
+// pin, so `Object.keys` is the TS side's own `keyof` rather than a second list
+// written by hand.
+// ---------------------------------------------------------------------------
+
+const AGENT_CLIENTS_RS = readFileSync(join(HERE, '../../../src-tauri/src/agent_clients.rs'), 'utf8');
+
+const CLIENT_STATE_FIXTURE: ClientState = {
+  id: 'claude', installed: true, link: { kind: 'current' }, error: null,
+};
+
+test('ClientState is exactly what agent_clients.rs defines, field for field', () => {
+  expect(Object.keys(CLIENT_STATE_FIXTURE).sort()).toEqual(
+    rustStructFields(AGENT_CLIENTS_RS, 'ClientState').map(camelOfSnake).sort(),
+  );
+});
+
+const APPLIED_FIXTURE: Applied = { id: 'pi', error: null };
+
+test('Applied is exactly what agent_clients.rs defines, field for field', () => {
+  expect(Object.keys(APPLIED_FIXTURE).sort()).toEqual(
+    rustStructFields(AGENT_CLIENTS_RS, 'Applied').map(camelOfSnake).sort(),
+  );
+});
+
+test('ClientId is exactly what agent_clients.rs defines, in the spelling serde sends', () => {
+  const ids: readonly ClientId[] = ['claude', 'codex', 'pi', 'opencode'];
+  expect(ids.slice().sort()).toEqual(
+    rustEnumVariants(AGENT_CLIENTS_RS, 'ClientId').map(camelOf).sort(),
+  );
+  // `rename_all = "lowercase"`, not serde's CamelCase: for these four one-word
+  // variants the two rules agree, and the attribute is what says so. A switch to
+  // `UPPERCASE` would leave the list above green and the wire spelling changed.
+  expect(AGENT_CLIENTS_RS).toMatch(/#\[serde\(rename_all = "lowercase"\)\]\s*pub enum ClientId/);
+});
+
+test('Link is exactly what agent_clients.rs defines, and a stale record names its command', () => {
+  // `Record<…>` over the discriminant as well: an arm added to the TS union and
+  // left out here is a compile error, and the list is compared against Rust.
+  const byKind: Record<Link['kind'], true> = { absent: true, current: true, stale: true };
+  expect(Object.keys(byKind).sort()).toEqual(
+    rustEnumVariants(AGENT_CLIENTS_RS, 'Link').map(camelOf).sort(),
+  );
+  // The tag and the rule that spells the variants: a `Link` that stopped being
+  // `kind`-tagged would reach the window as `{"stale":{…}}` and every box would
+  // read `undefined`. Pinned on the source because neither helper reads it.
+  expect(AGENT_CLIENTS_RS).toMatch(/#\[serde\(tag = "kind", rename_all = "lowercase"\)\]\s*pub enum Link/);
+  // `rustVariantFields` refuses an enum with no `rename_all_fields`; this
+  // variant's one field is a single word, so the source is where it is pinned.
+  expect(AGENT_CLIENTS_RS).toMatch(/Stale \{ command: String \}/);
+  const stale: Link = { kind: 'stale', command: '/Applications/Mnema.app/Contents/MacOS/mnema' };
+  expect(stale.kind === 'stale' && stale.command).toBe('/Applications/Mnema.app/Contents/MacOS/mnema');
+});
+
+test('agentClients invokes agent_clients with no arguments at all', async () => {
+  invoke.mockResolvedValue([]);
+
+  await ipc.agentClients();
+
+  expect(invoke).toHaveBeenCalledWith('agent_clients');
+  // Both directions: the wire string AND the absence of a payload — a `want`
+  // smuggled into the read would be a request drawn as an answer.
+  expect((invoke.mock.calls.at(-1) as unknown[]).length).toBe(1);
+});
+
+test('applyAgentClients sends the wanted set under the name the command declares', async () => {
+  invoke.mockResolvedValue([{ id: 'codex', error: null }]);
+
+  await expect(ipc.applyAgentClients(['codex', 'opencode'])).resolves.toEqual([{ id: 'codex', error: null }]);
+
+  expect(invoke).toHaveBeenCalledWith('apply_agent_clients', { want: ['codex', 'opencode'] });
+  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['want']);
 });

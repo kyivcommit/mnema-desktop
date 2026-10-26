@@ -114,7 +114,6 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::agent_access_enabled,
         prefs::set_agent_access,
         agent::agent_log,
-        agent::agent_command_path,
         agent_clients::agent_clients,
         agent_clients::apply_agent_clients,
         open_settings,
