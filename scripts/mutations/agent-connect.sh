@@ -223,13 +223,12 @@ case_ "opencode: the write is a rename, not a copy that leaves the temporary beh
   $W \
   's~    std::fs::rename\(tmp, path\)~    std::fs::copy(tmp, path).map(|_| ())~' \
   'std::fs::copy(tmp, path)' \
-  mnema-desktop "${T}opencode_writing_atomically_leaves_only_the_target_in_the_directory" --lib
+  mnema-desktop "${T}opencode_a_symlinked_file_stays_a_link_and_its_target_is_rewritten" --lib
 
 case_ "opencode: the target's permissions must be copied to the replacement" \
   $W \
-  's~        if let Ok\(meta\) = std::fs::metadata\(path\) \{\n            file\.set_permissions\(meta\.permissions\(\)\)\?;\n        \}\n~~' \
-  '.open(tmp)?;
-        file.write_all(text.as_bytes())?;' \
+  's~        file\.set_permissions\(std::fs::metadata\(path\)\?\.permissions\(\)\)\?;~        let _ = std::fs::metadata(path)?;~' \
+  'let _ = std::fs::metadata(path)?;' \
   mnema-desktop "${T}opencode_a_rewritten_file_keeps_its_permissions" --lib
 
 case_ "opencode: a write that cannot use a temporary leaves the target alone" \
@@ -284,7 +283,7 @@ case_ "opencode: a file with a trailing newline must keep it" \
 
 case_ "opencode: a symlinked config is followed, not replaced by a regular file" \
   $W \
-  's~    let target = std::fs::canonicalize\(path\)\.unwrap_or_else\(\|_\| path\.to_path_buf\(\)\);~    let target = path.to_path_buf();~' \
+  's~    let target = std::fs::canonicalize\(path\)\?;~    let target = path.to_path_buf();~' \
   'let target = path.to_path_buf();' \
   mnema-desktop "${T}opencode_a_symlinked_file_stays_a_link_and_its_target_is_rewritten" --lib
 
@@ -443,8 +442,8 @@ case_ "agent_clients: a reader waits for the answer but not past its deadline" \
 
 case_ "agent_clients: a reader that missed its deadline is an error, not an empty answer" \
   $W \
-  's~            \.recv_timeout\(deadline\.saturating_duration_since\(Instant::now\(\)\)\)\n            \.ok\(\),~            .recv_timeout(deadline.saturating_duration_since(Instant::now()))\n            .ok().or(Some(String::new())),~' \
-  '.ok().or(Some(String::new())),' \
+  's~            \.recv_timeout\(deadline\.saturating_duration_since\(Instant::now\(\)\)\)\n            \.ok\(\),~            .recv_timeout(deadline.saturating_duration_since(Instant::now()))\n            .ok().or(Some(Ok(String::new()))),~' \
+  '.ok().or(Some(Ok(String::new()))),' \
   mnema-desktop "${T}a_command_whose_output_stays_open_is_an_error_not_an_empty_answer" --lib
 
 case_ "agent_clients: a normal exit signals no group, however the child left the pipes" \
@@ -476,7 +475,7 @@ AT=src/settings/Agents.test.ts
 
 case_ "Agents.svelte: a state that could not be read shows the error, not the note" \
   $A \
-  's~      \{#if row\.state\?\.error\}\n        <details data-testid=\{`agents-error-\$\{row\.id\}`\}>\n          <summary>\{detailsLabel\}</summary>\n          <p>\{row\.state\.error\}</p>\n        </details>\n      \{:else if row\.note\}\n        <p class="fc" data-testid=\{`agents-note-\$\{row\.id\}`\}>\{row\.note\}</p>\n      \{/if\}~      {#if row.note}\n        <p class="fc" data-testid={`agents-note-\${row.id}`}>{row.note}</p>\n      {:else if row.state?.error}\n        <details data-testid={`agents-error-\${row.id}`}>\n          <summary>{detailsLabel}</summary>\n          <p>{row.state.error}</p>\n        </details>\n      {/if}~; s~state === undefined \|\| state\.error !== null \? null~state === undefined ? null~' \
+  's~      \{#if row\.state !== undefined && row\.state\.error !== null\}\n        <details data-testid=\{`agents-error-\$\{row\.id\}`\}>\n          <summary>\{detailsLabel\}</summary>\n          <p>\{row\.state\.error\}</p>\n        </details>\n      \{:else if row\.note\}\n        <p class="fc" data-testid=\{`agents-note-\$\{row\.id\}`\}>\{row\.note\}</p>\n      \{/if\}~      {#if row.note}\n        <p class="fc" data-testid={`agents-note-\${row.id}`}>{row.note}</p>\n      {:else if row.state?.error}\n        <details data-testid={`agents-error-\${row.id}`}>\n          <summary>{detailsLabel}</summary>\n          <p>{row.state.error}</p>\n        </details>\n      {/if}~; s~state === undefined \|\| state\.error !== null \? null~state === undefined ? null~' \
   'data-testid={`agents-note-${row.id}`}>{row.note}</p>' \
   $AT 'a client whose state could not be read shows the error, not "not installed"' runner=vitest
 
@@ -633,3 +632,89 @@ case_ "agent_clients: kill_group must signal the whole group (CI, PR #79)" \
   's~        unsafe \{ libc::killpg\(pgid, libc::SIGKILL\) \};\n~        let _ = pgid;\n~' \
   'let _ = pgid;' \
   mnema-desktop "${T}a_child_that_outlives_the_timeout_is_killed_with_its_group" --lib
+
+# ── External review, PR #79 ──────────────────────────────────────────────────
+
+case_ "opencode: a target whose permissions cannot be read is not written" \
+  $W \
+  's~        file\.set_permissions\(std::fs::metadata\(path\)\?\.permissions\(\)\)\?;~        if let Ok(meta) = std::fs::metadata(path) { file.set_permissions(meta.permissions())?; }~' \
+  'if let Ok(meta) = std::fs::metadata(path) {' \
+  mnema-desktop "${T}a_target_whose_permissions_cannot_be_read_is_not_written" --lib
+
+case_ "opencode: a dangling link is an error, not replaced by a regular file" \
+  $W \
+  's~    let target = std::fs::canonicalize\(path\)\?;~    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());~' \
+  'unwrap_or_else(|_| path.to_path_buf());' \
+  mnema-desktop "${T}opencode_a_dangling_link_is_an_error_and_stays_a_link" --lib
+
+case_ "agent_clients: output that is not UTF-8 is an error, not an empty answer" \
+  $W \
+  's~        let read = stream\.read_to_string\(&mut text\)\.map\(\|_\| text\);~        let _ = stream.read_to_string(&mut text);\n        let read = Ok(text);~' \
+  'let read = Ok(text);' \
+  mnema-desktop "${T}output_that_is_not_utf8_is_an_error_and_not_an_empty_answer" --lib
+
+case_ "agent_clients: a claude answer without a Scope line is an error" \
+  $W \
+  's~field\(&out\.stdout, "Scope:"\)\.ok_or_else\(\|\| said\.clone\(\)\)\?;~field(&out.stdout, "Scope:").unwrap_or_default();~' \
+  'field(&out.stdout, "Scope:").unwrap_or_default();' \
+  mnema-desktop "${T}claude_without_a_scope_line_is_an_error_carrying_the_output" --lib
+
+case_ "agent_clients: a CLI that said nothing still gets a sentence" \
+  $W \
+  's~        if error\.is_empty\(\) \{\n            format!\(\n                "\{\} answered nothing~        if false {\n            format!(\n                "{} answered nothing~' \
+  'if false {
+            format!(
+                "{} answered nothing' \
+  mnema-desktop "${T}a_cli_that_says_nothing_is_an_error_that_says_so" --lib
+
+case_ "agent_clients: without our own path nothing is read or run" \
+  $W \
+  's~    if env\.ours\.is_empty\(\) \{~    if false {~' \
+  'if false {
+        return Err("could not find the mnema command' \
+  mnema-desktop "${T}without_our_own_path_nothing_is_read_or_run" --lib
+
+case_ "agent_clients: a relative XDG_CONFIG_HOME is ignored" \
+  $W \
+  's~let xdg = self\.xdg_config\.as_deref\(\)\.filter\(\|dir\| dir\.is_absolute\(\)\);~let xdg = self.xdg_config.as_deref();~' \
+  'let xdg = self.xdg_config.as_deref();' \
+  mnema-desktop "${T}a_relative_config_directory_is_never_joined_onto" --lib
+
+case_ "agent_clients: a relative HOME is no home" \
+  $W \
+  's~let home = self\.home\.as_deref\(\)\.filter\(\|dir\| dir\.is_absolute\(\)\);~let home = self.home.as_deref();~' \
+  'let home = self.home.as_deref();' \
+  mnema-desktop "${T}a_relative_config_directory_is_never_joined_onto" --lib
+
+case_ "Agents.svelte: an empty error still draws its Details" \
+  $A \
+  's~\{#if row\.state !== undefined && row\.state\.error !== null\}~{#if row.state?.error}~' \
+  '{#if row.state?.error}' \
+  $AT 'an empty error still draws its Details under the disabled box' runner=vitest
+
+case_ "Agents.svelte: a client the press applied carries no failure" \
+  $A \
+  's~applied\.flatMap\(\(one\) => one\.error === null \? \[\]~applied.flatMap((one) => false ? []~' \
+  'applied.flatMap((one) => false ? []' \
+  $AT 'a client the press applied says nothing, beside one that failed' runner=vitest
+
+case_ "lib.rs: apply_agent_clients is registered" \
+  src-tauri/src/lib.rs \
+  's~        agent_clients::apply_agent_clients,\n~~' \
+  '        agent_clients::agent_clients,
+        open_settings,' \
+  mnema-desktop 'the_commands_that_touch_the_database_leave_the_main_thread' --test commands
+
+case_ "agent_clients: agent_clients leaves the main thread" \
+  $W \
+  's~#\[tauri::command\(async\)\]\npub fn agent_clients\(\)~#[tauri::command]\npub fn agent_clients()~' \
+  '#[tauri::command]
+pub fn agent_clients()' \
+  mnema-desktop 'the_commands_that_touch_the_database_leave_the_main_thread' --test commands
+
+case_ "agent_clients: apply_agent_clients leaves the main thread" \
+  $W \
+  's~#\[tauri::command\(async\)\]\npub fn apply_agent_clients~#[tauri::command]\npub fn apply_agent_clients~' \
+  '#[tauri::command]
+pub fn apply_agent_clients' \
+  mnema-desktop 'the_commands_that_touch_the_database_leave_the_main_thread' --test commands

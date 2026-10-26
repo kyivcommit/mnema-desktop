@@ -168,7 +168,8 @@ vi.mock('../lib/ipc', () => ({
   agentAccessEnabled: () => Promise.resolve(false),
   setAgentAccess: vi.fn(),
   agentLog: () => Promise.resolve([]),
-  agentCommandPath: () => Promise.resolve(''),
+  agentClients: () => Promise.resolve([]),
+  applyAgentClients: () => Promise.resolve([]),
   setHotkey: vi.fn(),
   setAutostart: vi.fn(),
 }));

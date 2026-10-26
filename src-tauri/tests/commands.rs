@@ -407,6 +407,14 @@ fn the_commands_that_touch_the_database_leave_the_main_thread() {
         "set_cold_after",
         // A network call (`/credits`) and a credential-store read.
         "provider_status",
+        // A login shell and up to four agent CLIs, each with its own timeout:
+        // inline, the settings window freezes for as long as they take. Also the
+        // only check that both are registered at all. `agent_clients` takes no
+        // arguments, so it really runs here: it reads, and writes nothing.
+        // `apply_agent_clients` is refused for its missing `changes` and runs
+        // nothing.
+        "agent_clients",
+        "apply_agent_clients",
     ] {
         assert_ne!(
             responding_thread(&webview, cmd),

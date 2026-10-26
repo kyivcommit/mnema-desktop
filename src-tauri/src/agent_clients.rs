@@ -113,8 +113,10 @@ pub fn parse_claude(out: &Output, ours: &str) -> Result<Link, String> {
     }
     // `get` answers for whichever scope holds the name; only the user one is
     // ours to read and to remove, so a `local`/`project` record is "not
-    // connected" rather than a second entry we would add beside it.
-    let scope = field(&out.stdout, "Scope:").unwrap_or_default();
+    // connected" rather than a second entry we would add beside it. A missing
+    // `Scope:` line is an answer this parser does not know, and that is an
+    // error: read as "another scope", it is an unticked box `add` cannot fix.
+    let scope = field(&out.stdout, "Scope:").ok_or_else(|| said.clone())?;
     if !scope.starts_with("User config") {
         return Ok(Link::Absent);
     }
@@ -271,7 +273,9 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     // A dotfiles `opencode.json` is a symlink: renaming onto the link replaces
     // it and leaves the file it points at untouched, so the temporary file and
     // the rename belong beside the real one.
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // No fallback to `path`: the caller has just read the file, so a target that
+    // cannot be resolved now is a race, and the link must not be replaced.
+    let target = std::fs::canonicalize(path)?;
     let dir = target.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(temp_name(&target));
     let written = write_then_rename(&tmp, &target, text);
@@ -304,9 +308,9 @@ fn write_then_rename(tmp: &Path, path: &Path, text: &str) -> std::io::Result<()>
             .write(true)
             .create_new(true)
             .open(tmp)?;
-        if let Ok(meta) = std::fs::metadata(path) {
-            file.set_permissions(meta.permissions())?;
-        }
+        // An error and not a skip: skipped, a `0600` file would come back with
+        // the umask's mode and the person's provider keys in it.
+        file.set_permissions(std::fs::metadata(path)?.permissions())?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
     }
@@ -403,15 +407,15 @@ impl Env {
 
     /// The file opencode keeps its servers in — see [`opencode_config`].
     ///
-    /// An empty `HOME` is an error and not a path to join: joined, it would make
-    /// this a relative path, read and written against whatever directory the
+    /// An empty or relative `HOME` is an error and not a path to join: joined, it
+    /// would make this a relative path, read and written against whatever directory the
     /// application was started from.
     fn opencode_file(&self) -> Result<PathBuf, String> {
-        let xdg = self
-            .xdg_config
-            .as_deref()
-            .filter(|dir| !dir.as_os_str().is_empty());
-        match (xdg, self.home.as_deref()) {
+        // Relative values are ignored, as the XDG spec says, for the same reason
+        // as an empty one.
+        let xdg = self.xdg_config.as_deref().filter(|dir| dir.is_absolute());
+        let home = self.home.as_deref().filter(|dir| dir.is_absolute());
+        match (xdg, home) {
             (Some(xdg), _) => Ok(opencode_config(Some(xdg), Path::new(""))),
             (None, Some(home)) => Ok(opencode_config(None, home)),
             (None, None) => Err("could not find your home directory".to_string()),
@@ -594,9 +598,15 @@ fn apply_one(env: &Env, id: ClientId, cli: &Path, connect: bool, timeout: Durati
     }
 }
 
+/// Every write starts here, so this is where a build that cannot name its own
+/// `mnema` stops: `""` would be written into all four configs, after Claude's
+/// working record had already been removed.
 fn read_link(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<Link, String> {
+    if env.ours.is_empty() {
+        return Err("could not find the mnema command beside the application".to_string());
+    }
     let read = |args: &[&str]| run(cli, args, timeout, READER_GRACE, env.cli_path());
-    match id {
+    let link = match id {
         ClientId::Claude => {
             read(&["mcp", "get", "mnema"]).and_then(|out| parse_claude(&out, &env.ours))
         }
@@ -605,7 +615,19 @@ fn read_link(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<L
         }
         ClientId::Pi => read(&["mcp", "list", "--json"]).and_then(|out| parse_pi(&out, &env.ours)),
         ClientId::Opencode => read_opencode(env),
-    }
+    };
+    // A CLI that said nothing at all still gets a sentence: an empty one draws
+    // a disabled box with nothing under it.
+    link.map_err(|error| {
+        if error.is_empty() {
+            format!(
+                "{} answered nothing this application can read",
+                cli.display()
+            )
+        } else {
+            error
+        }
+    })
 }
 
 fn add(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<(), String> {
@@ -770,6 +792,14 @@ fn run(
                     kill_group(&mut child);
                     return Err(format!("{} kept its output open", program.display()));
                 };
+                // `read_to_string` leaves the text empty on a byte that is not
+                // UTF-8, and an empty `claude mcp get` reads as "not connected".
+                let (stdout, stderr) = match (stdout, stderr) {
+                    (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+                    (Err(error), _) | (_, Err(error)) => {
+                        return Err(format!("{}: {error}", program.display()));
+                    }
+                };
                 return Ok(Output {
                     // A signal has no exit code, and -1 is not a code any CLI
                     // answers with.
@@ -818,12 +848,14 @@ fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn drain(mut stream: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+type Reader = std::sync::mpsc::Receiver<std::io::Result<String>>;
+
+fn drain(mut stream: impl Read + Send + 'static) -> Reader {
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut text = String::new();
-        let _ = stream.read_to_string(&mut text);
-        let _ = send.send(text);
+        let read = stream.read_to_string(&mut text).map(|_| text);
+        let _ = send.send(read);
     });
     receive
 }
@@ -831,9 +863,9 @@ fn drain(mut stream: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<St
 /// A reader's text, or `None` when `deadline` came first: a pipe reaches EOF
 /// only when every process holding it closes it, and that is not always the
 /// child. `None` is not an empty answer — the caller must tell them apart.
-fn joined(reader: Option<std::sync::mpsc::Receiver<String>>, deadline: Instant) -> Option<String> {
+fn joined(reader: Option<Reader>, deadline: Instant) -> Option<std::io::Result<String>> {
     match reader {
-        None => Some(String::new()),
+        None => Some(Ok(String::new())),
         Some(receive) => receive
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .ok(),
@@ -1086,6 +1118,20 @@ To remove this server, run: claude mcp remove mnema -s user
     fn claude_a_server_in_another_scope_is_not_ours() {
         let text = CLAUDE_GET.replace("User config", "Local config");
         assert_eq!(parse_claude(&out(0, &text, ""), OURS), Ok(Link::Absent));
+    }
+
+    /// No `Scope:` line at all is an answer this parser does not know — a
+    /// claude that renamed it — and not a record in another scope.
+    #[test]
+    fn claude_without_a_scope_line_is_an_error_carrying_the_output() {
+        let text = CLAUDE_GET.replace(
+            "  Scope: User config (available in all your projects)\n",
+            "",
+        );
+        assert_eq!(
+            parse_claude(&out(0, &text, ""), OURS),
+            Err(text.trim().to_string())
+        );
     }
 
     #[test]
@@ -1473,45 +1519,63 @@ To remove this server, run: claude mcp remove mnema -s user
         assert_eq!(opencode_without_mnema("{\n  \"mcp\": null\n}"), Ok(None));
     }
 
+    /// A record of ours in a file whose bytes `opencode_without_mnema` cannot
+    /// hand back: the disconnect goes through [`apply`], the only caller, so a
+    /// caller that wrote the file some other way would fail here.
+    #[cfg(unix)]
     #[test]
     fn opencode_a_file_it_cannot_hand_back_unchanged_is_refused_and_left_alone() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("opencode.json");
+        let stand = Stand::new();
+        stand.install("opencode");
+        let path = stand.opencode_file();
+        // Each parses, holds a record `apply` would remove, and comes back a
+        // different file.
         for text in [
-            // a comment and a trailing comma: not plain JSON at all
-            "{\n  // the person's own comment\n  \"mcp\": {\"mnema\": {}}\n}\n",
-            "{\n  \"mcp\": {\"mnema\": {}},\n}\n",
-            // each of these parses, and each comes back a different file
-            "{\n    \"mcp\": {\n        \"mnema\": {}\n    }\n}\n",
-            "{\"mcp\":{\"mnema\":{}}}\n",
-            "{\n  \"mcp\": {\n    \"mnema\": {}\n  },\n  \"caf\\u00e9\": \"\\u00e9\"\n}\n",
-            "{\n  \"mcp\": {\n    \"mnema\": {}\n  },\n  \"x\": 1e3\n}\n",
-            "{\n  \"mcp\": {\n    \"servers\": {}\n  },\n  \"mcp\": {\n    \"mnema\": {}\n  }\n}\n",
+            "{\n    \"mcp\": {\n        \"mnema\": {\"command\": [\"/x/mnema\", \"mcp\"]}\n    }\n}\n",
+            "{\"mcp\":{\"mnema\":{\"command\":[\"/x/mnema\",\"mcp\"]}}}\n",
+            "{\n  \"mcp\": {\n    \"mnema\": {\n      \"command\": [\n        \"/x/mnema\",\n        \"mcp\"\n      ]\n    }\n  },\n  \"caf\\u00e9\": \"\\u00e9\"\n}\n",
+            "{\n  \"mcp\": {\n    \"mnema\": {\n      \"command\": [\n        \"/x/mnema\",\n        \"mcp\"\n      ]\n    }\n  },\n  \"x\": 1e3\n}\n",
+            "{\n  \"mcp\": {\n    \"servers\": {}\n  },\n  \"mcp\": {\n    \"mnema\": {\n      \"command\": [\n        \"/x/mnema\",\n        \"mcp\"\n      ]\n    }\n  }\n}\n",
         ] {
             fs::write(&path, text).unwrap();
-            // The exact call sequence the caller in the next task uses.
-            let change = fs::read_to_string(&path)
-                .map_err(|error| error.to_string())
-                .and_then(|text| opencode_without_mnema(&text))
-                .and_then(|change| match change {
-                    Some(text) => write_atomically(&path, &text).map_err(|error| error.to_string()),
-                    None => Ok(()),
-                });
-            assert!(change.is_err(), "{text}");
-            let error = change.unwrap_err();
-            assert!(error.starts_with(UNTOUCHED), "{error}");
+            assert!(
+                matches!(read_opencode(&stand.env()), Ok(Link::Stale { .. })),
+                "{text}"
+            );
+            let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
+            let error = applied[0].error.as_deref().unwrap_or_default();
+            assert!(error.contains(UNTOUCHED), "{text}: {error}");
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
-            assert_eq!(names(dir.path()), ["opencode.json"]);
+            assert_eq!(names(path.parent().unwrap()), ["opencode.json"]);
         }
     }
 
+    /// Comments and trailing commas do not parse at all. Such a file is an
+    /// error in the box's own state — disabled — and never "not connected":
+    /// that box would be enabled, and a tick would hand the file to
+    /// `opencode mcp add`, which rewrites it in its own form.
+    #[cfg(unix)]
     #[test]
-    fn opencode_writing_atomically_leaves_only_the_target_in_the_directory() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("opencode.json");
-        write_atomically(&path, "{\n  \"a\": 1\n}\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "{\n  \"a\": 1\n}\n");
-        assert_eq!(names(dir.path()), ["opencode.json"]);
+    fn opencode_a_file_that_does_not_parse_is_an_error_and_nothing_is_run_for_it() {
+        let stand = Stand::new();
+        stand.install("opencode");
+        let path = stand.opencode_file();
+        for text in [
+            "{\n  // the person's own comment\n  \"mcp\": {}\n}\n",
+            "{\n  \"mcp\": {},\n}\n",
+        ] {
+            fs::write(&path, text).unwrap();
+            let state = &states(&stand.env(), TIMEOUT, TIMEOUT)[3];
+            assert!(state.installed);
+            assert_eq!(state.link, None, "{text}");
+            assert!(state.error.is_some(), "{text}");
+            for change in [on(ClientId::Opencode), off(ClientId::Opencode)] {
+                let applied = apply(&stand.env(), &[change], TIMEOUT, TIMEOUT);
+                assert!(applied[0].error.is_some(), "{text}");
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+        assert!(stand.calls().is_empty(), "{:?}", stand.calls());
     }
 
     /// A dotfiles `opencode.json` is a link into another directory: writing
@@ -1519,37 +1583,74 @@ To remove this server, run: claude mcp remove mnema -s user
     #[cfg(unix)]
     #[test]
     fn opencode_a_symlinked_file_stays_a_link_and_its_target_is_rewritten() {
-        let dir = TempDir::new().unwrap();
-        let real_dir = dir.path().join("dotfiles");
+        let stand = Stand::new();
+        stand.install("opencode");
+        let real_dir = stand.dir.path().join("dotfiles");
         fs::create_dir(&real_dir).unwrap();
         let real = real_dir.join("opencode.json");
-        fs::write(&real, "{}\n").unwrap();
-        let link = dir.path().join("opencode.json");
+        fs::write(&real, OPENCODE_JSON).unwrap();
+        let link = stand.opencode_file();
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        write_atomically(&link, "{\n  \"a\": 1\n}\n").unwrap();
+        let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
+        assert_eq!(applied[0].error, None);
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(fs::read_to_string(&real).unwrap(), "{\n  \"a\": 1\n}\n");
+        assert_eq!(
+            Some(fs::read_to_string(&real).unwrap()),
+            opencode_without_mnema(OPENCODE_JSON).unwrap()
+        );
         assert_eq!(names(&real_dir), ["opencode.json"]);
-        assert_eq!(names(dir.path()), ["dotfiles", "opencode.json"]);
+        assert_eq!(names(link.parent().unwrap()), ["opencode.json"]);
+    }
+
+    /// A link whose target is gone is not a file to write: falling back to the
+    /// link's own path would replace the link with a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_a_dangling_link_is_an_error_and_stays_a_link() {
+        let dir = TempDir::new().unwrap();
+        let link = dir.path().join("opencode.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &link).unwrap();
+        assert!(write_atomically(&link, "{}\n").is_err());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(names(dir.path()), ["opencode.json"]);
     }
 
     #[cfg(unix)]
     #[test]
     fn opencode_a_rewritten_file_keeps_its_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("opencode.json");
-        fs::write(&path, "{}").unwrap();
+        let stand = Stand::new();
+        stand.install("opencode");
+        let path = stand.opencode_file();
+        fs::write(&path, OPENCODE_JSON).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        write_atomically(&path, "{}\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
+        let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
+        assert_eq!(applied[0].error, None);
+        assert_ne!(fs::read_to_string(&path).unwrap(), OPENCODE_JSON);
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    /// A target whose permissions cannot be read is not written with the
+    /// umask's instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_whose_permissions_cannot_be_read_is_not_written() {
+        let dir = TempDir::new().unwrap();
+        let tmp = dir.path().join("tmp");
+        let target = dir.path().join("gone.json");
+        assert!(write_then_rename(&tmp, &target, "{}\n").is_err());
+        assert!(!target.exists());
     }
 
     /// A directory nobody may write to forbids the sibling temporary file and
@@ -1559,15 +1660,17 @@ To remove this server, run: claude mcp remove mnema -s user
     #[test]
     fn opencode_a_failed_write_leaves_the_target_as_it_was() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("opencode.json");
-        fs::write(&path, "{}").unwrap();
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
-        let result = write_atomically(&path, "{\"mcp\": {}}\n");
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(result.is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
-        assert_eq!(names(dir.path()), ["opencode.json"]);
+        let stand = Stand::new();
+        stand.install("opencode");
+        let path = stand.opencode_file();
+        let dir = path.parent().unwrap();
+        fs::write(&path, OPENCODE_JSON).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(applied[0].error.is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), OPENCODE_JSON);
+        assert_eq!(names(dir), ["opencode.json"]);
     }
 
     #[test]
@@ -2072,6 +2175,77 @@ exit 0
         );
     }
 
+    /// A byte that is not UTF-8 is an error, never the empty answer
+    /// `read_to_string` leaves behind: an empty `claude mcp get` is a working
+    /// record drawn as "not connected", which `add` then cannot fix.
+    #[cfg(unix)]
+    #[test]
+    fn output_that_is_not_utf8_is_an_error_and_not_an_empty_answer() {
+        let stand = Stand::new();
+        stand.install("claude");
+        let mut text = CLAUDE_GET.as_bytes().to_vec();
+        text.extend_from_slice(b"\xff\n");
+        fs::write(stand.bin.join("claude.mcp-get.out"), text).unwrap();
+        let state = &states(&stand.env(), TIMEOUT, TIMEOUT)[0];
+        assert!(state.installed);
+        assert_eq!(state.link, None);
+        let error = state.error.as_deref().unwrap_or_default();
+        assert!(error.contains("valid UTF-8"), "{error}");
+    }
+
+    /// A CLI that exits 0 and prints nothing gets a sentence: an empty error
+    /// draws a disabled box with nothing under it.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_says_nothing_is_an_error_that_says_so() {
+        let stand = Stand::new();
+        stand.install("codex");
+        stand.install("pi");
+        let states = states(&stand.env(), TIMEOUT, TIMEOUT);
+        for state in &states[1..3] {
+            assert_eq!(state.link, None, "{:?}", state.id);
+            let error = state.error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("answered nothing"),
+                "{:?}: {error}",
+                state.id
+            );
+        }
+    }
+
+    /// A build that cannot name its own `mnema` writes nothing anywhere: `""`
+    /// would land in every config, after Claude's record had been removed.
+    #[cfg(unix)]
+    #[test]
+    fn without_our_own_path_nothing_is_read_or_run() {
+        let stand = Stand::new();
+        for name in ["claude", "codex", "pi", "opencode"] {
+            stand.install(name);
+        }
+        stand.fixture("claude.mcp-get.out", CLAUDE_GET);
+        let env = Env {
+            ours: String::new(),
+            ..stand.env()
+        };
+        for state in states(&env, TIMEOUT, TIMEOUT) {
+            assert!(state.installed, "{:?}", state.id);
+            assert_eq!(state.link, None, "{:?}", state.id);
+            assert!(state.error.is_some(), "{:?}", state.id);
+        }
+        let applied = apply(
+            &env,
+            &[
+                on(ClientId::Claude),
+                off(ClientId::Codex),
+                on(ClientId::Opencode),
+            ],
+            TIMEOUT,
+            TIMEOUT,
+        );
+        assert!(applied.iter().all(|applied| applied.error.is_some()));
+        assert!(stand.calls().is_empty(), "{:?}", stand.calls());
+    }
+
     /// No `opencode.json` is a client that was never configured, and connecting
     /// it is the CLI's `add` — this build never creates the file.
     #[cfg(unix)]
@@ -2303,11 +2477,11 @@ exit 0
         let (send, receive) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
-            let _ = send.send("late".to_string());
+            let _ = send.send(Ok("late".to_string()));
         });
         let started = Instant::now();
         let text = joined(Some(receive), Instant::now() + Duration::from_millis(50));
-        assert_eq!(text, None, "a deadline is not an empty answer");
+        assert!(text.is_none(), "a deadline is not an empty answer");
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "the answer waited past its deadline"
@@ -2410,6 +2584,32 @@ exit 0
             "{:?}",
             state.error
         );
+    }
+
+    /// A relative `$XDG_CONFIG_HOME` is ignored, as the XDG spec says, and a
+    /// relative `$HOME` is no home: either would be read and written against
+    /// the application's own working directory.
+    #[test]
+    fn a_relative_config_directory_is_never_joined_onto() {
+        let env = Env {
+            shell: PathBuf::from("/bin/sh"),
+            fallback: PathBuf::from("/bin/sh"),
+            home: Some(PathBuf::from("/home/someone")),
+            xdg_config: Some(PathBuf::from("xdg")),
+            ours: OURS.to_string(),
+            path: ShellPath::Unread,
+        };
+        assert_eq!(
+            env.opencode_file(),
+            Ok(PathBuf::from(
+                "/home/someone/.config/opencode/opencode.json"
+            ))
+        );
+        let env = Env {
+            home: Some(PathBuf::from("home")),
+            ..env
+        };
+        assert!(env.opencode_file().is_err());
     }
 
     /// The window between our read and our rename belongs to whichever writer

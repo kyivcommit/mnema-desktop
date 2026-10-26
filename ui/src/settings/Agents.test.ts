@@ -118,6 +118,23 @@ test('a client whose state could not be read shows the error, not "not installed
   expect(details.textContent).toContain('the login shell was not asked for its PATH');
 });
 
+// The backend never sends an empty sentence, but a disabled box must not depend
+// on that: an error that is present, however short, is what disables the row,
+// and the same test decides whether its Details are drawn.
+test('an empty error still draws its Details under the disabled box', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  agentClients.mockResolvedValue([
+    client('claude', { link: null, error: '' }),
+    client('codex'),
+    client('pi'),
+    client('opencode'),
+  ]);
+  render(Agents);
+
+  await waitFor(() => expect(box('claude').disabled).toBe(true));
+  expect(screen.getByTestId('agents-error-claude')).toBeTruthy();
+});
+
 test('a connected client with another path is ticked and says the path is outdated', async () => {
   agentAccessEnabled.mockResolvedValue(true);
   agentClients.mockResolvedValue(MIXED);
@@ -212,7 +229,7 @@ test('a press the command did not answer is its own sentence, not a failed read'
   await fireEvent.click(apply());
 
   const rejected = await screen.findByTestId('agents-apply-rejected');
-  expect(rejected.textContent).toContain('Could not apply the changes');
+  expect(rejected.textContent).toContain('Could not finish applying the changes');
   expect(rejected.textContent).toContain('the command is not registered');
   // The state itself was re-read and answered: nothing here may say it was not.
   expect(screen.queryByTestId('agents-read-failed')).toBeNull();
@@ -344,6 +361,25 @@ test('one client failing is named with its direction and does not hide another',
     .toContain('pi: could not write the global config');
   // Claude Code answered with no error: nothing is said about it.
   expect(screen.queryByTestId('agents-failed-claude')).toBeNull();
+});
+
+test('a client the press applied says nothing, beside one that failed', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  // Codex succeeded and pi did not: only pi may carry a sentence.
+  applyAgentClients.mockResolvedValue([
+    { id: 'codex', error: null },
+    { id: 'pi', error: 'pi: could not write the global config' },
+  ]);
+  render(Agents);
+
+  await waitFor(() => expect(box('codex').checked).toBe(false));
+  await fireEvent.click(box('codex'));
+  await fireEvent.click(box('pi'));
+  await fireEvent.click(apply());
+
+  await screen.findByTestId('agents-failed-pi');
+  expect(screen.queryByTestId('agents-failed-codex')).toBeNull();
+  expect(screen.queryByTestId('agents-failed-details-codex')).toBeNull();
 });
 
 test('no command line, JSON fragment or copy button is left in the section', async () => {

@@ -213,7 +213,7 @@
           onchange={(e) => pick(row.id, e.currentTarget.checked)}
         /> {row.name}
       </label>
-      {#if row.state?.error}
+      {#if row.state !== undefined && row.state.error !== null}
         <details data-testid={`agents-error-${row.id}`}>
           <summary>{detailsLabel}</summary>
           <p>{row.state.error}</p>
