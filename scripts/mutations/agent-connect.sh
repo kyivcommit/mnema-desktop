@@ -6,10 +6,17 @@
 # One case per mutant the four task reports list as killing a test:
 # `docs/private/sdd/2026-10-26-agent-connect/task-{1,2,3,4}-report.md`, the
 # round-fix sections included. A mutant whose code later rounds deleted is not
-# here; `task-5-report.md` names each one and the section that killed it:
+# here; `task-5-report.md` names each one and why:
 #
-#   - task 3 M6, M9, M10 and R1 (the shell-command `find_cli`, the old `want`
-#     set) — the PATH is resolved in Rust since round 1;
+#   - task 2 M8 (drop `preserve_order` from serde_json) — the mutant no longer
+#     compiles: `shift_remove` exists only under that feature. The file order it
+#     pins is still killed here, by the shift_remove case below;
+#   - task 3 M6, M9 and M10 (`find_cli`, and a client's name interpolated into a
+#     shell command) — no shell runs a command any more; the PATH is resolved in
+#     Rust since round 1;
+#   - task 3 R1 (a finished child's group is not ended) — round 2 made "no
+#     signal on a normal exit" the intended behaviour, so the mutant has no
+#     subject, and its test was replaced;
 #   - task 3 S4 (an error for every client, wanted or not) — its `want` no
 #     longer exists; Task 4's R1 pins the same "only listed clients" rule;
 #   - task 4 M10 (a `want` field on the wire) — superseded by I1, the same
