@@ -185,6 +185,7 @@
   const detailsLabel = $derived.by(() => { void $locale; return t('agents_details'); });
   const readFailedLabel = $derived.by(() => { void $locale; return t('agents_read_failed'); });
   const applyRejectedLabel = $derived.by(() => { void $locale; return t('agents_apply_rejected'); });
+  const checkingLabel = $derived.by(() => { void $locale; return t('agents_checking'); });
 </script>
 
 <label class="agents-switch">
@@ -197,6 +198,11 @@
 {#if on}
   <div role="group" aria-labelledby="agents-clients-heading">
     <h3 id="agents-clients-heading">{clientsHeading}</h3>
+    <!-- Before the first answer an empty box would read as "not connected"
+         (owner, live stand 2026-10-26): say it is being checked instead. -->
+    {#if states === null && readFailure === null}
+      <p class="fc" data-testid="agents-checking">{checkingLabel}</p>
+    {:else}
     {#each rows as row (row.id)}
       <label class="agents-switch">
         <input
@@ -224,6 +230,7 @@
       {/if}
     {/each}
     <button type="button" data-testid="agents-apply" disabled={!canApply} onclick={runApply}>{applyLabel}</button>
+    {/if}
   </div>
   {#if applyRejected}
     <p role="alert" data-testid="agents-apply-rejected">{applyRejectedLabel} {applyRejected}</p>

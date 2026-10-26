@@ -150,7 +150,10 @@ pub fn parse_codex(out: &Output, ours: &str) -> Result<Link, String> {
 /// string with the arguments already appended to the command.
 pub fn parse_pi(out: &Output, ours: &str) -> Result<Link, String> {
     let said = said(out);
-    if out.code != 0 {
+    // Exit 1 is pi saying some server failed to start — still a full list.
+    // Any broken server of the person's, or our own stale path, does it
+    // (measured 2026-10-26 on the stand; the sandbox run hid it behind a pipe).
+    if out.code != 0 && out.code != 1 {
         return Err(said);
     }
     let record: Value = serde_json::from_str(&out.stdout).map_err(|_| said.clone())?;
@@ -1225,6 +1228,26 @@ To remove this server, run: claude mcp remove mnema -s user
         assert_eq!(
             parse_pi(&out(0, "not json", ""), OURS),
             Err("not json".to_string())
+        );
+    }
+
+    /// `pi mcp list --json` exits 1 when a server fails to start, and still
+    /// prints the whole list — recorded 2026-10-26 on the stand.
+    #[test]
+    fn pi_exit_one_with_a_failed_server_is_still_read() {
+        let text = PI_LIST.replace(
+            "/tmp/My App's/mnema mcp",
+            "/Applications/Mnema.app/Contents/MacOS/mnema mcp",
+        );
+        assert_eq!(
+            parse_pi(&out(1, &text, ""), OURS),
+            Ok(Link::Stale {
+                command: "/Applications/Mnema.app/Contents/MacOS/mnema".to_string()
+            })
+        );
+        assert_eq!(
+            parse_pi(&out(1, "Error: no config", ""), OURS),
+            Err("Error: no config".to_string())
         );
     }
 

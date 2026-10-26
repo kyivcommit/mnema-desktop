@@ -117,12 +117,18 @@ case_ "agent_clients: pi strips the trailing mcp from a stale transport" \
 
 case_ "agent_clients: pi's unexpected exit code must be an error" \
   $W \
-  's~    if out\.code != 0 \{\n        return Err\(said\);\n    \}\n    let record: Value = serde_json::from_str\(&out\.stdout\)\.map_err\(\|_\| said\.clone\(\)\)\?;\n    let server = record\["servers"\]~    if out.code != 0 {\n        return Ok(Link::Absent);\n    }\n    let record: Value = serde_json::from_str(&out.stdout).map_err(|_| said.clone())?;\n    let server = record["servers"]~' \
+  's~    if out\.code != 0 && out\.code != 1 \{\n        return Err\(said\);\n    \}\n    let record: Value = serde_json::from_str\(&out\.stdout\)\.map_err\(\|_\| said\.clone\(\)\)\?;\n    let server = record\["servers"\]~    if out.code != 0 \&\& out.code != 1 {\n        return Ok(Link::Absent);\n    }\n    let record: Value = serde_json::from_str(&out.stdout).map_err(|_| said.clone())?;\n    let server = record["servers"]~' \
   'return Ok(Link::Absent);
     }
     let record: Value = serde_json::from_str(&out.stdout).map_err(|_| said.clone())?;
     let server = record["servers"]' \
   mnema-desktop "${T}pi_an_unexpected_exit_code_is_an_error" --lib
+
+case_ "agent_clients: pi's exit 1 (a server failed to start) must still be read" \
+  $W \
+  's~if out\.code != 0 && out\.code != 1 \{~if out.code != 0 {~' \
+  'if out.code != 0 {' \
+  mnema-desktop "${T}pi_exit_one_with_a_failed_server_is_still_read" --lib
 
 case_ "agent_clients: said prefers stderr when the CLI said anything" \
   $W \
@@ -620,3 +626,11 @@ case_ "ipc: Change's field is connect, not wanted" \
   's~    pub connect: bool,~    pub wanted: bool,~' \
   'pub wanted: bool,' \
   $IT 'Change is exactly what agent_clients.rs defines, field for field' runner=vitest
+
+# ── Live stand, 2026-10-26 ───────────────────────────────────────────────────
+
+case_ "Agents.svelte: before the first answer no empty box is drawn" \
+  $A \
+  's~\{#if states === null && readFailure === null\}~{#if false}~' \
+  '{#if false}' \
+  $AT 'before the first answer no box is drawn, only a line saying the agents are being checked' runner=vitest

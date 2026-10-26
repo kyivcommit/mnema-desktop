@@ -358,16 +358,22 @@ test('no command line, JSON fragment or copy button is left in the section', asy
   expect(document.body.textContent).not.toContain('mcpServers');
 });
 
-test('the four boxes are drawn disabled while the first answer is on its way', async () => {
+// Owner, live stand 2026-10-26: empty boxes before the first answer read as
+// "nothing is connected" for a second, then flipped to ticked.
+test('before the first answer no box is drawn, only a line saying the agents are being checked', async () => {
   agentAccessEnabled.mockResolvedValue(true);
-  agentClients.mockReturnValue(new Promise(() => {}));
+  let answer!: (states: ClientState[]) => void;
+  agentClients.mockReturnValue(new Promise<ClientState[]>((resolve) => { answer = resolve; }));
   render(Agents);
 
+  const checking = await screen.findByTestId('agents-checking');
+  expect(checking.textContent).toContain('Checking the agents');
+  expect(screen.queryByTestId('agents-client-claude')).toBeNull();
+  expect(screen.queryByTestId('agents-apply')).toBeNull();
+
+  answer(SETTLED);
   await waitFor(() => expect(box('claude')).toBeTruthy());
-  for (const id of ['claude', 'codex', 'pi', 'opencode'] as const) {
-    expect(box(id).disabled).toBe(true);
-  }
-  expect(apply().disabled).toBe(true);
+  expect(screen.queryByTestId('agents-checking')).toBeNull();
 });
 
 test('a failed read of the clients says so and leaves the boxes disabled', async () => {
