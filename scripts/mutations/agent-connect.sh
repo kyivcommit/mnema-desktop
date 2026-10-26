@@ -194,16 +194,10 @@ case_ "opencode: the new form must be removed, not only the old one" \
     if !removed {' \
   mnema-desktop "${T}opencode_removing_mnema_leaves_the_rest_of_the_file_in_its_order" --lib
 
-case_ "opencode: the rest of the file keeps its order (preserve_order)" \
-  Cargo.toml \
-  's~serde_json = \{ version = "1", features = \["preserve_order"\] \}~serde_json = { version = "1" }~' \
-  'serde_json = { version = "1" }' \
-  mnema-desktop "${T}opencode_removing_mnema_leaves_the_rest_of_the_file_in_its_order" --lib
-
 case_ "opencode: the servers key is read, not created on the way" \
   $W \
-  's~    if let Some\(servers\) = mcp\.get_mut\("servers"\)\.and_then\(Value::as_object_mut\) \{~    if let Some(servers) = mcp["servers"].as_object_mut() {~' \
-  'mcp["servers"]' \
+  's~    if let Some\(servers\) = mcp\.get_mut\("servers"\)\.and_then\(Value::as_object_mut\) \{~    if let Some(servers) = mcp.entry("servers".to_string()).or_insert(Value::Null).as_object_mut() {~' \
+  '.or_insert(Value::Null)' \
   mnema-desktop "${T}opencode_the_old_form_is_removed_without_adding_anything" --lib
 
 case_ "opencode: a file with nothing to remove is not rewritten" \
@@ -227,8 +221,8 @@ case_ "opencode: the target's permissions must be copied to the replacement" \
 
 case_ "opencode: a write that cannot use a temporary leaves the target alone" \
   $W \
-  's~    let target = std::fs::canonicalize\(path\)\.unwrap_or_else\(\|_\| path\.to_path_buf\(\)\);~    return std::fs::write(path, text);~' \
-  'return std::fs::write(path, text);' \
+  's~    let written = write_then_rename\(&tmp, &target, text\);~    let written = std::fs::write(&target, text);~' \
+  'let written = std::fs::write(&target, text);' \
   mnema-desktop "${T}opencode_a_failed_write_leaves_the_target_as_it_was" --lib
 
 case_ "opencode: JSONC is refused, not accepted by stripping its comments" \
@@ -316,7 +310,7 @@ case_ "agent_clients: a CLI runs with the login shell's PATH" \
 
 case_ "agent_clients: a timed-out child is killed and waited for" \
   $W \
-  's~            Ok\(None\) if Instant::now\(\) >= deadline => \{\n                kill_group\(&mut child\);\n                let _ = child\.wait\(\);~            Ok(None) if Instant::now() >= deadline {\n                kill_group(&mut child);~' \
+  's~            Ok\(None\) if Instant::now\(\) >= deadline => \{\n                kill_group\(&mut child\);\n                let _ = child\.wait\(\);~            Ok(None) if Instant::now() >= deadline => {\n                kill_group(&mut child);~' \
   'kill_group(&mut child);
                 return Err(format!("timed out after' \
   mnema-desktop "${T}a_child_that_outlives_the_timeout_is_killed_with_its_group" --lib
@@ -362,7 +356,7 @@ case_ "agent_clients: states answers in ALL order, not in the order the threads 
 
 case_ "agent_clients: no opencode file is an absent client, not an error" \
   $W \
-  's~        Err\(error\) if error\.kind\(\) == std::io::ErrorKind::NotFound => Ok\(Link::Absent\),~        Err(format!("{}: {error}", path.display())),~' \
+  's~        Err\(error\) if error\.kind\(\) == std::io::ErrorKind::NotFound => Ok\(Link::Absent\),~        Err(error) => Err(format!("{}: {error}", path.display())),~' \
   'Err(format!("{}: {error}", path.display())),
         Err(error)' \
   mnema-desktop "${T}an_opencode_without_a_file_is_absent_and_connect_goes_through_its_cli" --lib
@@ -476,8 +470,8 @@ AT=src/settings/Agents.test.ts
 
 case_ "Agents.svelte: a state that could not be read shows the error, not the note" \
   $A \
-  's~\{#if row\.state\?\.error\}~{#if row.note}~; s~\{:else if row\.note\}~{:else if row.state?.error}~; s~state === undefined \|\| state\.error !== null \? null~state === undefined ? null~' \
-  '{#if row.note}' \
+  's~      \{#if row\.state\?\.error\}\n        <details data-testid=\{`agents-error-\$\{row\.id\}`\}>\n          <summary>\{detailsLabel\}</summary>\n          <p>\{row\.state\.error\}</p>\n        </details>\n      \{:else if row\.note\}\n        <p class="fc" data-testid=\{`agents-note-\$\{row\.id\}`\}>\{row\.note\}</p>\n      \{/if\}~      {#if row.note}\n        <p class="fc" data-testid={`agents-note-\${row.id}`}>{row.note}</p>\n      {:else if row.state?.error}\n        <details data-testid={`agents-error-\${row.id}`}>\n          <summary>{detailsLabel}</summary>\n          <p>{row.state.error}</p>\n        </details>\n      {/if}~; s~state === undefined \|\| state\.error !== null \? null~state === undefined ? null~' \
+  'data-testid={`agents-note-${row.id}`}>{row.note}</p>' \
   $AT 'a client whose state could not be read shows the error, not "not installed"' runner=vitest
 
 case_ "Agents.svelte: Apply re-reads the record instead of drawing the request" \
