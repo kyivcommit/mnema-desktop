@@ -6,14 +6,16 @@
 //! The parsers are pure functions over [`Output`] and text, which is what lets a
 //! test reproduce any shape without an agent installed. Everything that touches
 //! the machine sits below them: [`Env`] is what the two commands take from it,
-//! [`run`] is the one place a process starts, and [`write_atomically`] the one
-//! place this module writes — opencode has no command that removes a server, so
-//! its config file is the one file the application edits, and the surface for
-//! that is kept as small as it can be.
+//! [`run`] is where a process starts, and [`write_atomically`] the one place
+//! this module writes — opencode has no command that removes a server, so its
+//! config file is the one file the application edits, and the surface for that
+//! is kept as small as it can be.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -314,52 +316,105 @@ fn write_then_rename(tmp: &Path, path: &Path, text: &str) -> std::io::Result<()>
 /// knows.
 const CLI_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long the login shell may take. It is asked where a CLI is once per
-/// client, and it reads the person's own start-up files before it answers.
+/// How long the login shell may take. It reads the person's own start-up files
+/// before it answers, and it is asked once per command.
 const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often [`run`] asks a child whether it has finished.
 const POLL: Duration = Duration::from_millis(50);
 
+/// The marker the login shell is asked to print its `PATH` after.
+///
+/// Marked rather than read as the whole output, because a login shell prints its
+/// greeting and its rc's chatter around whatever it was asked.
+const PATH_MARK: &str = "__MNEMA_PATH__";
+
+/// What the login shell is asked to run. `printf` exists in sh, bash, zsh and
+/// fish; `"$PATH"` is one colon-joined string in all four, fish included, which
+/// joins a path variable with colons when it is quoted.
+const PATH_QUESTION: &str = "printf \"\\n__MNEMA_PATH__%s\\n\" \"$PATH\"";
+
+/// The shell tried when the person's own will not answer at all: `tcsh` reads
+/// `-l -c` as an option it does not know, and a start-up file that exits leaves
+/// the command unrun. A `PATH` from another shell beats four checkboxes saying
+/// "not installed".
+const FALLBACK_SHELL: &str = "/bin/zsh";
+
+/// What the login shell said when it was asked for its `PATH`.
+#[derive(Clone, Debug)]
+pub enum ShellPath {
+    /// Not asked yet: [`with_login_shell`] fills this in once per command.
+    Unread,
+    /// The directories a CLI is looked for in.
+    Path(String),
+    /// Why there is none, in the shells' own words where they had any.
+    Unreadable(String),
+}
+
 /// Everything the two commands take from the machine, so a test can point them
 /// at a temporary directory instead.
 #[derive(Clone, Debug)]
 pub struct Env {
-    /// The person's login shell: `$SHELL`, or `/bin/zsh` when it is unset.
+    /// The person's login shell: `$SHELL`, or [`FALLBACK_SHELL`] when it is
+    /// unset.
     pub shell: PathBuf,
-    pub home: PathBuf,
+    /// The shell tried when `shell` will not answer — [`FALLBACK_SHELL`] in the
+    /// build, a fake in a test.
+    pub fallback: PathBuf,
+    /// `$HOME`; `None` when it is unset or empty, which is an error for the one
+    /// file this module reads rather than an empty directory to join onto.
+    pub home: Option<PathBuf>,
     pub xdg_config: Option<PathBuf>,
     /// The `mnema` binary an agent is pointed at.
     pub ours: String,
-    /// The login shell's `PATH`, filled in once per command by
-    /// [`with_login_path`] — `None` until then, and when the shell would not
-    /// say.
-    pub path: Option<String>,
+    /// [`ShellPath::Unread`] until [`with_login_shell`] has asked.
+    pub path: ShellPath,
 }
 
 impl Env {
     /// The machine this process is running on.
     pub fn from_process() -> Env {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        };
         Env {
-            shell: var("SHELL").unwrap_or_else(|| PathBuf::from("/bin/zsh")),
-            home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default(),
-            xdg_config: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            shell: non_empty("SHELL").unwrap_or_else(|| PathBuf::from(FALLBACK_SHELL)),
+            fallback: PathBuf::from(FALLBACK_SHELL),
+            home: non_empty("HOME"),
+            xdg_config: non_empty("XDG_CONFIG_HOME"),
             ours: crate::agent::agent_command_path(),
-            path: None,
+            path: ShellPath::Unread,
+        }
+    }
+
+    /// The `PATH` a CLI must run with, or `None` when the shell would not say.
+    fn cli_path(&self) -> Option<&str> {
+        match &self.path {
+            ShellPath::Path(path) => Some(path),
+            ShellPath::Unread | ShellPath::Unreadable(_) => None,
         }
     }
 
     /// The file opencode keeps its servers in — see [`opencode_config`].
-    fn opencode_file(&self) -> PathBuf {
-        opencode_config(self.xdg_config.as_deref(), &self.home)
+    ///
+    /// An empty `HOME` is an error and not a path to join: joined, it would make
+    /// this a relative path, read and written against whatever directory the
+    /// application was started from.
+    fn opencode_file(&self) -> Result<PathBuf, String> {
+        let xdg = self
+            .xdg_config
+            .as_deref()
+            .filter(|dir| !dir.as_os_str().is_empty());
+        match (xdg, self.home.as_deref()) {
+            (Some(xdg), _) => Ok(opencode_config(Some(xdg), Path::new(""))),
+            (None, Some(home)) => Ok(opencode_config(None, home)),
+            (None, None) => Err("could not find your home directory".to_string()),
+        }
     }
+}
+
+/// A `$NAME` whose empty value means "unset", as it does for `SHELL` and `HOME`.
+fn non_empty(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// What one checkbox draws.
@@ -387,15 +442,12 @@ pub struct Applied {
 /// in a row would be a window that has not drawn yet. The threads are joined in
 /// [`ALL`] order, so which one finishes first changes nothing that is drawn.
 pub fn states(env: &Env, run_timeout: Duration, shell_timeout: Duration) -> Vec<ClientState> {
-    let env = with_login_path(env, shell_timeout);
+    let env = with_login_shell(env, shell_timeout);
     let machine = &env;
     std::thread::scope(|scope| {
         let mut threads = Vec::with_capacity(ALL.len());
         for id in ALL {
-            threads.push((
-                id,
-                scope.spawn(move || state_of(machine, id, run_timeout, shell_timeout)),
-            ));
+            threads.push((id, scope.spawn(move || state_of(machine, id, run_timeout))));
         }
         threads
             .into_iter()
@@ -411,19 +463,36 @@ pub fn states(env: &Env, run_timeout: Duration, shell_timeout: Duration) -> Vec<
     })
 }
 
-fn state_of(
-    env: &Env,
-    id: ClientId,
-    run_timeout: Duration,
-    shell_timeout: Duration,
-) -> ClientState {
-    let Some(cli) = find_cli(&env.shell, id.name(), shell_timeout) else {
-        return ClientState {
-            id,
-            installed: false,
-            link: None,
-            error: None,
-        };
+/// Where this client's CLI is on the login `PATH`: `Ok(None)` is a CLI that is
+/// not installed, and `Err` is a `PATH` that could not be read at all — a
+/// different sentence for the window than "not installed".
+fn locate(env: &Env, id: ClientId) -> Result<Option<PathBuf>, String> {
+    match &env.path {
+        ShellPath::Path(path) => Ok(resolve(path, id.name())),
+        ShellPath::Unreadable(error) => Err(error.clone()),
+        ShellPath::Unread => Err("the login shell was not asked for its PATH".to_string()),
+    }
+}
+
+fn state_of(env: &Env, id: ClientId, run_timeout: Duration) -> ClientState {
+    let cli = match locate(env, id) {
+        Ok(Some(cli)) => cli,
+        Ok(None) => {
+            return ClientState {
+                id,
+                installed: false,
+                link: None,
+                error: None,
+            };
+        }
+        Err(error) => {
+            return ClientState {
+                id,
+                installed: false,
+                link: None,
+                error: Some(error),
+            };
+        }
     };
     match read_link(env, id, &cli, run_timeout) {
         Ok(link) => ClientState {
@@ -453,13 +522,26 @@ pub fn apply(
     run_timeout: Duration,
     shell_timeout: Duration,
 ) -> Vec<Applied> {
-    let env = with_login_path(env, shell_timeout);
-    ALL.iter()
-        .filter_map(|&id| {
-            let cli = find_cli(&env.shell, id.name(), shell_timeout)?;
-            Some(apply_one(&env, id, &cli, want.contains(&id), run_timeout))
-        })
-        .collect()
+    let env = with_login_shell(env, shell_timeout);
+    let mut applied = Vec::new();
+    for &id in &ALL {
+        match locate(&env, id) {
+            // The shell would not say what is installed, so every client is a
+            // change this call could not make: a wanted one was not connected,
+            // an unchecked one was not disconnected, and neither can be called
+            // absent. One sentence per client, never silence.
+            Err(error) => applied.push(Applied {
+                id,
+                error: Some(error),
+            }),
+            // Not installed: nothing to add and nothing to remove.
+            Ok(None) => {}
+            Ok(Some(cli)) => {
+                applied.push(apply_one(&env, id, &cli, want.contains(&id), run_timeout))
+            }
+        }
+    }
+    applied
 }
 
 fn apply_one(env: &Env, id: ClientId, cli: &Path, wanted: bool, timeout: Duration) -> Applied {
@@ -484,7 +566,7 @@ fn apply_one(env: &Env, id: ClientId, cli: &Path, wanted: bool, timeout: Duratio
 }
 
 fn read_link(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<Link, String> {
-    let read = |args: &[&str]| run(cli, args, timeout, env.path.as_deref());
+    let read = |args: &[&str]| run(cli, args, timeout, env.cli_path());
     match id {
         ClientId::Claude => {
             read(&["mcp", "get", "mnema"]).and_then(|out| parse_claude(&out, &env.ours))
@@ -519,7 +601,7 @@ fn remove(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<(), 
 /// Runs a command that is only interesting when it fails, and answers with the
 /// CLI's own words when it does.
 fn ran(program: &Path, args: &[&str], timeout: Duration, env: &Env) -> Result<(), String> {
-    let out = run(program, args, timeout, env.path.as_deref())?;
+    let out = run(program, args, timeout, env.cli_path())?;
     if out.code == 0 {
         return Ok(());
     }
@@ -535,7 +617,7 @@ fn ran(program: &Path, args: &[&str], timeout: Duration, env: &Env) -> Result<()
 /// goes through a managed service and did not answer in an isolated `HOME` — so
 /// its record is the file `mcp add --global` writes.
 fn read_opencode(env: &Env) -> Result<Link, String> {
-    let path = env.opencode_file();
+    let path = env.opencode_file()?;
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             parse_opencode(&text, &env.ours).map_err(|error| format!("{}: {error}", path.display()))
@@ -549,7 +631,7 @@ fn read_opencode(env: &Env) -> Result<Link, String> {
 
 /// The one place this module writes a person's file.
 fn remove_opencode(env: &Env) -> Result<(), String> {
-    let path = env.opencode_file();
+    let path = env.opencode_file()?;
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         // Gone since the state was read: nothing left to remove.
@@ -561,6 +643,8 @@ fn remove_opencode(env: &Env) -> Result<(), String> {
     else {
         return Ok(());
     };
+    #[cfg(test)]
+    second_writer_window();
     write_if_unchanged(&path, &text, &text_without)
         .map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -577,6 +661,25 @@ fn write_if_unchanged(path: &Path, expected: &str, text: &str) -> Result<(), Str
         return Err("opencode.json changed while being updated, try again".to_string());
     }
     write_atomically(path, text).map_err(|error| error.to_string())
+}
+
+// The moment between reading `opencode.json` and re-reading it before the
+// write, which is where a test puts a second writer. Thread-local: a command
+// does its work on the thread that called it, and no other test's `apply` may
+// see this one's writer.
+#[cfg(test)]
+thread_local! {
+    static SECOND_WRITER: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn second_writer_window() {
+    SECOND_WRITER.with(|writer| {
+        if let Some(writer) = writer.borrow().as_ref() {
+            writer();
+        }
+    });
 }
 
 /// Runs a program with no shell between us and it, and answers what it printed.
@@ -602,6 +705,12 @@ fn run(
     if let Some(path) = path {
         command.env("PATH", path);
     }
+    // Its own process group, so that everything this child starts can be ended
+    // with it. A CLI — or the login shell's start-up file — may leave a
+    // background job behind, and a job that inherited these pipes keeps them
+    // open long after the command itself has finished.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .map_err(|error| format!("{}: {error}", program.display()))?;
@@ -613,83 +722,167 @@ fn run(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The child is gone; what it started is not wanted, and its
+                // pipes are the only reason the readers below could otherwise
+                // wait as long as a background job lives. A group with nothing
+                // left in it is an `ESRCH` no-op.
+                kill_group(&mut child);
                 return Ok(Output {
                     // A signal has no exit code, and -1 is not a code any CLI
                     // answers with.
                     code: status.code().unwrap_or(-1),
-                    stdout: joined(stdout),
-                    stderr: joined(stderr),
+                    stdout: joined(stdout, deadline),
+                    stderr: joined(stderr, deadline),
                 });
             }
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
+                kill_group(&mut child);
                 let _ = child.wait();
                 return Err(format!("timed out after {} s", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(POLL),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                // The system will not say whether this child is alive, so there
+                // is nothing left to wait for: end it and reap it rather than
+                // leave a zombie behind.
+                kill_group(&mut child);
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
         }
     }
 }
 
-fn drain(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+/// Ends the child's process group, and the child with it.
+///
+/// Every child leads its own group (`process_group(0)`), so a background job it
+/// left behind — a login shell's `(update-check &)`, an agent's helper — goes
+/// with it and the pipes it holds close.
+#[cfg(unix)]
+fn kill_group(child: &mut Child) {
+    // The `kill` utility and not `libc::kill`: `libc` is not a dependency of this
+    // crate, and one short-lived process costs less than a new dependency. A
+    // group with no members left answers `ESRCH`, which is nothing to report.
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{}", child.id()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn kill_group(child: &mut Child) {
+    let _ = child.kill();
+}
+
+fn drain(mut stream: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+    let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut text = String::new();
         let _ = stream.read_to_string(&mut text);
-        text
-    })
+        let _ = send.send(text);
+    });
+    receive
 }
 
-fn joined(reader: Option<std::thread::JoinHandle<String>>) -> String {
+/// A reader's text, and never a wait past `deadline`: a pipe reaches EOF only
+/// when every process holding it closes it, and that is not always the child.
+fn joined(reader: Option<std::sync::mpsc::Receiver<String>>, deadline: Instant) -> String {
     reader
-        .and_then(|thread| thread.join().ok())
+        .and_then(|receive| {
+            receive
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()
+        })
         .unwrap_or_default()
 }
 
-/// Where the person's login shell finds a CLI, or `None`.
+/// The first directory of `path` that holds an executable file called `name`.
 ///
-/// Through the shell because an application started from Finder has no
-/// `~/.local/bin` and no `/opt/homebrew/bin` in `PATH`. The name is a positional
-/// argument and never part of the script: a name is a name, not a command.
-fn find_cli(shell: &Path, name: &str, timeout: Duration) -> Option<PathBuf> {
-    let out = run(
-        shell,
-        &["-lc", "command -v \"$1\"", "mnema", name],
-        timeout,
-        None,
-    )
-    .ok()?;
-    if out.code != 0 {
-        return None;
-    }
-    // The last non-empty line, because a login shell prints its greeting first.
-    let line = out
-        .stdout
+/// Resolved here and not by the shell's `command -v`: the name is a file name
+/// and nothing else, and a shell is asked one question — its `PATH` — instead of
+/// a command per client. `tcsh` has no `-lc` and `fish` has no `$1`, so a shell
+/// asked to run `command -v` is a shell that answers nothing at all.
+fn resolve(path: &str, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        // An empty entry means "here" to a shell, and here is not a directory
+        // this application may run a CLI from.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// One start of a login shell, asked for its `PATH`.
+fn ask(shell: &Path, timeout: Duration) -> Result<String, String> {
+    let out = run(shell, &["-l", "-c", PATH_QUESTION], timeout, None)?;
+    after_last_mark(&out.stdout).ok_or_else(|| {
+        let said = said(&out);
+        if said.is_empty() {
+            format!("{} answered nothing", shell.display())
+        } else {
+            said
+        }
+    })
+}
+
+/// The text after the last line that starts with [`PATH_MARK`]: exactly one
+/// line is the answer, and a greeting before it or a word after it is neither.
+fn after_last_mark(stdout: &str) -> Option<String> {
+    stdout
         .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())?;
-    let path = PathBuf::from(line);
-    // `command -v` also answers a builtin or an alias with something that is not
-    // a path at all, and an absolute path to a file is the only thing this can
-    // run.
-    (path.is_absolute() && path.is_file()).then_some(path)
+        .filter_map(|line| line.trim_end().strip_prefix(PATH_MARK))
+        .rfind(|path| !path.is_empty())
+        .map(str::to_string)
 }
 
-/// The login shell's `PATH`, or `None` when it would not answer.
-fn login_path(shell: &Path, timeout: Duration) -> Option<String> {
-    let out = run(shell, &["-lc", "printf \"%s\" \"$PATH\""], timeout, None).ok()?;
-    let path = out.stdout.trim();
-    (out.code == 0 && !path.is_empty()).then(|| path.to_string())
+/// The login shell's `PATH`, from the person's shell or, failing that, from
+/// [`FALLBACK_SHELL`].
+///
+/// Two shells rather than one because the absence of an answer is silent: `tcsh`
+/// takes `-l -c` for an option it does not know, and a start-up file that exits
+/// leaves the command unrun. Either way the person's own directories are the
+/// ones this application has to look in, and a `PATH` from another shell is much
+/// better than four checkboxes claiming nothing is installed.
+fn login_path(shell: &Path, fallback: &Path, timeout: Duration) -> Result<String, String> {
+    let first = match ask(shell, timeout) {
+        Ok(path) => return Ok(path),
+        Err(error) => error,
+    };
+    match ask(fallback, timeout) {
+        Ok(path) => Ok(path),
+        Err(second) => Err(format!(
+            "could not read your shell's PATH ({}: {first}; {}: {second})",
+            shell.display(),
+            fallback.display()
+        )),
+    }
 }
 
-/// [`Env`] with the login `PATH`, read once so that every CLI run of one
+/// [`Env`] with the login `PATH`, asked for once so that every CLI run of one
 /// command shares it.
-fn with_login_path(env: &Env, timeout: Duration) -> Env {
-    if env.path.is_some() {
+fn with_login_shell(env: &Env, timeout: Duration) -> Env {
+    if !matches!(env.path, ShellPath::Unread) {
         return env.clone();
     }
     Env {
-        path: login_path(&env.shell, timeout),
+        path: match login_path(&env.shell, &env.fallback, timeout) {
+            Ok(path) => ShellPath::Path(path),
+            Err(error) => ShellPath::Unreadable(error),
+        },
         ..env.clone()
     }
 }
@@ -705,7 +898,6 @@ pub fn agent_clients() -> Vec<ClientState> {
 pub fn apply_agent_clients(want: Vec<ClientId>) -> Vec<Applied> {
     apply(&Env::from_process(), &want, CLI_TIMEOUT, SHELL_TIMEOUT)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,36 +1539,35 @@ done
 exit 0
 "#;
 
-    /// The person's login shell, as this application asks it two questions: the
-    /// `PATH` to run CLIs with, and where a CLI is. It answers the first from a
-    /// literal and the second by running the command string the way `sh -c`
-    /// would, with `mnema` as `$0` and the CLI name as `$1` — which is what
-    /// makes a name interpolated into the script instead of passed beside it
-    /// visible as a command that ran.
+    /// The person's login shell: it answers the one question this application
+    /// asks it — its `PATH` — on a marked line. `noisy` makes it print a
+    /// greeting before the answer and a word after it, as a real login shell
+    /// with a chatty start-up file does.
     #[cfg(unix)]
     fn shell_body(login: &str, noisy: bool) -> String {
-        let mut body =
-            String::from("#!/bin/sh\ndir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n");
+        let mut body = String::from("#!/bin/sh\n");
         if noisy {
             body.push_str("printf '%s\\n' 'Last login: Mon Oct 26 09:00:00 on ttys001'\n");
         }
-        body.push_str("case \"$*\" in\n  *'$PATH'*) printf '%s' '");
-        body.push_str(login);
-        body.push_str(
-            "'; exit 0 ;;\nesac\ncd \"$dir\" || exit 1\nPATH=\"$dir:/usr/bin:/bin\"\n\
-             script=$2\nshift 2\nshift\neval \"$script\"\n",
-        );
+        body.push_str(&format!("printf '\\n__MNEMA_PATH__%s\\n' '{login}'\n"));
+        if noisy {
+            body.push_str("printf '%s\\n' 'bye'\n");
+        }
         body
     }
 
-    /// A temporary machine: a fake login shell, four fake CLIs and the
-    /// fixtures they answer from, all in one `TempDir`. Nothing here reads the
-    /// real `~`, the real `$SHELL` or a real `claude`.
+    /// A temporary machine: a fake login shell, a fake second shell, four fake
+    /// CLIs and the fixtures they answer from, all in one `TempDir`. Nothing
+    /// here reads the real `~`, the real `$SHELL` or a real `claude`.
     #[cfg(unix)]
     struct Stand {
         dir: TempDir,
         bin: PathBuf,
+        /// The `PATH` the fake shell answers with: the fakes, the interpreter
+        /// only they use, and the system's own tools for the scripts to run
+        /// (`cat`, `sleep`). No `~/.local/bin`, no Homebrew.
         login: String,
+        fallback: PathBuf,
     }
 
     #[cfg(unix)]
@@ -1386,9 +1577,19 @@ exit 0
             let bin = dir.path().join("bin");
             fs::create_dir_all(&bin).unwrap();
             fs::create_dir_all(dir.path().join("pathbin")).unwrap();
-            let login = format!("{}:/usr/bin:/bin", dir.path().join("pathbin").display());
-            let stand = Stand { dir, bin, login };
+            let login = format!(
+                "{}:{}:/usr/bin:/bin",
+                bin.display(),
+                dir.path().join("pathbin").display()
+            );
+            let stand = Stand {
+                fallback: dir.path().join("fallback-shell"),
+                dir,
+                bin,
+                login,
+            };
             stand.shell(false);
+            stand.fallback_shell(None);
             stand
         }
 
@@ -1396,13 +1597,22 @@ exit 0
             executable(&self.bin.join("shell"), &shell_body(&self.login, noisy));
         }
 
+        /// The second shell; `None` restores one that answers, `Some` breaks it.
+        fn fallback_shell(&self, body: Option<&str>) {
+            let body = body
+                .map(str::to_string)
+                .unwrap_or_else(|| shell_body(&self.login, false));
+            executable(&self.fallback, &body);
+        }
+
         fn env(&self) -> Env {
             Env {
                 shell: self.bin.join("shell"),
-                home: self.dir.path().join("home"),
+                fallback: self.fallback.clone(),
+                home: Some(self.dir.path().join("home")),
                 xdg_config: Some(self.dir.path().join("xdg")),
                 ours: OURS.to_string(),
-                path: None,
+                path: ShellPath::Unread,
             }
         }
 
@@ -1443,6 +1653,51 @@ exit 0
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             path
         }
+    }
+
+    /// Waits for a file a child writes, and answers its first line — a bounded
+    /// wait, because the file is written by the child rather than before it.
+    #[cfg(unix)]
+    fn wait_for_text(path: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = fs::read_to_string(path)
+                && !text.trim().is_empty()
+            {
+                return text.trim().to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} was never written",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether a pid is still there. `kill -0` answers yes for a zombie too,
+    /// which is the point: a child nobody reaped is still there.
+    #[cfg(unix)]
+    fn alive(pid: &str) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    /// Waits — bounded — for a pid to be gone: a killed process is reaped by
+    /// whoever inherits it, which is not this test.
+    #[cfg(unix)]
+    fn wait_gone(pid: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     /// A missing CLI is a checkbox that is not drawn, and nothing was run for
@@ -1744,121 +1999,285 @@ exit 0
         );
     }
 
-    /// A login shell greets before it answers, and the path is still found.
+    /// The shell prints a greeting before the answer and a word after it; the
+    /// CLI still runs with exactly the `PATH` between the markers.
     #[cfg(unix)]
     #[test]
-    fn a_login_shell_that_greets_before_answering_is_still_read() {
+    fn a_chatty_shell_does_not_corrupt_the_path() {
         let stand = Stand::new();
         stand.shell(true);
-        stand.install("claude");
+        let path_log = stand.dir.path().join("path.log");
+        stand.fakenode(&format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$PATH\" >> '{}'\nexec /bin/sh \"$@\"\n",
+            path_log.display()
+        ));
+        stand.script("claude", &format!("#!/usr/bin/env fakenode\n{CLI_BODY}"));
+        stand.fixture("claude.mcp-get.out", CLAUDE_GET);
+        let state = &states(&stand.env(), TIMEOUT, TIMEOUT)[0];
+        assert_eq!(state.error, None);
+        assert_eq!(state.link, Some(Link::Current));
         assert_eq!(
-            find_cli(&stand.env().shell, "claude", TIMEOUT),
-            Some(stand.bin.join("claude"))
+            fs::read_to_string(&path_log).unwrap_or_default().trim(),
+            stand.login,
+            "the greeting reached the child's PATH"
         );
     }
 
-    /// The name is an argument and never part of the script: a name whose shell
-    /// meaning is "run this too" is answered with "no such CLI" and runs
+    /// A name is a file name and nothing else: no shell ever sees it, so a name
+    /// whose meaning in a shell is "run this too" resolves to nothing and starts
     /// nothing.
     #[cfg(unix)]
     #[test]
-    fn a_cli_name_is_never_run_as_part_of_the_script() {
+    fn a_name_with_shell_metacharacters_resolves_to_nothing() {
         let stand = Stand::new();
-        assert_eq!(find_cli(&stand.env().shell, "a;touch PWNED", TIMEOUT), None);
+        assert_eq!(resolve(&stand.login, "a;touch PWNED"), None);
         assert!(
             !stand.bin.join("PWNED").exists(),
             "the name was run as a command"
         );
     }
 
-    /// Only an absolute path to a file is a CLI: `command -v` also answers a
-    /// builtin with a bare name, and a path that is not there runs nothing.
+    /// `command -v`'s own rule, done here: the first directory whose entry is an
+    /// executable regular file.
     #[cfg(unix)]
     #[test]
-    fn find_cli_answers_only_an_absolute_path_to_a_file() {
+    fn a_name_resolves_to_the_first_executable_file_on_the_path() {
         let dir = TempDir::new().unwrap();
-        let shell = executable(
-            &dir.path().join("shell"),
-            "#!/bin/sh\nprintf '%s\\n' 'motd'\nprintf '%s\\n' 'claude'\n",
-        );
+        let one = dir.path().join("one");
+        let two = dir.path().join("two");
+        fs::create_dir_all(one.join("claude")).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        let path = format!("{}:{}", one.display(), two.display());
+        // A directory called `claude`, and a file nobody may run.
+        let plain = two.join("claude");
+        fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert_eq!(resolve(&path, "claude"), None);
+        // The execute bit is the whole difference.
+        executable(&plain, "#!/bin/sh\n");
+        assert_eq!(resolve(&path, "claude"), Some(plain.clone()));
+        // And the first directory that holds one wins.
+        fs::remove_dir(one.join("claude")).unwrap();
+        let first = executable(&one.join("claude"), "#!/bin/sh\n");
+        assert_eq!(resolve(&path, "claude"), Some(first));
+        // An empty entry means "the current directory" to a shell; this
+        // application does not run a CLI out of the directory it was started in.
         assert_eq!(
-            find_cli(&shell, "claude", TIMEOUT),
-            None,
-            "a bare name is not a path"
-        );
-        let shell = executable(
-            &dir.path().join("shell"),
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
-                dir.path().join("gone").display()
-            ),
-        );
-        assert_eq!(
-            find_cli(&shell, "claude", TIMEOUT),
-            None,
-            "a file that is not there is not a CLI"
-        );
-        let shell = executable(
-            &dir.path().join("shell"),
-            &format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", dir.path().display()),
-        );
-        assert_eq!(
-            find_cli(&shell, "claude", TIMEOUT),
-            None,
-            "a directory is not an executable"
+            resolve(&format!(":{}", two.display()), "claude"),
+            Some(plain)
         );
     }
 
-    /// A child that outstays its timeout is killed **and waited for**: a kill
-    /// without the wait leaves a zombie whose pid answers `kill -0` until this
-    /// process exits.
+    /// A child that outstays its timeout is killed with everything it started,
+    /// and waited for: a kill without the wait leaves a zombie whose pid answers
+    /// `kill -0` until this process exits.
     #[cfg(unix)]
     #[test]
-    fn a_child_that_outlives_the_timeout_is_killed_and_waited_for() {
+    fn a_child_that_outlives_the_timeout_is_killed_with_its_group() {
         let dir = TempDir::new().unwrap();
         let pid_file = dir.path().join("pid");
+        let job_file = dir.path().join("job");
         let script = executable(
             &dir.path().join("slow"),
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nexec sleep 5\n",
-                pid_file.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\n\
+                 ( sleep 30 & printf '%s\\n' \"$!\" > '{}' )\nsleep 30\n",
+                pid_file.display(),
+                job_file.display()
             ),
         );
         let started = Instant::now();
-        let error = run(&script, &[], Duration::from_millis(300), None).unwrap_err();
-        assert!(error.contains("timed out after"), "{error}");
+        let error = run(&script, &[], Duration::from_secs(2), None).unwrap_err();
+        assert!(error.contains("timed out after 2 s"), "{error}");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(10),
             "the timeout did not cut the child short"
         );
-        let pid = fs::read_to_string(&pid_file).expect("the fake child never said its pid");
-        let gone = Command::new("kill")
-            .arg("-0")
-            .arg(pid.trim())
-            .output()
-            .is_ok_and(|output| !output.status.success());
-        assert!(gone, "the child is still there: {}", pid.trim());
+        for file in [pid_file, job_file] {
+            let pid = wait_for_text(&file);
+            assert!(wait_gone(&pid), "still there after the timeout: {pid}");
+        }
+    }
+
+    /// A command that leaves a background job behind finishes when it finishes:
+    /// the job inherits the pipes, and a pipe reaches EOF only when every holder
+    /// closes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_leaves_a_background_job_returns_and_the_job_is_gone() {
+        let dir = TempDir::new().unwrap();
+        let job_file = dir.path().join("job");
+        let script = executable(
+            &dir.path().join("leaver"),
+            &format!(
+                "#!/bin/sh\n( sleep 30 & printf '%s\\n' \"$!\" > '{}' )\nprintf 'done\\n'\n",
+                job_file.display()
+            ),
+        );
+        let started = Instant::now();
+        let output = run(&script, &[], Duration::from_secs(2), None)
+            .expect("a command that exits is not a timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the background job kept the pipes open"
+        );
+        assert_eq!(output.code, 0);
+        assert!(
+            output.stdout.contains("done"),
+            "the output was lost behind the job: {:?}",
+            output.stdout
+        );
+        let job = wait_for_text(&job_file);
+        assert!(wait_gone(&job), "the job outlived its command: {job}");
+    }
+
+    /// A reader that answers late is not waited for past the deadline: a pipe
+    /// held by a process that left the child's group — a daemonizing CLI — never
+    /// reaches EOF.
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_that_answers_late_does_not_hold_the_command_past_its_deadline() {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = send.send("late".to_string());
+        });
+        let started = Instant::now();
+        let text = joined(Some(receive), Instant::now() + Duration::from_millis(50));
+        assert_eq!(text, "");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "the answer waited past its deadline"
+        );
+    }
+
+    /// A shell that will not answer is replaced by the second one: `tcsh` reads
+    /// `-l -c` as an option it does not know, and then every client would be
+    /// "not installed" with nothing said.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_will_not_answer_falls_back_to_the_second_one() {
+        let stand = Stand::new();
+        stand.script(
+            "shell",
+            "#!/bin/sh\nprintf '%s\\n' \"Unknown option: '-lc'\" >&2\nexit 1\n",
+        );
+        stand.install("claude");
+        stand.fixture("claude.mcp-get.out", CLAUDE_GET);
+        let state = &states(&stand.env(), TIMEOUT, TIMEOUT)[0];
+        assert_eq!(state.error, None);
+        assert_eq!(state.link, Some(Link::Current));
+        assert!(state.installed);
+    }
+
+    /// Neither shell answers: every client says so, and `apply` answers for
+    /// every client rather than for none.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_will_not_say_its_path_is_an_error_for_every_client() {
+        let stand = Stand::new();
+        stand.script(
+            "shell",
+            "#!/bin/sh\nprintf '%s\\n' \"Unknown option: '-lc'\" >&2\nexit 1\n",
+        );
+        stand.fallback_shell(Some("#!/bin/sh\nexit 1\n"));
+        let states = states(&stand.env(), TIMEOUT, TIMEOUT);
+        assert_eq!(states.len(), 4);
+        for state in &states {
+            assert!(!state.installed, "{:?}", state.id);
+            assert_eq!(state.link, None);
+            let error = state.error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("could not read your shell's PATH"),
+                "{error}"
+            );
+        }
+        assert!(
+            states[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Unknown option: '-lc'"),
+            "the shell's own words are not in the details: {:?}",
+            states[0].error
+        );
+        // A wanted client was not connected and an unchecked one was not
+        // disconnected; neither can be called absent, so neither is dropped.
+        let applied = apply(&stand.env(), &[ClientId::Claude], TIMEOUT, TIMEOUT);
+        assert_eq!(applied.len(), 4);
+        assert!(applied.iter().all(|applied| applied.error.is_some()));
+    }
+
+    /// `$HOME` unset and no `$XDG_CONFIG_HOME` is an error, not a relative path
+    /// read and written against whatever directory the application was started
+    /// from.
+    #[cfg(unix)]
+    #[test]
+    fn an_unset_home_is_an_error_and_not_a_relative_path() {
+        let stand = Stand::new();
+        stand.install("opencode");
+        let env = Env {
+            home: None,
+            xdg_config: None,
+            ..stand.env()
+        };
+        let state = &states(&env, TIMEOUT, TIMEOUT)[3];
+        assert!(state.installed);
+        assert_eq!(state.link, None);
+        assert!(
+            state
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("home directory"),
+            "{:?}",
+            state.error
+        );
     }
 
     /// The window between our read and our rename belongs to whichever writer
-    /// got there first — opencode itself can be running.
+    /// got there first — opencode itself can be running. Driven through `apply`,
+    /// because that is the only caller of the disconnect.
     #[cfg(unix)]
     #[test]
-    fn a_file_another_writer_changed_is_left_to_that_writer() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("opencode.json");
-        let seen = "{\n  \"mcp\": {\n    \"mnema\": {}\n  }\n}\n";
+    fn a_file_another_writer_changes_mid_disconnect_is_left_to_that_writer() {
+        let stand = Stand::new();
+        stand.install("opencode");
+        let file = stand.opencode_file();
+        fs::write(&file, OPENCODE_JSON).unwrap();
         let concurrent = "{\n  \"mcp\": {\n    \"context7\": {}\n  }\n}\n";
-        fs::write(&path, seen).unwrap();
-        let without = opencode_without_mnema(seen).unwrap().unwrap();
-        // Between the read and the write, as opencode itself can make it move.
-        fs::write(&path, concurrent).unwrap();
-        let error = write_if_unchanged(&path, seen, &without).unwrap_err();
+        let _writer = SecondWriter::arm(&file, concurrent);
+        let applied = apply(&stand.env(), &[], TIMEOUT, TIMEOUT);
+        assert_eq!(applied.len(), 1);
+        let error = applied[0].error.as_deref().unwrap_or_default();
         assert!(
             error.contains("changed while being updated, try again"),
             "{error}"
         );
-        assert_eq!(fs::read_to_string(&path).unwrap(), concurrent);
+        assert_eq!(fs::read_to_string(&file).unwrap(), concurrent);
+    }
+
+    /// A second writer for the window between [`remove_opencode`]'s read and its
+    /// re-read, alive for as long as this guard is.
+    #[cfg(unix)]
+    struct SecondWriter;
+
+    #[cfg(unix)]
+    impl SecondWriter {
+        fn arm(path: &Path, text: &str) -> SecondWriter {
+            let path = path.to_path_buf();
+            let text = text.to_string();
+            SECOND_WRITER.with(|writer| {
+                *writer.borrow_mut() = Some(Box::new(move || fs::write(&path, &text).unwrap()));
+            });
+            SecondWriter
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SecondWriter {
+        fn drop(&mut self) {
+            SECOND_WRITER.with(|writer| *writer.borrow_mut() = None);
+        }
     }
 
     /// What Task 4's window reads: four fields, and a link tagged by `kind`.
