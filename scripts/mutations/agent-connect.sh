@@ -23,6 +23,10 @@
 #     field-name mutant against the shape the command now takes;
 #   - task 4 U2 (the stale clause dropped from `change`) — the same mutant as
 #     M6, kept once.
+#   - review of PR #79, `canonicalize(path)?` falling back to the link's own
+#     path — stays green: `metadata(path)?` in `write_then_rename` follows the
+#     dangling link and fails too. Two defences each keep the link, so no
+#     single mutant reddens `opencode_a_dangling_link_is_an_error_and_stays_a_link`.
 #
 # Every test named here is the one the report names, under its current name
 # where a later round renamed it (`apply_removes_a_current_client_the_person_unticked`,
@@ -640,12 +644,6 @@ case_ "opencode: a target whose permissions cannot be read is not written" \
   's~        file\.set_permissions\(std::fs::metadata\(path\)\?\.permissions\(\)\)\?;~        if let Ok(meta) = std::fs::metadata(path) { file.set_permissions(meta.permissions())?; }~' \
   'if let Ok(meta) = std::fs::metadata(path) {' \
   mnema-desktop "${T}a_target_whose_permissions_cannot_be_read_is_not_written" --lib
-
-case_ "opencode: a dangling link is an error, not replaced by a regular file" \
-  $W \
-  's~    let target = std::fs::canonicalize\(path\)\?;~    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());~' \
-  'unwrap_or_else(|_| path.to_path_buf());' \
-  mnema-desktop "${T}opencode_a_dangling_link_is_an_error_and_stays_a_link" --lib
 
 case_ "agent_clients: output that is not UTF-8 is an error, not an empty answer" \
   $W \
