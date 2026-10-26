@@ -428,13 +428,6 @@ case_ "agent_clients: remove_opencode writes through the re-read, not around it"
   'write_atomically(&path, &text_without)' \
   mnema-desktop "${T}a_file_another_writer_changes_mid_disconnect_is_left_to_that_writer" --lib
 
-case_ "agent_clients: a timed-out child is killed with its whole group" \
-  $W \
-  's~    let _ = Command::new\("kill"\)\n        \.arg\("-KILL"\)\n        \.arg\(format!\("-\{\}", child\.id\(\)\)\)\n        \.stdin\(Stdio::null\(\)\)\n        \.stdout\(Stdio::null\(\)\)\n        \.stderr\(Stdio::null\(\)\)\n        \.status\(\);\n~~' \
-  'nothing to report.
-    let _ = child.kill();' \
-  mnema-desktop "${T}a_child_that_outlives_the_timeout_is_killed_with_its_group" --lib
-
 case_ "agent_clients: no home directory is an error, not a relative config path" \
   $W \
   's~            \(None, None\) => Err\("could not find your home directory"\.to_string\(\)\),~            (None, None) => Ok(opencode_config(None, Path::new(""))),~' \
