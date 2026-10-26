@@ -2,7 +2,7 @@ import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/sv
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Agents from './Agents.svelte';
 import { setLocale } from '../i18n';
-import type { AgentLogEntry, ClientId, ClientState } from '../lib/ipc';
+import type { AgentLogEntry, Change, ClientId, ClientState } from '../lib/ipc';
 
 const agentAccessEnabled = vi.fn();
 const setAgentAccess = vi.fn();
@@ -16,7 +16,7 @@ vi.mock('../lib/ipc', () => ({
   setAgentAccess: (on: boolean) => setAgentAccess(on),
   agentLog: () => agentLog(),
   agentClients: () => agentClients(),
-  applyAgentClients: (want: ClientId[]) => applyAgentClients(want),
+  applyAgentClients: (changes: Change[]) => applyAgentClients(changes),
 }));
 
 const entry = (over: Partial<AgentLogEntry>): AgentLogEntry => ({ at: '2026-01-02T03:04:05Z', op: 'search', ...over });
@@ -152,17 +152,132 @@ test('an outdated path alone enables Apply', async () => {
   expect(apply().disabled).toBe(false);
 });
 
-test('Apply sends exactly the ticked set', async () => {
+test('Apply sends a change per box the person moved, and nothing for the rest', async () => {
   agentAccessEnabled.mockResolvedValue(true);
+  agentClients.mockResolvedValue([
+    client('claude', { link: { kind: 'current' } }), // untouched
+    client('codex', { link: { kind: 'current' } }), // the person unticks it
+    client('pi', { link: { kind: 'stale', command: '/old/Mnema.app/Contents/MacOS/mnema' } }),
+    client('opencode'), // the person ticks it
+  ]);
   render(Agents);
 
   await waitFor(() => expect(box('claude').checked).toBe(true));
-  await fireEvent.click(box('claude'));
+  await fireEvent.click(box('codex'));
+  await fireEvent.click(box('opencode'));
+  await fireEvent.click(apply());
+
+  await waitFor(() => expect(applyAgentClients).toHaveBeenCalledTimes(1));
+  // In the order the boxes are drawn. Claude Code is absent because nothing
+  // about it moved; pi is there with nothing moved only because a stale record
+  // is a change an add corrects.
+  expect(applyAgentClients).toHaveBeenCalledWith([
+    { id: 'codex', connect: false },
+    { id: 'pi', connect: true },
+    { id: 'opencode', connect: true },
+  ]);
+});
+
+test('a client whose state could not be read is never sent, even when Apply is about another', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  // Claude's `mcp get` timed out once: installed, but no record was read, so the
+  // box is disabled and unticked. Unticked here must not reach the backend as
+  // "disconnect Claude", which is what a "wanted set" would have meant.
+  agentClients.mockResolvedValue([
+    client('claude', { link: null, error: 'timed out after 15 s' }),
+    client('codex'),
+    client('pi'),
+    client('opencode'),
+  ]);
+  render(Agents);
+
+  // The error fold is what says the answer landed; a wait on an unchecked box
+  // is also true while the first read is still out.
+  await screen.findByTestId('agents-error-claude');
+  expect(box('claude').disabled).toBe(true);
   await fireEvent.click(box('codex'));
   await fireEvent.click(apply());
 
   await waitFor(() => expect(applyAgentClients).toHaveBeenCalledTimes(1));
-  expect(applyAgentClients).toHaveBeenCalledWith(['codex']);
+  expect(applyAgentClients).toHaveBeenCalledWith([{ id: 'codex', connect: true }]);
+});
+
+test('a press the command did not answer is its own sentence, not a failed read', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  applyAgentClients.mockRejectedValue('the command is not registered');
+  render(Agents);
+
+  await waitFor(() => expect(box('claude').checked).toBe(true));
+  await fireEvent.click(box('codex'));
+  await fireEvent.click(apply());
+
+  const rejected = await screen.findByTestId('agents-apply-rejected');
+  expect(rejected.textContent).toContain('Could not apply the changes');
+  expect(rejected.textContent).toContain('the command is not registered');
+  // The state itself was re-read and answered: nothing here may say it was not.
+  expect(screen.queryByTestId('agents-read-failed')).toBeNull();
+});
+
+test('a rejected press is reported at once, without waiting for the re-read', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  applyAgentClients.mockRejectedValue('the command is not registered');
+  // The re-read never answers. The press's own sentence must not be held behind
+  // four CLI reads (up to about twenty seconds) that may never settle.
+  agentClients.mockResolvedValueOnce(SETTLED).mockReturnValueOnce(new Promise(() => {}));
+  render(Agents);
+
+  await waitFor(() => expect(box('claude').checked).toBe(true));
+  await fireEvent.click(box('codex'));
+  await fireEvent.click(apply());
+
+  expect((await screen.findByTestId('agents-apply-rejected')).textContent)
+    .toContain('the command is not registered');
+});
+
+test('a re-read that disables a box drops the pick that box was carrying', async () => {
+  // The switch goes off and on again, and the second read finds Codex broken:
+  // the tick was made against a record that no longer holds, and a disabled box
+  // must not stay ticked.
+  agentAccessEnabled
+    .mockResolvedValueOnce(true) // mount
+    .mockResolvedValueOnce(false) // the switch is turned off
+    .mockResolvedValue(true); // and on again
+  agentClients
+    .mockResolvedValueOnce(SETTLED)
+    .mockResolvedValueOnce([
+      client('claude', { link: { kind: 'current' } }),
+      client('codex', { link: null, error: 'codex exited with code 2' }),
+      client('pi'),
+      client('opencode'),
+    ]);
+  render(Agents);
+
+  await waitFor(() => expect(box('claude').checked).toBe(true));
+  await fireEvent.click(box('codex'));
+  expect(box('codex').checked).toBe(true);
+  const access = screen.getByTestId('agents-access') as HTMLInputElement;
+  await fireEvent.click(access); // off
+  await waitFor(() => expect(access.checked).toBe(false));
+  await fireEvent.click(access); // on: a fresh read, and Codex is broken now
+
+  await waitFor(() => expect(box('codex').disabled).toBe(true));
+  expect(screen.getByTestId('agents-error-codex')).toBeTruthy();
+  expect(box('codex').checked).toBe(false);
+});
+
+test('a failed re-read keeps the pick and says the state is unknown', async () => {
+  agentAccessEnabled.mockResolvedValue(true);
+  agentClients.mockResolvedValueOnce(SETTLED).mockRejectedValueOnce('read failed');
+  render(Agents);
+
+  await waitFor(() => expect(box('claude').checked).toBe(true));
+  await fireEvent.click(box('codex'));
+  await fireEvent.click(apply());
+
+  expect((await screen.findByTestId('agents-read-failed')).textContent).toContain('read failed');
+  // Nothing confirmed the press, so the tick stays where the person put it.
+  expect(box('codex').checked).toBe(true);
+  expect(box('codex').disabled).toBe(false);
 });
 
 test('after Apply the boxes show the re-read state, not what was asked for', async () => {
@@ -203,8 +318,9 @@ test('one client failing is named with its direction and does not hide another',
     client('pi', { link: { kind: 'current' } }),
     client('opencode'),
   ]);
+  // One answer per client the press named: Codex was ticked, pi unticked, and
+  // Claude Code was not touched at all, so it is not in the reply.
   applyAgentClients.mockResolvedValue([
-    { id: 'claude', error: null },
     { id: 'codex', error: 'codex: No MCP server named "mnema".' },
     { id: 'pi', error: 'pi: could not write the global config' },
   ]);

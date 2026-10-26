@@ -1008,13 +1008,18 @@ export const agentLog = () => invoke<AgentLogEntry[]>('agent_log');
 // (`agent_clients.rs`). `link` is the CLI's own record — `absent` when it holds
 // no such server — and null when the record could not be read at all, which is
 // what `error` then carries. Mirrored IN FULL, field for field; `ipc.test.ts`
-// pins both structs and both enums against that file.
+// pins the structs and enums against that file.
 export type ClientId = 'claude' | 'codex' | 'pi' | 'opencode';
 export type Link =
   | { kind: 'absent' }
   | { kind: 'current' }
   | { kind: 'stale'; command: string };
 export type ClientState = { id: ClientId; installed: boolean; link: Link | null; error: string | null };
+// One box the person moved: which client, and which way. The window sends only
+// these, and a client it did not list is not read, run or answered — a box whose
+// state could not be read is disabled and unticked, and "unticked" must never
+// reach the backend as "disconnect it".
+export type Change = { id: ClientId; connect: boolean };
 // One answer per client `apply_agent_clients` touched; a client it did not touch
 // is absent from the array. `error` is the CLI's own words.
 export type Applied = { id: ClientId; error: string | null };
@@ -1023,10 +1028,11 @@ export type Applied = { id: ClientId; error: string | null };
 // is given five, each CLI fifteen — so the section draws itself first and
 // disables the boxes until this answers.
 export const agentClients = () => invoke<ClientState[]>('agent_clients');
-// Connects the clients in `want` and disconnects every other installed one. The
-// answer is NOT the new state: the caller re-reads `agentClients()` and draws
-// that, because one client's refusal says nothing about the other three.
-export const applyAgentClients = (want: ClientId[]) => invoke<Applied[]>('apply_agent_clients', { want });
+// Applies exactly the listed changes. The answer is NOT the new state: the
+// caller re-reads `agentClients()` and draws that, because one client's refusal
+// says nothing about the other three.
+export const applyAgentClients = (changes: Change[]) =>
+  invoke<Applied[]>('apply_agent_clients', { changes });
 
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is

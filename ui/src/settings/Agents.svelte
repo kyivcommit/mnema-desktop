@@ -4,7 +4,7 @@
   import type { Key } from '../i18n/catalog';
   import {
     agentAccessEnabled, setAgentAccess, agentLog, agentClients, applyAgentClients,
-    type AgentLogEntry, type ClientId, type ClientState,
+    type AgentLogEntry, type Change, type ClientId, type ClientState,
   } from '../lib/ipc';
 
   // The «Agents» section: the access switch, the four agents it connects, and
@@ -43,8 +43,10 @@
   // whether that client was being connected or disconnected.
   let failures = $state<{ id: ClientId; connecting: boolean; error: string }[]>([]);
   let applying = $state(false);
-  // An answer this window did not get at all, verbatim.
+  // An answer this window did not get at all, verbatim — from the read and from
+  // the press, kept apart because they name different things.
   let readFailure = $state<string | null>(null);
+  let applyRejected = $state<string | null>(null);
 
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -58,6 +60,11 @@
     try {
       states = await agentClients();
       readFailure = null;
+      // An answer is a new state, and the person's pick was made against the
+      // old one: a box this read now disables must not keep a tick it can no
+      // longer justify. A FAILED read confirms nothing and leaves the pick
+      // alone — that is the one case where the boxes are still the person's.
+      choice = null;
     } catch (err) {
       // The previous answer, if any, stays on screen: it was true a moment ago.
       readFailure = message(err);
@@ -105,14 +112,22 @@
     void $locale;
     return CLIENTS.map((id) => {
       const state = states?.find((one) => one.id === id);
+      const checked = choice?.[id] ?? connected(state);
+      // Nothing is offered until the first answer arrives, and a client the
+      // shell could not even look for is not a client this window may touch.
+      const disabled = applying || state === undefined || !state.installed || state.error !== null;
       return {
         id,
         name: t(CLIENT_NAME[id]),
         state,
-        checked: choice?.[id] ?? connected(state),
-        // Nothing is offered until the first answer arrives, and a client the
-        // shell could not even look for is not a client this window may touch.
-        disabled: applying || state === undefined || !state.installed || state.error !== null,
+        checked,
+        disabled,
+        // The one fact Apply is sent: a box the person moved, and which way.
+        // A disabled row is never a change — its state is unknown, and "unknown"
+        // must not reach the backend as "disconnect it". A ticked stale record
+        // is a change with nothing moved: only an add rewrites it.
+        change: !disabled
+          && (checked !== connected(state) || (checked && state.link?.kind === 'stale')),
         note: state === undefined || state.error !== null ? null
           : !state.installed ? t('agents_not_installed')
             : state.link?.kind === 'stale' ? t('agents_stale')
@@ -121,13 +136,8 @@
     });
   });
 
-  // Apply is owed only when something would change: a box that differs from the
-  // record, or a record naming another path, which only an add can correct.
-  const canApply = $derived(
-    states !== null && !applying
-    && rows.some((row) => row.state !== undefined && row.state.error === null
-      && (row.checked !== connected(row.state) || row.state.link?.kind === 'stale')),
-  );
+  // Apply is owed only when some box carries a change — see `change` above.
+  const canApply = $derived(states !== null && !applying && rows.some((row) => row.change));
 
   const failureOf = $derived(new Map(failures.map((one) => [one.id, one])));
   const failureText = $derived.by(() => {
@@ -144,22 +154,28 @@
 
   async function runApply() {
     if (!canApply) return;
-    const want = rows.filter((row) => row.checked).map((row) => row.id);
+    const changes: Change[] = rows
+      .filter((row) => row.change)
+      .map((row) => ({ id: row.id, connect: row.checked }));
     applying = true;
     failures = [];
-    let rejected: string | null = null;
+    applyRejected = null;
+    // Every id an answer can carry is one this request named — `apply` reads,
+    // runs and answers only listed clients — so this map is total by
+    // construction; the default covers a reply the contract does not allow.
+    const connectOf = new Map(changes.map((change) => [change.id, change.connect]));
     try {
-      const applied = await applyAgentClients(want);
+      const applied = await applyAgentClients(changes);
       failures = applied.flatMap((one) => one.error === null ? []
-        : [{ id: one.id, connecting: want.includes(one.id), error: one.error }]);
+        : [{ id: one.id, connecting: connectOf.get(one.id) ?? false, error: one.error }]);
     } catch (err) {
-      // A command that never answered changed nothing this window knows of; the
-      // re-read below still draws the record, and the press is not left silent.
-      rejected = message(err);
+      // Set HERE, not after the re-read: the press's own sentence must not wait
+      // behind four CLI reads (up to about twenty seconds) or go unseen if one
+      // never settles. A command that never answered changed nothing this
+      // window knows of; the re-read below still draws the record.
+      applyRejected = message(err);
     }
     await readClients();
-    if (rejected !== null) readFailure = rejected;
-    if (readFailure === null) choice = null;
     applying = false;
   }
 
@@ -168,6 +184,7 @@
   const applyLabel = $derived.by(() => { void $locale; return t('agents_apply'); });
   const detailsLabel = $derived.by(() => { void $locale; return t('agents_details'); });
   const readFailedLabel = $derived.by(() => { void $locale; return t('agents_read_failed'); });
+  const applyRejectedLabel = $derived.by(() => { void $locale; return t('agents_apply_rejected'); });
 </script>
 
 <label class="agents-switch">
@@ -208,6 +225,9 @@
     {/each}
     <button type="button" data-testid="agents-apply" disabled={!canApply} onclick={runApply}>{applyLabel}</button>
   </div>
+  {#if applyRejected}
+    <p role="alert" data-testid="agents-apply-rejected">{applyRejectedLabel} {applyRejected}</p>
+  {/if}
   {#if readFailure}
     <p role="alert" data-testid="agents-read-failed">{readFailedLabel} {readFailure}</p>
   {/if}

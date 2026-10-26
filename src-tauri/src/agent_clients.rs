@@ -433,6 +433,14 @@ pub struct ClientState {
     pub error: Option<String>,
 }
 
+/// One box the person moved: which client, and which way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Change {
+    pub id: ClientId,
+    pub connect: bool,
+}
+
 /// What one client's change came to: `error` is the CLI's own words.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -516,43 +524,54 @@ fn state_of(env: &Env, id: ClientId, run_timeout: Duration) -> ClientState {
     }
 }
 
-/// Connects the clients in `want` and disconnects every other installed one,
-/// one client at a time, with one answer per installed client.
+/// Applies exactly the listed changes, one client at a time, with one answer
+/// per client it touched.
 ///
-/// Sequential, and without an early return: the four CLIs write the person's
+/// 🔴 **Only the clients in `changes` are read, run or answered.** A client that
+/// is not listed is not this call's business, and the difference is not
+/// cosmetic: the window sends a change only for a box the person moved, and a
+/// box whose state could not be read — a timed-out `mcp get`, an `opencode.json`
+/// it refused — is disabled and therefore never listed. An `apply` that read
+/// "not listed" as "not wanted" would disconnect the working agent whose state
+/// that one failed read hid, on a press that was about another client.
+///
+/// Sequential, and without an early return: the listed CLIs write the person's
 /// configuration files, and a client that fails is a sentence under its own
 /// checkbox rather than a reason to leave the rest as they were.
 pub fn apply(
     env: &Env,
-    want: &[ClientId],
+    changes: &[Change],
     run_timeout: Duration,
     shell_timeout: Duration,
 ) -> Vec<Applied> {
     let env = with_login_shell(env, shell_timeout);
     let mut applied = Vec::new();
-    for &id in &ALL {
-        match locate(&env, id) {
-            // The shell would not say what is installed. A box the person left
-            // ticked was asked for and was not connected, so it answers with the
-            // reason; the rest were not touched by this call, and `states` is
-            // what marks all four — which is also what disables Apply.
-            Err(error) if want.contains(&id) => applied.push(Applied {
-                id,
+    for change in changes {
+        match locate(&env, change.id) {
+            // The shell would not say what is installed, so neither a connect
+            // nor a disconnect happened. Every listed client answers with that
+            // reason; `states` is what marks all four — which is also what
+            // disables Apply.
+            Err(error) => applied.push(Applied {
+                id: change.id,
                 error: Some(error),
             }),
-            Err(_) => {}
             // Not installed: nothing to add and nothing to remove.
             Ok(None) => {}
-            Ok(Some(cli)) => {
-                applied.push(apply_one(&env, id, &cli, want.contains(&id), run_timeout))
-            }
+            Ok(Some(cli)) => applied.push(apply_one(
+                &env,
+                change.id,
+                &cli,
+                change.connect,
+                run_timeout,
+            )),
         }
     }
     applied
 }
 
-fn apply_one(env: &Env, id: ClientId, cli: &Path, wanted: bool, timeout: Duration) -> Applied {
-    let outcome = read_link(env, id, cli, timeout).and_then(|link| match (wanted, link) {
+fn apply_one(env: &Env, id: ClientId, cli: &Path, connect: bool, timeout: Duration) -> Applied {
+    let outcome = read_link(env, id, cli, timeout).and_then(|link| match (connect, link) {
         // The record is already the one this build would write.
         (true, Link::Current) => Ok(()),
         // `claude mcp add` refuses a name it already holds, so the stale record
@@ -928,10 +947,10 @@ pub fn agent_clients() -> Vec<ClientState> {
     states(&Env::from_process(), CLI_TIMEOUT, SHELL_TIMEOUT)
 }
 
-/// Connects the clients in `want` and disconnects every other installed one.
+/// Applies exactly the listed changes: the boxes the person moved, and no others.
 #[tauri::command(async)]
-pub fn apply_agent_clients(want: Vec<ClientId>) -> Vec<Applied> {
-    apply(&Env::from_process(), &want, CLI_TIMEOUT, SHELL_TIMEOUT)
+pub fn apply_agent_clients(changes: Vec<Change>) -> Vec<Applied> {
+    apply(&Env::from_process(), &changes, CLI_TIMEOUT, SHELL_TIMEOUT)
 }
 #[cfg(test)]
 mod tests {
@@ -953,6 +972,15 @@ mod tests {
 
     fn keys(value: &Value) -> Vec<String> {
         value.as_object().unwrap().keys().cloned().collect()
+    }
+
+    /// A box the person moved: `on(ClientId::Codex)` is "connect Codex".
+    fn on(id: ClientId) -> Change {
+        Change { id, connect: true }
+    }
+
+    fn off(id: ClientId) -> Change {
+        Change { id, connect: false }
     }
 
     /// `claude mcp get mnema`, exit 0 — recorded 2026-10-26.
@@ -1792,7 +1820,7 @@ exit 0
 
     /// The `add` table's first row: an absent client is added with exactly the
     /// arguments measured on 2026-10-26 — the path one argument, not two — and
-    /// a wanted client that is already current is written nothing for.
+    /// a listed client that is already current is written nothing for.
     #[cfg(unix)]
     #[test]
     fn apply_adds_an_absent_client_and_writes_nothing_for_a_current_one() {
@@ -1807,7 +1835,7 @@ exit 0
         stand.fixture("codex.mcp-get.out", CODEX_GET);
         let applied = apply(
             &stand.env(),
-            &[ClientId::Claude, ClientId::Codex],
+            &[on(ClientId::Claude), on(ClientId::Codex)],
             TIMEOUT,
             TIMEOUT,
         );
@@ -1827,15 +1855,48 @@ exit 0
         );
     }
 
+    /// A client that is not listed is not read, not run and not answered — even
+    /// when it is `Current`. That is the difference between "the person moved
+    /// this box" and "the person did not": a box whose state could not be read
+    /// is disabled and unticked, and treating it as "not wanted" would remove a
+    /// working connection on a press that was about another agent.
+    #[cfg(unix)]
+    #[test]
+    fn a_client_the_person_did_not_touch_is_never_run() {
+        let stand = Stand::new();
+        stand.install("claude");
+        stand.install("codex");
+        // Claude is connected with this build's own path; Codex is not connected.
+        stand.fixture("claude.mcp-get.out", CLAUDE_GET);
+        stand.fixture("codex.mcp-get.code", "1");
+        stand.fixture(
+            "codex.mcp-get.err",
+            "Error: No MCP server named 'mnema' found.",
+        );
+        let applied = apply(&stand.env(), &[on(ClientId::Codex)], TIMEOUT, TIMEOUT);
+        assert_eq!(
+            applied.iter().map(|applied| applied.id).collect::<Vec<_>>(),
+            [ClientId::Codex]
+        );
+        assert_eq!(applied[0].error, None);
+        assert_eq!(
+            stand.calls(),
+            [
+                "codex [mcp] [get] [mnema] [--json]",
+                "codex [mcp] [add] [mnema] [--] [/tmp/My App's/mnema] [mcp]",
+            ]
+        );
+    }
+
     /// Unchecked and current is a `remove`, with the arguments measured on the
     /// same day.
     #[cfg(unix)]
     #[test]
-    fn apply_removes_a_current_client_that_is_not_wanted() {
+    fn apply_removes_a_current_client_the_person_unticked() {
         let stand = Stand::new();
         stand.install("claude");
         stand.fixture("claude.mcp-get.out", CLAUDE_GET);
-        let applied = apply(&stand.env(), &[], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[off(ClientId::Claude)], TIMEOUT, TIMEOUT);
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].error, None);
         assert_eq!(
@@ -1861,7 +1922,7 @@ exit 0
                 "Command: /Applications/Mnema.app/Contents/MacOS/mnema",
             ),
         );
-        let applied = apply(&stand.env(), &[ClientId::Claude], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[on(ClientId::Claude)], TIMEOUT, TIMEOUT);
         assert_eq!(applied[0].error, None);
         assert_eq!(
             stand.calls(),
@@ -1883,7 +1944,7 @@ exit 0
             "codex.mcp-get.out",
             &CODEX_GET.replace("/tmp/My App's/mnema", "/usr/local/bin/mnema"),
         );
-        let applied = apply(&stand.env(), &[ClientId::Codex], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[on(ClientId::Codex)], TIMEOUT, TIMEOUT);
         assert_eq!(applied[0].error, None);
         assert_eq!(
             stand.calls(),
@@ -1902,7 +1963,7 @@ exit 0
         stand.install("opencode");
         let file = stand.opencode_file();
         fs::write(&file, OPENCODE_JSON).unwrap();
-        let applied = apply(&stand.env(), &[], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].error, None);
         // Neither the state nor the change ran the CLI.
@@ -1948,7 +2009,7 @@ exit 0
         );
         let applied = apply(
             &stand.env(),
-            &[ClientId::Claude, ClientId::Codex],
+            &[on(ClientId::Claude), on(ClientId::Codex)],
             TIMEOUT,
             TIMEOUT,
         );
@@ -1980,7 +2041,7 @@ exit 0
             state.error.as_deref(),
             Some("could not read the user config")
         );
-        let applied = apply(&stand.env(), &[ClientId::Claude], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[on(ClientId::Claude)], TIMEOUT, TIMEOUT);
         assert_eq!(
             applied[0].error.as_deref(),
             Some("could not read the user config")
@@ -2001,7 +2062,7 @@ exit 0
         let states = states(&stand.env(), TIMEOUT, TIMEOUT);
         assert!(states[3].installed);
         assert_eq!(states[3].link, Some(Link::Absent));
-        let applied = apply(&stand.env(), &[ClientId::Opencode], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[on(ClientId::Opencode)], TIMEOUT, TIMEOUT);
         assert_eq!(applied[0].error, None);
         assert_eq!(
             stand.calls(),
@@ -2283,11 +2344,11 @@ exit 0
             "the shell's own words are not in the details: {:?}",
             states[0].error
         );
-        // Only the boxes the person left ticked were asked for, so only those
-        // answer; `states` is what marks all four and disables Apply.
+        // Only the listed clients were asked for, so only those answer;
+        // `states` is what marks all four and disables Apply.
         let applied = apply(
             &stand.env(),
-            &[ClientId::Claude, ClientId::Pi],
+            &[on(ClientId::Claude), on(ClientId::Pi)],
             TIMEOUT,
             TIMEOUT,
         );
@@ -2343,7 +2404,7 @@ exit 0
         fs::write(&file, OPENCODE_JSON).unwrap();
         let concurrent = "{\n  \"mcp\": {\n    \"context7\": {}\n  }\n}\n";
         let _writer = SecondWriter::arm(&file, concurrent);
-        let applied = apply(&stand.env(), &[], TIMEOUT, TIMEOUT);
+        let applied = apply(&stand.env(), &[off(ClientId::Opencode)], TIMEOUT, TIMEOUT);
         assert_eq!(applied.len(), 1);
         let error = applied[0].error.as_deref().unwrap_or_default();
         assert!(
@@ -2375,6 +2436,23 @@ exit 0
         fn drop(&mut self) {
             SECOND_WRITER.with(|writer| *writer.borrow_mut() = None);
         }
+    }
+
+    /// What Task 4's window sends: the client and the direction, deserialized
+    /// from the JSON the command receives — the direction that actually runs.
+    /// `connect: true` on purpose: a dropped or misnamed field would default to
+    /// `false` and pass a `false` fixture.
+    #[test]
+    fn a_change_reaches_the_backend_with_the_fields_it_names() {
+        let change: Change = serde_json::from_value(json!({"id": "codex", "connect": true}))
+            .expect("a change deserializes");
+        assert_eq!(
+            change,
+            Change {
+                id: ClientId::Codex,
+                connect: true,
+            }
+        );
     }
 
     /// What Task 4's window reads: four fields, and a link tagged by `kind`.

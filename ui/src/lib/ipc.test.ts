@@ -10,6 +10,7 @@ import type {
   AppPrefs,
   Applied,
   AutostartState,
+  Change,
   ClientId,
   ClientState,
   Counts,
@@ -1027,7 +1028,7 @@ test('set_chat_model and set_embedding_model carry the role\'s provider', async 
 // Task 4 of agent-connect: the two commands the Agents section calls, and the
 // wire shapes they answer with (`src-tauri/src/agent_clients.rs`).
 //
-// Both structs are pinned field for field and both enums variant for variant,
+// The structs are pinned field for field and the enums variant for variant,
 // because a rename on either side compiles cleanly on the other — there is no
 // shared compiler — and what it leaves behind is a checkbox reading `undefined`
 // or a client nobody can tick. The fixtures are typed as the very types they
@@ -1044,6 +1045,14 @@ const CLIENT_STATE_FIXTURE: ClientState = {
 test('ClientState is exactly what agent_clients.rs defines, field for field', () => {
   expect(Object.keys(CLIENT_STATE_FIXTURE).sort()).toEqual(
     rustStructFields(AGENT_CLIENTS_RS, 'ClientState').map(camelOfSnake).sort(),
+  );
+});
+
+const CHANGE_FIXTURE: Change = { id: 'codex', connect: false };
+
+test('Change is exactly what agent_clients.rs defines, field for field', () => {
+  expect(Object.keys(CHANGE_FIXTURE).sort()).toEqual(
+    rustStructFields(AGENT_CLIENTS_RS, 'Change').map(camelOfSnake).sort(),
   );
 });
 
@@ -1095,11 +1104,19 @@ test('agentClients invokes agent_clients with no arguments at all', async () => 
   expect((invoke.mock.calls.at(-1) as unknown[]).length).toBe(1);
 });
 
-test('applyAgentClients sends the wanted set under the name the command declares', async () => {
+// The changes and not a "wanted set": a client the window does not list is not
+// read, run or answered, which is what keeps a box it could not read from being
+// disconnected. Both directions of the flag travel, because the backend decides
+// add or remove from them and nothing else.
+test('applyAgentClients sends the changes under the name the command declares', async () => {
   invoke.mockResolvedValue([{ id: 'codex', error: null }]);
+  const changes: Change[] = [
+    { id: 'codex', connect: true },
+    { id: 'pi', connect: false },
+  ];
 
-  await expect(ipc.applyAgentClients(['codex', 'opencode'])).resolves.toEqual([{ id: 'codex', error: null }]);
+  await expect(ipc.applyAgentClients(changes)).resolves.toEqual([{ id: 'codex', error: null }]);
 
-  expect(invoke).toHaveBeenCalledWith('apply_agent_clients', { want: ['codex', 'opencode'] });
-  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['want']);
+  expect(invoke).toHaveBeenCalledWith('apply_agent_clients', { changes });
+  expect(Object.keys((invoke.mock.calls.at(-1) as [string, object])[1])).toEqual(['changes']);
 });

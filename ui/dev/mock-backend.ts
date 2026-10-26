@@ -16,7 +16,7 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, ClientId, ClientState, RoleCatalogue, DocumentView, HistoryEntry, IndexRead,
+  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, HistoryEntry, IndexRead,
   KeyState, LocaleChoice, ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
@@ -371,15 +371,20 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     set_agent_access: (a) => (s.agentAccess = a.on as boolean),
     agent_log: () => [],
     // The backend's own two commands: the state is the record each CLI holds,
-    // and Apply moves that record — a ticked client gets this build's path, an
-    // unticked one loses it, and a CLI that is not installed is not touched.
+    // and Apply moves only the records it names — a ticked change connects, an
+    // unticked one disconnects, and a client nobody named is left alone.
     agent_clients: () => s.clients,
     apply_agent_clients: (a) => {
-      const want = a.want as ClientId[];
-      const applied = s.clients.flatMap((one) => (one.installed ? [{ id: one.id, error: null }] : []));
-      s.clients = s.clients.map((one): ClientState => (one.installed
-        ? { ...one, link: want.includes(one.id) ? { kind: 'current' } : { kind: 'absent' } }
-        : one));
+      const changes = a.changes as Change[];
+      const applied = changes.flatMap((change) => {
+        const one = s.clients.find((client) => client.id === change.id);
+        return one?.installed ? [{ id: change.id, error: null }] : [];
+      });
+      s.clients = s.clients.map((one): ClientState => {
+        const change = changes.find((candidate) => candidate.id === one.id);
+        if (!one.installed || change === undefined) return one;
+        return { ...one, link: change.connect ? { kind: 'current' } : { kind: 'absent' } };
+      });
       return applied;
     },
     chat_tools_enabled: () => s.chatTools,
