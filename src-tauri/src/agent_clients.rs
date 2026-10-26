@@ -323,6 +323,12 @@ const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often [`run`] asks a child whether it has finished.
 const POLL: Duration = Duration::from_millis(50);
 
+/// How long a finished child's readers are given to see the end of their pipes.
+/// Not the child's own timeout: a command that exits at the last second still
+/// owes this application what it printed, and an answer cut off by the clock is
+/// not an answer.
+const READER_GRACE: Duration = Duration::from_secs(2);
+
 /// The marker the login shell is asked to print its `PATH` after.
 ///
 /// Marked rather than read as the whole output, because a login shell prints its
@@ -526,14 +532,15 @@ pub fn apply(
     let mut applied = Vec::new();
     for &id in &ALL {
         match locate(&env, id) {
-            // The shell would not say what is installed, so every client is a
-            // change this call could not make: a wanted one was not connected,
-            // an unchecked one was not disconnected, and neither can be called
-            // absent. One sentence per client, never silence.
-            Err(error) => applied.push(Applied {
+            // The shell would not say what is installed. A box the person left
+            // ticked was asked for and was not connected, so it answers with the
+            // reason; the rest were not touched by this call, and `states` is
+            // what marks all four — which is also what disables Apply.
+            Err(error) if want.contains(&id) => applied.push(Applied {
                 id,
                 error: Some(error),
             }),
+            Err(_) => {}
             // Not installed: nothing to add and nothing to remove.
             Ok(None) => {}
             Ok(Some(cli)) => {
@@ -566,7 +573,7 @@ fn apply_one(env: &Env, id: ClientId, cli: &Path, wanted: bool, timeout: Duratio
 }
 
 fn read_link(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<Link, String> {
-    let read = |args: &[&str]| run(cli, args, timeout, env.cli_path());
+    let read = |args: &[&str]| run(cli, args, timeout, READER_GRACE, env.cli_path());
     match id {
         ClientId::Claude => {
             read(&["mcp", "get", "mnema"]).and_then(|out| parse_claude(&out, &env.ours))
@@ -601,7 +608,7 @@ fn remove(env: &Env, id: ClientId, cli: &Path, timeout: Duration) -> Result<(), 
 /// Runs a command that is only interesting when it fails, and answers with the
 /// CLI's own words when it does.
 fn ran(program: &Path, args: &[&str], timeout: Duration, env: &Env) -> Result<(), String> {
-    let out = run(program, args, timeout, env.cli_path())?;
+    let out = run(program, args, timeout, READER_GRACE, env.cli_path())?;
     if out.code == 0 {
         return Ok(());
     }
@@ -690,10 +697,17 @@ fn second_writer_window() {
 ///
 /// A child that outlives `timeout` is killed **and waited for** — an unreaped
 /// child is a zombie holding its pid for as long as this application runs.
+///
+/// A child that exits is given `grace` for its pipes to end. A reader still open
+/// after it holds a pipe that something the child started has not let go of:
+/// that is an error and never an empty answer, because an empty `claude mcp get`
+/// reads as "no server connected" and the person's record would then never be
+/// removed.
 fn run(
     program: &Path,
     args: &[&str],
     timeout: Duration,
+    grace: Duration,
     path: Option<&str>,
 ) -> Result<Output, String> {
     let mut command = Command::new(program);
@@ -722,17 +736,24 @@ fn run(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // The child is gone; what it started is not wanted, and its
-                // pipes are the only reason the readers below could otherwise
-                // wait as long as a background job lives. A group with nothing
-                // left in it is an `ESRCH` no-op.
-                kill_group(&mut child);
+                // Their own grace, not what is left of the child's clock: a
+                // command that exits at the last second still owes its output.
+                let end = Instant::now() + grace;
+                let (stdout, stderr) = (joined(stdout, end), joined(stderr, end));
+                let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+                    // Something the child started still holds one of the pipes,
+                    // so the answer is cut short. It is a member of the child's
+                    // group — which is the one case where signalling that group
+                    // is both safe (a member keeps the id alive) and right.
+                    kill_group(&mut child);
+                    return Err(format!("{} kept its output open", program.display()));
+                };
                 return Ok(Output {
                     // A signal has no exit code, and -1 is not a code any CLI
                     // answers with.
                     code: status.code().unwrap_or(-1),
-                    stdout: joined(stdout, deadline),
-                    stderr: joined(stderr, deadline),
+                    stdout,
+                    stderr,
                 });
             }
             Ok(None) if Instant::now() >= deadline => {
@@ -766,6 +787,7 @@ fn kill_group(child: &mut Child) {
     let _ = Command::new("kill")
         .arg("-KILL")
         .arg(format!("-{}", child.id()))
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -787,16 +809,26 @@ fn drain(mut stream: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<St
     receive
 }
 
-/// A reader's text, and never a wait past `deadline`: a pipe reaches EOF only
-/// when every process holding it closes it, and that is not always the child.
-fn joined(reader: Option<std::sync::mpsc::Receiver<String>>, deadline: Instant) -> String {
-    reader
-        .and_then(|receive| {
-            receive
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .ok()
-        })
-        .unwrap_or_default()
+/// A reader's text, or `None` when `deadline` came first: a pipe reaches EOF
+/// only when every process holding it closes it, and that is not always the
+/// child. `None` is not an empty answer — the caller must tell them apart.
+fn joined(reader: Option<std::sync::mpsc::Receiver<String>>, deadline: Instant) -> Option<String> {
+    match reader {
+        None => Some(String::new()),
+        Some(receive) => receive
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok(),
+    }
+}
+
+/// The directories of a `PATH` this application will run a CLI from: absolute
+/// ones only.
+///
+/// A shell reads `.`, `bin` and `node_modules/.bin` against its own working
+/// directory; this application's working directory is wherever it happened to be
+/// started from, which is not a place to find an agent.
+fn search_dirs(path: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path).filter(|dir| dir.is_absolute())
 }
 
 /// The first directory of `path` that holds an executable file called `name`.
@@ -806,10 +838,7 @@ fn joined(reader: Option<std::sync::mpsc::Receiver<String>>, deadline: Instant) 
 /// a command per client. `tcsh` has no `-lc` and `fish` has no `$1`, so a shell
 /// asked to run `command -v` is a shell that answers nothing at all.
 fn resolve(path: &str, name: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        // An empty entry means "here" to a shell, and here is not a directory
-        // this application may run a CLI from.
-        .filter(|dir| !dir.as_os_str().is_empty())
+    search_dirs(path)
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))
 }
@@ -828,7 +857,13 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// One start of a login shell, asked for its `PATH`.
 fn ask(shell: &Path, timeout: Duration) -> Result<String, String> {
-    let out = run(shell, &["-l", "-c", PATH_QUESTION], timeout, None)?;
+    let out = run(
+        shell,
+        &["-l", "-c", PATH_QUESTION],
+        timeout,
+        READER_GRACE,
+        None,
+    )?;
     after_last_mark(&out.stdout).ok_or_else(|| {
         let said = said(&out);
         if said.is_empty() {
@@ -2067,6 +2102,18 @@ exit 0
         );
     }
 
+    /// Only absolute entries are searched: `.`, `bin` and `node_modules/.bin`
+    /// mean a shell's working directory, and this application's is wherever it
+    /// happened to be started from.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_entry_that_is_relative_is_not_searched() {
+        assert_eq!(
+            search_dirs(".:bin:/usr/local/bin:node_modules/.bin::/bin").collect::<Vec<_>>(),
+            [PathBuf::from("/usr/local/bin"), PathBuf::from("/bin")]
+        );
+    }
+
     /// A child that outstays its timeout is killed with everything it started,
     /// and waited for: a kill without the wait leaves a zombie whose pid answers
     /// `kill -0` until this process exits.
@@ -2086,7 +2133,7 @@ exit 0
             ),
         );
         let started = Instant::now();
-        let error = run(&script, &[], Duration::from_secs(2), None).unwrap_err();
+        let error = run(&script, &[], Duration::from_secs(2), READER_GRACE, None).unwrap_err();
         assert!(error.contains("timed out after 2 s"), "{error}");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -2098,36 +2145,72 @@ exit 0
         }
     }
 
-    /// A command that leaves a background job behind finishes when it finishes:
-    /// the job inherits the pipes, and a pipe reaches EOF only when every holder
-    /// closes it.
+    /// A command whose output is still held after the grace is an error and
+    /// never an empty answer: an empty `claude mcp get` reads as "no server
+    /// connected", and the person's record would then never be removed.
     #[cfg(unix)]
     #[test]
-    fn a_command_that_leaves_a_background_job_returns_and_the_job_is_gone() {
+    fn a_command_whose_output_stays_open_is_an_error_not_an_empty_answer() {
         let dir = TempDir::new().unwrap();
         let job_file = dir.path().join("job");
         let script = executable(
-            &dir.path().join("leaver"),
+            &dir.path().join("holder"),
             &format!(
                 "#!/bin/sh\n( sleep 30 & printf '%s\\n' \"$!\" > '{}' )\nprintf 'done\\n'\n",
                 job_file.display()
             ),
         );
         let started = Instant::now();
-        let output = run(&script, &[], Duration::from_secs(2), None)
-            .expect("a command that exits is not a timeout");
+        // A timeout far longer than the grace, so that the wait below can only
+        // have ended because of the grace.
+        let error = run(
+            &script,
+            &[],
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+            None,
+        )
+        .expect_err("a cut-off answer was handed back as a success");
+        assert!(error.contains("kept its output open"), "{error}");
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the background job kept the pipes open"
+            started.elapsed() < Duration::from_secs(5),
+            "the grace did not end the wait"
         );
-        assert_eq!(output.code, 0);
-        assert!(
-            output.stdout.contains("done"),
-            "the output was lost behind the job: {:?}",
-            output.stdout
-        );
+        // The group is ended when the pipe is held: a member of it holds it.
         let job = wait_for_text(&job_file);
-        assert!(wait_gone(&job), "the job outlived its command: {job}");
+        assert!(wait_gone(&job), "the holder outlived its command: {job}");
+    }
+
+    /// A background job that kept no pipe is none of this application's
+    /// business: a login shell's `(brew update &)` may not be killed by opening
+    /// a settings section.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_command_leaves_a_background_job_that_holds_no_pipe_alone() {
+        let dir = TempDir::new().unwrap();
+        let job_file = dir.path().join("job");
+        let script = executable(
+            &dir.path().join("quiet"),
+            &format!(
+                "#!/bin/sh\n( sleep 30 >/dev/null 2>&1 & printf '%s\\n' \"$!\" > '{}' )\nprintf 'done\\n'\n",
+                job_file.display()
+            ),
+        );
+        let output = run(
+            &script,
+            &[],
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            None,
+        )
+        .expect("a command with nothing holding its pipes is a success");
+        assert_eq!(output.code, 0);
+        assert_eq!(output.stdout, "done\n");
+        let job = wait_for_text(&job_file);
+        assert!(alive(&job), "the command killed a job it did not start");
+        // Cleanup: nobody else is going to end this one.
+        let _ = Command::new("kill").arg("-KILL").arg(&job).status();
+        assert!(wait_gone(&job), "the job would not die: {job}");
     }
 
     /// A reader that answers late is not waited for past the deadline: a pipe
@@ -2143,7 +2226,7 @@ exit 0
         });
         let started = Instant::now();
         let text = joined(Some(receive), Instant::now() + Duration::from_millis(50));
-        assert_eq!(text, "");
+        assert_eq!(text, None, "a deadline is not an empty answer");
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "the answer waited past its deadline"
@@ -2200,11 +2283,25 @@ exit 0
             "the shell's own words are not in the details: {:?}",
             states[0].error
         );
-        // A wanted client was not connected and an unchecked one was not
-        // disconnected; neither can be called absent, so neither is dropped.
-        let applied = apply(&stand.env(), &[ClientId::Claude], TIMEOUT, TIMEOUT);
-        assert_eq!(applied.len(), 4);
-        assert!(applied.iter().all(|applied| applied.error.is_some()));
+        // Only the boxes the person left ticked were asked for, so only those
+        // answer; `states` is what marks all four and disables Apply.
+        let applied = apply(
+            &stand.env(),
+            &[ClientId::Claude, ClientId::Pi],
+            TIMEOUT,
+            TIMEOUT,
+        );
+        assert_eq!(
+            applied.iter().map(|applied| applied.id).collect::<Vec<_>>(),
+            [ClientId::Claude, ClientId::Pi]
+        );
+        assert!(applied.iter().all(|applied| {
+            applied
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("could not read your shell's PATH")
+        }));
     }
 
     /// `$HOME` unset and no `$XDG_CONFIG_HOME` is an error, not a relative path
