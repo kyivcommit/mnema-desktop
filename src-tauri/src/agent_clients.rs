@@ -194,29 +194,49 @@ pub fn parse_opencode(text: &str, ours: &str) -> Result<Link, String> {
     Ok(link_of(command, args, ours))
 }
 
+/// What both refusals answer: this application removes one key from a file it
+/// does not own, so a file it cannot hand back otherwise untouched is left
+/// exactly as it is.
+const UNTOUCHED: &str = "the file is not in the form opencode writes, so it is left as it is";
+
 /// The file's text with `mcp.servers.mnema` and `mcp.mnema` gone — `Ok(None)`
 /// when neither was there, so the caller has nothing to write.
 ///
-/// Text that is not plain JSON is refused rather than repaired: comments and
-/// trailing commas are a file this application has no business rewriting, and
-/// one key is not worth re-serialising a person's file to guess at.
-/// `preserve_order` is what keeps the other keys in the order they were in.
+/// A file this function cannot hand back otherwise byte-for-byte is refused,
+/// not repaired. Comments and trailing commas do not parse at all; indentation,
+/// `\u` escapes, `1e3`, an integer too wide for 64 bits and a key written twice
+/// all parse to a value whose own rendering is a different file. One key is not
+/// worth re-exporting a person's config to guess at.
 pub fn opencode_without_mnema(text: &str) -> Result<Option<String>, String> {
-    let mut root: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let mut root: Value =
+        serde_json::from_str(text).map_err(|error| format!("{UNTOUCHED}: {error}"))?;
+    let newline = text.ends_with('\n');
+    // Taken before anything is removed: this is the shape check.
+    let unmodified = written_form(&root, newline)?;
     let Some(mcp) = root.get_mut("mcp").and_then(Value::as_object_mut) else {
         return Ok(None);
     };
-    // `get_mut`, never `mcp["servers"]`: indexing *inserts* a key, and only
-    // `mnema` may come or go.
-    let mut removed = mcp.remove("mnema").is_some();
+    // `shift_remove`, not `remove`: under `preserve_order`, `remove` is
+    // `swap_remove`, which pulls the last key into the hole.
+    let mut removed = mcp.shift_remove("mnema").is_some();
     if let Some(servers) = mcp.get_mut("servers").and_then(Value::as_object_mut) {
-        removed |= servers.remove("mnema").is_some();
+        removed |= servers.shift_remove("mnema").is_some();
     }
     if !removed {
         return Ok(None);
     }
-    let text = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
-    Ok(Some(format!("{text}\n")))
+    if unmodified != text {
+        return Err(UNTOUCHED.to_string());
+    }
+    Ok(Some(written_form(&root, newline)?))
+}
+
+/// The text `opencode` itself writes — `to_string_pretty`, plus the trailing
+/// newline the file had. Its `mcp add` leaves none; the owner's file has one,
+/// and neither is ours to change.
+fn written_form(value: &Value, newline: bool) -> Result<String, String> {
+    let text = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    Ok(if newline { format!("{text}\n") } else { text })
 }
 
 /// Replaces the file with `text` through a temporary sibling and a `rename`, so
@@ -227,9 +247,13 @@ pub fn opencode_without_mnema(text: &str) -> Result<Option<String>, String> {
 /// being filled.
 #[allow(dead_code)] // no caller in the shipped build until Task 3's `apply`
 fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let tmp = dir.join(temp_name(path));
-    let written = write_then_rename(&tmp, path, text);
+    // A dotfiles `opencode.json` is a symlink: renaming onto the link replaces
+    // it and leaves the file it points at untouched, so the temporary file and
+    // the rename belong beside the real one.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let tmp = dir.join(temp_name(&target));
+    let written = write_then_rename(&tmp, &target, text);
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -255,7 +279,12 @@ fn temp_name(path: &Path) -> String {
 #[allow(dead_code)] // no caller in the shipped build until Task 3's `apply`
 fn write_then_rename(tmp: &Path, path: &Path, text: &str) -> std::io::Result<()> {
     {
-        let mut file = std::fs::File::create(tmp)?;
+        // `create_new`, not `create`: a file already carrying this name is
+        // never truncated and filled with bytes it did not have.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)?;
         if let Ok(meta) = std::fs::metadata(path) {
             file.set_permissions(meta.permissions())?;
         }
@@ -308,33 +337,46 @@ To remove this server, run: claude mcp remove mnema -s user
     /// `pi mcp list --json`, exit 0 — recorded 2026-10-26.
     const PI_LIST: &str = r#"{"servers":[{"name":"mnema","scope":"global","enabled":true,"transport":"/tmp/My App's/mnema mcp","state":"failed","tools":[],"error":"spawn /tmp/My App's/mnema ENOENT"}],"errors":[]}"#;
 
-    /// A whole `opencode.json` of the kind the owner keeps: a schema, keys in no
-    /// alphabetical order, one server in the old `mcp.<name>` form and two in
-    /// the new `mcp.servers.<name>` one, and nested objects under both.
+    /// A whole `opencode.json` of the kind the owner keeps, in exactly the
+    /// bytes `opencode` writes them: 2-space `to_string_pretty` with a trailing
+    /// newline, keys in no alphabetical order, `mnema` first in both places it
+    /// can sit, and nested objects under each.
     const OPENCODE_JSON: &str = r#"{
   "theme": "opencode",
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
+    "mnema": {
+      "type": "local",
+      "command": [
+        "/tmp/My App's/mnema",
+        "mcp"
+      ]
+    },
     "zeta": {
       "type": "local",
-      "command": ["zeta", "mcp"],
+      "command": [
+        "zeta",
+        "mcp"
+      ],
       "environment": {
         "Z_LAST": "1",
         "A_FIRST": "2"
       }
     },
-    "mnema": {
-      "type": "local",
-      "command": ["/tmp/My App's/mnema", "mcp"]
-    },
     "servers": {
-      "omega": {
-        "type": "local",
-        "command": ["omega", "serve"]
-      },
       "mnema": {
         "type": "local",
-        "command": ["/Applications/Mnema.app/Contents/MacOS/mnema", "mcp"]
+        "command": [
+          "/Applications/Mnema.app/Contents/MacOS/mnema",
+          "mcp"
+        ]
+      },
+      "omega": {
+        "type": "local",
+        "command": [
+          "omega",
+          "serve"
+        ]
       },
       "alpha": {
         "type": "remote",
@@ -667,41 +709,98 @@ To remove this server, run: claude mcp remove mnema -s user
 
     #[test]
     fn opencode_the_old_form_is_removed_without_adding_anything() {
-        let text = r#"{"mcp":{"context7":{"type":"remote","url":"https://x"},"mnema":{"type":"local","command":["/x/mnema","mcp"]}}}"#;
+        let text = "{\n  \"mcp\": {\n    \"context7\": {\n      \"type\": \"remote\",\n      \"url\": \"https://x\"\n    },\n    \"mnema\": {}\n  }\n}\n";
         let new = opencode_without_mnema(text).unwrap().unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&new).unwrap(),
-            json!({"mcp": {"context7": {"type": "remote", "url": "https://x"}}})
+            new,
+            "{\n  \"mcp\": {\n    \"context7\": {\n      \"type\": \"remote\",\n      \"url\": \"https://x\"\n    }\n  }\n}\n"
         );
     }
 
     #[test]
     fn opencode_an_emptied_servers_object_is_left_in_place() {
-        let text = r#"{"mcp":{"servers":{"mnema":{"type":"local","command":["/x/mnema","mcp"]}}}}"#;
+        let text = "{\n  \"mcp\": {\n    \"servers\": {\n      \"mnema\": {}\n    }\n  }\n}\n";
         let new = opencode_without_mnema(text).unwrap().unwrap();
+        assert_eq!(new, "{\n  \"mcp\": {\n    \"servers\": {}\n  }\n}\n");
+    }
+
+    #[test]
+    fn opencode_mnema_first_in_the_object_leaves_the_other_keys_in_order() {
+        // `mnema` first of four: `swap_remove` and `shift_remove` give
+        // different files here, and every other key must keep its place.
+        let text = r#"{
+  "mcp": {
+    "mnema": {},
+    "zzz": {},
+    "aaa": {},
+    "servers": {
+      "mnema": {},
+      "zzz": {},
+      "aaa": {}
+    }
+  }
+}
+"#;
         assert_eq!(
-            serde_json::from_str::<Value>(&new).unwrap(),
-            json!({"mcp": {"servers": {}}})
+            opencode_without_mnema(text),
+            Ok(Some(
+                r#"{
+  "mcp": {
+    "zzz": {},
+    "aaa": {},
+    "servers": {
+      "zzz": {},
+      "aaa": {}
+    }
+  }
+}
+"#
+                .to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn opencode_a_two_space_file_keeps_the_newline_it_had() {
+        let text = "{\n  \"mcp\": {\n    \"servers\": {\n      \"mnema\": {}\n    }\n  }\n}\n";
+        let without = text.strip_suffix('\n').unwrap();
+        let removed = "{\n  \"mcp\": {\n    \"servers\": {}\n  }\n}";
+        assert_eq!(
+            opencode_without_mnema(text),
+            Ok(Some(format!("{removed}\n")))
+        );
+        assert_eq!(
+            opencode_without_mnema(without),
+            Ok(Some(removed.to_string()))
         );
     }
 
     #[test]
     fn opencode_without_mnema_says_so_when_there_is_nothing_to_remove() {
         assert_eq!(opencode_without_mnema("{}"), Ok(None));
+        // Nothing to remove is decided before the layout check: a file nothing
+        // is written to is never refused for its shape.
         assert_eq!(
             opencode_without_mnema(r#"{"mcp":{"servers":{}}}"#),
             Ok(None)
         );
-        assert_eq!(opencode_without_mnema(r#"{"mcp":null}"#), Ok(None));
+        assert_eq!(opencode_without_mnema("{\n  \"mcp\": null\n}"), Ok(None));
     }
 
     #[test]
-    fn opencode_jsonc_is_refused_and_the_file_on_disk_stays_byte_identical() {
+    fn opencode_a_file_it_cannot_hand_back_unchanged_is_refused_and_left_alone() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("opencode.json");
         for text in [
-            "{\n  // the person's own comment\n  \"mcp\": {\"mnema\": {\"command\": [\"/x/mnema\", \"mcp\"]}}\n}\n",
-            "{\n  \"mcp\": {\"mnema\": {\"command\": [\"/x/mnema\", \"mcp\"]}},\n}\n",
+            // a comment and a trailing comma: not plain JSON at all
+            "{\n  // the person's own comment\n  \"mcp\": {\"mnema\": {}}\n}\n",
+            "{\n  \"mcp\": {\"mnema\": {}},\n}\n",
+            // each of these parses, and each comes back a different file
+            "{\n    \"mcp\": {\n        \"mnema\": {}\n    }\n}\n",
+            "{\"mcp\":{\"mnema\":{}}}\n",
+            "{\n  \"mcp\": {\n    \"mnema\": {}\n  },\n  \"caf\\u00e9\": \"\\u00e9\"\n}\n",
+            "{\n  \"mcp\": {\n    \"mnema\": {}\n  },\n  \"x\": 1e3\n}\n",
+            "{\n  \"mcp\": {\n    \"servers\": {}\n  },\n  \"mcp\": {\n    \"mnema\": {}\n  }\n}\n",
         ] {
             fs::write(&path, text).unwrap();
             // The exact call sequence the caller in the next task uses.
@@ -713,6 +812,8 @@ To remove this server, run: claude mcp remove mnema -s user
                     None => Ok(()),
                 });
             assert!(change.is_err(), "{text}");
+            let error = change.unwrap_err();
+            assert!(error.starts_with(UNTOUCHED), "{error}");
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
             assert_eq!(names(dir.path()), ["opencode.json"]);
         }
@@ -725,6 +826,30 @@ To remove this server, run: claude mcp remove mnema -s user
         write_atomically(&path, "{\n  \"a\": 1\n}\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\n  \"a\": 1\n}\n");
         assert_eq!(names(dir.path()), ["opencode.json"]);
+    }
+
+    /// A dotfiles `opencode.json` is a link into another directory: writing
+    /// over the link would leave the person's real file with the old text.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_a_symlinked_file_stays_a_link_and_its_target_is_rewritten() {
+        let dir = TempDir::new().unwrap();
+        let real_dir = dir.path().join("dotfiles");
+        fs::create_dir(&real_dir).unwrap();
+        let real = real_dir.join("opencode.json");
+        fs::write(&real, "{}\n").unwrap();
+        let link = dir.path().join("opencode.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomically(&link, "{\n  \"a\": 1\n}\n").unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "{\n  \"a\": 1\n}\n");
+        assert_eq!(names(&real_dir), ["opencode.json"]);
+        assert_eq!(names(dir.path()), ["dotfiles", "opencode.json"]);
     }
 
     #[cfg(unix)]
