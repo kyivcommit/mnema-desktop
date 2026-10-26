@@ -58,7 +58,9 @@ sqlite-vec = "=0.1.9"
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is for one file: `opencode.json` is edited in place, and a
+# rewrite that reorders the person's own keys is a change nobody asked for.
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 # The tokenizer's category list is Unicode general categories, so the query side
 # has to read the same property rather than approximate it. One function, no
