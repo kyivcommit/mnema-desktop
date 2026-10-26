@@ -546,49 +546,31 @@ case_ "bundle: the application must not link rmcp" \
 A=ui/src/settings/Agents.svelte
 AT=src/settings/Agents.test.ts
 
-case_ "Agents.svelte: the command shows although access is off" \
-  $A \
-  's~\{:else if on && path\}~{:else if true}~' \
-  '{:else if true}' \
-  $AT 'access is off by default and no command is shown' runner=vitest
-
 case_ "Agents.svelte: turning access on asks for off" \
   $A \
   's~setAgentAccess\(want\)~setAgentAccess(false)~' \
   'setAgentAccess(false)' \
-  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
-
-case_ "Agents.svelte: the command carries a placeholder instead of the real path" \
-  $A \
-  's~claude mcp add --scope user mnema -- \$\{quoted\} mcp~claude mcp add --scope user mnema -- mnema mcp~' \
-  'claude mcp add --scope user mnema -- mnema mcp' \
-  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+  $AT 'turning access on reads the four agents and draws one box each' runner=vitest
 
 case_ "Agents.svelte: the switch is not re-read after a change" \
   $A \
   's~    await readEnabled\(\);\n    busy = false;~    busy = false;~' \
-  '    try { await setAgentAccess(want); } catch (err) { failure = String(err); }
+  '    try { await setAgentAccess(want); } catch (err) { failure = message(err); }
     busy = false;' \
-  $AT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
+  $AT 'a failed read of the switch keeps the last known state and shows the error' runner=vitest
 
 case_ "Agents.svelte: a refused start leaves the box ticked" \
   $A \
   's~    box\.checked = on;\n~~' \
-  'what the socket says.
+  'if (on) void readClients();
   }' \
   $AT 'a refused start shows the error and does not claim access is on' runner=vitest
 
 case_ "Agents.svelte: a refused start is not shown" \
   $A \
-  's~(setAgentAccess\(want\); \} catch \(err\) \{) failure = String\(err\);~$1 failure = null;~' \
+  's~(setAgentAccess\(want\); \} catch \(err\) \{) failure = message\(err\);~$1 failure = null;~' \
   'catch (err) { failure = null; }' \
   $AT 'a refused start shows the error and does not claim access is on' runner=vitest
-
-case_ "Agents.svelte: the fragment button copies the command" \
-  $A \
-  's~copy\(json\)\}~copy(cmd)}~' \
-  'copy(cmd)}>{#key $locale}{t(' \
-  $AT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
 
 case_ "Agents.svelte: the log is listed oldest first" \
   $A \
@@ -626,28 +608,10 @@ case_ "Settings.svelte: the Agents section is left out of the navigation" \
   "'indexing', 'application'];" \
   src/settings/Settings.test.ts 'the agents section is reachable from the settings navigation' runner=vitest
 
-case_ "Agents.svelte: the path is quoted without escaping the quote" \
-  $A \
-  's~path\.replaceAll\([^\n]*?\)\}~path}~' \
-  "const quoted = \$derived(\`'\${path}'\`);" \
-  $AT 'a path with a space, a quote and a dollar sign is quoted for the shell' runner=vitest
-
-case_ "Agents.svelte: the command is drawn for an empty path" \
-  $A \
-  's~\{:else if on && path\}~{:else if on}~' \
-  '{:else if on}' \
-  $AT 'while the path is pending there is no command and no copy button' runner=vitest
-
-case_ "Agents.svelte: a rejected path read is swallowed" \
-  $A \
-  's~\(\) => \(pathFailed = true\)~() => {}~' \
-  'agentCommandPath().then((p) => (path = p), () => {});' \
-  $AT 'a rejected path read shows an error line and no copyable command' runner=vitest
-
 case_ "Agents.svelte: a failed read of the switch turns it off" \
   $A \
-  's~catch \(err\) \{ failure = String\(err\); \}\n  \}\n\n  async function toggle~catch (err) { failure = String(err); on = false; }\n  }\n\n  async function toggle~' \
-  'on = false; }' \
+  's~(async function readEnabled\(\) \{\n\s*try \{ on = await agentAccessEnabled\(\); \} catch \(err\) \{ failure = )message\(err\);( \})~${1}message(err); on = false;$2~' \
+  'failure = message(err); on = false;' \
   $AT 'a failed read of the switch keeps the last known state and shows the error' runner=vitest
 
 case_ "Agents.svelte: the switch stays enabled during a change" \
@@ -730,42 +694,6 @@ case_ "mnema mcp: the rescan description must say what started false means" \
 AG2=ui/src/settings/Agents.svelte
 AGT=src/settings/Agents.test.ts
 
-case_ "Agents.svelte: the Codex line must say codex" \
-  $AG2 \
-  's~`codex mcp add mnema~`claude mcp add mnema~' \
-  'const codex = $derived(`claude mcp add mnema' \
-  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
-
-case_ "Agents.svelte: the opencode line must say opencode" \
-  $AG2 \
-  's~`opencode mcp add --global mnema~`codex mcp add --global mnema~' \
-  'const opencode = $derived(`codex mcp add --global mnema' \
-  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
-
-case_ "Agents.svelte: the Codex line must be shell-quoted" \
-  $AG2 \
-  's~`codex mcp add mnema -- \$\{quoted\} mcp`~`codex mcp add mnema -- \$\{path\} mcp`~' \
-  'codex mcp add mnema -- ${path} mcp' \
-  $AGT 'a path with a space, a quote and a dollar sign is quoted for the shell' runner=vitest
-
-case_ "Agents.svelte: the Codex copy button must copy the Codex line" \
-  $AG2 \
-  's~copy\(codex\)~copy(cmd)~' \
-  'data-testid="agents-copy-codex" onclick={() => copy(cmd)}' \
-  $AGT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
-
-case_ "Agents.svelte: the opencode copy button must copy the opencode line" \
-  $AG2 \
-  's~copy\(opencode\)~copy(cmd)~' \
-  'data-testid="agents-copy-opencode" onclick={() => copy(cmd)}' \
-  $AGT 'the copy buttons put the command and the fragment on the clipboard' runner=vitest
-
-case_ "Agents.svelte: the JSON must be labelled for the clients that take it" \
-  ui/src/i18n/catalog.ts \
-  's~Claude Desktop, Cursor \(settings file fragment\)~Or the settings fragment~' \
-  'Or the settings fragment:' \
-  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
-
 # ── Live-stand fixes ──────────────────────────────────────────────────────────
 
 case_ "mnema client: a running app without a socket must not be launched" \
@@ -827,18 +755,6 @@ case_ "mnema mcp: the passage description must point at search_library" \
   's~run `search_library` again~run `search` again~' \
   'run `search` again' \
   mnema-cli 'mcp_descriptions_tell_the_agent_what_started_false_empty_false_and_not_found_mean' --test cli
-
-case_ "Agents.svelte: the Claude Code line must register for the user, not the directory" \
-  $AG2 \
-  's~claude mcp add --scope user mnema~claude mcp add mnema~' \
-  'claude mcp add mnema -- ${quoted}' \
-  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
-
-case_ "Agents.svelte: the opencode line must write the global config" \
-  $AG2 \
-  's~opencode mcp add --global mnema~opencode mcp add mnema~' \
-  'opencode mcp add mnema -- ${quoted}' \
-  $AGT 'turning access on calls set_agent_access with true and shows the command with the real path' runner=vitest
 
 # Owner review fix wave: unavailable documents, the app id, `--`, the slot guard,
 # the log's op labels and locale.

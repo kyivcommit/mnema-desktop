@@ -16,8 +16,8 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, RoleCatalogue, DocumentView, HistoryEntry, IndexRead, KeyState, LocaleChoice,
-  ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
+  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, HistoryEntry, IndexRead,
+  KeyState, LocaleChoice, ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
 // The history as `list_history` keeps it, with the answer each question got.
@@ -71,6 +71,7 @@ function initialState(scenario: string) {
     nextRootId: 100,
     chatTools: true,
     agentAccess: false,
+    clients: structuredClone(standClients),
   };
 }
 
@@ -113,6 +114,21 @@ const catalogue = (role: ModelRole, openRouter: boolean, mnema: boolean): RoleCa
     unreadable: 0, unreadableRecords: [],
   };
 };
+
+// The four agent CLIs as `agent_clients` answers on the owner's machine: one
+// connected, one absent, one connected with an older build's path, one CLI that
+// is not there at all. The bench's Apply moves this the way the backend moves
+// the real records — see the two commands below.
+const standClients: ClientState[] = [
+  { id: 'claude', installed: true, link: { kind: 'current' }, error: null },
+  { id: 'codex', installed: true, link: { kind: 'absent' }, error: null },
+  {
+    id: 'pi', installed: true,
+    link: { kind: 'stale', command: '/Users/u/Projects/mnema-desktop/target/debug/mnema' },
+    error: null,
+  },
+  { id: 'opencode', installed: false, link: null, error: null },
+];
 
 // The stand's tree: the fixture's rows (the answers cite them) plus enough
 // depth to show nesting, root-level files and the search checks.
@@ -354,7 +370,23 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     agent_access_enabled: () => s.agentAccess,
     set_agent_access: (a) => (s.agentAccess = a.on as boolean),
     agent_log: () => [],
-    agent_command_path: () => '/Applications/Mnema.app/Contents/MacOS/mnema',
+    // The backend's own two commands: the state is the record each CLI holds,
+    // and Apply moves only the records it names — a ticked change connects, an
+    // unticked one disconnects, and a client nobody named is left alone.
+    agent_clients: () => s.clients,
+    apply_agent_clients: (a) => {
+      const changes = a.changes as Change[];
+      const applied = changes.flatMap((change) => {
+        const one = s.clients.find((client) => client.id === change.id);
+        return one?.installed ? [{ id: change.id, error: null }] : [];
+      });
+      s.clients = s.clients.map((one): ClientState => {
+        const change = changes.find((candidate) => candidate.id === one.id);
+        if (!one.installed || change === undefined) return one;
+        return { ...one, link: change.connect ? { kind: 'current' } : { kind: 'absent' } };
+      });
+      return applied;
+    },
     chat_tools_enabled: () => s.chatTools,
     new_chat: () => {},
     set_chat_tools: (a) => ({ kind: 'stored', on: (s.chatTools = a.on as boolean) }),

@@ -6,6 +6,7 @@
 //! webview calls them.
 
 pub mod agent;
+pub mod agent_clients;
 pub mod bridge;
 pub mod dialogue;
 pub mod embed_job;
@@ -113,7 +114,8 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::agent_access_enabled,
         prefs::set_agent_access,
         agent::agent_log,
-        agent::agent_command_path,
+        agent_clients::agent_clients,
+        agent_clients::apply_agent_clients,
         open_settings,
     ]
 }

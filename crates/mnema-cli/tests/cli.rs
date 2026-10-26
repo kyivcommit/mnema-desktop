@@ -204,7 +204,7 @@ fn mcp_lists_four_tools_and_calls_search() {
     assert_eq!(init["result"]["serverInfo"]["name"], "mnema");
     assert_eq!(
         init["result"]["instructions"],
-        "Mnema is the user's local document library: their own books, papers and files, indexed on this machine. Use `search_library` whenever the user asks what their documents, books or library say about something, or asks to find something in them — in any language (e.g. «мої книжки», «мої документи», «моя бібліотека»). Mnema already indexes these documents: call `search_library` first, instead of searching the file system for them. Answer from the passages it returns and cite each fact with its path and locator."
+        "Mnema is the user's local document library: their own books, papers and files, indexed on this machine. Use `search_library` whenever the user asks what their documents, books or library say about something, or asks to find something in them — in any language (e.g. «мої книжки», «мої документи», «моя бібліотека»). Mnema already indexes these documents: call `search_library` first, instead of searching the file system for them. Answer from the passages it returns and cite each fact with its file and locator. Make each citation a Markdown link to the file's `absolutePath`: `path` is relative to the library folder and does not open on its own."
     );
 
     m.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));

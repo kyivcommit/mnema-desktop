@@ -589,7 +589,10 @@ pub fn agent_log(server: tauri::State<'_, AgentServer>) -> Vec<LogEntry> {
 }
 
 /// Where the `mnema` command-line tool sits: beside the application binary.
-#[tauri::command]
+///
+/// Not a Tauri command any more: the Agents section connects the four CLIs
+/// itself (`agent_clients.rs`), so nothing in the window asks for a path to
+/// paste. [`crate::agent_clients::Env::from_process`] is the one caller left.
 pub fn agent_command_path() -> String {
     std::env::current_exe()
         .ok()

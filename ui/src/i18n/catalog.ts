@@ -1,7 +1,10 @@
 export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_nav_models' | 'settings_nav_folders' | 'settings_nav_scanning' | 'settings_nav_application' | 'settings_nav_agents'
-  | 'agents_access_label' | 'agents_access_failed' | 'agents_path_failed' | 'agents_setup_cmd' | 'agents_setup_claude' | 'agents_setup_codex' | 'agents_setup_opencode' | 'agents_setup_json'
-  | 'agents_copy' | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
+  | 'agents_access_label' | 'agents_access_failed' | 'agents_clients_heading'
+  | 'agents_client_claude' | 'agents_client_codex' | 'agents_client_pi' | 'agents_client_opencode'
+  | 'agents_not_installed' | 'agents_stale' | 'agents_apply' | 'agents_apply_failed' | 'agents_disconnect_failed'
+  | 'agents_details' | 'agents_read_failed' | 'agents_apply_rejected' | 'agents_checking'
+  | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
@@ -170,13 +173,21 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_agents: 'Агенти',
     agents_access_label: 'Доступ агентам',
     agents_access_failed: 'Не вдалося змінити доступ:',
-    agents_path_failed: 'Не вдалося визначити шлях до команди.',
-    agents_setup_cmd: 'Команда для налаштування агента:',
-    agents_setup_claude: 'Claude Code:',
-    agents_setup_codex: 'Codex:',
-    agents_setup_opencode: 'opencode:',
-    agents_setup_json: 'Claude Desktop, Cursor (фрагмент файлу налаштувань):',
-    agents_copy: 'Копіювати',
+    agents_clients_heading: 'Підключення агентів',
+    // Product names: the same four words in both languages.
+    agents_client_claude: 'Claude Code',
+    agents_client_codex: 'Codex',
+    agents_client_pi: 'pi',
+    agents_client_opencode: 'opencode',
+    agents_not_installed: 'не встановлено',
+    agents_stale: 'застарілий шлях',
+    agents_apply: 'Застосувати',
+    agents_apply_failed: 'Не вдалося підключити {name}',
+    agents_disconnect_failed: 'Не вдалося відключити {name}',
+    agents_details: 'Деталі',
+    agents_read_failed: 'Не вдалося прочитати стан агентів:',
+    agents_apply_rejected: 'Не вдалося завершити зміни:',
+    agents_checking: 'Перевіряю агентів…',
     agents_log_heading: 'Звернення агентів',
     agents_log_empty: 'Агенти ще не зверталися',
     agents_log_passages: '{n, plural, one {# уривок} few {# уривки} many {# уривків} other {# уривка}}',
@@ -1196,13 +1207,20 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_nav_agents: 'Agents',
     agents_access_label: 'Agent access',
     agents_access_failed: 'Could not change access:',
-    agents_path_failed: 'Could not find the command to set up.',
-    agents_setup_cmd: 'Command that sets up your agent:',
-    agents_setup_claude: 'Claude Code:',
-    agents_setup_codex: 'Codex:',
-    agents_setup_opencode: 'opencode:',
-    agents_setup_json: 'Claude Desktop, Cursor (settings file fragment):',
-    agents_copy: 'Copy',
+    agents_clients_heading: 'Agent connections',
+    agents_client_claude: 'Claude Code',
+    agents_client_codex: 'Codex',
+    agents_client_pi: 'pi',
+    agents_client_opencode: 'opencode',
+    agents_not_installed: 'not installed',
+    agents_stale: 'outdated path',
+    agents_apply: 'Apply',
+    agents_apply_failed: 'Could not connect {name}',
+    agents_disconnect_failed: 'Could not disconnect {name}',
+    agents_details: 'Details',
+    agents_read_failed: 'Could not read the agent state:',
+    agents_apply_rejected: 'Could not finish applying the changes:',
+    agents_checking: 'Checking the agents…',
     agents_log_heading: 'Agent requests',
     agents_log_empty: 'No agent has asked yet',
     agents_log_passages: '{n, plural, one {# passage} other {# passages}}',
