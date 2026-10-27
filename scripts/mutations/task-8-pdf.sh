@@ -66,7 +66,7 @@ case_ "worker: the summary names the pdf text source" \
 # by a green walk and a fixed install returns nothing.
 case_ "worker: a library that will not load is not a damaged file" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                message: format!\("pdfium could not be loaded: \{e\}"\),\n            \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                rule: "malformed".to_string(),\n                reason: format!("pdfium could not be loaded: \{e\}"),\n                sha256: Some(sha256),\n            \}],}' \
+  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                message: format!\("pdfium could not be loaded: \{e\}"\),\n            \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                rule: "malformed".to_string(),\n                reason: format!("pdfium could not be loaded: \{e\}"),\n                sha256: Some(sha256),\n                reader: None,\n                reader_version: None,\n            \}],}' \
   'rule: "malformed".to_string(),
                 reason: format!("pdfium could not be loaded: {e}"),' \
   mnema-extract 'a_damaged_pdf_is_the_files_fault_and_an_unloadable_library_is_not' --test pdf

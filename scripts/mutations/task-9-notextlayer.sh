@@ -234,6 +234,6 @@ case_ "ingest: no row is written about a page the index holds" \
 # columns that read as though they described the page.
 case_ "ingest: a page's row carries no measurement of its file" \
   crates/mnema-ingest/src/lib.rs \
-  's{            None,\n        \)\?;\n    \}\n    Ok\(\(\)\)}{            Some(OnDisk \{ size_bytes: 1, mtime: 1 \}),\n        )?;\n    \}\n    Ok(())}' \
+  's{            None,\n            None,\n        \)\?;\n    \}\n    Ok\(\(\)\)}{            Some(OnDisk \{ size_bytes: 1, mtime: 1 \}),\n            None,\n        )?;\n    \}\n    Ok(())}' \
   '            Some(OnDisk { size_bytes: 1, mtime: 1 }),' \
   mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice
