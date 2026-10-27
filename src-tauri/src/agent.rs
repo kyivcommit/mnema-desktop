@@ -276,9 +276,10 @@ pub fn rescan(
 }
 
 const MAX_CONNECTIONS: usize = 8;
-/// How long a connection past the limit waits for a slot; under Codex's 60 s per call.
+/// How long a connection past the limit waits for a slot: far under the CLI's own
+/// `READ_TIMEOUT` (660 s), and under the 60 s Codex gives a tool call by default.
 const SLOT_WAIT: Duration = Duration::from_secs(30);
-const BUSY: &str = "Mnema is busy with other requests — run this call again in a few seconds";
+const BUSY: &str = "Mnema is busy with other requests — wait a few seconds and run this call again";
 const LOG_CAP: usize = 50;
 /// `sun_path` on macOS holds 104 bytes, the terminator included.
 const MAX_SOCKET_PATH: usize = 103;

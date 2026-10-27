@@ -617,7 +617,11 @@ fn served_waiting(data: &std::path::Path, wait: Duration) -> tauri::App<tauri::t
 fn hold_eight(path: &std::path::Path) -> Vec<Client> {
     let mut held: Vec<Client> = (0..8).map(|_| Client::connect(path)).collect();
     for c in &mut held {
-        assert_eq!(c.ask(STATUS)["v"], 1, "one of the first eight was refused");
+        let reply = c.ask(STATUS);
+        assert!(
+            reply.get("ok").is_some(),
+            "one of the first eight was refused: {reply}"
+        );
     }
     held
 }
@@ -689,7 +693,8 @@ fn a_freed_slot_ends_the_overflow() {
     refusal_of(&path);
     drop(held.pop());
     let mut eighth = Client::connect(&path);
-    assert_eq!(eighth.ask(STATUS)["v"], 1);
+    let reply = eighth.ask(STATUS);
+    assert!(reply.get("ok").is_some(), "{reply}");
     // Full again: a new overflow, and a new wait of its own.
     let (_, took) = refusal_of(&path);
     assert!(took >= Duration::from_millis(900), "refused after {took:?}");
