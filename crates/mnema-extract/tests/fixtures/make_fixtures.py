@@ -45,15 +45,62 @@ STAMP_TEXT = "Page 2 of 2"
 # skipped three times".
 SCAN_STAMPS = ["Page 1 of 3", "Page 2 of 3", "Page 3 of 3"]
 
+# `F2`, the font of `replacement-chars.pdf`: Helvetica with a `/ToUnicode` map
+# that sends every code to U+FFFD. That is the shape of a real book whose prose
+# font carries a map and the map is wrong, and pdfium answers it with U+FFFD for
+# every glyph, spaces included — measured on a probe built exactly like this
+# before the fixture was written, not assumed from the PDF specification.
+GARBLED_CMAP = (
+    b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+    b"/CMapName /Garbled def\n/CMapType 2 def\n"
+    b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
+    b"1 beginbfrange\n<00> <FF> [" + b" ".join([b"<FFFD>"] * 256) + b"]\nendbfrange\n"
+    b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+)
 
-def content_stream(lines: list[str]) -> bytes:
-    """A minimal text-drawing content stream, one Tj per line."""
+# A line drawn in two fonts: a book's table of contents, whose leader dots are
+# in a font without a usable map. The dots come back as a run of U+FFFD between
+# two words that have to stay two words.
+TOC_LINE = [("F1", "About the Authors"), ("F2", "...................."), ("F1", "xxi")]
+
+# A page drawn wholly in `F2`. Comfortably above TEXT_LAYER_MIN_CHARS as drawn,
+# so it is the replacement characters and not the length that decide the page.
+GARBLED_LINES = [
+    [("F2", "This whole page is drawn in a font with a broken map")],
+    [("F2", "and so is this second line of it, word for word.")],
+]
+
+
+def line_text(line: str | list[tuple[str, str]]) -> str:
+    return line if isinstance(line, str) else "".join(text for _, text in line)
+
+
+def uses_garbled(pages: list[list]) -> bool:
+    return any(
+        font == "F2" for lines in pages for line in lines if not isinstance(line, str)
+        for font, _ in line
+    )
+
+
+def content_stream(lines: list) -> bytes:
+    """A minimal text-drawing content stream, one Tj per line.
+
+    A line is a string drawn in `F1`, or a list of `(font, text)` segments; a
+    segmented line returns to `F1` after itself, so plain lines after it are
+    drawn as they always were.
+    """
     out = ["BT", "/F1 12 Tf", "14 TL", "72 720 Td"]
     for line in lines:
         # No escaping logic on purpose: the fixture text is chosen to contain no
         # parentheses or backslashes, so a naive writer stays correct and obvious.
-        assert "(" not in line and ")" not in line and "\\" not in line
-        out.append(f"({line}) Tj")
+        text = line_text(line)
+        assert "(" not in text and ")" not in text and "\\" not in text
+        if isinstance(line, str):
+            out.append(f"({line}) Tj")
+        else:
+            for font, segment in line:
+                out.append(f"/{font} 12 Tf ({segment}) Tj")
+            out.append("/F1 12 Tf")
         out.append("T*")
     out.append("ET")
     return "\n".join(out).encode("ascii")
@@ -83,12 +130,18 @@ def build(
     """
     n_pages = len(pages)
     # Object numbering: 1 catalog, 2 page tree, 3..(2+n) pages,
-    # (3+n)..(2+2n) content streams, (3+2n) the font, and — when locked —
-    # (4+2n) the encryption dictionary.
+    # (3+n)..(2+2n) content streams, (3+2n) the font, then — only when a page
+    # draws in `F2` — that font and its map, and — when locked — the
+    # encryption dictionary. A file that never draws in `F2` gets neither, so
+    # every fixture written before `F2` existed is still the same bytes.
     first_page_obj = 3
     first_stream_obj = first_page_obj + n_pages
     font_obj = first_stream_obj + n_pages
-    encrypt_obj = font_obj + 1
+    garbled = uses_garbled(pages)
+    garbled_font_obj = font_obj + 1
+    cmap_obj = font_obj + 2
+    encrypt_obj = font_obj + (3 if garbled else 1)
+    fonts = b"/F1 %d 0 R" % font_obj + (b" /F2 %d 0 R" % garbled_font_obj if garbled else b"")
 
     kids = " ".join(f"{first_page_obj + i} 0 R" for i in range(n_pages))
     objs = [
@@ -103,8 +156,8 @@ def build(
         else:
             objs.append(
                 b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-                b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
-                % (font_obj, first_stream_obj + i)
+                b"/Resources << /Font << %s >> >> /Contents %d 0 R >>"
+                % (fonts, first_stream_obj + i)
             )
     for lines in pages:
         stream = zlib.compress(content_stream(lines))
@@ -114,6 +167,14 @@ def build(
             + b"\nendstream"
         )
     objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    if garbled:
+        objs.append(
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode %d 0 R >>"
+            % cmap_obj
+        )
+        objs.append(
+            b"<< /Length %d >>\nstream\n" % len(GARBLED_CMAP) + GARBLED_CMAP + b"\nendstream"
+        )
     if locked:
         # V1/R2 is 40-bit RC4, the oldest standard handler and the one every
         # reader implements — so a reader that stops here stopped because it
@@ -158,7 +219,7 @@ def write(
     data = build(pages, locked=locked, break_page=break_page)
     (HERE / name).write_bytes(data)
     counts = [
-        sum(1 for c in "".join(lines) if not c.isspace()) for lines in pages
+        sum(1 for c in "".join(map(line_text, lines)) if not c.isspace()) for lines in pages
     ]
     print(f"{name}: {len(data)} bytes, non-whitespace chars per page {counts}")
 
@@ -219,4 +280,13 @@ if __name__ == "__main__":
     # third way to reach "this document produced no pages", and the other two
     # are a scan and a document whose pages would not load.
     write("no-pages.pdf", [])
+    # Three pages for the reader's answer to U+FFFD. Page 1 is a contents line
+    # whose leader dots are replacement characters, followed by a body line so
+    # the page clears the threshold on real text; page 2 is replacement
+    # characters only; page 3 is a neighbour with words of its own, so "page 2
+    # skipped" cannot be confused with "the document stopped at page 2".
+    write(
+        "replacement-chars.pdf",
+        [[TOC_LINE, BODY_TEXT], GARBLED_LINES, [BODY_TEXT_5, BODY_TEXT_6]],
+    )
     write_solid_png()

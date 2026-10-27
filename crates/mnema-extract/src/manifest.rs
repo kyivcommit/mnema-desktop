@@ -31,7 +31,7 @@ pub use mnema_core::manifest::{
 /// changing anything costs one re-read of every such file.
 pub const TEXT_READER_VERSION: u32 = 1;
 pub const MARKDOWN_READER_VERSION: u32 = 1;
-pub const PDF_READER_VERSION: u32 = 1;
+pub const PDF_READER_VERSION: u32 = 2;
 pub const HTML_READER_VERSION: u32 = 1;
 pub const EPUB_READER_VERSION: u32 = 1;
 pub const DOCX_READER_VERSION: u32 = 1;

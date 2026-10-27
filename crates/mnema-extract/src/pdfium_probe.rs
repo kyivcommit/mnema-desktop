@@ -153,10 +153,17 @@ pub fn probe_text_layer(path: &Path) -> Result<Vec<PageProbe>, Error> {
 /// Whitespace does not count, because a scanned page's furniture is a handful
 /// of glyphs spread over a page and the amount of space between them says
 /// nothing about how much text there is.
+///
+/// U+FFFD does not count either: it is pdfium's answer for a glyph whose font
+/// maps to nothing usable, so it marks text that could not be read, not text.
+/// A book whose prose font had a wrong `/ToUnicode` gave pages of two thousand
+/// of them, every one over the threshold. `pdf::extract_pdf` has already turned
+/// them into spaces before it counts; this is for the probe, which counts the
+/// page as pdfium returned it.
 pub(crate) fn text_layer_chars(text: &str) -> usize {
     nfc::normalise(text)
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| !c.is_whitespace() && *c != '\u{FFFD}')
         .count()
 }
 
@@ -499,6 +506,33 @@ mod tests {
         assert_eq!(pages[1], "Page 2 of 2");
     }
 
+    #[test]
+    fn a_font_mapped_to_u_fffd_reads_back_as_replacement_characters_only() {
+        // The premise `tests/pdf.rs` rests on for the skipped page of
+        // `replacement-chars.pdf`: pdfium returns that page as U+FFFD, and as
+        // more of them than the threshold — so it is the characters, not the
+        // length, that make the reader skip it. A page later emptied in the
+        // generator would be skipped for having nothing on it, and every test
+        // above it would stay green.
+        let pages = page_texts(&fixture("replacement-chars.pdf")).expect("the fixture parses");
+
+        let page = &pages[1];
+        assert!(
+            page.chars().all(|c| c == '\u{FFFD}' || c.is_whitespace()),
+            "{page:?}"
+        );
+        assert!(
+            page.chars().filter(|c| *c == '\u{FFFD}').count() >= TEXT_LAYER_MIN_CHARS,
+            "{page:?}"
+        );
+        // And the contents line: a run between two words that stay words.
+        assert!(
+            pages[0].starts_with("About the Authors\u{FFFD}"),
+            "{:?}",
+            pages[0]
+        );
+    }
+
     // These two build their manifests from `PDFIUM_API_BUILD` rather than from a
     // literal. A literal here would make the tests fight a version bump: the accept
     // case would red on *every* bump, and the refuse case would red on a bump to
@@ -560,6 +594,17 @@ mod tests {
         // Whitespace is not text: a scanner footer spread across a page is
         // still a scanner footer.
         assert_eq!(text_layer_chars(" й \r\n ї\tщ "), 3);
+    }
+
+    #[test]
+    fn replacement_characters_are_not_counted() {
+        let garbage = "\u{FFFD}".repeat(100);
+        let at_the_minimum = format!("{garbage}{}{garbage}", "x".repeat(TEXT_LAYER_MIN_CHARS));
+        assert_eq!(text_layer_chars(&at_the_minimum), TEXT_LAYER_MIN_CHARS);
+        assert!(has_text_layer(text_layer_chars(&at_the_minimum)));
+        let one_short = format!("{garbage}{}", "x".repeat(TEXT_LAYER_MIN_CHARS - 1));
+        assert_eq!(text_layer_chars(&one_short), TEXT_LAYER_MIN_CHARS - 1);
+        assert!(!has_text_layer(text_layer_chars(&one_short)));
     }
 
     #[test]

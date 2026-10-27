@@ -548,7 +548,7 @@ jobs:
       fail-fast: false
       matrix:
         leg:
-          - pr8-subfolders debt-ui-blind-tests task-8-pdf
+          - pr8-subfolders debt-ui-blind-tests task-8-pdf pdf-replacement-chars
           - embedding pr8-ui-folders task-5
           - model-config pr10e-settings task-3
           - pr9-index pr8-subfolders-linux

@@ -107,6 +107,62 @@ fn a_page_under_the_threshold_is_skipped_by_number_and_its_neighbours_are_not() 
     );
 }
 
+/// Page 1 of `replacement-chars.pdf` as it must be stored: a contents line whose
+/// leader dots pdfium returned as twenty U+FFFD, then a body line.
+const CONTENTS_PAGE_TEXT: &str = "About the Authors xxi\r\n\
+     Invented contract 4417 between Northwind Depot and Ravella Freight,";
+
+/// Page 3 of `replacement-chars.pdf`, the neighbour after the skipped page.
+const ANNEX_PAGE_TEXT: &str = "Annex C records the arbitration venue and the notice period agreed,\r\n\
+     together with the schedule of penalties for a late collection.";
+
+/// A page whose every glyph came back as U+FFFD is a page without text, the
+/// same as a scan, however many of them it holds.
+///
+/// Measured on a real library: a book whose prose font has a wrong
+/// `/ToUnicode` gave pages of two thousand U+FFFD each, every one of them over
+/// the threshold, and those pages won searches they had no words for.
+#[test]
+fn a_page_drawn_only_in_replacement_characters_is_skipped_like_a_scan() {
+    let doc =
+        extract_pdf(include_bytes!("fixtures/replacement-chars.pdf")).expect("the fixture parses");
+
+    assert_eq!(doc.skipped, vec![2], "only the page of U+FFFD is skipped");
+    assert_eq!(
+        doc.pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(
+        doc.pages[1].blocks[0].text, ANNEX_PAGE_TEXT,
+        "the page numbered 3 must carry page 3's own words"
+    );
+}
+
+/// A run of U+FFFD between words is one space: the words on either side stay
+/// two words, and nothing the file does not show is stored.
+#[test]
+fn a_run_of_replacement_characters_becomes_one_space() {
+    let doc =
+        extract_pdf(include_bytes!("fixtures/replacement-chars.pdf")).expect("the fixture parses");
+
+    assert_eq!(doc.pages[0].page_no, 1);
+    assert_eq!(doc.pages[0].blocks[0].text, CONTENTS_PAGE_TEXT);
+}
+
+/// The diagnostic and the reader agree on which page has text, and the
+/// diagnostic is handed the raw page — U+FFFD and all — so it is the counting
+/// itself that has to leave them out.
+#[test]
+fn the_probe_does_not_count_replacement_characters_as_text() {
+    let probes = probe_text_layer(&fixture("replacement-chars.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        probes.iter().map(|p| p.has_text_layer).collect::<Vec<_>>(),
+        vec![true, false, true]
+    );
+    assert_eq!(probes[1].char_count, 0, "not one U+FFFD is text");
+}
+
 /// A scan of a paper document: every page exists, none has text.
 ///
 /// Both halves, because either alone is satisfied by a mistake. A reader that
@@ -306,6 +362,7 @@ fn every_page_of_a_document_is_either_read_or_named() {
         ("one-page-text.pdf", 1u32),
         ("text-stamp-text.pdf", 3),
         ("all-scanned.pdf", 3),
+        ("replacement-chars.pdf", 3),
     ] {
         let bytes = std::fs::read(fixture(name)).expect("the fixture is on disk");
         let doc = extract_pdf(&bytes).expect("the fixture parses");
@@ -339,6 +396,7 @@ fn the_probe_and_the_reader_see_the_same_pages() {
         ("one-page-text.pdf", 1usize),
         ("text-stamp-text.pdf", 3),
         ("all-scanned.pdf", 3),
+        ("replacement-chars.pdf", 3),
     ] {
         let probes = probe_text_layer(&fixture(name)).expect("the fixture parses");
         assert_eq!(probes.len(), pages_in_the_file, "{name}");
