@@ -247,28 +247,32 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
     Ok(PdfDocument { pages, skipped })
 }
 
-/// Every run of U+FFFD, however long, as one space.
+/// Every run of U+FFFD, however long, as one space — and as none where a
+/// space would stand beside whitespace or at either end of the page.
 ///
 /// pdfium returns U+FFFD for a glyph its font maps to nothing usable — a
 /// book's leader dots, or every letter of a prose font with a wrong
 /// `/ToUnicode`. Kept, a run of them is a chunk whose vector sits near every
-/// question the library has no answer to, and an excerpt of nothing.
+/// question the library has no answer to, and an excerpt of nothing. The space
+/// exists only to keep the words on either side apart, so it is written only
+/// where there are two words to keep apart: the chunker modifies no character
+/// (`mnema_chunk`), and a doubled or leading space would reach the stored text.
 fn replacement_runs_to_spaces(text: &str) -> Cow<'_, str> {
     if !text.contains('\u{FFFD}') {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
-    let mut in_run = false;
+    let mut after_run = false;
     for c in text.chars() {
         if c == '\u{FFFD}' {
-            if !in_run {
-                out.push(' ');
-            }
-            in_run = true;
-        } else {
-            out.push(c);
-            in_run = false;
+            after_run = true;
+            continue;
         }
+        if after_run && !c.is_whitespace() && out.ends_with(|p: char| !p.is_whitespace()) {
+            out.push(' ');
+        }
+        after_run = false;
+        out.push(c);
     }
     Cow::Owned(out)
 }
@@ -285,5 +289,28 @@ fn load_failure(e: PdfiumError) -> PdfError {
             PdfiumInternalError::PasswordError | PdfiumInternalError::SecurityError,
         ) => PdfError::Encrypted,
         other => PdfError::Malformed(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replacement_runs_to_spaces;
+
+    #[test]
+    fn a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any() {
+        for (raw, kept) in [
+            (
+                "About the Authors\u{FFFD}\u{FFFD}\u{FFFD}xxi",
+                "About the Authors xxi",
+            ),
+            ("a \u{FFFD}\u{FFFD}b", "a b"),
+            ("a\u{FFFD}\u{FFFD} b", "a b"),
+            ("a\u{FFFD}\r\nb", "a\r\nb"),
+            ("\u{FFFD}\u{FFFD}ab", "ab"),
+            ("ab\u{FFFD}\u{FFFD}", "ab"),
+            ("\u{FFFD}\u{FFFD}\r\n\u{FFFD}", "\r\n"),
+        ] {
+            assert_eq!(replacement_runs_to_spaces(raw), kept, "{raw:?}");
+        }
     }
 }

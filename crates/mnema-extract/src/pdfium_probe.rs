@@ -506,6 +506,33 @@ mod tests {
         assert_eq!(pages[1], "Page 2 of 2");
     }
 
+    #[test]
+    fn a_font_mapped_to_u_fffd_reads_back_as_replacement_characters_only() {
+        // The premise `tests/pdf.rs` rests on for the skipped page of
+        // `replacement-chars.pdf`: pdfium returns that page as U+FFFD, and as
+        // more of them than the threshold — so it is the characters, not the
+        // length, that make the reader skip it. A page later emptied in the
+        // generator would be skipped for having nothing on it, and every test
+        // above it would stay green.
+        let pages = page_texts(&fixture("replacement-chars.pdf")).expect("the fixture parses");
+
+        let page = &pages[1];
+        assert!(
+            page.chars().all(|c| c == '\u{FFFD}' || c.is_whitespace()),
+            "{page:?}"
+        );
+        assert!(
+            page.chars().filter(|c| *c == '\u{FFFD}').count() >= TEXT_LAYER_MIN_CHARS,
+            "{page:?}"
+        );
+        // And the contents line: a run between two words that stay words.
+        assert!(
+            pages[0].starts_with("About the Authors\u{FFFD}"),
+            "{:?}",
+            pages[0]
+        );
+    }
+
     // These two build their manifests from `PDFIUM_API_BUILD` rather than from a
     // literal. A literal here would make the tests fight a version bump: the accept
     // case would red on *every* bump, and the refuse case would red on a bump to

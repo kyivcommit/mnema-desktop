@@ -46,10 +46,18 @@ case_ "pdf: a run of U+FFFD leaves a space between the words" \
   'out.push_str("");' \
   mnema-extract 'a_run_of_replacement_characters_becomes_one_space' --test pdf
 
-# R4. Every U+FFFD becomes its own space: twenty spaces where the leader dots
-# were, and a run that is no longer one space.
-case_ "pdf: a run of U+FFFD is one space, not one per character" \
+# R4. A run beside whitespace still writes its space: `a  b`, a doubled space
+# that the chunker keeps and the excerpt shows.
+case_ "pdf: no space is written for a run beside whitespace" \
   crates/mnema-extract/src/pdf.rs \
-  's#if !in_run \{#if true {#' \
-  'if true {' \
-  mnema-extract 'a_run_of_replacement_characters_becomes_one_space' --test pdf
+  's{if after_run && !c\.is_whitespace\(\) && }{if after_run && }' \
+  'if after_run && out.ends_with' \
+  mnema-extract 'pdf::tests::a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any' --lib
+
+# R5. A run at the start of the page writes its space: a page that begins
+# with a leading space it does not show.
+case_ "pdf: no space is written for a run at the start of the page" \
+  crates/mnema-extract/src/pdf.rs \
+  's{ && out\.ends_with\(\|p: char\| !p\.is_whitespace\(\)\)}{}' \
+  'if after_run && !c.is_whitespace() {' \
+  mnema-extract 'pdf::tests::a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any' --lib
