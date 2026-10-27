@@ -376,8 +376,9 @@ case_ "agent socket: turning access off must end the wait for a slot" \
 
 case_ "agent socket: twelve parallel searches must all be answered" \
   $A \
-  's~let deadline = \*inner\.full_since\.get_or_insert_with\(Instant::now\) \+ server\.slot_wait~let deadline = Instant::now()~' \
-  'let deadline = Instant::now();' \
+  's~if inner\.streams\.len\(\) < MAX_CONNECTIONS \{~if false {~' \
+  'if false {
+                    break inner;' \
   mnema-desktop 'twelve_parallel_searches_are_all_answered' --test agent
 
 case_ "agent socket: a path of 104 bytes must be refused with the limit named" \
