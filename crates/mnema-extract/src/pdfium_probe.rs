@@ -153,10 +153,17 @@ pub fn probe_text_layer(path: &Path) -> Result<Vec<PageProbe>, Error> {
 /// Whitespace does not count, because a scanned page's furniture is a handful
 /// of glyphs spread over a page and the amount of space between them says
 /// nothing about how much text there is.
+///
+/// U+FFFD does not count either: it is pdfium's answer for a glyph whose font
+/// maps to nothing usable, so it marks text that could not be read, not text.
+/// A book whose prose font had a wrong `/ToUnicode` gave pages of two thousand
+/// of them, every one over the threshold. `pdf::extract_pdf` has already turned
+/// them into spaces before it counts; this is for the probe, which counts the
+/// page as pdfium returned it.
 pub(crate) fn text_layer_chars(text: &str) -> usize {
     nfc::normalise(text)
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| !c.is_whitespace() && *c != '\u{FFFD}')
         .count()
 }
 
@@ -560,6 +567,17 @@ mod tests {
         // Whitespace is not text: a scanner footer spread across a page is
         // still a scanner footer.
         assert_eq!(text_layer_chars(" й \r\n ї\tщ "), 3);
+    }
+
+    #[test]
+    fn replacement_characters_are_not_counted() {
+        let garbage = "\u{FFFD}".repeat(100);
+        let at_the_minimum = format!("{garbage}{}{garbage}", "x".repeat(TEXT_LAYER_MIN_CHARS));
+        assert_eq!(text_layer_chars(&at_the_minimum), TEXT_LAYER_MIN_CHARS);
+        assert!(has_text_layer(text_layer_chars(&at_the_minimum)));
+        let one_short = format!("{garbage}{}", "x".repeat(TEXT_LAYER_MIN_CHARS - 1));
+        assert_eq!(text_layer_chars(&one_short), TEXT_LAYER_MIN_CHARS - 1);
+        assert!(!has_text_layer(text_layer_chars(&one_short)));
     }
 
     #[test]
