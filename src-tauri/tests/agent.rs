@@ -13,7 +13,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mnema_core::agent_wire::{ErrKind, Op};
 use mnema_desktop::agent::{AgentServer, agent_log, handle, rescan, socket_path};
@@ -607,20 +607,149 @@ fn an_overlong_line_is_refused_and_the_connection_closed() {
     assert!(c.is_cut(), "the connection stayed open");
 }
 
+fn served_waiting(data: &std::path::Path, wait: Duration) -> tauri::App<tauri::test::MockRuntime> {
+    let app = unfolded(data);
+    app.manage(AgentServer::with_slot_wait(wait));
+    app
+}
+
+/// Eight connections, each answered once, so every slot is registered and taken.
+fn hold_eight(path: &std::path::Path) -> Vec<Client> {
+    let mut held: Vec<Client> = (0..8).map(|_| Client::connect(path)).collect();
+    for c in &mut held {
+        let reply = c.ask(STATUS);
+        assert!(
+            reply.get("ok").is_some(),
+            "one of the first eight was refused: {reply}"
+        );
+    }
+    held
+}
+
+/// The reply a connection past the limit gets once the wait is over, and how long it took.
+fn refusal_of(path: &std::path::Path) -> (Value, Duration) {
+    let started = Instant::now();
+    let mut c = Client::connect(path);
+    let refusal = c
+        .read()
+        .expect("no refusal arrived")
+        .expect("closed with no refusal");
+    let took = started.elapsed();
+    assert_eq!(refusal["err"]["kind"], "internal", "{refusal}");
+    assert!(c.is_cut());
+    (refusal, took)
+}
+
 #[test]
-fn a_ninth_connection_is_refused() {
+fn a_ninth_connection_waits_for_a_freed_slot() {
     let data = tempfile::tempdir().unwrap();
     let app = served(data.path());
     let path = access_on(&app);
-    let mut held: Vec<Client> = (0..8).map(|_| Client::connect(&path)).collect();
-    for c in &mut held {
-        assert_eq!(c.ask(STATUS)["v"], 1, "one of the first eight was refused");
-    }
+    let mut held = hold_eight(&path);
     let mut ninth = Client::connect(&path);
-    let refusal = ninth.read().unwrap().expect("no refusal");
-    assert_eq!(refusal["err"]["kind"], "internal");
-    assert_eq!(refusal["err"]["message"], "too many connections");
-    assert!(ninth.is_cut());
+    ninth.send(format!("{STATUS}\n").as_bytes());
+    std::thread::sleep(Duration::from_millis(200));
+    drop(held.pop());
+    let reply = ninth.read().unwrap().expect("the server closed");
+    assert_eq!(reply["v"], 1, "{reply}");
+    assert!(reply.get("ok").is_some(), "{reply}");
+}
+
+#[test]
+fn a_ninth_connection_past_the_wait_is_told_to_retry() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served_waiting(data.path(), Duration::from_millis(500));
+    let path = access_on(&app);
+    let _held = hold_eight(&path);
+    let (refusal, took) = refusal_of(&path);
+    assert!(
+        refusal["err"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("run this call again"),
+        "{refusal}"
+    );
+    assert!(took >= Duration::from_millis(450), "refused after {took:?}");
+}
+
+#[test]
+fn connections_past_an_expired_wait_are_refused_at_once() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served_waiting(data.path(), Duration::from_secs(1));
+    let path = access_on(&app);
+    let _held = hold_eight(&path);
+    let (_, ninth) = refusal_of(&path);
+    assert!(ninth >= Duration::from_millis(900), "ninth after {ninth:?}");
+    let (_, tenth) = refusal_of(&path);
+    assert!(tenth < Duration::from_millis(300), "tenth after {tenth:?}");
+}
+
+#[test]
+fn a_freed_slot_ends_the_overflow() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served_waiting(data.path(), Duration::from_secs(1));
+    let path = access_on(&app);
+    let mut held = hold_eight(&path);
+    refusal_of(&path);
+    drop(held.pop());
+    let mut eighth = Client::connect(&path);
+    let reply = eighth.ask(STATUS);
+    assert!(reply.get("ok").is_some(), "{reply}");
+    // Full again: a new overflow, and a new wait of its own.
+    let (_, took) = refusal_of(&path);
+    assert!(took >= Duration::from_millis(900), "refused after {took:?}");
+}
+
+#[test]
+fn turning_access_off_cuts_a_connection_waiting_for_a_slot() {
+    let data = tempfile::tempdir().unwrap();
+    let app = served(data.path());
+    let path = access_on(&app);
+    let _held = hold_eight(&path);
+    let mut ninth = Client::connect(&path);
+    // The timeout lives on the socket, so the reader's clone sees it too.
+    ninth
+        .w
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(!ninth.is_cut(), "the ninth was not left waiting");
+    // Fails on a socket the server already closed; the assertion below says so.
+    let _ = ninth.w.set_read_timeout(Some(Duration::from_secs(5)));
+    assert!(!set_access(&app, false).unwrap());
+    assert!(ninth.is_cut(), "the waiting connection was not cut");
+}
+
+#[test]
+fn twelve_parallel_searches_are_all_answered() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = fixture_dir();
+    let app = indexed(data.path(), dir.path());
+    app.manage(AgentServer::default());
+    let path = access_on(&app);
+    // All twelve connect before any asks, so the first eight still hold their slots.
+    let ready = Arc::new(std::sync::Barrier::new(12));
+    let replies: Vec<Value> = (0..12)
+        .map(|_| {
+            let (path, ready) = (path.clone(), ready.clone());
+            std::thread::spawn(move || {
+                let mut c = Client::connect(&path);
+                ready.wait();
+                c.ask(r#"{"v":1,"op":"search","query":"fox","k":8}"#)
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect();
+    for r in &replies {
+        assert!(
+            !r["ok"]["passages"]
+                .as_array()
+                .expect("not answered")
+                .is_empty(),
+            "{r}"
+        );
+    }
 }
 
 #[test]

@@ -338,11 +338,48 @@ case_ "agent socket: a line of exactly the limit must be served" \
   'take(MAX_LINE as u64)' \
   mnema-desktop 'an_overlong_line_is_refused_and_the_connection_closed' --test agent
 
-case_ "agent socket: the ninth connection must be refused" \
+case_ "agent socket: the ninth connection must not take a slot of its own" \
   $A \
   's~inner\.streams\.len\(\) >= MAX_CONNECTIONS~inner.streams.len() > MAX_CONNECTIONS~' \
   'streams.len() > MAX_CONNECTIONS' \
-  mnema-desktop 'a_ninth_connection_is_refused' --test agent
+  mnema-desktop 'a_ninth_connection_past_the_wait_is_told_to_retry' --test agent
+
+case_ "agent socket: a waiting connection must not take a ninth slot" \
+  $A \
+  's~inner\.streams\.len\(\) < MAX_CONNECTIONS~inner.streams.len() <= MAX_CONNECTIONS~' \
+  'streams.len() <= MAX_CONNECTIONS' \
+  mnema-desktop 'a_ninth_connection_past_the_wait_is_told_to_retry' --test agent
+
+case_ "agent socket: a connection past the limit must wait, not be refused at once" \
+  $A \
+  's~let deadline = \*inner\.full_since\.get_or_insert_with\(Instant::now\) \+ server\.slot_wait~let deadline = Instant::now()~' \
+  'let deadline = Instant::now();' \
+  mnema-desktop 'a_ninth_connection_waits_for_a_freed_slot' --test agent
+
+case_ "agent socket: the overflow must share one deadline" \
+  $A \
+  's~\*inner\.full_since\.get_or_insert_with\(Instant::now\)~Instant::now()~' \
+  'let deadline = Instant::now() +' \
+  mnema-desktop 'connections_past_an_expired_wait_are_refused_at_once' --test agent
+
+case_ "agent socket: a free slot must end the overflow" \
+  $A \
+  's~inner\.full_since = None;~let _ = ();~' \
+  'let _ = ();' \
+  mnema-desktop 'a_freed_slot_ends_the_overflow' --test agent
+
+case_ "agent socket: turning access off must end the wait for a slot" \
+  $A \
+  's~^                if !inner\.running \|\| inner\.generation != generation \{~                if false {~m' \
+  '                if false {' \
+  mnema-desktop 'turning_access_off_cuts_a_connection_waiting_for_a_slot' --test agent
+
+case_ "agent socket: twelve parallel searches must all be answered" \
+  $A \
+  's~if inner\.streams\.len\(\) < MAX_CONNECTIONS \{~if false {~' \
+  'if false {
+                    break inner;' \
+  mnema-desktop 'twelve_parallel_searches_are_all_answered' --test agent
 
 case_ "agent socket: a path of 104 bytes must be refused with the limit named" \
   $A \

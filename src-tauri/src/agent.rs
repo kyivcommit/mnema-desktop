@@ -276,6 +276,10 @@ pub fn rescan(
 }
 
 const MAX_CONNECTIONS: usize = 8;
+/// How long a connection past the limit waits for a slot: far under the CLI's own
+/// `READ_TIMEOUT` (660 s), and under the 60 s Codex gives a tool call by default.
+const SLOT_WAIT: Duration = Duration::from_secs(30);
+const BUSY: &str = "Mnema is busy with other requests — wait a few seconds and run this call again";
 const LOG_CAP: usize = 50;
 /// `sun_path` on macOS holds 104 bytes, the terminator included.
 const MAX_SOCKET_PATH: usize = 103;
@@ -305,18 +309,36 @@ struct Inner {
     generation: u64,
     next_id: u64,
     streams: HashMap<u64, UnixStream>,
+    /// When the current overflow began: one deadline for every connection that
+    /// finds all slots taken until one frees.
+    full_since: Option<Instant>,
     log: VecDeque<LogEntry>,
 }
 
-#[derive(Default)]
 pub struct AgentServer {
     inner: Mutex<Inner>,
     /// Held by whoever changes the switch across persist + start/stop, which
     /// `start` and `stop` (locking `inner` themselves) cannot do alone.
     toggle: Mutex<()>,
+    slot_wait: Duration,
+}
+
+impl Default for AgentServer {
+    fn default() -> Self {
+        Self::with_slot_wait(SLOT_WAIT)
+    }
 }
 
 impl AgentServer {
+    /// A server whose connections past the limit wait `slot_wait` instead of the default.
+    pub fn with_slot_wait(slot_wait: Duration) -> Self {
+        Self {
+            inner: Mutex::default(),
+            toggle: Mutex::default(),
+            slot_wait,
+        }
+    }
+
     pub fn toggle_lock(&self) -> MutexGuard<'_, ()> {
         self.toggle.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -439,7 +461,7 @@ fn refuse(mut stream: UnixStream, kind: ErrKind, message: &str) {
 }
 
 fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation: u64) {
-    loop {
+    'accept: loop {
         let server = app.state::<AgentServer>();
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -460,10 +482,27 @@ fn accept_loop<R: Runtime>(app: AppHandle<R>, listener: UnixListener, generation
             return;
         }
         if inner.streams.len() >= MAX_CONNECTIONS {
+            // One deadline for the whole overflow: behind connections that never
+            // free their slot, only the first caller waits it out.
+            let deadline = *inner.full_since.get_or_insert_with(Instant::now) + server.slot_wait;
             drop(inner);
-            refuse(stream, ErrKind::Internal, "too many connections");
-            continue;
+            inner = loop {
+                std::thread::sleep(Duration::from_millis(20));
+                let inner = server.lock();
+                if !inner.running || inner.generation != generation {
+                    return;
+                }
+                if inner.streams.len() < MAX_CONNECTIONS {
+                    break inner;
+                }
+                if Instant::now() >= deadline {
+                    drop(inner);
+                    refuse(stream, ErrKind::Internal, BUSY);
+                    continue 'accept;
+                }
+            };
         }
+        inner.full_since = None;
         let Ok(registered) = stream.try_clone() else {
             drop(inner);
             refuse(
