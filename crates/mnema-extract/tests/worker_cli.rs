@@ -565,7 +565,9 @@ fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
         panic!("expected a header, got {:?}", frames.first());
     };
     assert_eq!(reader, "pdf");
-    assert_eq!(*reader_version, 1);
+    // 2 since U+FFFD stopped counting as text (D186): every PDF read by version
+    // 1 has to be read again.
+    assert_eq!(*reader_version, 2);
     assert_eq!(*pages, 1);
     assert_eq!(mime, "application/pdf");
 
