@@ -65,9 +65,18 @@ fn a_dead_root_id_writes_nothing_and_does_not_fail() {
     assert_eq!(rows(&db), 0);
 }
 
+/// `search_folder` arrives as migration 6, and later migrations are numbered
+/// after it rather than folded into it — the `ADD_FILE_MASK` rule, measured from
+/// the other end.
+///
+/// The assertion is on the current version rather than on 6, because a build
+/// that appended the journal's reader columns to migration 6 would leave every
+/// index already at 6 without them; that defect is caught by
+/// `a_v6_index_keeps_its_skip_rows_and_they_name_no_reader` in the migrations
+/// module, and this line is what says the numbering moved.
 #[test]
-fn the_migration_is_the_sixth() {
-    assert_eq!(SCHEMA_VERSION, 6);
+fn search_folder_arrives_as_the_sixth_migration() {
+    assert_eq!(SCHEMA_VERSION, 7);
     let db = temp_db();
     assert_eq!(rows(&db), 0, "a fresh database has the table, empty");
 }

@@ -70,6 +70,102 @@ GARBLED_LINES = [
     [("F2", "and so is this second line of it, word for word.")],
 ]
 
+# `F2` of `broken-utf16.pdf`: pdfium's own answer to a font whose map sends one
+# code to a lone UTF-16 surrogate. Identity for printable ASCII, except code
+# 0x58, which becomes U+D800. **0x58 must lie outside every bfrange**: a range
+# wins over a bfchar for the same code, and the probe that established this map
+# read the page back as ordinary text until 0x58 was cut out of the range.
+# Written as an array so every other code maps to itself — the probe's single
+# destination `<0059>` turned every letter above 0x58 into `Y`, which a fixture
+# asserting an exact line cannot use.
+BROKEN_CMAP = (
+    b"/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+    b"/CMapName /Broken def\n/CMapType 2 def\n"
+    b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
+    b"2 beginbfrange\n<20> <57> <0020>\n<59> <7E> ["
+    + b" ".join(b"<%04X>" % code for code in range(0x59, 0x7F))
+    + b"]\nendbfrange\n"
+    b"1 beginbfchar\n<58> <D800>\nendbfchar\n"
+    b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+)
+
+# `broken-utf16.pdf`, page 2: a page that clears the threshold on its own words,
+# with the word drawn in `F2` in the middle of a line — the shape of a real page
+# where one glyph's map is wrong and the reader loses the whole page. `X` is the
+# one code `BROKEN_CMAP` sends to a surrogate.
+BROKEN_LINE = "A damaged mapping in the middle of this line"
+BROKEN_SEGMENTS = [
+    ("F1", "drops the word"),
+    ("F2", "X"),
+    ("F1", "from the index silently."),
+]
+
+# Page 3 of the same file: nothing but the broken code, well over the threshold,
+# so the page is decided by the characters and not by the page being short.
+BROKEN_ONLY = [("F2", "X" * 60)]
+
+# Page 2 carries a CropBox as well, and a slug above it, because the two
+# mechanisms meet on a real page: the box says what is visible, the broken glyph
+# says the string pdfium built for that box cannot be decoded. A fallback that
+# reads every character instead of the box's characters brings this slug back.
+BROKEN_CROP_BOX = "[89 72 522 720]"
+
+# …and its first line starts at x=85, four points left of that box, so `A` is a
+# glyph crossing the box's edge. pdfium's bounded read keeps it (its test is an
+# intersection, not a containment), and the per-character fallback has to agree
+# or the page it rescues loses its first letter.
+BROKEN_CROP_ORIGIN = 85
+
+# `offset-cropbox.pdf`, page 1: the box measured on a library of books (D187) —
+# width 531, height 666, starting at (130.5, 279). The reader's `all()` reads
+# width×height from `(0,0)`, so a page whose text is drawn above y=666 comes
+# back empty however much text it holds.
+OFFSET_BOX = "[130.5 279 661.5 945]"
+
+# Page 2 of the same file: its own origin, a CropBox moved off it — width 433,
+# so a line ending at x≈478 is cut, which is the shape D187 measured on a
+# book's line ends.
+CROPPED_LINE = "Invented ledger entry 4417 lists every pallet hauled to the Ravella yard,"
+CROPPED_LINE_2 = "and the depot clerk signs each page of it before the wagon leaves."
+
+# Between the CropBox top (720) and the MediaBox top (792), and above the
+# rectangle `all()` reads (0..648): visible to the file, invisible on the page.
+# A press slug is exactly this (D187).
+CROPPED_SLUG = "INVENTED PRESS SLUG 4417 2012-08-27"
+
+# Page 3: the same moved MediaBox and no CropBox at all, its text above the
+# `page_size` rectangle as page 1's is. A reader that falls back to
+# `page_size()` rather than to the MediaBox loses this page the way it loses
+# page 1 — and no existing fixture can tell the two boxes apart, because every
+# one of them has a MediaBox at `[0 0 612 792]`.
+UNBOXED_PAGE_TEXT = [BODY_TEXT_3, BODY_TEXT_4]
+
+# `broken-utf16.pdf` page 2 also carries a line that runs past its CropBox's
+# right edge (522), which is the shape D187 measured. pdfium puts the generated
+# line break at the end of such a line — outside the box — so a fallback that
+# drops everything outside the box fuses the cut line with the one after it
+# (`…weekand the depot…`). The break has to be rebuilt.
+CUT_LINE = "Invented ledger entry 4417 lists every pallet hauled to the Ravella yard gate that week,"
+
+# `page-boxes.pdf`: the three ways a page's boxes are stated, and the one way
+# they are not. Both boxes sit on the `/Pages` node, where a real book often
+# keeps them (D187): a CropBox inherited that way is resolved by `pdfinfo`,
+# while `pdfium-render`'s `crop()` and `media()` read only the page dictionary
+# and answer `Err`. A reader that asks those two boxes loses this document.
+TREE_BOX = "[100 200 700 900]"  # MediaBox on /Pages: 600 × 700
+TREE_CROP = "[130.5 279 661.5 890]"  # CropBox on /Pages: 531 × 611
+
+# Page 2's own CropBox is degenerate, the shape broken producers write. pdfium
+# treats an empty box as absent and shows the MediaBox instead; a reader that
+# takes the raw box finds no character in it and calls the page a scan.
+DEGENERATE_CROP = "[0 0 0 0]"
+
+# Page 3's own CropBox is wider than the MediaBox on every side, which mixed
+# A4/Letter conversions produce. The viewer clips at the MediaBox, so text
+# between the two boxes is invisible and must not be indexed.
+WIDER_CROP = "[0 0 900 1000]"
+OUTSIDE_MEDIA_SLUG = "INVENTED COVER SPREAD 4417"
+
 
 def line_text(line: str | list[tuple[str, str]]) -> str:
     return line if isinstance(line, str) else "".join(text for _, text in line)
@@ -82,14 +178,17 @@ def uses_garbled(pages: list[list]) -> bool:
     )
 
 
-def content_stream(lines: list) -> bytes:
+def content_stream(lines: list, x: int = 72, y: int = 720, size: int = 12) -> bytes:
     """A minimal text-drawing content stream, one Tj per line.
 
     A line is a string drawn in `F1`, or a list of `(font, text)` segments; a
     segmented line returns to `F1` after itself, so plain lines after it are
     drawn as they always were.
+
+    The origin and size default to the ones every fixture before
+    `offset-cropbox.pdf` was drawn at, so that their bytes do not move.
     """
-    out = ["BT", "/F1 12 Tf", "14 TL", "72 720 Td"]
+    out = ["BT", f"/F1 {size} Tf", f"{size + 2} TL", f"{x} {y} Td"]
     for line in lines:
         # No escaping logic on purpose: the fixture text is chosen to contain no
         # parentheses or backslashes, so a naive writer stays correct and obvious.
@@ -99,15 +198,21 @@ def content_stream(lines: list) -> bytes:
             out.append(f"({line}) Tj")
         else:
             for font, segment in line:
-                out.append(f"/{font} 12 Tf ({segment}) Tj")
-            out.append("/F1 12 Tf")
+                out.append(f"/{font} {size} Tf ({segment}) Tj")
+            out.append(f"/F1 {size} Tf")
         out.append("T*")
     out.append("ET")
     return "\n".join(out).encode("ascii")
 
 
 def build(
-    pages: list[list[str]], locked: bool = False, break_page: int | None = None
+    pages: list[list[str]],
+    locked: bool = False,
+    break_page: int | None = None,
+    cmap: bytes = GARBLED_CMAP,
+    boxes: dict[int, tuple[str | None, str | None]] | None = None,
+    layout: dict[int, list[tuple[tuple[int, int, int], list]]] | None = None,
+    pages_boxes: tuple[str | None, str | None] | None = None,
 ) -> bytes:
     """Assembles a PDF whose pages draw the given lines, in the given order.
 
@@ -144,9 +249,16 @@ def build(
     fonts = b"/F1 %d 0 R" % font_obj + (b" /F2 %d 0 R" % garbled_font_obj if garbled else b"")
 
     kids = " ".join(f"{first_page_obj + i} 0 R" for i in range(n_pages))
+    tree_boxes = b""
+    if pages_boxes is not None:
+        media, crop = pages_boxes
+        tree_boxes = (b" /MediaBox %s" % media.encode("ascii") if media else b"") + (
+            b" /CropBox %s" % crop.encode("ascii") if crop else b""
+        )
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids.encode("ascii"), n_pages),
+        b"<< /Type /Pages /Kids [%s] /Count %d%s >>"
+        % (kids.encode("ascii"), n_pages, tree_boxes),
     ]
     for i in range(n_pages):
         if i == break_page:
@@ -154,13 +266,31 @@ def build(
             # and is not a page.
             objs.append(b"null")
         else:
-            objs.append(
-                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-                b"/Resources << /Font << %s >> >> /Contents %d 0 R >>"
-                % (fonts, first_stream_obj + i)
+            # `boxes` names a page's MediaBox and, when it has one, its CropBox;
+            # the default is the one every fixture before `offset-cropbox.pdf`
+            # was written with. With `pages_boxes`, a page that names no box of
+            # its own inherits both from the tree.
+            if i in (boxes or {}):
+                media, crop = boxes[i]
+            elif pages_boxes is not None:
+                media, crop = (None, None)
+            else:
+                media, crop = ("[0 0 612 792]", None)
+            page_boxes = (b" /MediaBox %s" % media.encode("ascii") if media else b"") + (
+                b" /CropBox %s" % crop.encode("ascii") if crop else b""
             )
-    for lines in pages:
-        stream = zlib.compress(content_stream(lines))
+            objs.append(
+                b"<< /Type /Page /Parent 2 0 R%s "
+                b"/Resources << /Font << %s >> >> /Contents %d 0 R >>"
+                % (page_boxes, fonts, first_stream_obj + i)
+            )
+    for i, lines in enumerate(pages):
+        # `layout` splits a page into text blocks at different origins; the
+        # default is the single block every other fixture is drawn as.
+        blocks = (layout or {}).get(i, [((72, 720, 12), lines)])
+        stream = zlib.compress(
+            b"\n".join(content_stream(block, *origin) for origin, block in blocks)
+        )
         objs.append(
             b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(stream)
             + stream
@@ -172,9 +302,7 @@ def build(
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode %d 0 R >>"
             % cmap_obj
         )
-        objs.append(
-            b"<< /Length %d >>\nstream\n" % len(GARBLED_CMAP) + GARBLED_CMAP + b"\nendstream"
-        )
+        objs.append(b"<< /Length %d >>\nstream\n" % len(cmap) + cmap + b"\nendstream")
     if locked:
         # V1/R2 is 40-bit RC4, the oldest standard handler and the one every
         # reader implements — so a reader that stops here stopped because it
@@ -215,8 +343,9 @@ def write(
     pages: list[list[str]],
     locked: bool = False,
     break_page: int | None = None,
+    **build_options,
 ) -> None:
-    data = build(pages, locked=locked, break_page=break_page)
+    data = build(pages, locked=locked, break_page=break_page, **build_options)
     (HERE / name).write_bytes(data)
     counts = [
         sum(1 for c in "".join(map(line_text, lines)) if not c.isspace()) for lines in pages
@@ -288,5 +417,75 @@ if __name__ == "__main__":
     write(
         "replacement-chars.pdf",
         [[TOC_LINE, BODY_TEXT], GARBLED_LINES, [BODY_TEXT_5, BODY_TEXT_6]],
+    )
+    # The two ways `all()` loses text a person can see. Page 1 is moved off the
+    # origin together with its text, the shape D187 measured (`left 130.5,
+    # bottom 279`): every line sits above the width×height rectangle read from
+    # `(0,0)`, and the page comes back as a scan. Page 2 keeps its origin and
+    # moves only its CropBox, which cuts the ends of its lines instead of
+    # emptying the page; its press slug lies between the CropBox top and the
+    # MediaBox top, where a reader of every character would find it and a reader
+    # of the visible page must not.
+    write(
+        "offset-cropbox.pdf",
+        [
+            [BODY_TEXT, BODY_TEXT_2],
+            [CROPPED_LINE, CROPPED_LINE_2],
+            UNBOXED_PAGE_TEXT,
+        ],
+        boxes={
+            0: (OFFSET_BOX, OFFSET_BOX),
+            1: ("[0 0 612 792]", "[89 72 522 720]"),
+            2: (OFFSET_BOX, None),
+        },
+        layout={
+            0: [((150, 760, 12), [BODY_TEXT, BODY_TEXT_2])],
+            1: [
+                ((100, 750, 10), [CROPPED_SLUG]),
+                ((100, 600, 12), [CROPPED_LINE, CROPPED_LINE_2]),
+            ],
+            2: [((150, 760, 12), UNBOXED_PAGE_TEXT)],
+        },
+    )
+    # A page whose `/ToUnicode` sends one code to a lone surrogate. Page 2 has
+    # the broken word in the middle of ordinary text and has to survive it; page
+    # 3 is nothing but the broken code and is a scan in every sense but the
+    # reason, which is why it stays skipped. Page 2 also carries a CropBox and a
+    # slug outside it, so the fallback that keeps the page must keep the box too.
+    write(
+        "broken-utf16.pdf",
+        [[BODY_TEXT, BODY_TEXT_2], [BROKEN_LINE, BROKEN_SEGMENTS], [BROKEN_ONLY]],
+        cmap=BROKEN_CMAP,
+        boxes={1: ("[0 0 612 792]", BROKEN_CROP_BOX)},
+        layout={
+            1: [
+                ((100, 750, 10), [CROPPED_SLUG]),
+                ((BROKEN_CROP_ORIGIN, 600, 12), [BROKEN_LINE, BROKEN_SEGMENTS]),
+                ((BROKEN_CROP_ORIGIN, 572, 12), [CUT_LINE, CROPPED_LINE_2]),
+            ]
+        },
+    )
+    # The box a page is read within, and the three ways a file can state it
+    # wrongly: inherited, degenerate, and wider than the MediaBox. Page 1 has no
+    # box of its own at all; page 2 declares an empty CropBox; page 3 declares a
+    # CropBox that reaches past the MediaBox on every side, with its slug in the
+    # part a viewer clips.
+    write(
+        "page-boxes.pdf",
+        [
+            [BODY_TEXT, BODY_TEXT_2],
+            [BODY_TEXT_3, BODY_TEXT_4],
+            [BODY_TEXT_5, BODY_TEXT_6],
+        ],
+        pages_boxes=(TREE_BOX, TREE_CROP),
+        boxes={1: (None, DEGENERATE_CROP), 2: (None, WIDER_CROP)},
+        layout={
+            0: [((150, 760, 12), [BODY_TEXT, BODY_TEXT_2])],
+            1: [((150, 760, 12), [BODY_TEXT_3, BODY_TEXT_4])],
+            2: [
+                ((150, 950, 10), [OUTSIDE_MEDIA_SLUG]),
+                ((150, 500, 12), [BODY_TEXT_5, BODY_TEXT_6]),
+            ],
+        },
     )
     write_solid_png()

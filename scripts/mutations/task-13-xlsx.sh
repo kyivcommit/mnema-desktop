@@ -41,7 +41,7 @@
 
 # C1. The name is one symbol across a process boundary and across D40, and this
 # format is the one where a near-miss is quietest: `pages_of` matches it to reach
-# `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1403`), and the fallback
+# `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1515`), and the fallback
 # arm asks blocks that DO carry numbers for a line range — so the citation is
 # non-empty, plausible and nameless.
 case_ "worker: the header names the xlsx reader, not a near-miss" \
@@ -357,9 +357,11 @@ case_ "reader: damage is not emptiness" \
 # build a `.xlsx` got the second one.
 case_ "worker: a workbook with no text is refused by content" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~            Err\(e \@ XlsxError::NoText\) => vec!\[Frame::Refused \{\n                rule: "no_text_layer"\.to_string\(\),~            Err(e \@ XlsxError::NoText) => vec![Frame::Refused {\n                rule: "unsupported".to_string(),~' \
-  'Err(e @ XlsxError::NoText) => vec![Frame::Refused {
-                rule: "unsupported".to_string(),' \
+  's~(Err\(e @ XlsxError::NoText\) => vec!\[reader_refused\(.*?)"no_text_layer",~${1}"unsupported",~s' \
+  'Err(e @ XlsxError::NoText) => vec![reader_refused(
+                manifest::READER_XLSX,
+                manifest::XLSX_READER_VERSION,
+                "unsupported",' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C34. Every refusal that read the file owes the digest of what it read:
@@ -368,11 +370,13 @@ case_ "worker: a workbook with no text is refused by content" \
 # moved.
 case_ "worker: an xlsx refusal carries the digest it was reached on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~            Err\(e \@ XlsxError::TooLarge\) => vec!\[Frame::Refused \{\n                rule: "too_large"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),~            Err(e \@ XlsxError::TooLarge) => vec![Frame::Refused {\n                rule: "too_large".to_string(),\n                reason: e.to_string(),\n                sha256: None,~' \
-  'Err(e @ XlsxError::TooLarge) => vec![Frame::Refused {
-                rule: "too_large".to_string(),
-                reason: e.to_string(),
-                sha256: None,' \
+  's~(Err\(e @ XlsxError::TooLarge\) => vec!\[reader_refused\(.*?)Some\(sha256\),~${1}None,~s' \
+  'Err(e @ XlsxError::TooLarge) => vec![reader_refused(
+                manifest::READER_XLSX,
+                manifest::XLSX_READER_VERSION,
+                "too_large",
+                e.to_string(),
+                None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C35. An `.xlsm` is the same part read the same way. An extension check anywhere

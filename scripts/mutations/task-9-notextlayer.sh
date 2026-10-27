@@ -40,7 +40,7 @@
 # anywhere else — the journal even records why each one went.
 case_ "ingest: a scan refuses on the bytes it was refused on" \
   crates/mnema-ingest/src/lib.rs \
-  's{        SkipRule::NoTextLayer => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{        SkipRule::NoTextLayer => true,}' \
+  's~        SkipRule::NoTextLayer => \{\n            content\.is_none_or\(.*?\n        \}~        SkipRule::NoTextLayer => true,~s' \
   '        SkipRule::NoTextLayer => true,' \
   mnema-ingest 'a_scanned_file_keeps_its_document_when_the_bytes_did_not_move' --test slice
 
@@ -50,7 +50,7 @@ case_ "ingest: a scan refuses on the bytes it was refused on" \
 # still answering under its name with prose it no longer contains.
 case_ "ingest: a scan over different bytes still takes the old document away" \
   crates/mnema-ingest/src/lib.rs \
-  's{        SkipRule::NoTextLayer => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),}{        SkipRule::NoTextLayer => false,}' \
+  's~        SkipRule::NoTextLayer => \{\n            content\.is_none_or\(.*?\n        \}~        SkipRule::NoTextLayer => false,~s' \
   '        SkipRule::NoTextLayer => false,' \
   mnema-ingest 'a_scanned_file_keeps_its_document_when_the_bytes_did_not_move' --test slice
 
@@ -181,9 +181,9 @@ case_ "ingest: a refusal that removes the document removes its page rows" \
 # running it before the `displaces` question is asked.
 case_ "ingest: an environmental refusal keeps the rows with the document" \
   crates/mnema-ingest/src/lib.rs \
-  's{        db\.record_skip\(root_id, relative, None, reason, rule, on_disk\)\?;}{        db.forget_page_skips(root_id, relative)?;\n        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;}' \
+  's~        db\.record_skip\(root_id, relative, None, reason, rule, on_disk, refused_by\)\?;~        db.forget_page_skips(root_id, relative)?;\n        db.record_skip(root_id, relative, None, reason, rule, on_disk, refused_by)?;~' \
   '        db.forget_page_skips(root_id, relative)?;
-        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;' \
+        db.record_skip(root_id, relative, None, reason, rule, on_disk, refused_by)?;' \
   mnema-ingest 'a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it' --test slice
 
 # N14. Reconciliation's own removal, narrowed to whole-file rows. It is the
@@ -234,6 +234,6 @@ case_ "ingest: no row is written about a page the index holds" \
 # columns that read as though they described the page.
 case_ "ingest: a page's row carries no measurement of its file" \
   crates/mnema-ingest/src/lib.rs \
-  's{            None,\n        \)\?;\n    \}\n    Ok\(\(\)\)}{            Some(OnDisk \{ size_bytes: 1, mtime: 1 \}),\n        )?;\n    \}\n    Ok(())}' \
+  's{            None,\n            None,\n        \)\?;\n    \}\n    Ok\(\(\)\)}{            Some(OnDisk \{ size_bytes: 1, mtime: 1 \}),\n            None,\n        )?;\n    \}\n    Ok(())}' \
   '            Some(OnDisk { size_bytes: 1, mtime: 1 }),' \
   mnema-ingest 'a_skipped_page_is_journalled_by_number_and_a_later_pass_takes_it_back' --test slice

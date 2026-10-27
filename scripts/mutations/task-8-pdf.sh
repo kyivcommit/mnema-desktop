@@ -66,7 +66,7 @@ case_ "worker: the summary names the pdf text source" \
 # by a green walk and a fixed install returns nothing.
 case_ "worker: a library that will not load is not a damaged file" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                message: format!\("pdfium could not be loaded: \{e\}"\),\n            \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                rule: "malformed".to_string(),\n                reason: format!("pdfium could not be loaded: \{e\}"),\n                sha256: Some(sha256),\n            \}],}' \
+  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                message: format!\("pdfium could not be loaded: \{e\}"\),\n            \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                rule: "malformed".to_string(),\n                reason: format!("pdfium could not be loaded: \{e\}"),\n                sha256: Some(sha256),\n                reader: None,\n                reader_version: None,\n            \}],}' \
   'rule: "malformed".to_string(),
                 reason: format!("pdfium could not be loaded: {e}"),' \
   mnema-extract 'a_damaged_pdf_is_the_files_fault_and_an_unloadable_library_is_not' --test pdf
@@ -75,7 +75,7 @@ case_ "worker: a library that will not load is not a damaged file" \
 # implementation that answered `Failed` for everything satisfies C4.
 case_ "worker: a damaged file is not an unloadable library" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{Err\(e @ PdfError::Malformed\(_\)\) => vec!\[Frame::Refused \{\n                rule: "malformed"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),\n            \}\],}{Err(e @ PdfError::Malformed(_)) => vec![Frame::Failed \{\n                message: e.to_string(),\n            \}],}' \
+  's~Err\(e @ PdfError::Malformed\(_\)\) => vec!\[reader_refused\(.*?\)\],~Err(e @ PdfError::Malformed(_)) => vec![Frame::Failed {\n                message: e.to_string(),\n            }],~s' \
   'Err(e @ PdfError::Malformed(_)) => vec![Frame::Failed {' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
@@ -95,10 +95,12 @@ case_ "reader: a locked document is not a damaged one" \
 # document per file with the bytes never having moved.
 case_ "worker: the no_text_layer refusal carries the digest it read" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                     \{TEXT_LAYER_MIN_CHARS\} characters"\n                \),\n                sha256: Some\(sha256\),}{                     \{TEXT_LAYER_MIN_CHARS\} characters"\n                ),\n                sha256: None,}' \
+  's~                     \{TEXT_LAYER_MIN_CHARS\} characters"\n                \),\n                Some\(sha256\),~                     {TEXT_LAYER_MIN_CHARS} characters"
+                ),
+                None,~' \
   '{TEXT_LAYER_MIN_CHARS} characters"
                 ),
-                sha256: None,' \
+                None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C8. `unsupported` promises a reader that is coming. The reader came; the file
@@ -106,9 +108,11 @@ case_ "worker: the no_text_layer refusal carries the digest it read" \
 # skip list, and — through `SkipRule` — two different `displaces` decisions.
 case_ "worker: a scan is refused under its own rule, not unsupported" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{(Ok\(doc\) if doc\.pages\.is_empty\(\) => vec!\[Frame::Refused \{\n                )rule: "no_text_layer"\.to_string\(\),}{${1}rule: "unsupported".to_string(),}' \
-  'rule: "unsupported".to_string(),
-                reason: format!(' \
+  's~manifest::PDF_READER_VERSION,\n                "no_text_layer",~manifest::PDF_READER_VERSION,\n                "unsupported",~' \
+  'reader_refused(
+                manifest::READER_PDF,
+                manifest::PDF_READER_VERSION,
+                "unsupported",' \
   mnema-extract 'a_pdf_with_no_text_layer_on_any_page_is_refused_under_its_own_rule' --test worker_cli
 
 # C9. The threshold is a product decision someone may want to argue with, so the
@@ -305,6 +309,6 @@ case_ "pool: a scan is not folded into unsupported" \
 # the one thing this map exists not to be.
 case_ "manifest: pdf is decided by content, so it has no extension entry" \
   crates/mnema-extract/src/manifest.rs \
-  's{    Manifest \{\n        default: ReaderId::new\("text", TEXT_READER_VERSION\),}{    by_extension.insert(\n        "pdf".to_string(),\n        ReaderId::new(READER_PDF, PDF_READER_VERSION),\n    );\n    Manifest \{\n        default: ReaderId::new("text", TEXT_READER_VERSION),}' \
+  's~    Manifest \{\n        default:~    by_extension.insert(\n        "pdf".to_string(),\n        ReaderId::new(READER_PDF, PDF_READER_VERSION),\n    );\n    Manifest {\n        default:~' \
   'ReaderId::new(READER_PDF, PDF_READER_VERSION),' \
   mnema-extract 'the_manifest_names_the_reader_that_identify_actually_picks' --test manifest

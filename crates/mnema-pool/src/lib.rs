@@ -302,8 +302,9 @@ impl From<Failure> for SkipRule {
     }
 }
 
-/// One file's failure, in the two parts `Db::record_skip` needs: the rule that
-/// fired and a sentence a person can read.
+/// One file's failure, in the parts `Db::record_skip` needs: the rule that
+/// fired, a sentence a person can read, and — when a reader decided — who it
+/// was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skip {
     pub failure: Failure,
@@ -320,6 +321,17 @@ pub struct Skip {
     /// under it did — see `mnema_ingest`'s `displaces`, which is where the
     /// difference costs a document.
     pub sha256: Option<String>,
+    /// The reader that made this refusal, and its version, when a reader did.
+    ///
+    /// Carried through from the frame unchanged; `None` for a refusal reached
+    /// before a reader was chosen (the size ceiling, `not_text`, `binary_tail`,
+    /// `unsupported`), for anything this pool synthesised without a worker, and
+    /// for any worker from a release before the frame had these fields. Two
+    /// options rather than a pair because that is the wire's shape and dropping
+    /// one here would be a second interpretation of a frame this crate
+    /// deliberately does not interpret.
+    pub reader: Option<String>,
+    pub reader_version: Option<u32>,
 }
 
 /// One page of an extracted document: what its [`Frame::Page`] announced, and
@@ -699,6 +711,8 @@ impl Pool {
                 ),
                 // No worker ran, so nothing read the bytes.
                 sha256: None,
+                reader: None,
+                reader_version: None,
             }));
         };
 
@@ -774,12 +788,16 @@ impl Pool {
                     failure,
                     reason,
                     sha256,
+                    reader,
+                    reader_version,
                 }) => {
                     lease.retire();
                     return Ok(Outcome::Skipped(Skip {
                         failure,
                         reason,
                         sha256,
+                        reader,
+                        reader_version,
                     }));
                 }
                 Ok(Answer::Ended { ending, note }) => {
@@ -798,6 +816,10 @@ impl Pool {
                         failure,
                         reason,
                         sha256: None,
+                        // Nothing chose a reader: the worker died, timed out or
+                        // was killed before it answered.
+                        reader: None,
+                        reader_version: None,
                     };
                     // This is the rule that keeps a multi-hour job moving: the
                     // file that killed a worker is remembered, not requeued.
@@ -1189,6 +1211,8 @@ enum Answer {
         failure: Failure,
         reason: String,
         sha256: Option<String>,
+        reader: Option<String>,
+        reader_version: Option<u32>,
     },
     /// The worker produced no answer: it died, or it was killed. `note` carries
     /// anything the wait status cannot express — today, that its output was not
@@ -1407,6 +1431,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 rule,
                 reason,
                 sha256,
+                reader,
+                reader_version,
             } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a refusal after a header"));
@@ -1434,6 +1460,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     failure,
                     reason,
                     sha256,
+                    reader,
+                    reader_version,
                 });
             }
             Frame::Failed { message } => {
@@ -1443,6 +1471,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,
+                    reader: None,
+                    reader_version: None,
                     // The frame carries no digest field, and nothing here needs
                     // one: a worker that could not obtain the bytes has nothing
                     // to have hashed, and one whose reader would not come up

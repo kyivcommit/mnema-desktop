@@ -181,6 +181,172 @@ pub(crate) fn has_text_layer(char_count: usize) -> bool {
     char_count >= TEXT_LAYER_MIN_CHARS
 }
 
+/// The text of one page, read inside the box that page shows.
+///
+/// **`PdfPageText::all()` reads the wrong rectangle, and that is why this
+/// function exists rather than a call to it.** `all()` is
+/// `inside_rect(self.page.page_size())`
+/// (`pdfium-render-0.9.3/src/pdf/document/page/text.rs:246-248`), and
+/// `page_size()` is width×height starting at `(0,0)` — the box's own origin is
+/// thrown away. A page whose MediaBox or CropBox starts away from the origin
+/// therefore loses everything outside that rectangle: measured on a library of
+/// books (D187), a document whose MediaBox and CropBox sit at
+/// `130.5 279 661.5 945` and whose every line is above the `page_size()` top
+/// came back empty page after page, each journalled as a scan, while documents
+/// whose CropBox trims the right-hand end of a line lost those ends instead.
+///
+/// **An empty string is two answers.** It is "no character inside this box", and
+/// it is "pdfium could not decode this page": `inside_rect` decodes the whole
+/// UTF-16 buffer with `get_string_from_pdfium_utf16le_bytes(...)
+/// .unwrap_or_default()` (`text.rs:309-310`), so **one lone surrogate empties
+/// the entire page**. A real page of a book whose `/ToUnicode` has one wrong
+/// glyph was journalled as a scan that way. The fallback asks the characters
+/// directly — the only road left when the string is not there — and it stays
+/// inside the same box, so the press marks and back covers that live outside the
+/// visible page do not come back with it.
+///
+/// `pub(crate)` because the probe answers a packaging question about the same
+/// pages: `probe_text_layer` and `pdf::extract_pdf` disagreeing about which
+/// pages of a file carry text is one question with two answers.
+pub(crate) fn page_text(page: &PdfPage) -> Result<String, PdfiumError> {
+    let text = page.text()?;
+    let bound = page_bound(page);
+
+    let bounded = text.inside_rect(bound);
+    if !bounded.is_empty() {
+        return Ok(bounded);
+    }
+
+    Ok(text_from_code_points(chars_within(&text, bound)))
+}
+
+/// The code points `inside_rect` of `bound` would have written, in its order.
+///
+/// **`inside_rect` is a predicate over characters, and this is that predicate.**
+/// `CPDF_TextPage::GetTextByPredicate` — which `FPDFText_GetBoundedText` runs —
+/// does three things a plain filter does not, and each of them is a word on a
+/// page a person can read:
+///
+/// - it keeps a character whose **tight** box **intersects** the bound, not one
+///   whose loose box is contained by it, so a glyph crossing the edge is in the
+///   page (`is_within` carries the measurement);
+/// - it writes a space that lies *outside* the box when the character before it
+///   was inside, because the space between two visible words is part of the
+///   line even when its own box fell over the edge;
+/// - it writes the `\r\n` it could not take from the file: the generated break
+///   sits at the end of a line, and on a line cut by the box that end is
+///   outside, so the break is added before the next character when the y
+///   position moved. Without it a rescued page reads `…the Raveand the depot…`.
+///
+/// Measured, not ported from memory: `broken-utf16.pdf`'s cut line comes back
+/// with exactly the string pdfium returns for the same geometry with the broken
+/// glyph removed — the `\r\n` included — and `tests/pdf.rs` holds it.
+fn chars_within(text: &PdfPageText, bound: PdfRect) -> Vec<u32> {
+    let mut values = Vec::new();
+    let mut pos_y = 0.0_f32;
+    let mut after_text = false;
+    let mut line_feed_due = false;
+    for character in text.chars().iter() {
+        let value = character.unicode_value();
+        if is_within(&character, bound) {
+            // pdfium keeps the y of the last break it wrote, not of the last
+            // character, and sets it before its own emptiness guard — a page
+            // whose first line is preceded by nothing but out-of-box characters
+            // depends on both.
+            let y = character.origin().map(|(_, y)| y.value).unwrap_or(pos_y);
+            if y != pos_y && !after_text && line_feed_due {
+                pos_y = y;
+                if !values.is_empty() {
+                    values.extend([u32::from(b'\r'), u32::from(b'\n')]);
+                }
+            }
+            after_text = true;
+            line_feed_due = false;
+            // pdfium writes no character for a glyph whose code has no Unicode
+            // at all (`GetTextByPredicate` appends only `if (charinfo.unicode())`),
+            // and `char::from_u32(0)` would otherwise store a NUL in the index.
+            if value != 0 {
+                values.push(value);
+            }
+        } else if value == u32::from(b' ') {
+            if after_text {
+                values.push(u32::from(b' '));
+                after_text = false;
+                line_feed_due = false;
+            }
+        } else {
+            after_text = false;
+            line_feed_due = true;
+        }
+    }
+    values
+}
+
+/// Whether this character is one that `inside_rect` of `bound` would have
+/// written.
+///
+/// **Intersection, not containment, and the tight box rather than the loose
+/// one** — measured against pdfium rather than reasoned from its name:
+/// `CPDF_TextPage::GetTextByRect` is `IsRectIntersect(rect, charinfo.char_box())`,
+/// so a glyph crossing the box's edge is part of the page as far as the fast
+/// path is concerned. Held by a character drawn across the CropBox's left edge
+/// in `broken-utf16.pdf`.
+///
+/// **A zero-size box is not inside**, and that is not a detail: the characters
+/// pdfium generates — the `\r\n` at a line end, the spaces it invents in
+/// justified text — have `CFX_FloatRect(origin, origin)` (`GenerateCharInfo`),
+/// and an empty rectangle intersects nothing. They are written by
+/// [`chars_within`]'s space and line-feed branches instead, which is the only
+/// reason a page the fallback rebuilds keeps its spaces and its line breaks.
+/// Treating a point inside the box as a character writes the break twice — a
+/// blank line on every page whose written break is inside the box.
+fn is_within(character: &PdfPageTextChar, bound: PdfRect) -> bool {
+    character.tight_bounds().is_ok_and(|b| {
+        // A zero-size box is not "overlapping": `PdfRect::does_overlap` compares
+        // the four edges, so a point inside the bound passes it, while pdfium's
+        // `IsRectIntersect` intersects and finds the result empty. Every
+        // generated character is a point, so this is the arm that keeps them
+        // out of the boundary test and in the space and line-feed branches.
+        b.width().value != 0.0 && b.height().value != 0.0 && b.does_overlap(&bound)
+    })
+}
+
+/// The box a page is read within: MediaBox ∩ CropBox with `/Pages` inheritance,
+/// which is what a viewer clips to and what `pdfinfo` calls the page's boxes.
+///
+/// **`bounding()` is the only one of the three that is all three of those.**
+/// Measured on `page-boxes.pdf`, whose boxes live on the `/Pages` node:
+/// `crop()` and `media()` both answer `Err` — they read the page dictionary
+/// only — while `bounding()` answers the CropBox. On the same file, a page whose
+/// own `/CropBox` is `[0 0 0 0]` answers its MediaBox through `bounding()`, and
+/// one whose CropBox is wider than its MediaBox answers the MediaBox — the two
+/// clippings a viewer does. The crate's own doc calls `bounding()` "the smallest
+/// rectangle that can enclose all the content", which is not what it answers
+/// here; do not build on that sentence.
+fn page_bound(page: &PdfPage) -> PdfRect {
+    page.boundaries()
+        .bounding()
+        .map(|box_| box_.bounds)
+        // Never seen to fail — the page tree is read when the page loads — but a
+        // `Result` that is thrown away with `unwrap` would end the whole
+        // document, and `page_size()` is the rectangle the reader used before.
+        .unwrap_or_else(|_| page.page_size())
+}
+
+/// One page's text, built from its characters' code points.
+///
+/// A code point that is not a `char` is a lone UTF-16 surrogate, and there is no
+/// character it could stand for: U+FFFD is what every decoder writes for one,
+/// and D186's `replacement_runs_to_spaces` already decides what a run of them
+/// means. Split out from [`page_text`] so that the mapping can be held on values
+/// — without pdfium, and without a fixture that a machine cannot build.
+fn text_from_code_points(values: impl IntoIterator<Item = u32>) -> String {
+    values
+        .into_iter()
+        .map(|value| char::from_u32(value).unwrap_or('\u{FFFD}'))
+        .collect()
+}
+
 /// The text layer of every page, in document order.
 ///
 /// Kept internal: what a page's text *is* — reading order, hyphenation, column
@@ -208,8 +374,7 @@ pub(crate) fn page_texts(path: &Path) -> Result<Vec<String>, Error> {
         let page = all_pages
             .get(index)
             .map_err(|e| Error::Pdfium(format!("page {} could not be loaded: {e}", index + 1)))?;
-        let text = page.text().map_err(|e| Error::Pdfium(e.to_string()))?;
-        out.push(text.all());
+        out.push(page_text(&page).map_err(|e| Error::Pdfium(e.to_string()))?);
     }
     Ok(out)
 }
@@ -504,6 +669,104 @@ mod tests {
              signed 2026-07-25, covering pallet haulage for one calendar quarter."
         );
         assert_eq!(pages[1], "Page 2 of 2");
+    }
+
+    /// The one character-level rule the fallback rests on, held without pdfium.
+    ///
+    /// A lone surrogate is not a `char` and there is none it could stand for;
+    /// U+FFFD is what a decoder writes, and D186's `replacement_runs_to_spaces`
+    /// already decides what a run of them means. The ordinary letter and the
+    /// astral character pass through — a mapping that gave up on everything
+    /// above U+FFFF would redden this line.
+    #[test]
+    fn a_value_that_is_not_a_character_becomes_u_fffd_and_the_others_survive() {
+        assert_eq!(
+            text_from_code_points([0x41, 0xD800, 0x20, 0x1F600, 0xDC00, 0x5A]),
+            "A\u{FFFD} \u{1F600}\u{FFFD}Z"
+        );
+    }
+
+    /// The fallback and the fast path are one predicate with two spellings, and
+    /// this holds them to the same string.
+    ///
+    /// [`page_text`] runs [`chars_within`] only when the bounded decode came
+    /// back empty, and that condition is what makes "run it every time" an
+    /// *equivalent* mutant rather than a survivor (task A's report). The
+    /// equivalence was measured once, by hand, on these fixtures; a later
+    /// simplification of the y rule, the space branch or the line-break rule
+    /// could diverge on a good page's geometry and nothing would go red. This is
+    /// that measurement as a guard: on every page whose bounded read decodes,
+    /// the code points `chars_within` selects are exactly the string
+    /// `inside_rect` returns — the breaks it synthesises and the spaces whose own
+    /// box fell outside the bound included. It also pins both cut-line
+    /// geometries: `offset-cropbox.pdf` page 2's line ends inside the box, and
+    /// the fixtures' moved boxes are the shape a containment filter gets wrong.
+    ///
+    /// **Only pages whose bounded read is non-empty are compared, and that is
+    /// the premise rather than a shortcut.** On `broken-utf16.pdf` pages 2 and 3
+    /// one lone surrogate empties pdfium's whole UTF-16 buffer, so
+    /// `inside_rect` answers `""` about a page that carries text; the fallback is
+    /// the only answer there is, and comparing the two would assert the defect
+    /// this test exists to prevent.
+    #[test]
+    fn the_fallback_computes_what_the_bounded_read_computes_on_every_decodable_page() {
+        // Every PDF beside this file but the three with no page this test can
+        // read: a locked document, one with no pages, and one whose middle page
+        // `FPDF_LoadPage` declines (that last one has its own test, `tests/pdf.rs`
+        // `a_page_that_will_not_load_refuses_the_document_rather_than_ending_it`).
+        const UNREADABLE: [&str; 3] = [
+            "password-locked.pdf",
+            "no-pages.pdf",
+            "unloadable-middle-page.pdf",
+        ];
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the fixture directory is beside this file")
+            .map(|entry| entry.expect("a readable directory entry").file_name())
+            .filter_map(|name| name.to_str().map(str::to_string))
+            .filter(|name| name.ends_with(".pdf") && !UNREADABLE.contains(&name.as_str()))
+            .collect();
+        names.sort();
+
+        let pdfium = pdfium().expect("the vendored library loads");
+        let _serialised = lock_pdfium();
+        let mut compared = 0_usize;
+        for name in &names {
+            let document = pdfium
+                .load_pdf_from_file(&dir.join(name), None)
+                .unwrap_or_else(|e| panic!("{name} parses: {e}"));
+            let pages = document.pages();
+            for index in 0..pages.len() {
+                let page = pages
+                    .get(index)
+                    .unwrap_or_else(|e| panic!("{name} page {} loads: {e}", index + 1));
+                let text = page.text().expect("the page's text layer reads");
+                let bound = page_bound(&page);
+                let bounded = text.inside_rect(bound);
+                if bounded.is_empty() {
+                    continue;
+                }
+                compared += 1;
+                assert_eq!(
+                    text_from_code_points(chars_within(&text, bound)),
+                    bounded,
+                    "{name} page {}: the fallback must be this predicate, not an \
+                     approximation of it",
+                    index + 1
+                );
+            }
+        }
+        // A literal rather than a count taken from the pages themselves, for the
+        // reason `tests/pdf.rs::every_page_of_a_document_is_either_read_or_named`
+        // gives for its page counts: a number derived from the reader moves with
+        // the reader. 1 + 2 + 3 + 3 + 3 + 1 + 3 + 3 over the eight fixtures that
+        // load, with `broken-utf16.pdf` contributing page 1 only — its pages 2 and
+        // 3 are the two the doc comment above excludes.
+        assert_eq!(
+            compared, 19,
+            "the comparison must run on the pages it says it ran on: {names:?}"
+        );
     }
 
     #[test]

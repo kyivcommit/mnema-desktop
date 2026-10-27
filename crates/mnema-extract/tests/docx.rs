@@ -771,7 +771,7 @@ fn an_xml_escape_is_one_character_of_the_text() {
 /// No block of a docx claims a line number.
 ///
 /// `pages_of` gives this reader `Fixed(Coordinate::Section)`
-/// (`crates/mnema-ingest/src/lib.rs:1392`) *because* these blocks carry no rows:
+/// (`crates/mnema-ingest/src/lib.rs:1505`) *because* these blocks carry no rows:
 /// a docx has no lines until something lays it out, and a number invented here
 /// would be cited as "рядки 1–1" of a document that has none.
 #[test]

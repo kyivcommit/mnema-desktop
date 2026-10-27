@@ -164,6 +164,28 @@ pub enum Frame {
         reason: String,
         #[serde(default)]
         sha256: Option<String>,
+        /// The reader that made this refusal, and the version of it that did.
+        ///
+        /// `None` for every refusal reached before a reader was chosen — the
+        /// size ceiling, `not_text`, `binary_tail`, a format with no reader at
+        /// all — and for every worker from a release before these fields. The
+        /// two travel as a pair on the wire because a version without the name
+        /// that made it is not something a parent can compare to anything.
+        ///
+        /// **Why the refusal has to say it.** `mnema-ingest` decides whether a
+        /// `no_text_layer` verdict on unchanged bytes replaces a document it
+        /// already holds, and the question is "is the reader that just refused
+        /// this a newer release of the one that indexed it?". The `path` row
+        /// names the reader that indexed it; without a name here the parent can
+        /// only ask the manifest for the version of the reader the row itself
+        /// names — a row compared with itself, which cannot tell "another
+        /// reader" from "the same one" — so a later bump of the row's own reader
+        /// would let an unrelated reader's refusal take the document away.
+        /// Review I2.
+        #[serde(default)]
+        reader: Option<String>,
+        #[serde(default)]
+        reader_version: Option<u32>,
     },
     /// The worker could not carry out the request, having learned nothing
     /// about the file's content in the attempt. Usually because it could not
@@ -312,8 +334,28 @@ mod tests {
             // The ceiling decides from `stat` and never opens the file, so this
             // fixture is also the one refusal that legitimately carries no
             // digest — and round-tripping `None` is worth having in the
-            // fixture others copy.
+            // fixture others copy. It names no reader for the same reason: the
+            // refusal was reached before one was chosen.
             sha256: None,
+            reader: None,
+            reader_version: None,
+        }
+    }
+
+    /// A refusal a reader made, which is what the whole file/version pair on
+    /// `Frame::Refused` exists for. Both values round-trip; a parent that read
+    /// back a default instead would keep every document a broken release
+    /// meant to displace (review I2).
+    fn sample_reader_refused() -> Frame {
+        Frame::Refused {
+            rule: "no_text_layer".to_string(),
+            reason: "no page of this PDF carries a text layer of at least 48 characters"
+                .to_string(),
+            sha256: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85".to_string(),
+            ),
+            reader: Some("pdf".to_string()),
+            reader_version: Some(3),
         }
     }
 
@@ -332,6 +374,7 @@ mod tests {
             sample_block_frame(),
             sample_summary(),
             sample_refused(),
+            sample_reader_refused(),
             sample_failed(),
         ] {
             let line = to_line(&frame).unwrap();
@@ -359,6 +402,8 @@ mod tests {
                 rule: "not_text".to_string(),
                 reason: "not text".to_string(),
                 sha256: None,
+                reader: None,
+                reader_version: None,
             }
         );
 
@@ -369,8 +414,50 @@ mod tests {
                 rule: "not_text".to_string(),
                 reason: "not text".to_string(),
                 sha256: Some("abc123".to_string()),
+                reader: None,
+                reader_version: None,
             }
         );
+    }
+
+    /// The pair a reader-made refusal carries, on the shape an older worker
+    /// sends and on the one this build sends.
+    ///
+    /// Both directions again: the old line must parse to `None` — a parent that
+    /// refused it would answer every file of a one-release-behind sidecar as a
+    /// protocol failure — and the new one must keep the name and the version,
+    /// because those are the two facts the `no_text_layer` rule compares before
+    /// it deletes anything.
+    #[test]
+    fn a_reader_made_refusal_states_its_reader_and_an_older_one_states_none() {
+        let older =
+            r#"{"frame":"refused","rule":"no_text_layer","reason":"no text","sha256":"abc123"}"#;
+        assert_eq!(
+            from_line(older).unwrap(),
+            Frame::Refused {
+                rule: "no_text_layer".to_string(),
+                reason: "no text".to_string(),
+                sha256: Some("abc123".to_string()),
+                reader: None,
+                reader_version: None,
+            }
+        );
+
+        let named = r#"{"frame":"refused","rule":"no_text_layer","reason":"no text","sha256":"abc123","reader":"pdf","reader_version":3}"#;
+        assert_eq!(
+            from_line(named).unwrap(),
+            sample_reader_refused_without_the_digest()
+        );
+    }
+
+    fn sample_reader_refused_without_the_digest() -> Frame {
+        Frame::Refused {
+            rule: "no_text_layer".to_string(),
+            reason: "no text".to_string(),
+            sha256: Some("abc123".to_string()),
+            reader: Some("pdf".to_string()),
+            reader_version: Some(3),
+        }
     }
 
     /// The opposite decision to the one above, on purpose, and worth stating

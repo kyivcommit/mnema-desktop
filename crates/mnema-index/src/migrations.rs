@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -166,6 +166,41 @@ CREATE TABLE search_folder (
     PRIMARY KEY (watched_root_id, folder_path)
 ) WITHOUT ROWID;";
 
+/// Which reader refused a file, for the whole-file row.
+///
+/// **Why the journal has to remember it.** After a refusal takes a document
+/// away, the path row goes and this table is the only thing left saying why. The
+/// cheap arm answers from it without a worker (`ingest_file`, its second arm),
+/// so it was unreachable by any reader upgrade: a release whose reader saw no
+/// text everywhere deleted every PDF it touched, and the release that fixed the
+/// reader brought nothing back (D57, and the review's I1).
+///
+/// The parent compares these against `Manifest::by_reader`: a row written by
+/// reader R at version v is re-examined when this build has R at a version above
+/// v. `NULL` for every row written before this migration, and for every refusal
+/// reached before a reader was chosen — a parent that read a default there would
+/// re-read every scan in the library on each upgrade for no reason, and, worse,
+/// could not tell "the reader moved on" from "nobody ever said".
+///
+/// `page_no` rows carry neither column: a page's verdict is not the file's, and
+/// nothing reads those columns for a page.
+///
+/// **And a whole-file scan is sent back through a worker once.** A row written
+/// before the journal named its reader could never be re-read on version grounds
+/// (`the_reader_has_moved_on` answers `false` without a name), and the files
+/// those rows hold are exactly the ones the CropBox reader exists to recover
+/// (D187): the cheap arm needs a size to compare, so clearing it costs one
+/// worker run, once, and `record_skip` writes a row that is cheap again.
+///
+/// `ALTER TABLE … ADD COLUMN` rather than a rebuild, and its own migration
+/// rather than an append to anything above it — the list's own rule, stated at
+/// `ADD_FILE_MASK`: the index of each migration is the `user_version` it
+/// produces.
+const ADD_SKIP_READER: &str = "\
+ALTER TABLE skipped ADD COLUMN reader TEXT;
+ALTER TABLE skipped ADD COLUMN reader_version INTEGER;
+UPDATE skipped SET size_bytes = NULL WHERE page_no IS NULL AND rule = 'no_text_layer';";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -183,6 +218,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_FILE_MASK),
         M::up(ADD_QUERY_HISTORY),
         M::up(ADD_SEARCH_FOLDER),
+        M::up(ADD_SKIP_READER),
     ])
 }
 
@@ -434,11 +470,11 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 6);
+        assert_eq!(SCHEMA_VERSION, 7);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         let value: String = conn
             .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {
@@ -464,6 +500,117 @@ mod tests {
         assert_eq!(
             foreign_keys, 0,
             "query_history must not reference any other table"
+        );
+    }
+
+    /// The journal learns which reader refused a file, and a database that is
+    /// already at version 6 keeps its rows and its reasons, names no reader on
+    /// any of them, and gives up a whole-file scan's measurement once.
+    ///
+    /// **The `NULL` reader is the answer, not an omission.** A row written before
+    /// this migration names no reader, so the parent cannot say whether the reader
+    /// the row was about has moved on, and it answers from the journal as it did
+    /// before — the side that loses no document rather than the side that loses
+    /// every one a manifest mismatch happens to touch.
+    ///
+    /// **The cleared size is the other half of the same migration** (D187). A
+    /// whole-file `no_text_layer` row that still carries a size is answered
+    /// without a worker for ever, and those rows are exactly the documents the
+    /// CropBox reader was written to recover. `NULL` there fails the cheap arm's
+    /// comparison once, and the worker then writes a row that is cheap again. No
+    /// other rule and no page row is touched: the statement says which row it is
+    /// about, and a page's measurement is never read.
+    ///
+    /// Its own migration for the reason `ADD_FILE_MASK` states: an index
+    /// already at version 6 runs nothing for a migration it is past, so an
+    /// appended `ALTER` would reach only machines installed after this commit
+    /// and every fresh-database test would stay green.
+    #[test]
+    fn a_v6_index_keeps_its_skip_rows_and_they_name_no_reader() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations()
+            .to_version(&mut conn, 6)
+            .expect("version 6 is the schema before the journal named its reader");
+        conn.execute(
+            "INSERT INTO watched_root (id, absolute_path) VALUES (1, '/tmp/root')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skipped
+                (watched_root_id, relative_path, page_no, reason, rule,
+                 size_bytes, mtime, format_version)
+             VALUES
+                (1, 'скани/скан.pdf', NULL, 'no text layer', 'no_text_layer',
+                 4096, 1234, 3),
+                (1, 'зламані/файл.pdf', NULL, 'the reader could not finish it',
+                 'malformed', 8192, 1234, 3),
+                -- A page row carrying a size, which this build does not write and
+                -- the column admits: `page_no IS NULL` is what leaves it alone.
+                (1, 'скани/скан.pdf', 3, 'page 3 of this document carries no text layer',
+                 'no_text_layer', 4096, 1234, 3)",
+            [],
+        )
+        .expect("the six-column statements a version-6 database could have written");
+
+        apply(&mut conn).expect("a version-6 database migrates to the current version");
+        assert_eq!(SCHEMA_VERSION, 7);
+
+        let (reason, size, reader, reader_version): (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT reason, size_bytes, reader, reader_version FROM skipped
+                  WHERE relative_path = 'скани/скан.pdf' AND page_no IS NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("the row written before the migration is still there");
+        assert_eq!(reason, "no text layer");
+        assert_eq!(
+            size, None,
+            "a whole-file scan journalled before a refusal could name its reader \
+             is re-read once, or it answers as a scan for ever (D187)"
+        );
+        assert_eq!(
+            (reader, reader_version),
+            (None, None),
+            "a row from before the column existed names no reader, and a parent \
+             that read a default there would re-read files it cannot judge"
+        );
+
+        let (rule, size): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT rule, size_bytes FROM skipped
+                  WHERE relative_path = 'зламані/файл.pdf'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("a row of another rule is still there");
+        assert_eq!(
+            (rule.as_str(), size),
+            ("malformed", Some(8192)),
+            "the statement is about the rule the CropBox reader changed, and a \
+             damaged file is no more likely to be readable than it was"
+        );
+
+        let page_size: Option<i64> = conn
+            .query_row(
+                "SELECT size_bytes FROM skipped
+                  WHERE relative_path = 'скани/скан.pdf' AND page_no = 3",
+                [],
+                |r| r.get(0),
+            )
+            .expect("a page's skip row is still there");
+        assert_eq!(
+            page_size,
+            Some(4096),
+            "a page's row is not the file's, and clearing its size would be a \
+             statement about the whole document"
         );
     }
 

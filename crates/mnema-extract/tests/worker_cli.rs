@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use mnema_extract::manifest;
 use mnema_extract::wire::Frame;
 use sha2::{Digest, Sha256};
 
@@ -75,6 +76,7 @@ fn a_file_over_the_ceiling_is_refused_without_being_read() {
                 rule,
                 reason,
                 sha256,
+                ..
             },
         ] => {
             assert_eq!(rule, "too_large", "a size ceiling must have its own rule");
@@ -107,6 +109,7 @@ fn a_photo_is_refused_by_the_real_worker() {
             rule,
             reason,
             sha256,
+            ..
         } => {
             assert_eq!(rule, "not_text");
             assert!(
@@ -375,7 +378,9 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
                 Frame::Refused {
                     rule,
                     sha256,
-                    reason: _,
+                    reader,
+                    reader_version,
+                    ..
                 },
             ] => {
                 assert_eq!(rule, want_rule, "wrong rule for {path}");
@@ -388,10 +393,129 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
                     Some(digest_of(path).as_str()),
                     "{path} was refused as {want_rule} without the digest it was refused on"
                 );
+                // **Who refused it, where a reader did.** The parent's rule for
+                // `no_text_layer` is "the same reader, a newer version", so a
+                // refusal from one of these rules that names nobody keeps every
+                // document that release meant to displace — and a version that
+                // disagrees with the manifest is the same silence from the other
+                // side. `too_large` is the one rule with two producers: the
+                // ceiling above never chose a reader, a reader's own size cap
+                // did, so it is the one row that may answer either way.
+                if matches!(want_rule, "no_text_layer" | "malformed" | "encrypted") {
+                    let reader = reader.as_deref().unwrap_or_else(|| {
+                        panic!("{path} was refused as {want_rule} without naming its reader")
+                    });
+                    assert_eq!(
+                        manifest::reader_version(reader),
+                        *reader_version,
+                        "{path} names {reader} at the version beside it, which is not \
+                         the version this build's manifest states for that reader"
+                    );
+                } else if want_rule != "too_large" {
+                    assert_eq!(
+                        (reader.as_deref(), *reader_version),
+                        (None, None),
+                        "{path} was refused as {want_rule} before any reader was chosen, \
+                         so it must name none"
+                    );
+                }
             }
             other => panic!("expected exactly one refusal for {path}, got {other:?}"),
         }
     }
+}
+
+/// **Review M1.** Every reader the worker emits states a version the manifest
+/// can look up — checked against the frames, not against a hand list of
+/// constants.
+///
+/// The direction this catches: a reader added to the worker with a version
+/// written by hand instead of through the table. Nothing else in the repository
+/// would say so — the parent's lookup answers `None` there, which means "keep",
+/// so the rule silently stops applying to that format. (The other direction, a
+/// reader in the table with no fixture here, is the set assertion at the end.)
+///
+/// **Narrowed to what it can see (review N2).** A reader that no file here
+/// reaches emits no frame, so this test cannot judge it at all. The nearest
+/// guard is the other way round: a reader this build ships is named in
+/// `mnema_core::manifest::READER_NAMES`, and
+/// `every_reader_this_build_ships_has_a_version` requires the version table to
+/// be exactly that set — so a name with no row reddens without a fixture. A
+/// reader added to the worker under a name that is in neither list is still
+/// invisible here, which is why the names live in one place rather than four.
+///
+/// Four of these files are built here rather than checked in, for the reason the
+/// refusal table above builds its own: each is derived from a rule this
+/// repository already states, and the three archive formats have no readable
+/// fixture checked in at all.
+#[test]
+fn every_reader_the_worker_emits_is_one_the_manifest_can_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let markdown = dir.path().join("замітка.md");
+    std::fs::write(&markdown, "# Заголовок\n\nОдин абзац.\n").unwrap();
+    let html = dir.path().join("сторінка.html");
+    std::fs::write(&html, "<h1>Заголовок</h1><p>Текст сторінки.</p>").unwrap();
+    // Three files refused by their own readers — a book of plates, a document of
+    // empty paragraphs, a workbook with no rows. Each still *names* the reader
+    // that refused it, and that is the fact this test is about.
+    let epub = dir.path().join("альбом.epub");
+    std::fs::write(
+        &epub,
+        epub_bytes(&[(
+            "cover.xhtml",
+            Some("<html><head><title>Обкладинка</title></head><body><img src=\"c.jpg\"/></body></html>"),
+        )]),
+    )
+    .unwrap();
+    let docx = dir.path().join("скан.docx");
+    std::fs::write(&docx, docx_bytes("<w:p/><w:p><w:pPr/></w:p>")).unwrap();
+    let xlsx = dir.path().join("таблиця.xlsx");
+    std::fs::write(&xlsx, xlsx_bytes(&[("Порожній", "")], "")).unwrap();
+
+    let mut seen = std::collections::BTreeSet::new();
+    for path in [
+        "tests/fixtures/simple.txt".to_string(),
+        markdown.to_str().expect("a temp path is UTF-8").to_string(),
+        html.to_str().expect("a temp path is UTF-8").to_string(),
+        "tests/fixtures/one-page-text.pdf".to_string(),
+        epub.to_str().expect("a temp path is UTF-8").to_string(),
+        docx.to_str().expect("a temp path is UTF-8").to_string(),
+        xlsx.to_str().expect("a temp path is UTF-8").to_string(),
+    ] {
+        let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
+        let frames = frames_of(&run_worker(&[&request.to_string()]));
+        let (reader, version) = frames
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Header {
+                    reader,
+                    reader_version,
+                    ..
+                } => Some((reader.clone(), *reader_version)),
+                Frame::Refused {
+                    reader: Some(reader),
+                    reader_version: Some(version),
+                    ..
+                } => Some((reader.clone(), *version)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{path} produced no frame naming a reader: {frames:?}"));
+        assert_eq!(
+            manifest::reader_version(&reader),
+            Some(version),
+            "{path} names {reader} at version {version}, which the manifest does \
+             not state for that reader"
+        );
+        seen.insert(reader);
+    }
+
+    let stated: std::collections::BTreeSet<String> =
+        manifest::manifest().by_reader.keys().cloned().collect();
+    assert_eq!(
+        seen, stated,
+        "every reader the manifest states must be one of these files, or a reader \
+         added to the table is a rule nothing here measures"
+    );
 }
 
 /// Lower-case hex of a file's sha256 — what `document.id` is, read off the disk
@@ -565,9 +689,11 @@ fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
         panic!("expected a header, got {:?}", frames.first());
     };
     assert_eq!(reader, "pdf");
-    // 2 since U+FFFD stopped counting as text (D186): every PDF read by version
-    // 1 has to be read again.
-    assert_eq!(*reader_version, 2);
+    // 3 since the reader started reading within the page's own box instead of
+    // the rectangle `page_size()` gives from (0,0): every PDF read by version 2
+    // was read from the wrong rectangle, so the version is not optional. (2 was
+    // U+FFFD counting as text, D186; 1 is what predates both.)
+    assert_eq!(*reader_version, 3);
     assert_eq!(*pages, 1);
     assert_eq!(mime, "application/pdf");
 
@@ -1198,6 +1324,7 @@ fn a_book_with_no_readable_chapter_is_refused_by_content_rather_than_as_unsuppor
         rule,
         sha256,
         reason,
+        ..
     } = &frames[0]
     else {
         panic!("expected Refused, got {:?}", frames[0]);
@@ -1684,7 +1811,7 @@ fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
 /// **A sheet's name crosses the wire bounded, and bounded once.**
 ///
 /// `pages_of` copies `Frame::Page::section_title` straight into
-/// `Coordinate::SheetRows { sheet }` (`crates/mnema-ingest/src/lib.rs:1403-1405`)
+/// `Coordinate::SheetRows { sheet }` (`crates/mnema-ingest/src/lib.rs:1515-1516`)
 /// — so for this format the page's name and the citation's coordinate are one
 /// string, and a second bounding anywhere would make them two. This asserts the
 /// binary sends what the reader bounded, byte for byte, which is the half of

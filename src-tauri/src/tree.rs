@@ -554,7 +554,7 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
     // `recorded.size_bytes == disk.size_bytes && recorded.mtime == disk.mtime`
     // is two of the five conditions `mnema-ingest` already asks
     // (`mnema-ingest/src/lib.rs:295-296`), and the negated form is what
-    // `displaces()` uses (`:1196`). Both halves, because an edit that keeps the
+    // `displaces()` uses (`:1313`). Both halves, because an edit that keeps the
     // length moves only the mtime — dropping either operand loses a whole
     // class of edit silently, which is why the two are separate tests.
     if disk.size_bytes != occupant.size_bytes || disk.mtime != occupant.mtime {

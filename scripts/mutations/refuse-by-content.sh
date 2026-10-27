@@ -82,14 +82,14 @@ case_ "displaces: an interrupted UTF-16 note keeps the prose it still has" \
 # link `mnema-index` (D26/D40), so nothing but a test compares the two spellings.
 case_ "wire: the worker spells not_text the way the pool reads it" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{rule: "not_text"\.to_string\(\),}{rule: "nottext".to_string(),}' \
-  'rule: "nottext".to_string(),' \
+  's{"not_text",}{"nottext",}' \
+  '"nottext",' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 
 case_ "wire: the worker spells binary_tail the way the pool reads it" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{rule: "binary_tail"\.to_string\(\),}{rule: "binarytail".to_string(),}' \
-  'rule: "binarytail".to_string(),' \
+  's{"binary_tail",}{"binarytail",}' \
+  '"binarytail",' \
   mnema-ingest 'an_interrupted_append_does_not_delete_what_the_note_still_says' --test slice
 
 # The pool's own side of the same seam. This is NOT an exhaustive `match` —
@@ -183,9 +183,11 @@ case_ "displaces: the digest comparison is not inverted" \
 # two classifier versions, which no test in one binary can stage.
 case_ "wire: the worker sends the digest it refused on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{// whether the file changed or only the rule did\.\n                sha256: Some\(sha256\),}{// whether the file changed or only the rule did.\n                sha256: None,}' \
-  'only the rule did.
-                sha256: None,' \
+  's~("not_text",.*?)Some\(sha256\),~${1}None,~s' \
+  '                None,
+            )]
+        }
+        // Also refused' \
   mnema-extract 'a_photo_is_refused_by_the_real_worker' --test worker_cli
 
 # …and the two branches beside it, which had nothing. The blindness was
@@ -203,10 +205,10 @@ case_ "wire: the worker sends the digest it refused on" \
 # a document per file with the bytes never having moved.
 case_ "wire: the worker sends the digest for a format it has no reader for" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{("unsupported".*?)sha256: Some\(sha256\)}{$1sha256: None}s' \
-  'file_type.mime, file_type.reader
+  's~("unsupported".*?)Some\(sha256\),~${1}None,~s' \
+  'file_type.reader
                 ),
-                sha256: None,' \
+                None,' \
   mnema-extract 'a_bare_zip_with_no_recognizable_member_is_refused_as_unsupported' --test worker_cli
 
 # `binary_tail` never displaces, so this field cannot cost a document through
@@ -223,11 +225,17 @@ case_ "wire: the worker sends the digest for a format it has no reader for" \
 # earlier task of the same branch". Anchored now on the arm's closing structure
 # and the arm that follows it: code, not prose, and the two lines the mutation
 # itself leaves adjacent.
+#
+# Re-aimed back to the digest table (review R1). The fix round had pointed this
+# at a slice test that reaches `displaces(BinaryTail) => false`, which never
+# reads the digest — so the case would have reported SURVIVED while the mutation
+# it makes is real and the digest table still has the `interrupted` /
+# `binary_tail` row for it.
 case_ "wire: the worker sends the digest for a note that stopped being text" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{("binary_tail".*?)sha256: Some\(sha256\)}{$1sha256: None}s' \
-  '                sha256: None,
-            }]
+  's~("binary_tail".*?)Some\(sha256\),~${1}None,~s' \
+  '                None,
+            )]
         }
         Reader::Pdf => match extract_pdf(&bytes) {' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
@@ -242,16 +250,16 @@ case_ "wire: the worker sends the digest for a note that stopped being text" \
 # the only one either hop can be seen from.
 case_ "wire: the pool carries the digest out of the frame" \
   crates/mnema-pool/src/lib.rs \
-  's{                return Ok\(Answer::Skipped \{\n                    failure,\n                    reason,\n                    sha256,\n                \}\);}{                return Ok(Answer::Skipped \{\n                    failure,\n                    reason,\n                    sha256: None,\n                \});}' \
-  'reason,
-                    sha256: None,' \
+  's~                    sha256,\n                    reader,\n                    reader_version,\n                \}\);~                    sha256: None,\n                    reader,\n                    reader_version,\n                });~' \
+  'sha256: None,
+                    reader,' \
   mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
 
 case_ "wire: the pool carries the digest into the Skip it returns" \
   crates/mnema-pool/src/lib.rs \
-  's{                    return Ok\(Outcome::Skipped\(Skip \{\n                        failure,\n                        reason,\n                        sha256,\n                    \}\)\);}{                    return Ok(Outcome::Skipped(Skip \{\n                        failure,\n                        reason,\n                        sha256: None,\n                    \}));}' \
-  'reason,
-                        sha256: None,' \
+  's~                        sha256,\n                        reader,\n                        reader_version,\n                    \}\)\);~                        sha256: None,\n                        reader,\n                        reader_version,\n                    }));~' \
+  'sha256: None,
+                        reader,' \
   mnema-ingest 'a_file_whose_bytes_did_not_change_keeps_its_document' --test slice
 
 # And the other side of that same line, which is the whole of task 9: a note
@@ -323,8 +331,8 @@ case_ "journal: a verdict from an older format version is not honoured" \
 # the note still answering under a name whose file is a photo.
 case_ "journal: a remembered refusal does not answer for a document it would remove" \
   crates/mnema-ingest/src/lib.rs \
-  's{\n        && !recorded\n            \.as_ref\(\)\n            \.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{}' \
-  '&& skip.mtime == Some(disk.mtime)
+  's~\n        && !recorded\.as_ref\(\)\.is_some_and\(\|entry\| \{.*?\n        \}\)~~s' \
+  '        && !the_reader_has_moved_on(&skip, manifest)
     {' \
   mnema-ingest 'a_remembered_refusal_does_not_answer_for_a_document_it_would_remove' --test slice
 
@@ -343,8 +351,8 @@ case_ "journal: a remembered refusal does not answer for a document it would rem
 # guard that actually matters, still covers both.
 case_ "journal: neither guard alone is what the three-walk reproduction rests on" \
   crates/mnema-ingest/src/lib.rs \
-  's{\n        && !recorded\n            \.as_ref\(\)\n            \.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{}; s{    db\.forget_skip\(root_id, relative\)\?;\n}{}' \
-  '&& skip.mtime == Some(disk.mtime)
+  's~\n        && !recorded\.as_ref\(\)\.is_some_and\(\|entry\| \{.*?\n        \}\)~~s; s{    db\.forget_skip\(root_id, relative\)\?;\n}{}' \
+  '        && !the_reader_has_moved_on(&skip, manifest)
     {' \
   mnema-ingest 'a_photo_restored_with_its_own_time_stops_the_note_answering' --test walk
 
@@ -353,7 +361,7 @@ case_ "journal: neither guard alone is what the three-walk reproduction rests on
 # each on every walk forever.
 case_ "journal: a rule that keeps still answers without a worker" \
   crates/mnema-ingest/src/lib.rs \
-  's{\.is_some_and\(\|entry\| displaces\(skip\.rule, entry, on_disk, None\)\)}{.is_some_and(|_| true)}' \
+  's~\|entry\| \{.*?\n            displaces\(skip\.rule, entry, on_disk, None, None\)\n        \}~|_| true~s' \
   '.is_some_and(|_| true)' \
   mnema-ingest 'a_second_walk_over_an_interrupted_note_asks_no_worker' --test walk
 

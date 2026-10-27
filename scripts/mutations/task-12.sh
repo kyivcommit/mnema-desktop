@@ -29,7 +29,7 @@
 # ------------------------------------------------------ the reader's own name
 
 # C1. The name is one symbol across a process boundary and across D40.
-# `pages_of` matches it to cite a section (`crates/mnema-ingest/src/lib.rs:1392`);
+# `pages_of` matches it to cite a section (`crates/mnema-ingest/src/lib.rs:1505`);
 # one character off falls to `PageContext::Lines`, which asks blocks that carry
 # no line numbers for a line range and answers `Coordinate::None`. Green
 # everywhere else.
@@ -64,12 +64,12 @@ case_ "worker: the summary names the docx text source" \
 # is predicted for a reader that never touched it.
 case_ "manifest: docx is decided by content, so the map does not claim it" \
   crates/mnema-extract/src/manifest.rs \
-  's{    Manifest \{\n        default: ReaderId::new\("text", TEXT_READER_VERSION\),}{    by_extension.insert(\n        "docx".to_string(),\n        ReaderId::new(READER_DOCX, DOCX_READER_VERSION),\n    );\n    Manifest \{\n        default: ReaderId::new("text", TEXT_READER_VERSION),}' \
+  's~    Manifest \{\n        default:~    by_extension.insert(\n        "docx".to_string(),\n        ReaderId::new(READER_DOCX, DOCX_READER_VERSION),\n    );\n    Manifest {\n        default:~' \
   'by_extension.insert(
         "docx".to_string(),
         ReaderId::new(READER_DOCX, DOCX_READER_VERSION),
     );' \
-  mnema-extract 'a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it' --test manifest
+  mnema-extract 'the_manifest_names_the_reader_that_identify_actually_picks' --test manifest
 
 # ------------------------------------------------ what a heading actually is
 
@@ -479,11 +479,13 @@ case_ "reader: a document with no text is refused, not stored empty" \
 # and does not add its rows is a branch nothing measures.
 case_ "worker: a docx refused after being read carries the digest it was read on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~            Err\(e \@ DocxError::NoText\) => vec!\[Frame::Refused \{\n                rule: "no_text_layer"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),~            Err(e \@ DocxError::NoText) => vec![Frame::Refused {\n                rule: "no_text_layer".to_string(),\n                reason: e.to_string(),\n                sha256: None,~' \
-  'Err(e @ DocxError::NoText) => vec![Frame::Refused {
-                rule: "no_text_layer".to_string(),
-                reason: e.to_string(),
-                sha256: None,' \
+  's~(Err\(e @ DocxError::NoText\) => vec!\[reader_refused\(.*?)Some\(sha256\),~${1}None,~s' \
+  'Err(e @ DocxError::NoText) => vec![reader_refused(
+                manifest::READER_DOCX,
+                manifest::DOCX_READER_VERSION,
+                "no_text_layer",
+                e.to_string(),
+                None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C38. A docx that cannot be read reported under the rule that promises a reader
@@ -492,8 +494,9 @@ case_ "worker: a docx refused after being read carries the digest it was read on
 # for a release that has already happened.
 case_ "worker: a damaged docx is refused as damaged, not as unsupported" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{            Err\(e @ DocxError::Malformed\(_\)\) => vec!\[Frame::Refused \{\n                rule: "malformed"\.to_string\(\),}{            Err(e @ DocxError::Malformed(_)) => vec![Frame::Refused \{\n                rule: "unsupported".to_string(),}' \
-  'rule: "unsupported".to_string(),' \
+  's~(Err\(e @ DocxError::Malformed\(_\)\) => vec!\[reader_refused\(.*?)"malformed",~${1}"unsupported",~s' \
+  'manifest::DOCX_READER_VERSION,
+                "unsupported",' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C39. The summary naming a page that was also sent. A docx skips nothing, so

@@ -92,12 +92,73 @@ jobs:
       # Measured in an ubuntu:24.04 container rather than assumed, including the
       # negative control: with libwebkit2gtk-4.1-dev removed the build stops in
       # `webkit2gtk-sys`, on pkg-config failing to find `webkit2gtk-4.1`.
+      #
+      # The download is the `mutations` job's, step for step, and its comment
+      # there has the measurements: a runner can be slow to one mirror for the
+      # whole job, so the archives come from the shared cache and a try that
+      # runs past 240 s asks the cache again, then leaves that mirror. Run
+      # 40567006111 (PR #82) cancelled this job at 15 min still inside a plain
+      # `apt-get install`.
+      - name: Linux system dependencies, which archives they need
+        if: runner.os == 'Linux'
+        id: apt
+        env:
+          APT_PACKAGES: >-
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+            librsvg2-dev patchelf
+        run: |
+          read -ra pkgs <<< "$APT_PACKAGES"
+          sudo apt-get update
+          echo "key=$(sudo apt-get install --print-uris -qq "${pkgs[@]}" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "packages=$APT_PACKAGES" >> "$GITHUB_OUTPUT"
+      - id: apt-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
+          restore-keys: apt-archives-
+      - name: Linux system dependencies, first download try
+        if: runner.os == 'Linux'
+        id: apt-first
+        run: |
+          read -ra pkgs <<< "${{ steps.apt.outputs.packages }}"
+          mkdir -p ~/apt-archives/partial
+          if timeout 240 sudo apt-get -y -o Dir::Cache::Archives="$HOME/apt-archives" \
+              install --download-only "${pkgs[@]}"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::apt download did not finish in 240 s; asking the cache again"
+            sudo chown -R "$USER" ~/apt-archives
+          fi
+      - id: apt-cache-again
+        if: runner.os == 'Linux' && steps.apt-first.outputs.ok != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
       - name: Linux system dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+          read -ra pkgs <<< "${{ steps.apt.outputs.packages }}"
+          apt=(sudo apt-get -y -o Dir::Cache::Archives="$HOME/apt-archives")
+          if [ "${{ steps.apt-first.outputs.ok }}" != true ]; then
+            cat /etc/apt/apt-mirrors.txt
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            for try in 2 3; do
+              timeout 240 "${apt[@]}" install --download-only "${pkgs[@]}" && break
+              [ "$try" = 3 ] && exit 1
+              echo "::warning::apt download try $try did not finish in 240 s, retrying"
+            done
+          fi
+          "${apt[@]}" install "${pkgs[@]}"
+          "${apt[@]}" autoclean
+          sudo chown -R "$USER" ~/apt-archives
+      - if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true' && steps.apt-cache-again.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ steps.apt.outputs.key }}
       # `bundle.externalBin` in tauri.conf.json names a file that has to exist
       # before `src-tauri` compiles at all — `tauri-build` validates it from
       # inside the build script, not at bundling time. The two `before*Command`
@@ -558,7 +619,7 @@ jobs:
           - pr8-exclusions citation-identity
           - task-9 tree task-12 task-2
           - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer
-          - watcher source debt-rust-mutants
+          - watcher source debt-rust-mutants pdf-broken-utf16
           - pr9-shell pr10c-fonts task-13
           - pr8-masks task-d64 task-6
           - pr9b-scan task-13-xlsx task-1

@@ -91,7 +91,7 @@ case_ "the extension is the part after the dot, not the file name" \
 # `Pool::manifest` return `Result` at all rather than `Manifest`.
 case_ "a binary that cannot state its readers is refused, not guessed at" \
   crates/mnema-pool/src/lib.rs \
-  's~        let manifest: Manifest = serde_json::from_slice~        if true {\n            return Ok(Manifest {\n                default: mnema_core::manifest::ReaderId::new("text", 1),\n                by_extension: Default::default(),\n            });\n        }\n        let manifest: Manifest = serde_json::from_slice~' \
+  's~        let manifest: Manifest = serde_json::from_slice~        if true {\n            return Ok(Manifest {\n                default: mnema_core::manifest::ReaderId::new("text", 1),\n                by_extension: Default::default(),\n                by_reader: Default::default(),\n            });\n        }\n        let manifest: Manifest = serde_json::from_slice~' \
   '            return Ok(Manifest {' \
   mnema-ingest \
   'a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file' --test walk
@@ -104,7 +104,7 @@ case_ "a binary that cannot state its readers is refused, not guessed at" \
 # C7, one level up, and it is `walk_root` rather than `Pool` that owns it.
 case_ "the walk compares against the worker's manifest, not one of its own" \
   crates/mnema-ingest/src/walk.rs \
-  's~    let manifest = pool\.manifest\(\)\?;~    let manifest = mnema_core::manifest::Manifest {\n        default: mnema_core::manifest::ReaderId::new("text", 1),\n        by_extension: Default::default(),\n    };~' \
+  's~    let manifest = pool\.manifest\(\)\?;~    let manifest = mnema_core::manifest::Manifest {\n        default: mnema_core::manifest::ReaderId::new("text", 1),\n        by_extension: Default::default(),\n        by_reader: Default::default(),\n    };~' \
   '    let manifest = mnema_core::manifest::Manifest {' \
   mnema-ingest \
   'a_worker_that_cannot_state_its_readers_stops_the_walk_before_any_file' --test walk

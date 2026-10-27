@@ -168,9 +168,9 @@ fn handle_request(line: &str) -> Vec<Frame> {
     // lowering `max_bytes` must not delete anything. See `SkipRule::TooLarge`.
     let size = metadata.len();
     if size > request.max_bytes {
-        return vec![Frame::Refused {
-            rule: "too_large".to_string(),
-            reason: format!(
+        return vec![refused_before_a_reader(
+            "too_large",
+            format!(
                 "{} is {size} bytes, over the {}-byte ceiling",
                 request.path, request.max_bytes
             ),
@@ -178,8 +178,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // branch decided from `stat` and never opened the file. Hashing it
             // here to fill the field in would read exactly the bytes the
             // ceiling exists to avoid reading.
-            sha256: None,
-        }];
+            None,
+        )];
     }
 
     // Read once: this same `Vec<u8>` is hashed and handed to the reader, so
@@ -213,7 +213,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 // manifest by extension: this is the record of how the file
                 // *was* read, and a lookup here would make the two agree by
                 // construction and hide the day they stop agreeing.
-                reader: "text".to_string(),
+                reader: manifest::READER_TEXT.to_string(),
                 reader_version: manifest::TEXT_READER_VERSION,
                 pages: 1,
             });
@@ -242,7 +242,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 sha256,
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
-                reader: "markdown".to_string(),
+                reader: manifest::READER_MARKDOWN.to_string(),
                 reader_version: manifest::MARKDOWN_READER_VERSION,
                 // The count the pool checks the page frames against, so it is
                 // taken from the same vector those frames come from rather
@@ -278,7 +278,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 mime: file_type.mime.to_string(),
                 source_kind: file_type.source_kind,
                 // The constant, and `pages_of` matches the **same constant**
-                // (`crates/mnema-ingest/src/lib.rs:1333`) rather than a literal
+                // (`crates/mnema-ingest/src/lib.rs:1504`) rather than a literal
                 // — so a typo here is not the risk, and saying it was would be
                 // an unchecked claim about the other side of D40. What the two
                 // ends really are is one symbol with a process boundary between
@@ -317,15 +317,14 @@ fn handle_request(line: &str) -> Vec<Frame> {
         // five. These bytes are not text at all, and no release adds a reader
         // that makes them prose (D51).
         Reader::NotText => {
-            vec![Frame::Refused {
-                rule: "not_text".to_string(),
-                reason: "this file is not text: its bytes are not something this product reads"
-                    .to_string(),
+            vec![refused_before_a_reader(
+                "not_text",
+                "this file is not text: its bytes are not something this product reads".to_string(),
                 // The digest of the bytes this verdict was reached on, taken
                 // above, before `identify` ran. It is what tells the parent
                 // whether the file changed or only the rule did.
-                sha256: Some(sha256),
-            }]
+                Some(sha256),
+            )]
         }
         // Also refused, and deliberately under a rule of its own: the parent
         // removes what the index holds under a path when a worker read a file
@@ -335,13 +334,13 @@ fn handle_request(line: &str) -> Vec<Frame> {
         // disk, and the document under this path is still mostly that prose
         // (D51). `SkipRule::BinaryTail` carries the rest.
         Reader::BinaryTail => {
-            vec![Frame::Refused {
-                rule: "binary_tail".to_string(),
-                reason: "this file starts as text and then stops being one: it may be truncated \
+            vec![refused_before_a_reader(
+                "binary_tail",
+                "this file starts as text and then stops being one: it may be truncated \
                          or damaged"
                     .to_string(),
-                sha256: Some(sha256),
-            }]
+                Some(sha256),
+            )]
         }
         Reader::Pdf => match extract_pdf(&bytes) {
             // Every page was below the text-layer threshold, so there is no
@@ -349,14 +348,16 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // under a rule about content rather than under `unsupported`,
             // which promises a reader that is coming. `SkipRule::NoTextLayer`
             // is what the parent records.
-            Ok(doc) if doc.pages.is_empty() => vec![Frame::Refused {
-                rule: "no_text_layer".to_string(),
-                reason: format!(
+            Ok(doc) if doc.pages.is_empty() => vec![reader_refused(
+                manifest::READER_PDF,
+                manifest::PDF_READER_VERSION,
+                "no_text_layer",
+                format!(
                     "no page of this PDF carries a text layer of at least \
                      {TEXT_LAYER_MIN_CHARS} characters"
                 ),
-                sha256: Some(sha256),
-            }],
+                Some(sha256),
+            )],
             Ok(doc) => {
                 let blocks: usize = doc.pages.iter().map(|p| p.blocks.len()).sum();
                 let mut frames = Vec::with_capacity(blocks + doc.pages.len() + 2);
@@ -397,11 +398,13 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 });
                 frames
             }
-            Err(PdfError::Encrypted) => vec![Frame::Refused {
-                rule: "encrypted".to_string(),
-                reason: "this PDF is password-protected".to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(PdfError::Encrypted) => vec![reader_refused(
+                manifest::READER_PDF,
+                manifest::PDF_READER_VERSION,
+                "encrypted",
+                "this PDF is password-protected".to_string(),
+                Some(sha256),
+            )],
             // A reader that could not load its own library is NOT a damaged
             // file, and this arm must not swallow it. Under `malformed` the
             // walk would not stop (`suggests_broken_environment() == false`)
@@ -418,11 +421,13 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // catch-all `Err(e)`. A catch-all is how a later variant — a
             // timeout, a page limit — would arrive silently as "this file is
             // damaged", which is the mistake the arm above exists to undo.
-            Err(e @ PdfError::Malformed(_)) => vec![Frame::Refused {
-                rule: "malformed".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ PdfError::Malformed(_)) => vec![reader_refused(
+                manifest::READER_PDF,
+                manifest::PDF_READER_VERSION,
+                "malformed",
+                e.to_string(),
+                Some(sha256),
+            )],
         },
         // **The first reader that opens an archive, so the mapping from zip
         // failures to refusal rules is declared here and repeated by docx and
@@ -486,24 +491,30 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // `reason: _` on every refusal it checks. Task 13 added a third
             // reader to this match and reduced all three rather than leaving one
             // idiom beside another in one `match`.
-            Err(e @ EpubError::TooLarge) => vec![Frame::Refused {
-                rule: "too_large".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
-            Err(e @ EpubError::NoReadableChapter) => vec![Frame::Refused {
-                rule: "no_text_layer".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ EpubError::TooLarge) => vec![reader_refused(
+                manifest::READER_EPUB,
+                manifest::EPUB_READER_VERSION,
+                "too_large",
+                e.to_string(),
+                Some(sha256),
+            )],
+            Err(e @ EpubError::NoReadableChapter) => vec![reader_refused(
+                manifest::READER_EPUB,
+                manifest::EPUB_READER_VERSION,
+                "no_text_layer",
+                e.to_string(),
+                Some(sha256),
+            )],
             // Bound to the one remaining variant rather than to a catch-all
             // `Err(e)`, for the reason the pdf branch states: a catch-all is
             // how a later variant arrives silently as "this file is damaged".
-            Err(e @ EpubError::Malformed(_)) => vec![Frame::Refused {
-                rule: "malformed".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ EpubError::Malformed(_)) => vec![reader_refused(
+                manifest::READER_EPUB,
+                manifest::EPUB_READER_VERSION,
+                "malformed",
+                e.to_string(),
+                Some(sha256),
+            )],
         },
         // The second format that opens an archive, and it takes the mapping
         // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
@@ -521,7 +532,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     source_kind: file_type.source_kind,
                     // The constant, not the literal `"docx"`. `pages_of` on the
                     // other side of the wire cites a docx chunk by this exact
-                    // string (`crates/mnema-ingest/src/lib.rs:1392`) and may not
+                    // string (`crates/mnema-ingest/src/lib.rs:1504`) and may not
                     // link this crate (D40), so a typo here costs every citation
                     // into a document its section name and nothing goes red.
                     reader: manifest::READER_DOCX.to_string(),
@@ -554,24 +565,30 @@ fn handle_request(line: &str) -> Vec<Frame> {
             // `e.to_string()` rather than the literal these two used to repeat —
             // see the epub arm above for why all three readers were reduced to
             // one source of the string together.
-            Err(e @ DocxError::TooLarge) => vec![Frame::Refused {
-                rule: "too_large".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
-            Err(e @ DocxError::NoText) => vec![Frame::Refused {
-                rule: "no_text_layer".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ DocxError::TooLarge) => vec![reader_refused(
+                manifest::READER_DOCX,
+                manifest::DOCX_READER_VERSION,
+                "too_large",
+                e.to_string(),
+                Some(sha256),
+            )],
+            Err(e @ DocxError::NoText) => vec![reader_refused(
+                manifest::READER_DOCX,
+                manifest::DOCX_READER_VERSION,
+                "no_text_layer",
+                e.to_string(),
+                Some(sha256),
+            )],
             // Bound to the one remaining variant rather than to a catch-all
             // `Err(e)`, for the reason the pdf branch states: a catch-all is how
             // a later variant arrives silently as "this file is damaged".
-            Err(e @ DocxError::Malformed(_)) => vec![Frame::Refused {
-                rule: "malformed".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ DocxError::Malformed(_)) => vec![reader_refused(
+                manifest::READER_DOCX,
+                manifest::DOCX_READER_VERSION,
+                "malformed",
+                e.to_string(),
+                Some(sha256),
+            )],
         },
         // The third format that opens an archive, and it takes the mapping
         // `epub.rs` declared rather than restating it: `TooLarge` → `too_large`,
@@ -590,7 +607,7 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // The constant, not the literal `"xlsx"`, and the cost of
                     // getting it wrong is worse here than for the other four.
                     // `pages_of` matches this exact string to reach
-                    // `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1403`)
+                    // `PageContext::Rows` (`crates/mnema-ingest/src/lib.rs:1515`)
                     // and may not link this crate (D40). A near-miss falls to
                     // `PageContext::Lines` — and unlike a docx's, these blocks
                     // *do* carry numbers, so nothing is empty and nothing goes
@@ -633,37 +650,86 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 });
                 frames
             }
-            Err(e @ XlsxError::TooLarge) => vec![Frame::Refused {
-                rule: "too_large".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
-            Err(e @ XlsxError::NoText) => vec![Frame::Refused {
-                rule: "no_text_layer".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ XlsxError::TooLarge) => vec![reader_refused(
+                manifest::READER_XLSX,
+                manifest::XLSX_READER_VERSION,
+                "too_large",
+                e.to_string(),
+                Some(sha256),
+            )],
+            Err(e @ XlsxError::NoText) => vec![reader_refused(
+                manifest::READER_XLSX,
+                manifest::XLSX_READER_VERSION,
+                "no_text_layer",
+                e.to_string(),
+                Some(sha256),
+            )],
             // Bound to the one remaining variant rather than to a catch-all
             // `Err(e)`, for the reason the pdf branch states: a catch-all is how
             // a later variant arrives silently as "this file is damaged".
-            Err(e @ XlsxError::Malformed(_)) => vec![Frame::Refused {
-                rule: "malformed".to_string(),
-                reason: e.to_string(),
-                sha256: Some(sha256),
-            }],
+            Err(e @ XlsxError::Malformed(_)) => vec![reader_refused(
+                manifest::READER_XLSX,
+                manifest::XLSX_READER_VERSION,
+                "malformed",
+                e.to_string(),
+                Some(sha256),
+            )],
         },
         // The one verdict left that promises a reader which is coming: a zip
         // this build recognises as neither a docx, an xlsx nor an epub.
         Reader::Unrecognized => {
-            vec![Frame::Refused {
-                rule: "unsupported".to_string(),
-                reason: format!(
+            vec![refused_before_a_reader(
+                "unsupported",
+                format!(
                     "no reader implemented yet for {} ({:?})",
                     file_type.mime, file_type.reader
                 ),
-                sha256: Some(sha256),
-            }]
+                Some(sha256),
+            )]
         }
+    }
+}
+
+/// A refusal made by `reader` — the frame names it and its version.
+///
+/// The parent uses the pair to answer one question: is the reader that just
+/// refused these bytes a newer release of the one that indexed them? Without
+/// the name it can only ask the manifest for the version of the reader the
+/// `path` row itself names — a row compared with itself, which cannot tell
+/// "another reader" from "the same one" — so a later bump of the row's own
+/// reader would let an unrelated reader's refusal take the document away
+/// (review I2).
+fn reader_refused(
+    reader: &str,
+    version: u32,
+    rule: &str,
+    reason: String,
+    sha256: Option<String>,
+) -> Frame {
+    Frame::Refused {
+        rule: rule.to_string(),
+        reason,
+        sha256,
+        reader: Some(reader.to_string()),
+        reader_version: Some(version),
+    }
+}
+
+/// A refusal reached before any reader was chosen: the size ceiling decided
+/// from `stat`, `not_text` from the first bytes, `binary_tail` from where the
+/// prose stopped, and `unsupported` because this build has no reader for the
+/// format at all.
+///
+/// It names no reader, and a parent reading one keeps what the index holds —
+/// there is no version here to compare against the row that says who indexed
+/// the file.
+fn refused_before_a_reader(rule: &str, reason: String, sha256: Option<String>) -> Frame {
+    Frame::Refused {
+        rule: rule.to_string(),
+        reason,
+        sha256,
+        reader: None,
+        reader_version: None,
     }
 }
 
