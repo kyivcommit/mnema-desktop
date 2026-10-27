@@ -225,21 +225,21 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
         // The constant a fourth time, and the reason it is one symbol is
         // sharper here than for html: `mnema-ingest` matches `READER_EPUB` to
         // cite a chapter as `Coordinate::Section`
-        // (`crates/mnema-ingest/src/lib.rs:1392`), and a literal `"epub"` in
+        // (`crates/mnema-ingest/src/lib.rs:1505`), and a literal `"epub"` in
         // this arm would leave the constant with two users out of three and
         // remove the cross-check it exists for. No compiler joins the two
         // across D40.
         Reader::Epub => mnema_core::manifest::READER_EPUB,
         // The constant a fifth time. `mnema-ingest` matches `READER_DOCX` in the
         // same arm as `READER_HTML` and `READER_EPUB`
-        // (`crates/mnema-ingest/src/lib.rs:1392`) to cite a section, so a
+        // (`crates/mnema-ingest/src/lib.rs:1504`) to cite a section, so a
         // literal `"docx"` here would leave the constant with two users out of
         // three and remove the cross-check it exists for. No compiler joins the
         // two across D40.
         Reader::Docx => mnema_core::manifest::READER_DOCX,
         // The constant a sixth time, and the cost of a literal here is worse
         // than for any of the five above. `mnema-ingest` matches `READER_XLSX`
-        // in an arm of its own (`crates/mnema-ingest/src/lib.rs:1403`) to reach
+        // in an arm of its own (`crates/mnema-ingest/src/lib.rs:1515`) to reach
         // `PageContext::Rows`; a near-miss falls to `PageContext::Lines`, and
         // unlike a docx's these blocks *do* carry line numbers — so nothing is
         // empty and nothing goes red, and every citation into a spreadsheet
@@ -256,7 +256,7 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
 /// `identify` gives real PDF bytes to the pdf reader whatever the file is
 /// called; the manifest predicts by extension and has no `pdf` entry, so it
 /// predicts the *text* reader for `report.pdf`; and the parent's cheap arm
-/// compares the two (`crates/mnema-ingest/src/lib.rs:274-280`). Every real PDF
+/// compares the two (`crates/mnema-ingest/src/lib.rs:293-298`). Every real PDF
 /// therefore misses that arm on every walk and is handed to a worker again —
 /// which for this format is a full pdfium parse, serialised process-wide,
 /// rather than a text read.
@@ -306,7 +306,7 @@ fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
 ///
 /// What the absence costs is what it costs for PDF: every real `.epub` records
 /// `epub@1`, is predicted `text@1` by the cheap arm
-/// (`crates/mnema-ingest/src/lib.rs:274-280`), and is handed to a worker on
+/// (`crates/mnema-ingest/src/lib.rs:293-298`), and is handed to a worker on
 /// every walk. For this format that is a zip open and one HTML parse per
 /// chapter, not a text read.
 #[test]

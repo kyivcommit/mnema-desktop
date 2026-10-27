@@ -338,7 +338,7 @@ fn a_row_with_no_words_in_it_produces_no_block() {
 ///
 /// The failure this exists for is specific to this format: the sheet's name is
 /// the only thing `pages_of` puts inside `Coordinate::SheetRows`
-/// (`crates/mnema-ingest/src/lib.rs:1403-1405`), so it is both what the citation
+/// (`crates/mnema-ingest/src/lib.rs:1515-1516`), so it is both what the citation
 /// shows and what the coordinate carries. Bound it in one of those two places
 /// and they would show two different names, silently, with everything green.
 /// There is one string because there is one field, and this is what holds it to

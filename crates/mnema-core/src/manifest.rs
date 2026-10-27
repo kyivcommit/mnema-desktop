@@ -38,15 +38,48 @@ use serde::{Deserialize, Serialize};
 /// are pinned, because `mnema-ingest/tests/slice.rs` states these literals to a
 /// stand-in worker and asserts the coordinate that comes back.
 ///
-/// The five formats of G7.1, and no more. `text` and `markdown` are absent on
-/// purpose: nothing matches on them — they reach the same default arm as a
-/// reader no build has heard of — so a constant for them would be a name with
-/// no second user.
+/// The five formats of G7.1, and the two the default arm used to stand in for.
+///
+/// **`text` and `markdown` joined when they gained a second and third user.**
+/// They were literals in four places at once — the worker's headers,
+/// `manifest()`'s `default`, its `md` entry, and the version table
+/// `mnema-extract` builds — and drift between those spellings is silent in the
+/// worst direction: the parent's lookup answers `None` and keeps a document it
+/// should have re-read. A constant is not a check (nothing makes a reader use
+/// it), but it is one spelling rather than four.
+pub const READER_TEXT: &str = "text";
+pub const READER_MARKDOWN: &str = "markdown";
 pub const READER_PDF: &str = "pdf";
 pub const READER_HTML: &str = "html";
 pub const READER_DOCX: &str = "docx";
 pub const READER_EPUB: &str = "epub";
 pub const READER_XLSX: &str = "xlsx";
+
+/// Every reader name above, in one list.
+///
+/// **What a name in this list buys is a red build without a fixture.**
+/// `mnema-extract`'s `READERS` pairs each of these names with the version this
+/// build has, and its unit test requires the two lists to be the same set — so a
+/// reader named here whose version row is missing is caught by that test, not by
+/// whether some file in `crates/mnema-extract/tests/fixtures/` happens to be read
+/// by it. That is the direction `worker_cli`'s
+/// `every_reader_the_worker_emits_is_one_the_manifest_can_version` cannot see:
+/// it runs a file per reader, and a reader no fixture reaches emits nothing to
+/// compare (review M1, and its own N2).
+///
+/// What no list can catch: a reader added to the worker whose name is written as
+/// a literal there and never listed here. Rust cannot enumerate a string that
+/// does not exist anywhere; the rule is that a reader this build ships is named
+/// in this file, and this is the list it is named in.
+pub const READER_NAMES: [&str; 7] = [
+    READER_TEXT,
+    READER_MARKDOWN,
+    READER_PDF,
+    READER_HTML,
+    READER_DOCX,
+    READER_EPUB,
+    READER_XLSX,
+];
 
 /// A reader and the version of it that produced (or would produce) a document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +111,25 @@ pub struct Manifest {
     /// reader, and the parent has to be able to version that reading.
     pub default: ReaderId,
     pub by_extension: BTreeMap<String, ReaderId>,
+    /// Every reader this build ships, by the name it answers to on the wire,
+    /// and the version of it this build has.
+    ///
+    /// **`by_extension` cannot stand in for this, which is why it exists.** A
+    /// parent asking "is the reader that made this row older than the one this
+    /// build has?" may not link `mnema-extract` (D40), so the answer arrives
+    /// over `--manifest` with everything else. Keyed on an extension, that map
+    /// has no entry for a reader the worker picks by magic bytes, and `pdf` is
+    /// deliberately absent from it — so the rows written by exactly those
+    /// readers are the ones the extension map cannot judge. `text` and
+    /// `markdown` are here too: a `path` row can name any reader this build
+    /// ships, and the lookup is by that name rather than by what the extension
+    /// predicts.
+    ///
+    /// `#[serde(default)]` because a worker from before this field answers a
+    /// manifest without it: the parent then knows no versions and keeps every
+    /// document, which is the side that loses nothing.
+    #[serde(default)]
+    pub by_reader: BTreeMap<String, u32>,
 }
 
 impl Manifest {
@@ -100,6 +152,16 @@ impl Manifest {
         ext.and_then(|ext| self.by_extension.get(ext))
             .unwrap_or(&self.default)
     }
+
+    /// Today's version of the reader that answers to `reader`, or `None` for a
+    /// name this build's worker does not state.
+    ///
+    /// `None` is a row written by a build that had a reader this one does not —
+    /// a sidecar of another release, a reader removed — and nothing here can
+    /// judge it, so callers have to answer from the name they see.
+    pub fn version_of(&self, reader: &str) -> Option<u32> {
+        self.by_reader.get(reader).copied()
+    }
 }
 
 #[cfg(test)]
@@ -109,9 +171,14 @@ mod tests {
     fn sample() -> Manifest {
         let mut by_extension = BTreeMap::new();
         by_extension.insert("md".to_string(), ReaderId::new("markdown", 3));
+        let mut by_reader = BTreeMap::new();
+        by_reader.insert("text".to_string(), 1);
+        by_reader.insert("markdown".to_string(), 3);
+        by_reader.insert("pdf".to_string(), 2);
         Manifest {
             default: ReaderId::new("text", 1),
             by_extension,
+            by_reader,
         }
     }
 
@@ -159,5 +226,31 @@ mod tests {
         assert_eq!(v["by_extension"]["md"]["version"], serde_json::json!(3));
         assert_eq!(v["default"]["reader"], serde_json::json!("text"));
         assert_eq!(serde_json::from_str::<Manifest>(&json).unwrap(), sample());
+    }
+
+    /// **The lookup is by the reader's own name, and that is the whole
+    /// reason the map exists.** `.pdf` is deliberately absent from
+    /// `by_extension` (`mnema-extract`'s manifest carries why), so an
+    /// extension lookup answers `text@1` for every path the pdf reader made. A
+    /// `path` row saying `pdf@1` has to be judged against the pdf reader's own
+    /// version, and this is the map that can.
+    #[test]
+    fn a_reader_no_extension_names_still_has_a_version() {
+        let manifest = sample();
+        assert_eq!(manifest.for_extension(Some("pdf")).reader, "text");
+        assert_eq!(manifest.version_of("pdf"), Some(2));
+        assert_eq!(manifest.version_of("no such reader"), None);
+    }
+
+    /// A worker from before this field answers a manifest without it, and the
+    /// parent still has to parse it — knowing no versions, which is the side
+    /// that keeps every document.
+    #[test]
+    fn a_manifest_without_versions_is_read_as_one_that_knows_none() {
+        let older = r#"{"default":{"reader":"text","version":1},"by_extension":{}}"#;
+        let manifest: Manifest =
+            serde_json::from_str(older).expect("the older manifest still parses");
+        assert!(manifest.by_reader.is_empty());
+        assert_eq!(manifest.version_of("text"), None);
     }
 }

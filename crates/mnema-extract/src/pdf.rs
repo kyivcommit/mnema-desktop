@@ -48,7 +48,7 @@ use std::borrow::Cow;
 use mnema_core::{Block, BlockType, nfc};
 use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
 
-use crate::pdfium_probe::{self, has_text_layer, lock_pdfium, text_layer_chars};
+use crate::pdfium_probe::{self, has_text_layer, lock_pdfium, page_text, text_layer_chars};
 
 /// One page of a PDF that had a text layer worth keeping.
 ///
@@ -197,14 +197,14 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
                 "page {page_no} of this PDF could not be loaded: {e}"
             ))
         })?;
-        let raw = page
-            .text()
-            .map_err(|e| {
-                PdfError::Malformed(format!(
-                    "page {page_no} of this PDF has no readable text: {e}"
-                ))
-            })?
-            .all();
+        // Not `all()`: it reads `page_size()`, a rectangle from `(0,0)` that
+        // throws the page's own origin away. `page_text` reads the box the page
+        // shows and rebuilds a page pdfium failed to decode.
+        let raw = page_text(&page).map_err(|e| {
+            PdfError::Malformed(format!(
+                "page {page_no} of this PDF has no readable text: {e}"
+            ))
+        })?;
         // Before the threshold and before the text is kept, so the page is
         // admitted and stored from the same string. A space and not nothing:
         // a contents line whose leader dots came back as U+FFFD would otherwise

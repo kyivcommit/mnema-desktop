@@ -256,6 +256,68 @@ done
     path
 }
 
+/// A worker that refuses every file under `rule` and **names the reader that
+/// refused it** — the shape a reader-made refusal has had since `Frame::Refused`
+/// grew `reader` and `reader_version`. `stricter_worker` above is the older
+/// shape, which names nobody, and is what stands in for "no reader" here.
+///
+/// The digest is real, for the reason `stricter_worker` gives.
+#[cfg(unix)]
+fn named_refusal_worker(dir: &Path, rule: &str, reader: &str, version: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("refuser-{rule}-{reader}-{version}"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"#!/bin/sh
+while read -r line; do
+  file=$(printf '%s' "$line" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+  sha=$(shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
+  printf '{{"frame":"refused","rule":"{rule}","reason":"a newer reader decided","sha256":"%s","reader":"{reader}","reader_version":{version}}}\n' "$sha"
+done
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// `inner` behind a counter: one byte appended to the returned file per request
+/// line, then the line handed on. The only way to tell "the journal answered"
+/// from "a worker was asked" when both come back `Skipped`.
+#[cfg(unix)]
+fn counted_worker(dir: &Path, inner: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = inner.file_name().unwrap().to_string_lossy();
+    let path = dir.join(format!("counted-{name}"));
+    let counter = dir.join(format!("counted-{name}.calls"));
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf x >> '{}'\n  printf '%s\\n' \"$line\"\ndone | '{}'\n",
+            counter.display(),
+            inner.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (path, counter)
+}
+
+/// The cases `a_newer_reader_finds_no_text_layer` rotates through, by the
+/// counter name each one reaching its refusal adds to — every one required.
+const NO_TEXT_CASES: [&str; 8] = [
+    "no-text case 0: older row, refused at today",
+    "no-text case 1: older row, refused between",
+    "no-text case 2: same version",
+    "no-text case 3: row newer than the refusal",
+    "no-text case 4: another reader",
+    "no-text case 5: no reader named",
+    "no-text case 6: malformed from a newer reader",
+    "no-text case 7: row recorded at version 0",
+];
+
 // ------------------------------------------------------------------ the dice
 
 /// splitmix64 — three lines, no dependency, and identical on every platform.
@@ -986,6 +1048,29 @@ struct World {
     /// Which reader version the next rebuild announces. Separate from
     /// `stricter_rotation` on purpose — see `the_build_learned_to_read_better`.
     rebuild_rotation: usize,
+    /// Which case `a_newer_reader_finds_no_text_layer` builds next.
+    no_text_rotation: usize,
+    /// The reader and version the `path` row named just before the call in
+    /// flight, and the reader and version the refusal it answered named (read
+    /// back from the journal, `None` for a refusal that named nobody). Invariant
+    /// 3c's `NoTextLayer` arm turns on both, and nothing else reads them.
+    recorded_before: Option<(String, i64)>,
+    refused_by: Option<(String, i64)>,
+    /// What the stand-in about to answer will put in its refusal — `Some(None)`
+    /// for one that names nobody — set only by an operation that built that
+    /// stand-in. `None` means the model does not know, and then no refusal is
+    /// taken to be a newer reader's: 3c demands the keep.
+    sending: Option<Option<(String, i64)>>,
+    /// True while a stand-in sidecar announces a reader name it is not — its
+    /// readings are not evidence that this build's reader was reached.
+    standing_in: bool,
+    /// Calls recorded so far, and which counts the latest of them has already
+    /// added to — so a call judged again by the end-of-step check is counted
+    /// once.
+    calls: u64,
+    judged: std::cell::RefCell<(u64, BTreeSet<String>)>,
+    /// How often each state and each side of 3c was reached — see [`Reached`].
+    fired: std::cell::RefCell<BTreeMap<String, usize>>,
 }
 
 impl World {
@@ -1030,6 +1115,14 @@ impl World {
             // did not.
             stricter_rotation: (seed % 4) as usize,
             rebuild_rotation: (seed % 3) as usize,
+            no_text_rotation: (seed % NO_TEXT_CASES.len() as u64) as usize,
+            recorded_before: None,
+            refused_by: None,
+            sending: None,
+            standing_in: false,
+            calls: 0,
+            judged: Default::default(),
+            fired: Default::default(),
         }
     }
 
@@ -1665,7 +1758,9 @@ impl World {
                 self.reached.rules.insert(rule.as_str());
             }
             Verdict::Settled => {
-                self.record_reader_of(relative);
+                if !self.standing_in {
+                    self.record_reader_of(relative);
+                }
                 // Scoped to this run's root, which the first version was not:
                 // every `World` has a database of its own today, so an unscoped
                 // count answered the same number — but it was a claim about
@@ -1685,6 +1780,34 @@ impl World {
             }
             Verdict::Failed | Verdict::Unoffered => {}
         }
+        // **Who refused comes from the model**, never from the product's own
+        // record: `record_skip` hands one value to both the journal and
+        // `displaces`, so reading it back would let a defect that inflates the
+        // refusal's version both displace and justify the displacement. The
+        // journal is required to agree with what the stand-in sent instead.
+        self.refused_by = None;
+        if let (Verdict::Skipped(_), Some(sent)) = (verdict, self.sending.clone()) {
+            // The two columns separately: `zip` reads a name with no version as
+            // `None`, which would agree with a refusal that sent nothing.
+            let entry = self.db.skip_entry(self.root_id, relative).unwrap();
+            let journal = entry
+                .as_ref()
+                .map(|skip| (skip.reader.as_deref(), skip.reader_version))
+                .unwrap_or((None, None));
+            let sent_columns = sent
+                .as_ref()
+                .map(|(reader, version)| (Some(reader.as_str()), Some(*version)))
+                .unwrap_or((None, None));
+            if journal != sent_columns {
+                self.fail(format!(
+                    "invariant 3c — {relative} was refused by a worker that sent {sent:?}, \
+                     and the journal records the refusal as {journal:?}: the product \
+                     recorded a refusal it did not receive"
+                ));
+            }
+            self.refused_by = sent;
+        }
+        self.calls += 1;
         self.calling = Some(relative.to_string());
         self.last.insert(
             relative.to_string(),
@@ -1743,6 +1866,7 @@ impl World {
         }
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
+        self.recorded_before = self.reading_of(relative);
         let absolute = self.absolute(relative);
         let outcome = ingest_file(
             &self.pool,
@@ -1785,6 +1909,7 @@ impl World {
         let pool = Pool::new(config).unwrap();
         let before = self.paths_now();
         let hash = self.hash_on_disk(relative);
+        self.recorded_before = self.reading_of(relative);
         let absolute = self.absolute(relative);
         let on_disk = mnema_walk::stat(&absolute);
         let outcome = ingest_file(
@@ -1885,6 +2010,20 @@ impl World {
         if let Some(reader) = reader {
             self.reached.readers.insert(reader);
         }
+    }
+
+    /// A walk is not the call before it: nothing the walk does may be excused,
+    /// or judged, as that call's verdict.
+    fn forget_the_call_in_flight(&mut self) {
+        (self.calling, self.recorded_before, self.refused_by) = (None, None, None);
+    }
+
+    /// The reader and version the `path` row under `relative` names, if any.
+    fn reading_of(&self, relative: &str) -> Option<(String, i64)> {
+        self.db
+            .path_entry(self.root_id, relative)
+            .unwrap()
+            .map(|entry| (entry.reader, entry.reader_version))
     }
 
     fn paths_now(&self) -> BTreeMap<String, String> {
@@ -1992,6 +2131,30 @@ impl World {
         self.check_ord_is_dense();
         self.check_checkpoints_agree(&documents);
         self.check_citations_locate();
+    }
+
+    /// The call in flight was refused by a newer release of the reader that
+    /// wrote the `path` row it found: same name, a higher version, and a
+    /// recorded version that is a version at all (≥ 1). A refusal that names
+    /// no reader is not one.
+    fn a_newer_reader_refused(&self) -> bool {
+        match (&self.recorded_before, &self.refused_by) {
+            (Some((recorded, was)), Some((refusing, now))) => {
+                recorded == refusing && *was >= 1 && was < now
+            }
+            _ => false,
+        }
+    }
+
+    /// Counts `what` once for the call in flight, however many checks judge it.
+    fn count_once(&self, what: &str) {
+        let mut judged = self.judged.borrow_mut();
+        if judged.0 != self.calls {
+            *judged = (self.calls, BTreeSet::new());
+        }
+        if judged.1.insert(what.to_string()) {
+            *self.fired.borrow_mut().entry(what.to_string()).or_default() += 1;
+        }
     }
 
     /// **0. The schema's own claims still hold.**
@@ -2257,6 +2420,30 @@ impl World {
             {
                 continue;
             }
+            // A refusal by content on the very bytes this document was built
+            // from is 3c's to judge, in both directions: it demands the keep
+            // for every such refusal but one, and the removal for that one — a
+            // newer release of the same reader finding no text layer. Judged
+            // here as well, the one would be red on a removal 3c requires, and
+            // every other would go red here first under a message that does not
+            // name its rule.
+            if self.calling.as_deref() == Some(relative.as_str())
+                && self.last.get(relative).is_some_and(|last| {
+                    last.hash.as_ref() == Some(document)
+                        && matches!(
+                            last.verdict,
+                            Verdict::Skipped(
+                                SkipRule::NotText
+                                    | SkipRule::Unsupported
+                                    | SkipRule::Malformed
+                                    | SkipRule::Encrypted
+                                    | SkipRule::NoTextLayer
+                            )
+                        )
+                })
+            {
+                continue;
+            }
             if self.hash_on_disk(relative).as_ref() == Some(document) {
                 self.fail(format!(
                     "invariant 3 — the index stopped holding {document} under {relative}, \
@@ -2348,6 +2535,25 @@ impl World {
                 // could have displaced or kept.
                 return;
             };
+            // The state task B's rule exists for, measured against the same
+            // manifest the run hands `ingest_file`: the row was written by a
+            // reader this build ships at a higher version, and that reader's
+            // "no text" came back on the bytes the row was built from.
+            if rule == SkipRule::NoTextLayer
+                && last.hash.as_deref() == Some(held.as_str())
+                && self
+                    .recorded_before
+                    .as_ref()
+                    .is_some_and(|(reader, version)| {
+                        self.manifest
+                            .version_of(reader)
+                            .is_some_and(|today| i64::from(today) > *version)
+                    })
+            {
+                self.count_once(
+                    "state: recorded reader older than today's, same bytes refused no_text_layer",
+                );
+            }
             match rule {
                 // Conditional on the digest since task 10, and both branches
                 // are asserted here because each one is a document lost or a
@@ -2401,8 +2607,37 @@ impl World {
                 | SkipRule::Encrypted
                 | SkipRule::NoTextLayer => match last.hash.as_deref() {
                     // The worker saw exactly the bytes the index was built
-                    // from. The rule changed, the file did not.
+                    // from, and **a newer release of the reader that built it**
+                    // says there is no text in them (D186, spec «Поправка 2»).
+                    // The one identical-bytes refusal that must take the
+                    // document away: the newer reading is the better one, and
+                    // keeping the old document keeps text that reader no longer
+                    // stands behind. Asserted positively, not merely allowed.
+                    Some(sha)
+                        if sha == held
+                            && rule == SkipRule::NoTextLayer
+                            && self.a_newer_reader_refused() =>
+                    {
+                        self.count_once("3c displace: a newer same reader found no text layer");
+                        if after.contains_key(relative) {
+                            self.fail(format!(
+                                "invariant 3c — {relative} was refused as no_text_layer by \
+                                 {:?}, a newer release of the reader that built {held} \
+                                 ({:?}), on those very bytes — and the index still answers \
+                                 for it with {:?}. The newer reader found no text there, so \
+                                 the old document is text nothing stands behind any more",
+                                self.refused_by,
+                                self.recorded_before,
+                                after.get(relative)
+                            ));
+                        }
+                    }
+                    // The worker saw exactly the bytes the index was built
+                    // from. The rule changed, the file did not — or the reader
+                    // that refused is not a newer release of the one that
+                    // built the document, which is no better evidence.
                     Some(sha) if sha == held => {
+                        self.count_once(&format!("3c keep: identical bytes, {}", rule.as_str()));
                         if after.get(relative) != Some(held) {
                             self.fail(format!(
                                 "invariant 3c — {relative} was refused as {rule:?} and lost \
@@ -2467,9 +2702,9 @@ impl World {
                 // nothing to add about a worker that crashed.
                 //
                 // 🔴 `NoTextLayer` used to sit in this list and does not belong
-                // in it. `displaces` gives it the *same* condition as the four
-                // content rules above — `content.is_none_or(|sha| sha !=
-                // recorded.document_id)` (`crates/mnema-ingest/src/lib.rs`) —
+                // in it. `displaces` gives it the four content rules' condition
+                // — `content.is_none_or(|sha| sha != recorded.document_id)` —
+                // plus one (a newer release of the same reader, judged above),
                 // while this arm asserted nothing at all about it, and an empty
                 // arm accepts both behaviours. That is the failure this very
                 // function's comment warns about, three lines up, about a
@@ -3132,7 +3367,7 @@ impl World {
         let choice = if self.files.is_empty() {
             0
         } else {
-            self.rng.below(30)
+            self.rng.below(32)
         };
         match choice {
             0 => self.create(),
@@ -3189,6 +3424,9 @@ impl World {
             26 => self.the_build_learned_to_read_better(),
             27 => self.an_interrupted_rebuild_is_finished_by_the_next_pass(),
             28 => self.a_format_changes_hands(),
+            // Two slots: seven cases rotate through it, and each of them is
+            // one side of a rule a single mutation flips.
+            29 | 30 => self.a_newer_reader_finds_no_text_layer(),
             _ => self.run_walk(),
         }
     }
@@ -4048,6 +4286,198 @@ impl World {
         }
     }
 
+    /// **A newer reader finds no text layer in bytes an older one indexed** —
+    /// D186's case, and the only state in which a refusal on byte-identical
+    /// content takes a document away (`displaces`' `NoTextLayer` arm).
+    ///
+    /// Nothing else here reaches it, and measured why: the only version bump
+    /// elsewhere is the text reader at 2..4, always *above* this build's, and
+    /// the real worker's `no_text_layer` refusals land on epub/docx/xlsx bodies
+    /// whose rows it wrote itself at today's version. So the row is written by
+    /// a stand-in announcing a reader this build ships at a version the
+    /// manifest has moved past, and the same bytes are then refused by a
+    /// stand-in that names its reader.
+    ///
+    /// **Eight cases, rotated rather than drawn**, for the reason
+    /// `stricter_rule_over_an_unchanged_folder` gives: a case the corpus
+    /// happens not to draw looks like a case with no defects. Two displace,
+    /// six keep, and each keep case is the one a single mutation of the rule
+    /// would turn into a removal:
+    ///
+    /// 0. same reader, recorded below today, refused at today → gone;
+    /// 1. the same, refused at a version between the two → gone, and the
+    ///    journal row it leaves names a version the build has moved past, so
+    ///    the next pass must ask a worker (invariant 3f below);
+    /// 2. same reader, same version → kept (`<` is not `<=`);
+    /// 3. recorded newer than the refusal (a rollback) → kept;
+    /// 4. another reader, at a higher version → kept (the name is compared);
+    /// 5. a refusal that names no reader → kept;
+    /// 6. `malformed` from the same newer reader → kept (only `NoTextLayer`);
+    /// 7. a row recorded at version 0 → kept (garbage is not a version).
+    ///
+    /// Invariant 3c is what judges the refusal. This operation adds **3f**:
+    /// after a displacement, an unchanged file is answered from the journal
+    /// without a worker when the row names today's version, and is re-read —
+    /// at least one worker call, and the document back — when it names an
+    /// older one. Both directions, because a fall-through that always fires
+    /// and one that never does each pass half of it.
+    fn a_newer_reader_finds_no_text_layer(&mut self) {
+        #[cfg(unix)]
+        {
+            // Today's versions from the manifest the run hands `ingest_file`,
+            // never from a literal this crate may not link.
+            let Some((reader, today)) = self
+                .manifest
+                .by_reader
+                .iter()
+                .find(|(_, version)| **version >= 2)
+                .map(|(reader, version)| (reader.clone(), *version))
+            else {
+                self.note(
+                    "  (no reader this build ships is past version 1, so no row can be \
+                     older than today's)"
+                        .to_string(),
+                );
+                return;
+            };
+            let other = self
+                .manifest
+                .by_reader
+                .keys()
+                .find(|name| **name != reader)
+                .cloned()
+                .expect("this build ships more than one reader");
+            let case = self.no_text_rotation % NO_TEXT_CASES.len();
+            self.no_text_rotation += 1;
+            let older = 1 + self.rng.below(today as usize - 1) as u32;
+            let (recorded, rule, by): (u32, &str, Option<(&str, u32)>) = match case {
+                0 => (older, "no_text_layer", Some((reader.as_str(), today))),
+                1 => (1, "no_text_layer", Some((reader.as_str(), today - 1))),
+                2 => (today, "no_text_layer", Some((reader.as_str(), today))),
+                3 => (today + 1, "no_text_layer", Some((reader.as_str(), today))),
+                4 => (older, "no_text_layer", Some((other.as_str(), today))),
+                5 => (older, "no_text_layer", None),
+                6 => (older, "malformed", Some((reader.as_str(), today))),
+                // The pool refuses a blank reader name and says nothing about
+                // the version (`PathEntry`'s doc), so a header can write 0.
+                _ => (0, "no_text_layer", Some((reader.as_str(), today))),
+            };
+            let displaces = rule == "no_text_layer"
+                && by.is_some_and(|(name, version)| {
+                    name == reader && recorded >= 1 && recorded < version
+                });
+
+            let n = self.next_counter();
+            let relative = format!("docs/scan-{n}.txt");
+            let units = 1 + self.rng.below(3);
+            let content = self.text_body(units);
+            let at = self.next_tick();
+            self.note(format!(
+                "  create {relative}, read by a stand-in {reader}@{recorded} (today {today})"
+            ));
+            self.write_at(&relative, content, at);
+            self.standing_in = true;
+            let older_reader = better_reader_worker(self.dir.path(), &reader, recorded);
+            self.ingest_with(
+                &relative,
+                PoolConfig::new(&older_reader),
+                &format!(" [{reader} reader v{recorded}]"),
+            );
+            self.standing_in = false;
+            if self.reading_of(&relative) != Some((reader.clone(), i64::from(recorded))) {
+                // Excluded or never written; there is no row to go stale.
+                return;
+            }
+
+            self.retouch(&relative);
+            let refuser = match by {
+                Some((name, version)) => named_refusal_worker(self.dir.path(), rule, name, version),
+                None => stricter_worker(self.dir.path(), rule),
+            };
+            self.note(format!("  refuse {relative} as {rule} by {by:?}"));
+            self.sending = Some(by.map(|(name, version)| (name.to_string(), i64::from(version))));
+            let verdict =
+                self.ingest_with(&relative, PoolConfig::new(&refuser), " [refusing reader]");
+            self.sending = None;
+            let Some(Verdict::Skipped(_)) = verdict else {
+                return;
+            };
+            *self
+                .fired
+                .get_mut()
+                .entry(NO_TEXT_CASES[case].to_string())
+                .or_default() += 1;
+            if let Some(state) = self.files.get_mut(&relative) {
+                state.refused_by_content = true;
+            }
+            let held = self.paths_now().contains_key(&relative);
+            if displaces && !held {
+                self.reached.states.insert("newer-reader-displaced");
+            }
+            if !displaces && held {
+                self.reached
+                    .states
+                    .insert("same-bytes-kept-by-the-reader-rule");
+            }
+            if !displaces || held {
+                return;
+            }
+
+            // **3f.** The file is unchanged, so the journal row matches it and
+            // only the reader it names decides whether a worker is asked.
+            let (_, refused_at) = by.expect("a displacing refusal names its reader");
+            let hash = self.hash_on_disk(&relative);
+            let todays_reader = better_reader_worker(self.dir.path(), &reader, today);
+            let (counted, calls) = counted_worker(self.dir.path(), &todays_reader);
+            let _ = std::fs::remove_file(&calls);
+            self.standing_in = true;
+            let verdict = self.ingest_with(
+                &relative,
+                PoolConfig::new(&counted),
+                &format!(" [{reader} reader v{today}, counted]"),
+            );
+            self.standing_in = false;
+            let asked = std::fs::metadata(&calls).map_or(0, |m| m.len());
+            let now = self.paths_now().get(&relative).cloned();
+            if refused_at < today {
+                *self
+                    .fired
+                    .get_mut()
+                    .entry("3f re-ask: journal row older than today's reader".to_string())
+                    .or_default() += 1;
+                if asked == 0 || now != hash {
+                    self.fail(format!(
+                        "invariant 3f — {relative} was displaced by {reader}@{refused_at}, and \
+                         this build's {reader} is at {today}. The next pass over the unchanged \
+                         file asked {asked} worker(s) and left the index holding {now:?} \
+                         rather than {hash:?}: a document a fixed reader would bring back is \
+                         answered from the journal for ever"
+                    ));
+                }
+                self.reached
+                    .states
+                    .insert("journal-re-asked-a-newer-reader");
+                if let Some(state) = self.files.get_mut(&relative) {
+                    state.refused_by_content = false;
+                }
+            } else {
+                *self
+                    .fired
+                    .get_mut()
+                    .entry("3f answer: journal row at today's reader".to_string())
+                    .or_default() += 1;
+                if asked != 0 || verdict != Some(Verdict::Skipped(SkipRule::NoTextLayer)) {
+                    self.fail(format!(
+                        "invariant 3f — {relative} was displaced by {reader}@{refused_at}, \
+                         which is this build's own {reader}. The next pass over the unchanged \
+                         file should have been answered from the journal; it asked {asked} \
+                         worker(s) and answered {verdict:?}"
+                    ));
+                }
+            }
+        }
+    }
+
     /// A rebuild that is cut off **between two slices**, and the pass after it.
     ///
     /// `PAGES_PER_TRANSACTION` is 20 and the sidecar emits one page per line, so
@@ -4333,6 +4763,7 @@ impl World {
     /// does — nothing in this file re-derives it any more.
     fn run_walk(&mut self) {
         self.note(format!("  RunWalk over {}", self.root.display()));
+        self.forget_the_call_in_flight();
         let before = self.paths_now();
         let cancel = AtomicBool::new(false);
         let report = walk_root(
@@ -4492,6 +4923,7 @@ impl World {
     /// the over-deletion direction (invariant 3), never the under-deletion
     /// one 3b is for.
     fn simulate_ejected_volume(&mut self) {
+        self.forget_the_call_in_flight();
         let before = self.paths_now();
         let parked = self.dir.path().join("parked");
         self.note(format!(
@@ -4686,6 +5118,7 @@ fn run(seed: u64, steps: usize) -> Reached {
         world.step(n);
     }
     world.settle();
+    world.reached.counts = world.fired.take();
     world.reached
 }
 
@@ -4731,6 +5164,10 @@ struct Reached {
     /// "exactly three pages were skipped" — belongs in invariant 3e, which
     /// reads the numbers themselves.
     page_skips: usize,
+    /// How many times each state and each side of invariants 3c and 3f was
+    /// reached — counted, not just seen, because a side reached zero times is
+    /// a side judged vacuously.
+    counts: BTreeMap<String, usize>,
 }
 
 impl Reached {
@@ -4740,6 +5177,9 @@ impl Reached {
         self.readers.extend(other.readers);
         self.states.extend(other.states);
         self.page_skips += other.page_skips;
+        for (what, n) in other.counts {
+            *self.counts.entry(what).or_default() += n;
+        }
     }
 }
 
@@ -4800,8 +5240,13 @@ fn random_sequences_do_not_lose_data() {
         // generated at all.
         eprintln!(
             "seed {seed} reached:\n  shapes:  {:?}\n  readers: {:?}\n  rules:   {:?}\n  \
-             states:  {:?}\n  per-page rows seen: {}",
-            reached.shapes, reached.readers, reached.rules, reached.states, reached.page_skips
+             states:  {:?}\n  per-page rows seen: {}\n  counts:  {:#?}",
+            reached.shapes,
+            reached.readers,
+            reached.rules,
+            reached.states,
+            reached.page_skips,
+            reached.counts
         );
         return;
     }
@@ -4809,7 +5254,11 @@ fn random_sequences_do_not_lose_data() {
     let runs = setting("MNEMA_FUZZ_RUNS", 12);
     let mut reached = Reached::default();
     for i in 0..runs as u64 {
-        reached.merge(run(base + i, steps));
+        let one = run(base + i, steps);
+        // Per seed under `--nocapture`: the coverage of a rule is a number per
+        // run, and a corpus total hides a run that never reached it.
+        eprintln!("seed {}: {:?}", base + i, one.counts);
+        reached.merge(one);
     }
 
     // **The corpus has to have met what it claims to cover.** Everything above
@@ -4832,9 +5281,16 @@ fn random_sequences_do_not_lose_data() {
     // wrong claim. It was still a sound case — checked by neutralising the
     // assertions in front of it — but "which assertion fired" is the evidence
     // this branch runs on, and a louder neighbour answering first destroys it.
-    let want_states: BTreeSet<&str> = ["rebuilt", "rebuild-resumed", "reader-changed-hands"]
-        .into_iter()
-        .collect();
+    let want_states: BTreeSet<&str> = [
+        "rebuilt",
+        "rebuild-resumed",
+        "reader-changed-hands",
+        "newer-reader-displaced",
+        "same-bytes-kept-by-the-reader-rule",
+        "journal-re-asked-a-newer-reader",
+    ]
+    .into_iter()
+    .collect();
     let want_shapes: BTreeSet<&str> = Shape::EVERY_LABEL.into_iter().collect();
     let want_readers: BTreeSet<String> = ["text", "markdown", "html", "epub", "docx", "xlsx"]
         .into_iter()
@@ -4883,6 +5339,23 @@ fn random_sequences_do_not_lose_data() {
             want_states.difference(&reached.states).collect::<Vec<_>>(),
             reached.states.difference(&want_states).collect::<Vec<_>>()
         );
+    }
+    // Every side of 3c's `NoTextLayer` arm and of 3f, by name: zero is a
+    // finding, not a pass.
+    for what in [
+        "state: recorded reader older than today's, same bytes refused no_text_layer",
+        "3c displace: a newer same reader found no text layer",
+        "3c keep: identical bytes, no_text_layer",
+        "3c keep: identical bytes, malformed",
+        "3f re-ask: journal row older than today's reader",
+        "3f answer: journal row at today's reader",
+    ]
+    .into_iter()
+    .chain(NO_TEXT_CASES)
+    {
+        if reached.counts.get(what).copied().unwrap_or(0) == 0 {
+            let _ = write!(wrong, "\n  counts:  {what:?} reached 0 times");
+        }
     }
     assert!(
         wrong.is_empty(),

@@ -46,6 +46,7 @@ case_ "the migration is registered, not merely written" \
         M::up(ADD_FILE_MASK),
         M::up(ADD_QUERY_HISTORY),
         M::up(ADD_SEARCH_FOLDER),
+        M::up(ADD_SKIP_READER),
     ])' \
   mnema-index \
   'migrations::tests::an_existing_database_keeps_its_rows_and_the_migration_credits_them_all_to_text' --lib

@@ -586,6 +586,17 @@ pub struct SkippedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkipEntry {
     pub rule: SkipRule,
+    /// Which reader refused the file, and the version of it that did — `None`
+    /// for a row written before the journal had the columns, and for every
+    /// refusal reached before a reader was chosen.
+    ///
+    /// The parent compares these against the worker's manifest: a verdict from a
+    /// reader this build has since moved past is re-examined rather than
+    /// answered from the journal. Without them a displaced document could not
+    /// come back — the path row is gone, so the journal is the only thing left
+    /// that knows what refused the file (review I1).
+    pub reader: Option<String>,
+    pub reader_version: Option<i64>,
     /// The bytes the walk stat'ed when this verdict was recorded. `None`
     /// whenever `rule.is_about_content()` is false, since `record_skip` drops
     /// them on the floor for those rules regardless of what the caller passed
@@ -606,6 +617,12 @@ impl Db {
     /// statement about the file's content; for an environmental rule it is
     /// dropped on the floor here rather than at the call site, so that no
     /// caller can get the asymmetry wrong.
+    // The last two arguments are what the caller measured and what it learned
+    // about who refused: `bytes` is dropped for a rule that is not about
+    // content, and the reader pair is dropped for a page's row. Two
+    // `Option`s rather than a struct because each is independently absent, and
+    // the function is the one place that knows which of the two applies.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_skip(
         &self,
         root_id: i64,
@@ -614,19 +631,27 @@ impl Db {
         reason: &str,
         rule: SkipRule,
         bytes: Option<OnDisk>,
+        refused_by: Option<(&str, u32)>,
     ) -> Result<(), Error> {
         let bytes = if rule.is_about_content() { bytes } else { None };
+        // A page's verdict is not the file's, so it names no reader: nothing
+        // reads these two columns for a page, and a version there would be a
+        // second answer to "what refused this file?" that disagrees with the
+        // row that stands for the file.
+        let refused_by = if page_no.is_none() { refused_by } else { None };
         self.conn().execute(
             "INSERT INTO skipped
                 (watched_root_id, relative_path, page_no, reason, rule,
-                 size_bytes, mtime, format_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 size_bytes, mtime, format_version, reader, reader_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT (COALESCE(watched_root_id, -1), relative_path, COALESCE(page_no, -1))
              DO UPDATE SET reason = excluded.reason,
                            rule = excluded.rule,
                            size_bytes = excluded.size_bytes,
                            mtime = excluded.mtime,
                            format_version = excluded.format_version,
+                           reader = excluded.reader,
+                           reader_version = excluded.reader_version,
                            at = unixepoch()",
             params![
                 root_id,
@@ -636,7 +661,9 @@ impl Db {
                 rule.as_str(),
                 bytes.map(|b| b.size_bytes),
                 bytes.map(|b| b.mtime),
-                INDEX_FORMAT_VERSION
+                INDEX_FORMAT_VERSION,
+                refused_by.map(|(reader, _)| reader),
+                refused_by.map(|(_, version)| i64::from(version))
             ],
         )?;
         Ok(())
@@ -650,20 +677,34 @@ impl Db {
     ) -> Result<Option<SkipEntry>, Error> {
         self.conn()
             .query_row(
-                "SELECT rule, size_bytes, mtime, format_version FROM skipped
+                "SELECT rule, size_bytes, mtime, format_version, reader, reader_version
+                   FROM skipped
                   WHERE watched_root_id = ?1 AND relative_path = ?2 AND page_no IS NULL",
                 params![root_id, relative_path],
-                |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                    ))
+                },
             )
             .optional()?
-            .map(|(rule, size_bytes, mtime, format_version)| {
-                Ok(SkipEntry {
-                    rule: SkipRule::parse(&rule).ok_or_else(|| Error::UnknownSkipRule(rule))?,
-                    size_bytes,
-                    mtime,
-                    format_version,
-                })
-            })
+            .map(
+                |(rule, size_bytes, mtime, format_version, reader, reader_version)| {
+                    Ok(SkipEntry {
+                        rule: SkipRule::parse(&rule).ok_or_else(|| Error::UnknownSkipRule(rule))?,
+                        size_bytes,
+                        mtime,
+                        format_version,
+                        reader,
+                        reader_version,
+                    })
+                },
+            )
             .transpose()
     }
 

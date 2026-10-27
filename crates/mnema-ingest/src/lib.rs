@@ -33,7 +33,7 @@ use mnema_core::manifest::{
     Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
 };
 use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
-use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipRule};
+use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipEntry, SkipRule};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
 mod walk;
@@ -341,9 +341,18 @@ pub fn ingest_file(
         && skip.format_version == INDEX_FORMAT_VERSION
         && skip.size_bytes == Some(disk.size_bytes)
         && skip.mtime == Some(disk.mtime)
-        && !recorded
-            .as_ref()
-            .is_some_and(|entry| displaces(skip.rule, entry, on_disk, None))
+        && !recorded.as_ref().is_some_and(|entry| {
+            // No refusal here: nothing read the file this pass, so there is no
+            // reader to compare and `displaces` is asked only "would this rule
+            // take the document away if the bytes could not be identified?".
+            displaces(skip.rule, entry, on_disk, None, None)
+        })
+        // **And the one lever that reaches a document this table already took.**
+        // A refusal that displaced its path leaves this row and nothing else, so
+        // this is where a fixed release finds the file again: a row written by
+        // reader R at version v is re-examined when this build has R above v.
+        // Without it the row answers without a worker for ever (D57, review I1).
+        && !the_reader_has_moved_on(&skip, manifest)
     {
         return Ok(Ingested::Skipped { rule: skip.rule });
     }
@@ -366,6 +375,8 @@ pub fn ingest_file(
                 // Nothing read the file — this arm is reached because the walk
                 // could not even stat it.
                 content: None,
+                reader: None,
+                reader_version: None,
             },
             &recorded,
             on_disk,
@@ -385,6 +396,12 @@ pub fn ingest_file(
                     rule,
                     reason: &skip.reason,
                     content: skip.sha256.as_deref(),
+                    // The reader that made this refusal, when one did. It is the
+                    // fact the `no_text_layer` rule compares before it deletes
+                    // anything, and the fact the journal keeps so a later
+                    // release can pick the file up again.
+                    reader: skip.reader.as_deref(),
+                    reader_version: skip.reader_version,
                 },
                 &recorded,
                 on_disk,
@@ -766,7 +783,9 @@ fn journal_skipped_pages(
             // the walk stat'ed, and their only reader is `skip_entry`, which
             // takes `page_no IS NULL` — so on a page's row they would be
             // written, never read, and left to go stale, in two columns that
-            // read as though they described the page.
+            // read as though they described the page. The same reason the last
+            // argument is `None`: a page's verdict names no reader.
+            None,
             None,
         )?;
     }
@@ -789,6 +808,13 @@ struct Refusal<'a> {
     /// the size ceiling refused it from `stat`, the worker died, or this crate
     /// answered without a worker at all.
     content: Option<&'a str>,
+    /// The reader that made this refusal, and its version, when a reader did.
+    /// Together they answer the one question [`displaces`] asks before it
+    /// deletes a document — is this a newer release of the reader that indexed
+    /// it? — and they are journalled so a later release can pick the file up
+    /// again after a displacement.
+    reader: Option<&'a str>,
+    reader_version: Option<u32>,
 }
 
 /// Journals one file's skip and, when [`displaces`] says so, removes what the
@@ -819,11 +845,14 @@ fn record_skip(
         rule,
         reason,
         content,
+        reader,
+        reader_version,
     } = refusal;
+    let refused_by = reader.zip(reader_version);
     db.transaction(|_| {
-        db.record_skip(root_id, relative, None, reason, rule, on_disk)?;
+        db.record_skip(root_id, relative, None, reason, rule, on_disk, refused_by)?;
         if let Some(recorded) = recorded
-            && displaces(rule, recorded, on_disk, content)
+            && displaces(rule, recorded, on_disk, content, refused_by)
         {
             db.delete_path(root_id, relative)?;
             forget_if_unnamed(db, &recorded.document_id)?;
@@ -866,6 +895,34 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
     Ok(())
 }
 
+/// Whether the journal's row was written by a reader this build has since moved
+/// past — and so must not be answered from.
+///
+/// **This is the only road back for a displaced document.** A refusal that takes
+/// a document away leaves no `path` row, so the cheap arm above has nothing to
+/// ask `displaces` about; the journal row is the whole of what survives. Left as
+/// it was, that row answered without a worker for ever, and a release that fixed
+/// its reader brought back nothing at all (review I1, D57).
+///
+/// A row naming no reader — everything written before the journal had the
+/// columns, and every refusal reached before a reader was chosen — is answered
+/// as before: nothing here can say the reader moved.
+///
+/// General on purpose, and not just for `no_text_layer`: a whole PDF skipped by
+/// the pdf reader at version N is worth one re-read when N+1 ships, and until
+/// this existed nothing re-read it. The cost is one worker per such file per
+/// reader upgrade.
+fn the_reader_has_moved_on(skip: &SkipEntry, manifest: &Manifest) -> bool {
+    skip.reader
+        .as_deref()
+        .zip(skip.reader_version)
+        .is_some_and(|(reader, version)| {
+            manifest
+                .version_of(reader)
+                .is_some_and(|today| i64::from(today) > version)
+        })
+}
+
 /// Whether this skip means the index must stop holding what it holds under
 /// this path.
 ///
@@ -902,6 +959,20 @@ fn forget_if_unnamed(db: &Db, document: &str) -> Result<(), mnema_index::Error> 
 /// loses text that is still on disk. The digest the worker refused on is what
 /// tells the two apart; the arms below carry the reasoning, and D51 the
 /// measurement.
+///
+/// **`NoTextLayer` also displaces on the same bytes, when a newer version of the
+/// same reader is the one saying "no text".** A reader's verdict is not a fact
+/// about the file alone: D186's reader refuses a page whose every character is
+/// `U+FFFD`, so a document made of nothing else becomes a `NoTextLayer` on bytes
+/// its predecessor indexed — and keeping it would keep exactly the garbage the
+/// release was written to remove. So this one rule reads **who the worker said
+/// refused the file** (`Frame::Refused`'s `reader` and `reader_version`) and
+/// requires that name to be the one on the row, at a strictly higher version.
+/// Nothing here consults the manifest: what has to match is the reader that
+/// refused *these bytes*, and only the frame says which reader that was. A
+/// refusal that names no reader, a recorded version that is the same or
+/// higher, a garbage version below 1, and a refusal from another reader all
+/// keep — each for its own reason, each carried at the arm below.
 ///
 /// Four of those five are refusals a *release* can reverse — a reader arrives,
 /// a reader gets better at damage, a password prompt is built, a threshold
@@ -1100,6 +1171,7 @@ fn displaces(
     recorded: &PathEntry,
     on_disk: Option<OnDisk>,
     content: Option<&str>,
+    refused_by: Option<(&str, u32)>,
 ) -> bool {
     match rule {
         // A determination about the bytes — but only about *these* bytes. A
@@ -1161,7 +1233,8 @@ fn displaces(
         SkipRule::Malformed => content.is_none_or(|sha| sha != recorded.document_id),
         SkipRule::Encrypted => content.is_none_or(|sha| sha != recorded.document_id),
         // The same condition once more, and on a line of its own for the same
-        // reason as the two above.
+        // reason as the two above — **and then a second one no other rule
+        // has.**
         //
         // The comment this replaces asked whoever built the PDF reader to
         // decide this rather than inherit it, because the rule was dormant —
@@ -1176,12 +1249,56 @@ fn displaces(
         // a build that did not is a document lost per file, with the bytes
         // never having moved.
         //
+        // **But "no text" is sometimes a release's deliberate decision about
+        // pages it used to index.** D186 is the case: a page whose every
+        // character is `U+FFFD` is now refused, because indexing that is
+        // indexing garbage, and a document made entirely of such pages becomes
+        // a `NoTextLayer` its predecessor never gave. On the same bytes, a
+        // *newer version of the same reader* is the code that made the old
+        // document being reconsidered by the code that replaced it — and the
+        // newer judgement is the point of the release.
+        //
+        // **The reader comes from the refusal, not from the manifest, and that
+        // is the whole guard (review I2).** `refused_by` is who the worker said
+        // refused the bytes. Requiring it to equal `recorded.reader` is what
+        // makes "another reader keeps" true rather than merely claimed: a
+        // refusal by some other reader is a verdict about bytes that reader
+        // never indexed, however much newer its version is. The version this
+        // rule used before came from `manifest.version_of(&recorded.reader)` —
+        // the row's own reader looked up by name, not the extension's
+        // prediction — so it compared that reader with itself. Two readers this
+        // build ships with the same version (or a row made by `text` under a
+        // `.pdf` name, refused by `pdf`) are the states that cannot be told
+        // apart that way, and a later bump of the row's own reader would let an
+        // unrelated reader's refusal take the document away (review I2).
+        //
+        // What still keeps, each for its own reason:
+        //
+        // * no reader named — an old worker, or a refusal reached before a
+        //   reader was chosen: there is no version to compare, so nothing here
+        //   may delete a document (D51);
+        // * the same version — a threshold, a library or a machine that failed
+        //   today says nothing about the file (D51);
+        // * a recorded version that is *higher* — a rolled-back build does not
+        //   get to overrule a newer one's reading;
+        // * a recorded version below 1, which no build this product ships writes
+        //   (the header versions are 1 or more) and a foreign sidecar could:
+        //   garbage is not a version, so it keeps (review M4);
+        // * another reader, for the reason above.
+        //
         // It is a rule about a page as well as about a file, and the two
         // meanings do not conflict here. This function is only ever asked
         // about the whole-file row: a page's own row carries `page_no` and is
         // never a verdict on the path (`Db::skip_entry` reads `page_no IS
         // NULL`, `Db::forget_page_skips` is what maintains the others).
-        SkipRule::NoTextLayer => content.is_none_or(|sha| sha != recorded.document_id),
+        SkipRule::NoTextLayer => {
+            content.is_none_or(|sha| sha != recorded.document_id)
+                || refused_by.is_some_and(|(reader, version)| {
+                    reader == recorded.reader
+                        && recorded.reader_version >= 1
+                        && recorded.reader_version < i64::from(version)
+                })
+        }
         // Something that happened, and that happens to every file alike.
         SkipRule::Crash | SkipRule::Timeout | SkipRule::Memory | SkipRule::Unreadable => false,
         // The one refusal by content that keeps: the file still opens with the

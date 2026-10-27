@@ -11,7 +11,7 @@
 //! G7.1 §2.2 declined to port pagination by character count — a number that
 //! would name a "page 4" no copy of the document agrees with. So this reader
 //! answers what `markdown.rs` and `html.rs` answer, and `pages_of` cites it the
-//! same way: `Coordinate::Section` (`crates/mnema-ingest/src/lib.rs:1392`).
+//! same way: `Coordinate::Section` (`crates/mnema-ingest/src/lib.rs:1505`).
 //!
 //! **What a heading is, is the one thing here that measurement reversed.** The
 //! obvious rule is a `<w:pStyle>` of `Heading1`–`Heading9`. Probed against 24

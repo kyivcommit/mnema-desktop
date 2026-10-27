@@ -24,7 +24,7 @@
 
 # C1. The name is one symbol across a process boundary and across D40.
 # `pages_of` matches it to cite a chapter as `Coordinate::Section`
-# (`crates/mnema-ingest/src/lib.rs:1392`); one character off falls to
+# (`crates/mnema-ingest/src/lib.rs:1505`); one character off falls to
 # `PageContext::Lines`, which asks blocks that carry no line numbers for a line
 # range and answers `Coordinate::None`. Green everywhere else.
 case_ "worker: the header names the epub reader, not a near-miss" \
@@ -59,12 +59,12 @@ case_ "worker: the summary names the epub text source" \
 # text file called `notes.epub` is predicted for a reader that never touched it.
 case_ "manifest: epub is decided by content, so the map does not claim it" \
   crates/mnema-extract/src/manifest.rs \
-  's{    Manifest \{\n        default: ReaderId::new\("text", TEXT_READER_VERSION\),}{    by_extension.insert(\n        "epub".to_string(),\n        ReaderId::new(READER_EPUB, EPUB_READER_VERSION),\n    );\n    Manifest \{\n        default: ReaderId::new("text", TEXT_READER_VERSION),}' \
+  's~    Manifest \{\n        default:~    by_extension.insert(\n        "epub".to_string(),\n        ReaderId::new(READER_EPUB, EPUB_READER_VERSION),\n    );\n    Manifest {\n        default:~' \
   'by_extension.insert(
         "epub".to_string(),
         ReaderId::new(READER_EPUB, EPUB_READER_VERSION),
     );' \
-  mnema-extract 'an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it' --test manifest
+  mnema-extract 'the_manifest_names_the_reader_that_identify_actually_picks' --test manifest
 
 # ------------------------------------- what can vanish: the skip accounting
 
@@ -410,11 +410,13 @@ case_ "reader: a chapter's name is bounded by the rule every reader shares" \
 # rule and does not add its rows is a branch nothing measures.
 case_ "worker: an epub refused after being read carries the digest it was read on" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~            Err\(e \@ EpubError::TooLarge\) => vec!\[Frame::Refused \{\n                rule: "too_large"\.to_string\(\),\n                reason: e\.to_string\(\),\n                sha256: Some\(sha256\),~            Err(e \@ EpubError::TooLarge) => vec![Frame::Refused {\n                rule: "too_large".to_string(),\n                reason: e.to_string(),\n                sha256: None,~' \
-  'Err(e @ EpubError::TooLarge) => vec![Frame::Refused {
-                rule: "too_large".to_string(),
-                reason: e.to_string(),
-                sha256: None,' \
+  's~(Err\(e @ EpubError::NoReadableChapter\) => vec!\[reader_refused\(.*?)Some\(sha256\),~${1}None,~s' \
+  'Err(e @ EpubError::NoReadableChapter) => vec![reader_refused(
+                manifest::READER_EPUB,
+                manifest::EPUB_READER_VERSION,
+                "no_text_layer",
+                e.to_string(),
+                None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # ------------------------------- fix round 1: what the review's own runs found

@@ -384,7 +384,7 @@ pub fn walk_root(
         // on every future walk. That is a known, accepted limitation of this
         // row, not a bug in the reconciliation that reads it.
         let key = pre.relative.as_deref().unwrap_or(&pre.detail);
-        db.record_skip(root_id, key, None, reason, SkipRule::Unreadable, None)?;
+        db.record_skip(root_id, key, None, reason, SkipRule::Unreadable, None, None)?;
         report.refused += 1;
     }
 
@@ -1012,6 +1012,7 @@ fn ingest_with_busy_retry(
         None,
         &reason,
         SkipRule::Unreadable,
+        None,
         None,
     )?;
     Ok(Retried::StillBusy)

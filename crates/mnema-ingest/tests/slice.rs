@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mnema_core::Coordinate;
-use mnema_core::manifest::{Manifest, ReaderId};
+use mnema_core::manifest::{Manifest, READER_PDF, ReaderId};
 #[cfg(unix)]
 use mnema_core::wire::{Frame, to_line};
 #[cfg(unix)]
@@ -2701,6 +2701,7 @@ fn a_content_refusal_an_older_build_remembered_is_looked_at_again() {
                 "refused by a build whose readers were not these",
                 rule,
                 mnema_walk::stat(&older_path),
+                None,
             )
             .unwrap();
         fx.age_every_skip_row();
@@ -2723,6 +2724,7 @@ fn a_content_refusal_an_older_build_remembered_is_looked_at_again() {
                 "refused by this build",
                 rule,
                 mnema_walk::stat(&today_path),
+                None,
             )
             .unwrap();
 
@@ -3925,6 +3927,710 @@ fn a_refusal_that_takes_the_document_away_takes_its_page_rows_with_it() {
     );
 }
 
+// ------------------------------------------- a reader's verdict, per release
+
+/// What `PDF_READER_VERSION` is, as the worker states it — `mnema-ingest` may
+/// not link the constant (D40), so the number these tests compare against comes
+/// out of the manifest the worker prints.
+#[cfg(unix)]
+fn pdf_reader_version(fx: &Fixture) -> u32 {
+    fx.manifest
+        .version_of(READER_PDF)
+        .expect("the worker states a version for the reader that refuses these files")
+}
+
+/// `before`, with `reader` moved to `version` — one row of the manifest and
+/// nothing else. The shape both halves of the recovery test need: a build whose
+/// manifest has not reached the refusing release yet, and one that has.
+#[cfg(unix)]
+fn with_reader_at(before: &Manifest, reader: &str, version: u32) -> Manifest {
+    let mut after = before.clone();
+    after.by_reader.insert(reader.to_string(), version);
+    after
+}
+
+/// A refusal on exactly `bytes`, built as the wire type rather than as JSON
+/// written out here — a literal would be a second copy of the protocol.
+///
+/// `refused_by` is the reader that made it and its version, or `None` for the
+/// shape an older worker sends and for a refusal reached before a reader was
+/// chosen.
+#[cfg(unix)]
+fn refusal(bytes: &[u8], rule: &str, refused_by: Option<(&str, u32)>) -> Frame {
+    let (reader, reader_version) = match refused_by {
+        Some((reader, version)) => (Some(reader.to_string()), Some(version)),
+        None => (None, None),
+    };
+    Frame::Refused {
+        rule: rule.to_string(),
+        reason: "the bytes did not move and this release reads them differently".to_string(),
+        sha256: Some(sha256_of(bytes)),
+        reader,
+        reader_version,
+    }
+}
+
+/// Indexes `path` as a pdf document read at `reader_version`, then touches the
+/// file and hands it to `refusing` — the state every test below is about: the
+/// bytes did not move, so whatever differs is the code that judged them.
+///
+/// Returns the document the first pass made, which a test needs to ask whether
+/// it is still there.
+#[cfg(unix)]
+fn refuse_on_the_same_bytes(
+    fx: &Fixture,
+    path: &str,
+    bytes: &[u8],
+    reader_version: u32,
+    refusing: &Path,
+) -> (String, Ingested) {
+    fx.place_at(path, bytes, mtime());
+    let indexed = pdf_frames_from(
+        bytes,
+        &[1, 2, 3],
+        Vec::new(),
+        "Договір постачання",
+        reader_version,
+    );
+    // A directory of its own: `wrong_worker` writes `<dir>/wrong-worker`, so a
+    // worker built beside `refusing` would replace it with these frames.
+    let scratch = tempfile::tempdir().unwrap();
+    assert!(
+        matches!(
+            fx.ingest_with_worker(path, &worker_answering_in(scratch.path(), &indexed)),
+            Ingested::Indexed { .. }
+        ),
+        "the premise is a document that release made"
+    );
+    let document = fx
+        .db
+        .path_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the first pass wrote a path row")
+        .document_id;
+
+    // Touched, so neither cheap arm can answer from size and mtime alone.
+    fx.place_at(path, bytes, mtime_just_after());
+    (document, fx.ingest_with_worker(path, refusing))
+}
+
+/// **The rule, and the only direction of it that deletes.** A release that
+/// decides a document has no text layer worth indexing has made a *reading* —
+/// D186's pages of replacement characters are the case — and the reading it
+/// replaces is exactly what that release was written to remove.
+///
+/// The refusal names the reader that made it, and that name is what the rule
+/// compares: `pdf@1` on the row, `pdf@2` saying "no text" on the same bytes.
+///
+/// Three assertions, each satisfied by a different mistake: the document is
+/// gone (the removal happened), the journal says why **and by whom** (a removal
+/// with no row leaves "what was this file?" unanswerable, and a row with no
+/// reader can never be re-read by a fixed release), and the next walk under the
+/// same manifest costs no worker because there is no path row left to dispute
+/// the journal.
+#[cfg(unix)]
+#[test]
+fn a_newer_reader_deciding_no_text_layer_takes_the_document_away() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract a later release reads as scans\n".as_slice();
+    let today = pdf_reader_version(&fx);
+    assert!(
+        today > 1,
+        "the premise is a release older than this build's, so the build has to \
+         have moved at least once"
+    );
+
+    let counter = fx.root.parent().unwrap().join("worker-calls");
+    let refusing = worker_answering_and_counting(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+        &counter,
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today - 1, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        },
+        "the premise fails unless the wire string arrives as this rule"
+    );
+    assert_eq!(worker_calls(&counter), 1, "the refusal cost one worker");
+    assert!(
+        !fx.db.document_exists(&document).unwrap(),
+        "the same bytes read as no text by a newer version of the same reader: \
+         the old reading is what the new one replaced"
+    );
+    assert!(
+        fx.db.path_entry(fx.root_id, path).unwrap().is_none(),
+        "a document nobody names has no path row"
+    );
+    let journalled: Vec<(String, Option<i64>, String)> = fx
+        .db
+        .skips_for_root(fx.root_id)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.relative_path, r.page_no, r.rule))
+        .collect();
+    assert_eq!(
+        journalled,
+        vec![(path.to_string(), None, "no_text_layer".to_string())],
+        "the removal is written down, under this path, and as a verdict on the \
+         file rather than on a page"
+    );
+    let row = fx
+        .db
+        .skip_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the removal left the file's row standing");
+    assert_eq!(
+        (row.reader.as_deref(), row.reader_version),
+        (Some(READER_PDF), Some(i64::from(today))),
+        "and it names the reader that made it, which is the only thing a fixed \
+         release can act on"
+    );
+
+    // The pass after the removal, under the same manifest: the journal answers
+    // and nothing is handed to a worker.
+    let calls_before = worker_calls(&counter);
+    let again = fx.ingest_with_worker(path, &refusing);
+    assert_eq!(
+        again,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        calls_before,
+        "the journal answered this pass; nothing was handed to a worker"
+    );
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_none());
+}
+
+/// **Review I1: the round trip this rule exists in, and the one it did not
+/// have.** A displaced document leaves a journal row naming the reader that
+/// refused it. A build whose manifest is still that release answers from the
+/// row without a worker; a build whose manifest has moved the reader on reads
+/// the file again, and when the reader can read it the document comes back.
+///
+/// Both halves of the second walk are asserted: the pass after the repair is
+/// `Indexed` (not `Skipped`) and the document is in the index again, and the
+/// journal row is gone — the third of those is what says the row was the road
+/// back rather than a row that happened to be overwritten.
+#[cfg(unix)]
+#[test]
+fn a_reader_that_moved_on_re_reads_what_its_predecessor_displaced() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract a broken release read as scans\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let counter = fx.root.parent().unwrap().join("worker-calls");
+    let refusing = worker_answering_and_counting(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+        &counter,
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today - 1, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(!fx.db.document_exists(&document).unwrap());
+    assert_eq!(worker_calls(&counter), 1);
+
+    // A build whose manifest has not moved past the refusing release: the row
+    // is still the whole truth, and answering it costs no worker.
+    let still_at_the_refusing_release = with_reader_at(&fx.manifest, READER_PDF, today);
+    let settled = fx.ingest_with_worker_against(path, &refusing, &still_at_the_refusing_release);
+    assert_eq!(
+        settled,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        1,
+        "the journal answered: this build's reader has not moved on"
+    );
+
+    // And a build whose reader *has* moved on — the release that fixed it —
+    // reads the file again. Its worker can read these bytes, so the document
+    // returns.
+    let fixed = with_reader_at(&fx.manifest, READER_PDF, today + 1);
+    let indexing = worker_answering(
+        &fx,
+        &pdf_frames_from(
+            bytes,
+            &[1, 2, 3],
+            Vec::new(),
+            "Договір постачання",
+            today + 1,
+        ),
+    );
+    let outcome = fx.ingest_with_worker_against(path, &indexing, &fixed);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a newer reader of the same name has to be asked again, and this one can \
+         read the file: got {outcome:?}"
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "the document the broken release removed is back"
+    );
+    assert!(
+        !fx.db.search_lexical("постачання", 10).unwrap().is_empty(),
+        "and it answers searches again, which is the whole of what was lost"
+    );
+    assert!(
+        fx.db.skips_for_root(fx.root_id).unwrap().is_empty(),
+        "the row that named the refusal is gone, because the verdict stopped \
+         being true"
+    );
+}
+
+/// D51, on the same bytes and **the same version**. A threshold that moved in a
+/// setting, a library that failed to load, a machine under pressure — every one
+/// of those makes today's build report what the one that indexed the file did
+/// not, and none of them says the old reading is wrong.
+#[cfg(unix)]
+#[test]
+fn the_same_reader_version_deciding_no_text_layer_keeps_the_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract read twice by one release\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let refusing = worker_answering(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "nothing about these bytes changed and neither did the reader that read \
+         them, so the old reading is not the release's to overrule"
+    );
+    assert!(fx.db.path_entry(fx.root_id, path).unwrap().is_some());
+}
+
+/// **Review I2, and the direction that used to be claimed without being
+/// guarded.** The refusal names the reader that made it, and that reader is not
+/// the one on the row — so whatever its version, it is a verdict about bytes it
+/// never indexed, and the document stays.
+///
+/// The `.pdf` name is deliberate: it is prose under a name the *pdf* reader
+/// takes for its own by magic bytes, so the row says `text@1` while the refusal
+/// says `pdf@today`. Nothing about the extension, and nothing in the manifest,
+/// can tell the two apart — only the name the worker sent.
+#[cfg(unix)]
+#[test]
+fn a_refusal_from_another_reader_keeps_the_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let prose = "Опис майна, переданого на відповідальне зберігання.\n".repeat(30);
+    fx.place_at(path, prose.as_bytes(), mtime());
+    assert!(matches!(fx.ingest(path), Ingested::Indexed { .. }));
+    let row = fx
+        .db
+        .path_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the text reader indexed this file");
+    assert_eq!(
+        (row.reader.as_str(), row.reader_version),
+        ("text", 1),
+        "the premise is prose under a .pdf name: the text reader's file"
+    );
+
+    fx.place_at(path, prose.as_bytes(), mtime_just_after());
+    // **The premise, asserted here rather than borrowed from a neighbour.** The
+    // row is `text@1` and the refusal is `pdf@today`, so `today > 1` is what
+    // makes the reader's name the only term that can decide this case: at
+    // `today == 1`, a rule that ignored the name would keep as well, and this
+    // test would pass without ever testing the name (review N4).
+    let today = pdf_reader_version(&fx);
+    assert!(
+        today > 1,
+        "this test needs a pdf version above the text reader's 1 to tell the \
+         name from the version: {today}"
+    );
+    let refusing = worker_answering(
+        &fx,
+        &[refusal(
+            prose.as_bytes(),
+            "no_text_layer",
+            Some((READER_PDF, today)),
+        )],
+    );
+    assert_eq!(
+        fx.ingest_with_worker(path, &refusing),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.document_exists(&row.document_id).unwrap(),
+        "the refusal came from a reader that never indexed these bytes, so its \
+         verdict is not about this document"
+    );
+}
+
+/// A refusal that names no reader — a worker from a release before the frame
+/// carried one, or a rule reached before a reader was chosen — keeps the
+/// document. There is no version to compare, and deleting on an unknown is the
+/// cost this rule has to refuse.
+#[cfg(unix)]
+#[test]
+fn a_refusal_that_names_no_reader_keeps_the_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract refused by an older worker\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let refusing = worker_answering(&fx, &[refusal(bytes, "no_text_layer", None)]);
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today - 1, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "the refusal does not say who made it, and an unknown reader is not a \
+         newer one"
+    );
+}
+
+/// A recorded version **higher** than the refusal's is a build that was rolled
+/// back, and the older code does not get to overrule a reading made by newer
+/// code. The pair with the test above: that one stops the name being ignored,
+/// this one stops the comparison becoming `!=`.
+#[cfg(unix)]
+#[test]
+fn a_recorded_version_newer_than_the_refusal_keeps_its_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract read after a rollback\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let refusing = worker_answering(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today + 1, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "the reading in the index was made by newer code than the refusing \
+         build, so the refusing build's verdict carries no authority"
+    );
+}
+
+/// **Review M4.** A recorded version below 1 is garbage — no worker this product
+/// ships writes it (the header versions are constants of 1 or more, and the
+/// migration's default is 1), but a foreign sidecar could. Garbage is not a
+/// version, so it keeps rather than being "older than everything".
+#[cfg(unix)]
+#[test]
+fn a_garbage_recorded_version_keeps_the_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes =
+        b"%PDF-1.7\ninvented: a row written by something that is not this product\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let refusing = worker_answering(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, 0, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "0 is not a release this product shipped, so it is not a version the \
+         refusal can be newer than"
+    );
+}
+
+/// **`NoTextLayer` only.** Damage after a version bump is the new reader being
+/// *worse* at these bytes, not finding them worthless — the old text is still
+/// the better reading of the file, and deleting it is the loss `Malformed`'s arm
+/// exists to avoid. The state is the one that would displace if the new
+/// condition were applied to every content rule, which is the mistake this
+/// stops.
+#[cfg(unix)]
+#[test]
+fn a_newer_reader_that_finds_the_bytes_damaged_keeps_the_document() {
+    let fx = Fixture::new();
+    let path = "договори/постачання.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a contract a later release cannot parse\n".as_slice();
+    let today = pdf_reader_version(&fx);
+
+    let refusing = worker_answering(
+        &fx,
+        &[refusal(bytes, "malformed", Some((READER_PDF, today)))],
+    );
+    let (document, outcome) = refuse_on_the_same_bytes(&fx, path, bytes, today - 1, &refusing);
+    assert_eq!(
+        outcome,
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        }
+    );
+    assert!(
+        fx.db.document_exists(&document).unwrap(),
+        "a newer release that cannot read these bytes at all is not a release \
+         that decided they hold no text"
+    );
+}
+
+// ------------------------------------- the journal, and the reader it names
+
+/// **Review I1, at the journal's own door.** A whole-file scan skipped by the
+/// pdf reader at `today` is answered from the journal while this build's
+/// manifest is still at `today`, and read again when it moves to `today + 1` —
+/// for every content rule, not only for `no_text_layer`.
+///
+/// The counter, not the outcome: both passes come back `Skipped`, so what tells
+/// "answered from the journal" from "asked a worker that said the same thing"
+/// is whether a process ran.
+#[cfg(unix)]
+#[test]
+fn a_scaled_file_skipped_by_an_older_reader_is_read_again_when_the_reader_moves() {
+    let fx = Fixture::new();
+    let path = "скани/скан.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a scan with no text layer on any page\n".as_slice();
+    let today = pdf_reader_version(&fx);
+    let counter = fx.root.parent().unwrap().join("worker-calls");
+    let refusing = worker_answering_and_counting(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+        &counter,
+    );
+
+    fx.place_at(path, bytes, mtime());
+    assert_eq!(
+        fx.ingest_with_worker(path, &refusing),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(worker_calls(&counter), 1, "the first pass asked a worker");
+    let row = fx
+        .db
+        .skip_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the refusal is journalled");
+    assert_eq!(
+        (row.reader.as_deref(), row.reader_version),
+        (Some(READER_PDF), Some(i64::from(today))),
+        "the premise is a row that names the reader that made it"
+    );
+
+    let same_release = with_reader_at(&fx.manifest, READER_PDF, today);
+    assert_eq!(
+        fx.ingest_with_worker_against(path, &refusing, &same_release),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        1,
+        "the manifest has not moved, so the journal answers and no worker runs"
+    );
+
+    let newer_release = with_reader_at(&fx.manifest, READER_PDF, today + 1);
+    assert_eq!(
+        fx.ingest_with_worker_against(path, &refusing, &newer_release),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        2,
+        "a newer version of the reader that refused these bytes is worth one \
+         more look at them"
+    );
+}
+
+/// A journal row written **before** the journal named readers is answered as it
+/// was, whatever the manifest says: nothing in it can tell this build whether
+/// the reader moved, and inventing an answer would re-read every scan in a
+/// library on the first walk after an upgrade.
+///
+/// **`Malformed`, not `NoTextLayer`.** Migration 7 clears the size of a
+/// whole-file `no_text_layer` row, which is what makes that row miss the cheap
+/// arm once (D187) — see
+/// [`a_whole_file_scan_journalled_without_a_reader_is_read_once`]. Every other
+/// rule keeps its measurement, and this is what that is worth: no worker, for
+/// ever, whatever the manifest says.
+///
+/// The row is written through `Db::record_skip` with no reader rather than by
+/// the stand-in worker, because a worker this build ships cannot produce that
+/// shape any more — which is the point.
+#[cfg(unix)]
+#[test]
+fn a_journal_row_that_names_no_reader_is_never_re_read_on_version_grounds() {
+    let fx = Fixture::new();
+    let path = "скани/старий-скан.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a scan journalled before the reader columns\n".as_slice();
+    let absolute = fx.place_at(path, bytes, mtime());
+    let disk = mnema_walk::stat(&absolute).expect("the fixture file is on disk");
+    fx.db
+        .record_skip(
+            fx.root_id,
+            path,
+            None,
+            "the reader could not finish it",
+            SkipRule::Malformed,
+            Some(disk),
+            None,
+        )
+        .unwrap();
+    assert!(
+        fx.db
+            .skip_entry(fx.root_id, path)
+            .unwrap()
+            .unwrap()
+            .reader
+            .is_none()
+    );
+
+    let counter = fx.root.parent().unwrap().join("worker-calls");
+    let refusing = worker_answering_and_counting(
+        &fx,
+        &[refusal(bytes, "malformed", Some((READER_PDF, 99)))],
+        &counter,
+    );
+    let much_newer = with_reader_at(&fx.manifest, READER_PDF, pdf_reader_version(&fx) + 1);
+    assert_eq!(
+        fx.ingest_with_worker_against(path, &refusing, &much_newer),
+        Ingested::Skipped {
+            rule: SkipRule::Malformed
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        0,
+        "the row names no reader, so no manifest can say its reader moved"
+    );
+}
+
+/// **Review I2, and the other half of migration 7.** A whole-file scan
+/// journalled before a refusal could name its reader has no size after the
+/// migration, so the cheap arm misses once and a worker reads the file. The row
+/// that worker writes carries both the measurement and the reader, and from the
+/// next walk on the journal answers it without a worker.
+///
+/// The row is written with no measurement rather than by the migration itself,
+/// which this crate's test fixture cannot reach: the shape the migration leaves
+/// behind is what matters here, and
+/// `a_v6_index_keeps_its_skip_rows_and_they_name_no_reader` is what asserts the
+/// migration produces it.
+#[cfg(unix)]
+#[test]
+fn a_whole_file_scan_journalled_without_a_reader_is_read_once() {
+    let fx = Fixture::new();
+    let path = "скани/старий-скан.pdf";
+    let bytes = b"%PDF-1.7\ninvented: a scan journalled before the reader columns\n".as_slice();
+    let absolute = fx.place_at(path, bytes, mtime());
+    let disk = mnema_walk::stat(&absolute).expect("the fixture file is on disk");
+    fx.db
+        .record_skip(
+            fx.root_id,
+            path,
+            None,
+            "no page carries a text layer",
+            SkipRule::NoTextLayer,
+            Some(disk),
+            None,
+        )
+        .unwrap();
+    // Migration 7's statement, run on the only row there is — this crate has no
+    // `rusqlite` to bind a path with, the reason `age_every_skip_row` gives. The
+    // mtime stays: the size is the whole of what the migration takes, and the
+    // cheap arm has to miss on that and on nothing else.
+    fx.db
+        .conn()
+        .execute_batch("UPDATE skipped SET size_bytes = NULL")
+        .unwrap();
+    let looked_up = fx.db.skip_entry(fx.root_id, path).unwrap().unwrap();
+    assert_eq!(
+        (looked_up.size_bytes, looked_up.mtime),
+        (None, Some(disk.mtime)),
+        "the premise is a whole-file scan with nothing to compare and its mtime intact"
+    );
+
+    let counter = fx.root.parent().unwrap().join("worker-calls");
+    let today = pdf_reader_version(&fx);
+    let refusing = worker_answering_and_counting(
+        &fx,
+        &[refusal(bytes, "no_text_layer", Some((READER_PDF, today)))],
+        &counter,
+    );
+    assert_eq!(
+        fx.ingest_with_worker(path, &refusing),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        1,
+        "with no size to compare, the journal cannot answer and a worker reads \
+         the file — which is the one look the CropBox reader needs (D187)"
+    );
+    let row = fx
+        .db
+        .skip_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the refusal is journalled");
+    assert_eq!(
+        (row.size_bytes, row.reader.as_deref(), row.reader_version),
+        (
+            Some(bytes.len() as i64),
+            Some(READER_PDF),
+            Some(i64::from(today))
+        ),
+        "the row the worker writes is measured and names the reader that made it"
+    );
+
+    assert_eq!(
+        fx.ingest_with_worker(path, &refusing),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    assert_eq!(
+        worker_calls(&counter),
+        1,
+        "once, not every walk: the row is cheap again"
+    );
+}
+
 // ------------------------------------------------- markdown, and its pages
 
 /// An invented handbook: content before the first heading, two sections, and a
@@ -4733,6 +5439,33 @@ fn worker_answering_in(dir: &Path, frames: &[Frame]) -> PathBuf {
         .map(|frame| to_line(frame).expect("a frame serialises"))
         .collect();
     support::wrong_worker(dir, &format!("cat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES"))
+}
+
+/// A stand-in worker that appends one byte to `counter` for every request it
+/// answers, then answers with `frames` — for the tests whose subject is how
+/// often a pass reaches the pool rather than what it learns when it does.
+///
+/// `counter` must sit outside the watched root, for the reason `wrong_worker`
+/// gives about `dir`.
+#[cfg(unix)]
+fn worker_answering_and_counting(fx: &Fixture, frames: &[Frame], counter: &Path) -> PathBuf {
+    let lines: String = frames
+        .iter()
+        .map(|frame| to_line(frame).expect("a frame serialises"))
+        .collect();
+    support::wrong_worker(
+        fx.root.parent().unwrap(),
+        &format!(
+            "printf x >> '{}'\ncat <<'MNEMA_FRAMES'\n{lines}MNEMA_FRAMES",
+            counter.display()
+        ),
+    )
+}
+
+/// How many requests the worker above was handed; zero before it exists.
+#[cfg(unix)]
+fn worker_calls(counter: &Path) -> usize {
+    std::fs::read(counter).map(|bytes| bytes.len()).unwrap_or(0)
 }
 
 /// What an html reader sends for a document of `pages` sections.

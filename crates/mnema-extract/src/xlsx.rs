@@ -3,7 +3,7 @@
 //!
 //! **This is the only reader whose citation coordinate is a range the chunker
 //! computes.** `pages_of` gives it `PageContext::Rows { sheet }`
-//! (`crates/mnema-ingest/src/lib.rs:1403`), and the chunker turns the rows of
+//! (`crates/mnema-ingest/src/lib.rs:1515`), and the chunker turns the rows of
 //! the blocks a chunk actually covers into `Coordinate::SheetRows`. The failure
 //! that arrangement exists to prevent is a fixed coordinate repeating the
 //! sheet's whole extent onto every chunk of it — a chunk of rows 10–20 citing
@@ -186,7 +186,7 @@ pub struct XlsxSheet {
     /// The sheet's name, flattened onto one line and bounded by
     /// [`bound_section_title`] — and this is the **only** place it is bounded.
     /// `pages_of` copies this exact string into `Coordinate::SheetRows { sheet }`
-    /// (`crates/mnema-ingest/src/lib.rs:1403`), so a second bounding anywhere
+    /// (`crates/mnema-ingest/src/lib.rs:1515`), so a second bounding anywhere
     /// would let the citation and the coordinate show two different names,
     /// silently, with every test green.
     pub section_title: Option<String>,

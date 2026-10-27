@@ -45,8 +45,8 @@ case_ "ingest: the other path that forgets page skips forgets them too" \
 # harness put this rule in an empty arm and asserted nothing about it.
 case_ "ingest: a document with no text layer keeps a document built from the same bytes" \
   crates/mnema-ingest/src/lib.rs \
-  's~        SkipRule::NoTextLayer => content\.is_none_or\(\|sha\| sha != recorded\.document_id\),~        SkipRule::NoTextLayer => true,~' \
-  'SkipRule::NoTextLayer => true,' \
+  's~        SkipRule::NoTextLayer => \{\n            content\.is_none_or\(.*?\n        \}~        SkipRule::NoTextLayer => true,~s' \
+  '        SkipRule::NoTextLayer => true,' \
   mnema-ingest 'random_sequences_do_not_lose_data' --test randomised
 
 # C4. The same for `Malformed`, which no generator reached before this task

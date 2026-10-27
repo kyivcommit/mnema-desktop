@@ -28,13 +28,13 @@ case_ "manifest: the --manifest branch must actually print the manifest" \
 # unnoticed.
 case_ "manifest: html listed (as text) is still a change the test must see" \
   crates/mnema-extract/src/manifest.rs \
-  's~    Manifest \{\n        default: ReaderId::new\("text", TEXT_READER_VERSION\),~    by_extension.insert("html".to_string(), ReaderId::new("text", TEXT_READER_VERSION));\n    Manifest {\n        default: ReaderId::new("text", TEXT_READER_VERSION),~' \
-  'by_extension.insert("html".to_string(), ReaderId::new("text", TEXT_READER_VERSION));' \
+  's~    Manifest \{\n        default:~    by_extension.insert("html".to_string(), ReaderId::new(READER_TEXT, TEXT_READER_VERSION));\n    Manifest {\n        default:~' \
+  'by_extension.insert("html".to_string(), ReaderId::new(READER_TEXT, TEXT_READER_VERSION));' \
   mnema-extract 'the_worker_states_which_reader_takes_each_extension' --test manifest
 
 case_ "manifest: the default reader is named 'text', not something else" \
   crates/mnema-extract/src/manifest.rs \
-  's~default: ReaderId::new\("text", TEXT_READER_VERSION\)~default: ReaderId::new("plain", TEXT_READER_VERSION)~' \
+  's~default: ReaderId::new\(READER_TEXT, TEXT_READER_VERSION\)~default: ReaderId::new("plain", TEXT_READER_VERSION)~' \
   'default: ReaderId::new("plain", TEXT_READER_VERSION)' \
   mnema-extract 'the_worker_states_which_reader_takes_each_extension' --test manifest
 
@@ -44,14 +44,14 @@ case_ "manifest: the default reader is named 'text', not something else" \
 # file of that format indexed by the old reader for ever.
 case_ "manifest: an extension claimed for a reader identify does not use" \
   crates/mnema-extract/src/manifest.rs \
-  's~ReaderId::new\("markdown", MARKDOWN_READER_VERSION\)~ReaderId::new("text", MARKDOWN_READER_VERSION)~' \
-  'ReaderId::new("text", MARKDOWN_READER_VERSION)' \
+  's~ReaderId::new\(READER_MARKDOWN, MARKDOWN_READER_VERSION\)~ReaderId::new(READER_TEXT, MARKDOWN_READER_VERSION)~' \
+  'ReaderId::new(READER_TEXT, MARKDOWN_READER_VERSION)' \
   mnema-extract 'the_manifest_names_the_reader_that_identify_actually_picks' --test manifest
 
 case_ "header: the reader named is the branch that ran" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~                reader: "text"\.to_string\(\),~                reader: "markdown".to_string(),~' \
-  '                reader: "markdown".to_string(),
+  's~                reader: manifest::READER_TEXT\.to_string\(\),~                reader: manifest::READER_MARKDOWN.to_string(),~' \
+  '                reader: manifest::READER_MARKDOWN.to_string(),
                 reader_version: manifest::TEXT_READER_VERSION,' \
   mnema-extract 'a_header_names_the_reader_that_produced_it' --test manifest
 
@@ -73,8 +73,8 @@ case_ "header: the version reported is the constant the manifest publishes" \
 # around, which is what made taking it on trust expensive.
 case_ "header: the markdown branch names its own reader, not the text one" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~                reader: "markdown"\.to_string\(\),~                reader: "text".to_string(),~' \
-  '                reader: "text".to_string(),
+  's~                reader: manifest::READER_MARKDOWN\.to_string\(\),~                reader: manifest::READER_TEXT.to_string(),~' \
+  '                reader: manifest::READER_TEXT.to_string(),
                 reader_version: manifest::MARKDOWN_READER_VERSION,' \
   mnema-extract 'a_markdown_header_names_the_markdown_reader' --test manifest
 

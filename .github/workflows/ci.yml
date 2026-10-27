@@ -558,7 +558,7 @@ jobs:
           - pr8-exclusions citation-identity
           - task-9 tree task-12 task-2
           - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer
-          - watcher source debt-rust-mutants
+          - watcher source debt-rust-mutants pdf-broken-utf16
           - pr9-shell pr10c-fonts task-13
           - pr8-masks task-d64 task-6
           - pr9b-scan task-13-xlsx task-1

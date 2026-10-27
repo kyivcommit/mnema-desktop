@@ -58,6 +58,7 @@ fn a_skipped_file_names_the_rule_that_fired() {
         "worker died on SIGSEGV",
         SkipRule::Crash,
         None,
+        None,
     )
     .unwrap();
     let rows = db.skips_for_root(1).unwrap();
@@ -75,9 +76,71 @@ fn a_page_without_a_text_layer_is_recorded_against_that_page() {
         "no text layer",
         SkipRule::NoTextLayer,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(db.skips_for_root(1).unwrap()[0].page_no, Some(4));
+}
+
+/// The file's row remembers **who refused it**, and a page's row does not.
+///
+/// The two facts are not decoration: a refusal that takes a document away
+/// leaves this row as the only record of the file, and the parent re-reads the
+/// path when the manifest has moved that reader on. A page's verdict is not the
+/// file's, so it names nobody — nothing reads those columns for a page, and a
+/// version there would be a second answer to "what refused this file?" that
+/// disagrees with the row that stands for the file.
+#[test]
+fn a_skipped_file_names_the_reader_that_refused_it_and_a_page_does_not() {
+    let db = fixture_empty();
+    db.record_skip(
+        1,
+        "скан.pdf",
+        None,
+        "no page carries a text layer",
+        SkipRule::NoTextLayer,
+        Some(OnDisk {
+            size_bytes: 4096,
+            mtime: 1234,
+        }),
+        Some(("pdf", 3)),
+    )
+    .unwrap();
+    db.record_skip(
+        1,
+        "скан.pdf",
+        Some(2),
+        "page 2 carries no text layer",
+        SkipRule::NoTextLayer,
+        None,
+        Some(("pdf", 3)),
+    )
+    .unwrap();
+
+    let file = db
+        .skip_entry(1, "скан.pdf")
+        .unwrap()
+        .expect("the whole-file row");
+    assert_eq!(
+        (file.reader.as_deref(), file.reader_version),
+        (Some("pdf"), Some(3)),
+        "the row that stands for the file names the reader that refused it"
+    );
+
+    let page: (Option<String>, Option<i64>) = db
+        .conn()
+        .query_row(
+            "SELECT reader, reader_version FROM skipped
+              WHERE relative_path = 'скан.pdf' AND page_no = 2",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        page,
+        (None, None),
+        "a page's verdict is not the file's, and nothing reads these there"
+    );
 }
 
 /// A file that left the tree takes its page rows with it, and a file that is
@@ -101,8 +164,16 @@ fn a_path_that_left_the_tree_takes_its_page_rows_with_it() {
         ("архів/зниклий.pdf", Some(2)),
         ("архів/наявний.pdf", Some(5)),
     ] {
-        db.record_skip(1, path, page, "no text layer", SkipRule::NoTextLayer, None)
-            .unwrap();
+        db.record_skip(
+            1,
+            path,
+            page,
+            "no text layer",
+            SkipRule::NoTextLayer,
+            None,
+            None,
+        )
+        .unwrap();
     }
 
     let seen = HashSet::from(["архів/наявний.pdf"]);
@@ -290,8 +361,16 @@ fn every_skip_rule_is_recorded_under_its_own_string() {
     let db = fixture_empty();
     let rules: Vec<SkipRule> = SkipRule::every().collect();
     for (i, rule) in rules.iter().enumerate() {
-        db.record_skip(1, &format!("file-{i}.pdf"), None, "reason", *rule, None)
-            .unwrap();
+        db.record_skip(
+            1,
+            &format!("file-{i}.pdf"),
+            None,
+            "reason",
+            *rule,
+            None,
+            None,
+        )
+        .unwrap();
     }
 
     // Round-tripped through SQLite, not just through `as_str`: this is the one
@@ -412,6 +491,7 @@ fn a_second_skip_of_the_same_file_replaces_the_first() {
         "no text layer",
         SkipRule::NoTextLayer,
         None,
+        None,
     )
     .unwrap();
     db.record_skip(
@@ -420,6 +500,7 @@ fn a_second_skip_of_the_same_file_replaces_the_first() {
         None,
         "still none",
         SkipRule::NoTextLayer,
+        None,
         None,
     )
     .unwrap();
@@ -450,6 +531,7 @@ fn page_skips_and_file_skips_do_not_collide_but_each_still_dedups() {
         "whole file",
         SkipRule::NoTextLayer,
         None,
+        None,
     )
     .unwrap();
     db.record_skip(
@@ -459,6 +541,7 @@ fn page_skips_and_file_skips_do_not_collide_but_each_still_dedups() {
         "page four",
         SkipRule::NoTextLayer,
         None,
+        None,
     )
     .unwrap();
     db.record_skip(
@@ -467,6 +550,7 @@ fn page_skips_and_file_skips_do_not_collide_but_each_still_dedups() {
         Some(4),
         "page four again",
         SkipRule::NoTextLayer,
+        None,
         None,
     )
     .unwrap();
@@ -493,6 +577,7 @@ fn only_content_rules_remember_the_bytes() {
             size_bytes: 10,
             mtime: 99,
         }),
+        None,
     )
     .unwrap();
     db.record_skip(
@@ -505,6 +590,7 @@ fn only_content_rules_remember_the_bytes() {
             size_bytes: 10,
             mtime: 99,
         }),
+        None,
     )
     .unwrap();
 

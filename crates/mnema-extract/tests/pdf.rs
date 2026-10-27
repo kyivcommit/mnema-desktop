@@ -116,6 +116,52 @@ const CONTENTS_PAGE_TEXT: &str = "About the Authors xxi\r\n\
 const ANNEX_PAGE_TEXT: &str = "Annex C records the arbitration venue and the notice period agreed,\r\n\
      together with the schedule of penalties for a late collection.";
 
+/// Page 2 of `offset-cropbox.pdf`, exactly as the page shows it.
+///
+/// `all()` reads `page_size()` — width×height from `(0,0)` — and this page's
+/// CropBox starts at `x 89`, so the rectangle `all()` reads is 433 wide and stops
+/// in the middle of both lines: measured, it returns `…to the Rave` and `…the
+/// wagon leav`. An assertion on the whole line therefore fails there and only
+/// there, which is what makes it worth writing out rather than checking a prefix.
+const CROPPED_PAGE_TEXT: &str = "Invented ledger entry 4417 lists every pallet hauled to the Ravella yard,\r\n\
+     and the depot clerk signs each page of it before the wagon leaves.";
+
+/// The slug drawn on page 2 of `offset-cropbox.pdf`, between the CropBox top
+/// (720) and the MediaBox top (792). It is in the file and on nobody's screen.
+const CROPPED_PAGE_SLUG: &str = "INVENTED PRESS SLUG";
+
+/// Page 2 of `broken-utf16.pdf`: one word of it drawn in a font whose
+/// `/ToUnicode` sends a single code to U+D800, and a third line that runs past
+/// the page's CropBox (to `x 543`) with a fourth line after it.
+///
+/// The single space is one assertion. pdfium answers a lone surrogate by
+/// failing to decode the page's whole buffer, so `all()` returns `""` and
+/// `inside_rect` of any rectangle returns `""`; the page is rebuilt from its
+/// characters, the one that is not a `char` becomes U+FFFD, and
+/// `replacement_runs_to_spaces` — D186's rule, unchanged — turns it into the
+/// space between `word` and `from`. A reader that dropped the character instead
+/// would store `wordfrom`, and one that kept the surrogate could not store the
+/// page at all.
+///
+/// The `\r\n` after `that we` is the other assertion. The line is cut by the
+/// box at `x 522`, and the line break pdfium writes at the end of it lies
+/// outside, so the fallback has to write that break itself — one word shorter
+/// and the last visible word of the cut line fuses with the first word of the
+/// next (`…that weand the depot…`), which is two words lost from search.
+///
+/// Every line here is the string pdfium's own bounded read gives for the same
+/// geometry with the broken glyph taken out (measured on a copy of this page
+/// before the test was written), so the fallback is held to the fast path's
+/// answer and not to its own.
+const BROKEN_PAGE_TEXT: &str = "A damaged mapping in the middle of this line\r\n\
+     drops the word from the index silently.\r\n\
+     nvented ledger entry 4417 lists every pallet hauled to the Ravella yard gate that we\r\n\
+     and the depot clerk signs each page of it before the wagon leaves.";
+
+/// The slug drawn on page 3 of `page-boxes.pdf`, above its MediaBox and inside
+/// its raw CropBox: the part of a page a viewer clips.
+const OUTSIDE_MEDIA_SLUG: &str = "INVENTED COVER SPREAD";
+
 /// A page whose every glyph came back as U+FFFD is a page without text, the
 /// same as a scan, however many of them it holds.
 ///
@@ -161,6 +207,303 @@ fn the_probe_does_not_count_replacement_characters_as_text() {
         vec![true, false, true]
     );
     assert_eq!(probes[1].char_count, 0, "not one U+FFFD is text");
+}
+
+/// A page whose box starts away from the origin is a page of text, not a scan.
+///
+/// `all()` is `inside_rect(page_size())`, and `page_size()` is a rectangle from
+/// `(0,0)` — width×height, with the box's own origin thrown away. Every fixture
+/// written before this one has its MediaBox at `[0 0 612 792]`, where the two
+/// rectangles are identical and the defect cannot be seen. Page 1 here carries
+/// a box at `130.5 279 661.5 945` (D187) and its text above
+/// `y 666`, so `all()` returns `""` — measured on the worker before the fix:
+/// `skipped_pages: [1, 3]` — and the page is journalled as a scan.
+///
+/// Page 3 is the same box with **no `/CropBox` at all**, so `crop()` answers
+/// `Err` there (measured); a reader that fell back to `page_size()` instead
+/// would lose this page exactly as it lost page 1.
+#[test]
+fn a_page_whose_box_starts_away_from_the_origin_is_read_whole() {
+    let doc =
+        extract_pdf(include_bytes!("fixtures/offset-cropbox.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "every page of this document carries text; none of them is a scan"
+    );
+    assert_eq!(doc.skipped, Vec::<u32>::new());
+    assert_eq!(
+        doc.pages[0].blocks[0].text, PAGE_ONE_TEXT,
+        "page 1's text lies above the rectangle all() reads, and it is the page's own text"
+    );
+    assert_eq!(
+        doc.pages[2].blocks[0].text, PAGE_THREE_TEXT,
+        "a page with a MediaBox and no CropBox is read within its MediaBox: {:?}",
+        doc.pages[2].blocks[0].text
+    );
+}
+
+/// A line that runs past the CropBox is read to its end.
+///
+/// The page is 433 wide by its CropBox and its lines end at `x≈478`, inside the
+/// visible page and outside `all()`'s rectangle. The assertion is the whole two
+/// lines rather than their beginning: `…to the Rave` is what `all()` returns,
+/// and a reader that keeps half a line has the same shape of defect as one that
+/// keeps none.
+#[test]
+fn a_line_that_runs_past_the_crop_box_is_read_to_its_end() {
+    let doc =
+        extract_pdf(include_bytes!("fixtures/offset-cropbox.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages
+            .iter()
+            .find(|p| p.page_no == 2)
+            .map(|p| p.blocks[0].text.as_str()),
+        Some(CROPPED_PAGE_TEXT),
+        "the ends of both lines are part of what the person reads"
+    );
+}
+
+/// A page whose boxes live on `/Pages` is read inside them.
+///
+/// `page-boxes.pdf` states both boxes on the page tree, the way a real book
+/// often does (D187): `PdfPageBoundaries::crop`/`media` read only the page
+/// dictionary, so measured on this fixture, both answer `Err`. A bound built
+/// from them therefore falls back to `page_size()` — width×height from `(0,0)`,
+/// the rectangle `all()` used — and this page, whose text sits above that
+/// rectangle, is journalled as a scan that is not one. `bounding()` is the box
+/// that resolves inheritance.
+#[test]
+fn a_page_whose_boxes_are_inherited_is_read_whole() {
+    let doc = extract_pdf(include_bytes!("fixtures/page-boxes.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages
+            .iter()
+            .find(|p| p.page_no == 1)
+            .map(|p| p.blocks[0].text.as_str()),
+        Some(PAGE_ONE_TEXT),
+        "page 1 inherits its CropBox and its MediaBox; neither is on the page"
+    );
+}
+
+/// A page whose own `/CropBox` is empty shows its MediaBox, and is read.
+///
+/// `/CropBox [0 0 0 0]` is what broken producers write. pdfium treats an empty
+/// box as absent — measured: `bounding()` for this page answers its MediaBox —
+/// so the page is read. A reader that took the raw `/CropBox` would find no
+/// character inside it, skip the page, and journal a page of prose as a scan.
+///
+/// **"Read" is the whole of what this asserts, and the name says so.** All of
+/// this page's text lies inside the MediaBox, so a reader with no bound at all
+/// passes it too; the MediaBox clipping itself is
+/// [`text_outside_the_media_box_is_not_indexed`], which is the neighbouring test
+/// on page 3 of this fixture.
+#[test]
+fn a_page_with_a_degenerate_crop_box_is_read() {
+    let doc = extract_pdf(include_bytes!("fixtures/page-boxes.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages
+            .iter()
+            .find(|p| p.page_no == 2)
+            .map(|p| p.blocks[0].text.as_str()),
+        Some(PAGE_THREE_TEXT),
+        "an empty /CropBox means the MediaBox, not an empty page"
+    );
+}
+
+/// …and a `/CropBox` wider than the `/MediaBox` clips at the MediaBox.
+///
+/// Page 3 declares a CropBox that reaches past its MediaBox on every side, with
+/// a cover slug in the part a viewer clips. The raw CropBox contains that slug,
+/// so a reader that took it would index text nobody can see in the file; the
+/// box a page is read within is MediaBox ∩ CropBox. The body is asserted whole
+/// as well, so a reader that emptied the page cannot pass this.
+#[test]
+fn text_outside_the_media_box_is_not_indexed() {
+    let doc = extract_pdf(include_bytes!("fixtures/page-boxes.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages
+            .iter()
+            .find(|p| p.page_no == 3)
+            .map(|p| p.blocks[0].text.as_str()),
+        Some(ANNEX_PAGE_TEXT),
+        "the visible text, and not the cover spread above it"
+    );
+    for page in &doc.pages {
+        assert!(
+            !page.blocks[0].text.contains(OUTSIDE_MEDIA_SLUG),
+            "page {} is cited by what it shows: {:?}",
+            page.page_no,
+            page.blocks[0].text
+        );
+    }
+}
+
+/// …and text outside the CropBox is not indexed, even though the file has it.
+///
+/// This is the other half of "read what the person sees", and it is the reason
+/// the bound is the box a viewer clips to rather than every character on the
+/// page: page 2 carries a press slug above the CropBox top, where a book's
+/// press slug sits (D187). A reader that took the page's characters
+/// without asking where they are would store the slug, and a search would find
+/// text nobody can see in the file.
+///
+/// The premise that the slug is really in the file is the **exact** line in the
+/// test above: its last words are `leaves.`, and an appended slug would redden
+/// that string. Nothing here reads a compressed stream to prove it a second time.
+#[test]
+fn text_outside_the_crop_box_is_not_indexed() {
+    let doc =
+        extract_pdf(include_bytes!("fixtures/offset-cropbox.pdf")).expect("the fixture parses");
+
+    for page in &doc.pages {
+        assert!(
+            !page.blocks[0].text.contains(CROPPED_PAGE_SLUG),
+            "page {} is cited by what it shows, and it does not show the slug: {:?}",
+            page.page_no,
+            page.blocks[0].text
+        );
+    }
+}
+
+/// The diagnostic reads the same text the reader stores, on the pages where the
+/// two used to disagree.
+///
+/// `probe_text_layer` answers `--probe-pdfium`, and it walked `text.all()` too:
+/// on this fixture it reported all three pages as scans while the reader — after
+/// the fix — reads three pages of prose. A packaging probe and a reader that
+/// disagree about which pages of a file have text are two answers to one
+/// question, and the probe's is the one a person sees first.
+#[test]
+fn the_probe_reads_the_pages_the_reader_reads() {
+    let probes = probe_text_layer(&fixture("offset-cropbox.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        probes.iter().map(|p| p.has_text_layer).collect::<Vec<_>>(),
+        vec![true, true, true],
+        "every page of this document carries a text layer: {probes:?}"
+    );
+}
+
+/// A glyph that is not a Unicode character loses its word, not its page.
+///
+/// Page 2 of `broken-utf16.pdf` is 70 characters of ordinary text with one word
+/// drawn in `F2`, whose `/ToUnicode` sends that word's code to U+D800. pdfium
+/// decodes the bounded text of the whole page with that one bad unit in it and
+/// fails, so `all()` answers `""` — measured on the worker before the fix:
+/// `pages: 1, skipped_pages: [2, 3]`, and the page the person can read is
+/// journalled as a scan. Page 3 is nothing but the broken code and stays
+/// skipped, which is what keeps the fallback from turning garbage into text.
+#[test]
+fn a_glyph_that_is_not_a_character_loses_its_word_and_not_its_page() {
+    let doc = extract_pdf(include_bytes!("fixtures/broken-utf16.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+        vec![1, 2],
+        "page 1 has no broken glyph and page 2 is readable apart from one word"
+    );
+    assert_eq!(
+        doc.skipped,
+        vec![3],
+        "a page of nothing but the broken code is a page without text"
+    );
+}
+
+/// …and the word it loses leaves exactly one space, with its neighbours whole.
+///
+/// Asserted as the one string and not as `contains` of either half: a reader
+/// that dropped the character would store `wordfrom`, a reader that inserted
+/// two spaces would store `word  from`, and both satisfy a check for `word` on
+/// its own.
+#[test]
+fn a_broken_glyph_between_two_words_leaves_one_space() {
+    let doc = extract_pdf(include_bytes!("fixtures/broken-utf16.pdf")).expect("the fixture parses");
+
+    assert_eq!(
+        doc.pages
+            .iter()
+            .find(|p| p.page_no == 2)
+            .map(|p| p.blocks[0].text.as_str()),
+        Some(BROKEN_PAGE_TEXT),
+        "the broken word is gone and the words around it are not"
+    );
+}
+
+/// A line cut by the box keeps its line break when the page is rebuilt from
+/// characters.
+///
+/// `broken-utf16.pdf` page 2's third line runs to `x 543`, past its CropBox's
+/// right edge at 522, and the break pdfium puts at the end of it lies outside
+/// the box — so the break is one of the things `inside_rect` *synthesises* from
+/// the y position rather than reads. A fallback that only filtered characters
+/// would drop it and store `…that weand the depot…`: the last visible word of
+/// one line fused with the first word of the next, and both unfindable.
+///
+/// Asserted from both sides: the visible tail of the cut line is the tail, and
+/// the next line starts at a break rather than in the middle of that word.
+#[test]
+fn a_line_cut_by_the_box_keeps_its_break_when_the_page_is_rebuilt() {
+    let doc = extract_pdf(include_bytes!("fixtures/broken-utf16.pdf")).expect("the fixture parses");
+    let text = &doc
+        .pages
+        .iter()
+        .find(|p| p.page_no == 2)
+        .expect("page 2 is read")
+        .blocks[0]
+        .text;
+
+    assert!(
+        text.contains("to the Ravella yard gate that we"),
+        "the cut line is read up to the box's edge: {text:?}"
+    );
+    assert!(
+        text.ends_with("\r\nand the depot clerk signs each page of it before the wagon leaves."),
+        "the line after the cut begins a line, and is not glued to the cut word: {text:?}"
+    );
+    assert!(
+        !text.contains("weand"),
+        "the cut word and the next one are two words: {text:?}"
+    );
+}
+
+/// The fixtures written before this change read the same text they always did.
+///
+/// The bound moved from `page_size()` to the page's box, and the fallback added
+/// a second road to a page's text; both are changes to what every PDF in the
+/// index answers with. For a page whose box is `[0 0 612 792]` the two
+/// rectangles coincide, so the text must not move by a character — and
+/// `tests/pdfium_binding.rs` pins the same sentences one layer below this one,
+/// which is what makes a difference here a change in the reader rather than in
+/// the expectation.
+#[test]
+fn the_fixtures_written_before_this_change_read_the_same_text() {
+    for (name, expected) in [
+        ("one-page-text.pdf", vec![PAGE_ONE_TEXT]),
+        ("text-then-stamp.pdf", vec![PAGE_ONE_TEXT]),
+        ("text-stamp-text.pdf", vec![PAGE_ONE_TEXT, PAGE_THREE_TEXT]),
+        (
+            "replacement-chars.pdf",
+            vec![CONTENTS_PAGE_TEXT, ANNEX_PAGE_TEXT],
+        ),
+    ] {
+        let bytes = std::fs::read(fixture(name)).expect("the fixture is on disk");
+        let doc = extract_pdf(&bytes).expect("the fixture parses");
+
+        assert_eq!(
+            doc.pages
+                .iter()
+                .map(|p| p.blocks[0].text.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{name}: the text a page stores must not move with the reader"
+        );
+    }
 }
 
 /// A scan of a paper document: every page exists, none has text.
@@ -363,6 +706,9 @@ fn every_page_of_a_document_is_either_read_or_named() {
         ("text-stamp-text.pdf", 3),
         ("all-scanned.pdf", 3),
         ("replacement-chars.pdf", 3),
+        ("offset-cropbox.pdf", 3),
+        ("broken-utf16.pdf", 3),
+        ("page-boxes.pdf", 3),
     ] {
         let bytes = std::fs::read(fixture(name)).expect("the fixture is on disk");
         let doc = extract_pdf(&bytes).expect("the fixture parses");
@@ -397,6 +743,9 @@ fn the_probe_and_the_reader_see_the_same_pages() {
         ("text-stamp-text.pdf", 3),
         ("all-scanned.pdf", 3),
         ("replacement-chars.pdf", 3),
+        ("offset-cropbox.pdf", 3),
+        ("broken-utf16.pdf", 3),
+        ("page-boxes.pdf", 3),
     ] {
         let probes = probe_text_layer(&fixture(name)).expect("the fixture parses");
         assert_eq!(probes.len(), pages_in_the_file, "{name}");
