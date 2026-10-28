@@ -551,6 +551,12 @@ jobs:
     # re-derive from the leg durations of a recent run, not from this
     # comment.
     #
+    # `agent-access agent-connect` was one leg and the longest job of the
+    # workflow: 15m01s on run 40573922782 (main, 2026-10-27), 7m24s and
+    # 6m24s of harness, against 11m09s for `bundle`. It is two legs now, and
+    # the two shortest buckets of that run (3m50s and 3m53s, each about 70 s
+    # of it setup) became one, so the job count stays where it was.
+    #
     # ⚠️ **This list is checked, not trusted.** `mutation-staleness.sh` in
     # `sweeps` proves each case still APPLIES; a job here proves a case still
     # KILLS, and only for what is named here. A file left out is local
@@ -612,12 +618,11 @@ jobs:
           - pr8-subfolders debt-ui-blind-tests task-8-pdf pdf-replacement-chars
           - embedding pr8-ui-folders task-5
           - model-config pr10e-settings task-3
-          - pr9-index pr8-subfolders-linux
           - wayland-shortcut branch-review refuse-by-content task-d61
           - pr7-default-models pr10f-tray-locale task-11 task-4
           - pr8c-mask-differential pr9-ui task-10 task-7
           - pr8-exclusions citation-identity
-          - task-9 tree task-12 task-2
+          - task-9 tree task-12 task-2 pr9-index pr8-subfolders-linux
           - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer
           - watcher source debt-rust-mutants pdf-broken-utf16
           - pr9-shell pr10c-fonts task-13
@@ -625,7 +630,8 @@ jobs:
           - pr9b-scan task-13-xlsx task-1
           - pr10b-theme pr8-ui-masks pr10d-launcher
           - task-8 task-14
-          - agent-access agent-connect
+          - agent-access
+          - agent-connect
     runs-on: ubuntu-24.04
     # Thirty was a guess when this leg was written, and it stayed one until the
     # leg first executed: pull request #7, 6m17s on 119 cases; later 9m52s on
