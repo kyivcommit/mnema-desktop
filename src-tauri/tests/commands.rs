@@ -11327,6 +11327,76 @@ fn the_ask_path_sends_the_mnema_voice_only_for_mnema() {
     );
 }
 
+/// D188: Mnema on E4B with tools on asks through the conversation: the chat
+/// body names E4B and its system prompt ends with E4B's own hint; on E2B the
+/// question keeps the Mnema voice (both directions).
+#[test]
+fn mnema_on_e4b_asks_through_the_conversation_with_its_own_hint() {
+    use mnema_local::ModelId;
+    const SENTENCE: &str = "call search instead of saying that the sources do not contain it.";
+    for e4b in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("fake-mlx.log");
+        let log_env = log.display().to_string();
+        let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+        let state = fx.app.state::<AppState>();
+        if e4b {
+            let local = state.local();
+            std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+            std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+            mnema_desktop::prefs::write_mnema_chat_model(state.data_dir(), ModelId::ChatTools)
+                .unwrap();
+            local.set_chat_model(ModelId::ChatTools);
+        }
+        assert!(
+            mnema_desktop::prefs::chat_tools(state.data_dir()),
+            "premise: tools on"
+        );
+        scan_to_completion(fx.app.handle());
+        call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+        let body = logged_chat_body(&log);
+        let system = body["messages"][0]["content"].as_str().unwrap_or_default();
+        let user = body["messages"]
+            .as_array()
+            .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        if e4b {
+            assert_eq!(body["model"], json!("gemma-4-e4b-it"), "{body}");
+            assert!(
+                system.ends_with(SENTENCE),
+                "E4B's hint closes the prompt: {system:?}"
+            );
+            assert!(
+                !user.contains("Answer briefly:"),
+                "the conversation, not the Mnema voice: {user:?}"
+            );
+            // A second question continues the conversation and offers the local
+            // model the search tool.
+            call(&fx.webview, "ask", json!({ "query": "find more" })).expect("follow-up");
+            let text = std::fs::read_to_string(&log).unwrap();
+            let last: Value = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("body /v1/chat/completions "))
+                .last()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .unwrap();
+            assert_eq!(
+                last["tools"][0]["function"]["name"],
+                json!("search"),
+                "{last}"
+            );
+        } else {
+            assert_eq!(body["model"], json!("gemma-4-e2b-it"), "{body}");
+            assert!(!system.contains(SENTENCE), "{system:?}");
+            assert!(
+                user.contains("Answer briefly:"),
+                "E2B keeps the Mnema voice: {user:?}"
+            );
+        }
+    }
+}
+
 /// A local answer slower than OpenRouter's 15 s still arrives: the chat call
 /// under Mnema waits `LOCAL_CHAT_TIMEOUT`. Pays 20 s.
 #[test]
