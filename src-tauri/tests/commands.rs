@@ -11746,7 +11746,7 @@ fn mnema_cannot_serve_a_foreign_space() {
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     mnema_desktop::provider::on_configured(&state, Mnema, None);
@@ -11797,7 +11797,7 @@ fn a_finished_download_fills_its_models_empty_role() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
@@ -11830,6 +11830,137 @@ fn only_the_chosen_chat_models_download_fills_the_chat_role() {
 
         assert_eq!(state.roles().chat, want, "chosen {chosen:?}");
     }
+}
+
+/// The chat model the index stores (`META_CHAT_MODEL`).
+fn chat_model_stored(app: &tauri::App<MockRuntime>) -> Option<String> {
+    app.state::<AppState>()
+        .with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))
+        .unwrap()
+}
+
+/// D188: E4B is chosen in the list like any model, only when downloaded; the
+/// choice reaches the process and the stored name, and E2B can be chosen back.
+#[test]
+fn the_local_chat_model_is_chosen_from_the_list_only_when_downloaded() {
+    use mnema_desktop::models::choose_chat_model;
+    use mnema_desktop::provider::{
+        LOCAL_CHAT_MODEL, LOCAL_CHAT_TOOLS_MODEL, ProviderChoice::Mnema,
+    };
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    mnema_desktop::boot_index(app.handle());
+    state.install_local(downloadable_local(dir.path(), &server, true));
+    write_roles(&state, None, None);
+
+    let refused = choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema);
+    assert!(
+        matches!(refused, Err(mnema_desktop::error::Error::ProviderNotReady)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        state.local().chat_model(),
+        ModelId::Chat,
+        "a refusal chooses nothing"
+    );
+    assert_eq!(state.roles().chat, None);
+
+    let local = state.local();
+    std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+    std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+    choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema).unwrap();
+    assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+    assert_eq!(
+        mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+        ModelId::ChatTools
+    );
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(
+        chat_model_stored(&app).as_deref(),
+        Some(LOCAL_CHAT_TOOLS_MODEL)
+    );
+
+    choose_chat_model(&state, LOCAL_CHAT_MODEL.into(), Mnema).unwrap();
+    assert_eq!(state.local().chat_model(), ModelId::Chat);
+    assert_eq!(
+        mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+        ModelId::Chat
+    );
+    assert_eq!(chat_model_stored(&app).as_deref(), Some(LOCAL_CHAT_MODEL));
+}
+
+/// D188: turning tools on with Mnema's chat on E2B takes E4B when it is
+/// downloaded — no question about the cloud, the role stays on Mnema; on E4B
+/// already, nothing moves. Without E4B the old answer (ask about the cloud).
+#[test]
+fn tools_on_takes_e4b_for_a_mnema_chat_role_when_it_is_downloaded() {
+    use mnema_desktop::models::{ToolsSwitch, choose_chat_tools};
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    use mnema_local::ModelId;
+    for e4b in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        mnema_desktop::boot_index(app.handle());
+        state.install_local(downloadable_local(dir.path(), &server, true));
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+        write_roles(&state, None, Some(Mnema));
+        if e4b {
+            let local = state.local();
+            std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+            std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+        }
+        let answer = choose_chat_tools(&state, true, false).unwrap();
+        if e4b {
+            assert_eq!(answer, ToolsSwitch::Stored { on: true });
+            assert_eq!(state.roles().chat, Some(Mnema));
+            assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+            // Again, on E4B: nothing to move.
+            assert_eq!(
+                choose_chat_tools(&state, true, false).unwrap(),
+                ToolsSwitch::Stored { on: true }
+            );
+            assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+        } else {
+            assert_eq!(
+                state.local().chat_model(),
+                ModelId::Chat,
+                "no E4B: E2B stays chosen"
+            );
+            assert_ne!(
+                state.roles().chat,
+                Some(Mnema),
+                "E2B cannot hold the role with tools on: {answer:?}"
+            );
+        }
+    }
+}
+
+/// D188: with tools on, a finished E4B download fills an empty chat role with
+/// E4B — the E2B download does not (the test below).
+#[test]
+fn an_e4b_download_with_tools_on_fills_an_empty_chat_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(state.local().chat_model(), mnema_local::ModelId::ChatTools);
 }
 
 /// With the tools switch on (the default) Gemma is no valid default: an empty
@@ -11866,7 +11997,7 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
     state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
     let scan = state

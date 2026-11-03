@@ -237,6 +237,15 @@ impl Local {
         }
     }
 
+    /// The local chat models a person can choose now: downloaded, on a host
+    /// that can run them. E2B first.
+    pub fn downloaded_chat_models(&self) -> Vec<ModelId> {
+        [ModelId::Chat, ModelId::ChatTools]
+            .into_iter()
+            .filter(|&id| self.available && self.store.state(id) == ModelState::Ready)
+            .collect()
+    }
+
     /// The chat model the process serves: E2B unless E4B was chosen.
     pub fn chat_model(&self) -> ModelId {
         if self.chat_tools.load(Ordering::SeqCst) {
@@ -737,6 +746,11 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
+    // With tools on, E4B is the only local chat model a role can take: its
+    // download chooses it (E2B could not fill the role anyway).
+    if ModelId::from(id) == ModelId::ChatTools && crate::prefs::chat_tools(state.data_dir()) {
+        let _ = choose_local_chat(&state, ModelId::ChatTools);
+    }
     // The chat model not chosen fills no role: its download moves nothing.
     if let Some(slot) = local.slot_of(id.into()) {
         on_configured(&state, ProviderChoice::Mnema, Some(slot));
@@ -876,17 +890,27 @@ fn model_missing(state: &crate::state::AppState, role: Role) -> bool {
     }
 }
 
+/// Chooses the local chat model: stored, and served from the next use (D188).
+pub(crate) fn choose_local_chat(state: &crate::state::AppState, id: ModelId) -> Result<(), Error> {
+    crate::prefs::write_mnema_chat_model(state.data_dir(), id)?;
+    state.local().set_chat_model(id);
+    Ok(())
+}
+
 /// Chat: `p`'s default model, then the role. The model write is best effort:
 /// Mnema's chat never reads it, and a shut index is filled at the next boot.
 fn fill_chat(state: &crate::state::AppState, p: ProviderChoice) {
-    // Gemma takes no tools: with the switch on it is no valid default, and the
-    // role is left as it is (never moved to the cloud either).
-    if p == ProviderChoice::Mnema && crate::prefs::chat_tools(state.data_dir()) {
+    // With the switch on only E4B is a valid local default (E2B takes no
+    // tools); otherwise the role is left as it is, never moved to the cloud.
+    if p == ProviderChoice::Mnema
+        && crate::prefs::chat_tools(state.data_dir())
+        && state.local().chat_model() != ModelId::ChatTools
+    {
         return;
     }
     let model = match p {
         ProviderChoice::OpenRouter => crate::models::DEFAULT_MODELS.chat,
-        ProviderChoice::Mnema => LOCAL_CHAT_MODEL,
+        ProviderChoice::Mnema => local_chat_name(state.local().chat_model()),
     };
     let _ = state.with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, model));
     let _ = crate::prefs::write_role(state.data_dir(), Role::Chat, Some(p));
