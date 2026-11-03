@@ -12,11 +12,11 @@
 //! stream the parent parses line by line.
 
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use mnema_extract::manifest;
-use mnema_extract::typing::{Reader, identify};
+use mnema_extract::typing::{PDF_MAGIC, Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
     DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, XlsxError, extract_docx, extract_epub,
@@ -123,6 +123,18 @@ fn write_frame(stdout: &mut io::Stdout, frame: &Frame) {
     }
 }
 
+/// The `too_large` refusal. The one refusal with no digest, and it cannot have
+/// one: it decides on a configured number, and hashing the file to fill the
+/// field in would read exactly the bytes the ceiling exists to avoid reading.
+fn too_large(path: &str, size: u64, ceiling: u64, non_pdf: bool) -> Frame {
+    let scope = if non_pdf { " for non-PDF files" } else { "" };
+    refused_before_a_reader(
+        "too_large",
+        format!("{path} is {size} bytes, over the {ceiling}-byte ceiling{scope}"),
+        None,
+    )
+}
+
 /// Handles one request line, returning the frames it produces: `[Header,
 /// Page, Block..., Summary]` for a file this crate can read — one `Page` per
 /// page, each followed by its own blocks — or exactly one `Refused`/`Failed`
@@ -166,33 +178,65 @@ fn handle_request(line: &str) -> Vec<Frame> {
     // under a path when a worker read a file and would not have its content;
     // this branch never opened the file and decided on a configured number, so
     // lowering `max_bytes` must not delete anything. See `SkipRule::TooLarge`.
+    //
+    // There are two ceilings (D189): `pdf_max_bytes` for a PDF, `max_bytes`
+    // for everything else. `stat` cannot tell them apart, so it refuses only
+    // what is over the larger one; the rest is decided by the file's magic.
     let size = metadata.len();
-    if size > request.max_bytes {
-        return vec![refused_before_a_reader(
-            "too_large",
-            format!(
-                "{} is {size} bytes, over the {}-byte ceiling",
-                request.path, request.max_bytes
-            ),
-            // The one refusal with no digest, and it cannot have one: this
-            // branch decided from `stat` and never opened the file. Hashing it
-            // here to fill the field in would read exactly the bytes the
-            // ceiling exists to avoid reading.
-            None,
-        )];
+    let widest = request.max_bytes.max(request.pdf_max_bytes);
+    if size > widest {
+        return vec![too_large(&request.path, size, widest, false)];
     }
 
-    // Read once: this same `Vec<u8>` is hashed and handed to the reader, so
-    // there is no window between "the bytes we hashed" and "the bytes we
-    // read" for the file to change in.
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    // Past `stat` the file is opened, but only five bytes are read to learn
+    // which ceiling applies; a non-PDF over `max_bytes` is refused after those
+    // five and its remaining bytes are never loaded. The type is decided by
+    // magic here for the same reason `identify` does: an extension names what
+    // the file is called, not what it is.
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(e) => {
             return vec![Frame::Failed {
                 message: format!("{}: {e}", request.path),
             }];
         }
     };
+    let mut bytes = Vec::with_capacity(PDF_MAGIC.len());
+    if let Err(e) = (&mut file)
+        .take(PDF_MAGIC.len() as u64)
+        .read_to_end(&mut bytes)
+    {
+        return vec![Frame::Failed {
+            message: format!("{}: {e}", request.path),
+        }];
+    }
+    // A file shorter than the magic is simply not a PDF.
+    let is_pdf = bytes.starts_with(PDF_MAGIC);
+    let ceiling = if is_pdf {
+        request.pdf_max_bytes
+    } else {
+        request.max_bytes
+    };
+    if size > ceiling {
+        return vec![too_large(&request.path, size, ceiling, !is_pdf)];
+    }
+
+    // Read once: this same `Vec<u8>` is hashed and handed to the reader, so
+    // there is no window between "the bytes we hashed" and "the bytes we
+    // read" for the file to change in. The five bytes already read are the
+    // start of it.
+    if let Err(e) = file.read_to_end(&mut bytes) {
+        return vec![Frame::Failed {
+            message: format!("{}: {e}", request.path),
+        }];
+    }
+    // The file can change between `stat` and the read, so the ceiling is
+    // checked again on what was actually loaded. This refusal does have the
+    // bytes in hand but still carries no digest: it is a fact about settings.
+    let loaded = bytes.len() as u64;
+    if loaded > ceiling {
+        return vec![too_large(&request.path, loaded, ceiling, !is_pdf)];
+    }
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes);

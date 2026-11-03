@@ -94,6 +94,112 @@ fn a_file_over_the_ceiling_is_refused_without_being_read() {
     }
 }
 
+/// Runs one request and returns its only refusal's `(rule, reason, sha256)`.
+fn only_refusal(request: serde_json::Value) -> (String, String, Option<String>) {
+    match frames_of(&run_worker(&[&request.to_string()])).as_slice() {
+        [
+            Frame::Refused {
+                rule,
+                reason,
+                sha256,
+                ..
+            },
+        ] => (rule.clone(), reason.clone(), sha256.clone()),
+        other => panic!("expected exactly one refusal, got {other:?}"),
+    }
+}
+
+// D189: a PDF and everything else have separate ceilings. `big.txt` is 131
+// bytes and `one-page-text.pdf` 723, so 1_000_000 sits over both only because
+// the limits below say so.
+#[test]
+fn a_non_pdf_over_max_bytes_is_refused_even_when_the_pdf_ceiling_would_admit_it() {
+    let (rule, reason, sha256) = only_refusal(serde_json::json!({
+        "path": "tests/fixtures/big.txt", "max_bytes": 16, "pdf_max_bytes": 1_000_000,
+    }));
+    assert_eq!(rule, "too_large");
+    assert!(reason.contains("non-PDF"), "{reason}");
+    // The pair of states that tells "refused after five bytes" from "read and
+    // hashed, then refused": a file read to the end carries its digest in the
+    // header (see the PDF test below), a refusal never does.
+    assert_eq!(sha256, None, "{reason}");
+}
+
+#[test]
+fn a_pdf_over_max_bytes_is_read_when_it_is_under_pdf_max_bytes() {
+    let request = serde_json::json!({
+        "path": "tests/fixtures/one-page-text.pdf", "max_bytes": 16, "pdf_max_bytes": 1_000_000,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+    match frames.first() {
+        Some(Frame::Header { reader, sha256, .. }) => {
+            assert_eq!(reader, "pdf");
+            assert_eq!(*sha256, digest_of("tests/fixtures/one-page-text.pdf"));
+        }
+        other => panic!("expected a header, got {other:?}"),
+    }
+    assert!(matches!(frames.last(), Some(Frame::Summary { .. })));
+}
+
+#[test]
+fn a_pdf_over_both_ceilings_is_refused_as_too_large() {
+    let (rule, reason, sha256) = only_refusal(serde_json::json!({
+        "path": "tests/fixtures/one-page-text.pdf", "max_bytes": 16, "pdf_max_bytes": 100,
+    }));
+    assert_eq!(rule, "too_large");
+    assert!(reason.contains("over the 100-byte ceiling"), "{reason}");
+    assert!(!reason.contains("non-PDF"), "{reason}");
+    assert_eq!(sha256, None);
+}
+
+#[test]
+fn a_request_without_pdf_max_bytes_keeps_one_ceiling_for_every_format() {
+    for path in ["tests/fixtures/big.txt", "tests/fixtures/one-page-text.pdf"] {
+        let (rule, _, sha256) = only_refusal(serde_json::json!({ "path": path, "max_bytes": 16 }));
+        assert_eq!(rule, "too_large", "{path}");
+        assert_eq!(sha256, None, "{path}");
+    }
+}
+
+/// The ceiling follows the bytes, not the name: a PDF called `.txt` is a PDF,
+/// and a text file called `.pdf` is not.
+#[test]
+fn the_ceiling_is_chosen_by_magic_not_by_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf_as_txt = dir.path().join("really-a-pdf.txt");
+    std::fs::copy("tests/fixtures/one-page-text.pdf", &pdf_as_txt).unwrap();
+    let txt_as_pdf = dir.path().join("really-text.pdf");
+    std::fs::copy("tests/fixtures/big.txt", &txt_as_pdf).unwrap();
+
+    let request = serde_json::json!({
+        "path": pdf_as_txt.display().to_string(), "max_bytes": 16, "pdf_max_bytes": 1_000_000,
+    });
+    let frames = frames_of(&run_worker(&[&request.to_string()]));
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { reader, .. }) if reader == "pdf"),
+        "{frames:?}"
+    );
+
+    let (rule, reason, _) = only_refusal(serde_json::json!({
+        "path": txt_as_pdf.display().to_string(), "max_bytes": 16, "pdf_max_bytes": 1_000_000,
+    }));
+    assert_eq!(rule, "too_large");
+    assert!(reason.contains("non-PDF"), "{reason}");
+}
+
+/// Shorter than the five magic bytes: not a PDF, and it must not be an error.
+#[test]
+fn a_file_shorter_than_the_pdf_magic_is_a_non_pdf_for_the_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiny");
+    std::fs::write(&path, b"%PDF").unwrap();
+    let (rule, reason, _) = only_refusal(serde_json::json!({
+        "path": path.display().to_string(), "max_bytes": 2, "pdf_max_bytes": 1_000_000,
+    }));
+    assert_eq!(rule, "too_large");
+    assert!(reason.contains("non-PDF"), "{reason}");
+}
+
 /// D51, end to end through the real binary — the same way the defect was
 /// found rather than read. Before this, a genuine photo came back as
 /// `mime: text/plain`, `source_kind: document`, one block holding the file's
