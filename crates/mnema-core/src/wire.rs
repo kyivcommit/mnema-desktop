@@ -40,9 +40,15 @@ pub enum Frame {
     /// always 1 (D37: one page per file); it lets the application size its
     /// per-page bookkeeping before the blocks start arriving.
     ///
+    /// It counts **every page the document declares**: the ones that arrive as
+    /// [`Frame::Page`] plus the ones the summary names in `skipped_pages`
+    /// (D189 — a streaming reader writes the header before it knows which
+    /// pages carry text, so only the sum is known up front).
+    ///
     /// It is also the one cheap integrity check on this stream: `mnema-pool`
-    /// requires it to equal the number of [`Frame::Page`] frames that actually
-    /// arrive.
+    /// requires that sum to equal it, and stops a document the moment more
+    /// `Page` frames arrive than it promised — the bound that lets the pool's
+    /// deadline be per page.
     ///
     /// What that catches is a **worker binary that does not agree with the
     /// parent about the protocol** — a half-finished install, a sidecar from
@@ -52,7 +58,7 @@ pub enum Frame {
     /// mid-document loses its `Summary` too and is classified by how it died,
     /// and a pipe does not drop interior bytes while still delivering later
     /// ones. For a correct reader the check is structurally unable to fire,
-    /// because the worker takes both numbers from the same vector — which is
+    /// because the worker takes both numbers from the same vectors — which is
     /// the point, and is worth knowing before being clever with the count.
     Header {
         sha256: String,

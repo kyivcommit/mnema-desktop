@@ -5507,9 +5507,10 @@ fn html_frames(bytes: &[u8], pages: u32, reader_version: u32) -> Vec<Frame> {
 /// What a PDF reader sends for a document whose pages `sent` carried a text
 /// layer and whose pages `skipped` did not.
 ///
-/// The header's count is `sent.len()` rather than the document's page count,
-/// which is the pool's own integrity check: a reader that announced the pages
-/// it *has* would stop the job on every PDF with a scan in it.
+/// The header's count is `sent` plus `skipped` — every page the document
+/// declares — which is the pool's own integrity check since D189: a reader
+/// that announced only the pages it sends would stop the job on every PDF with
+/// a scan in it.
 #[cfg(unix)]
 fn pdf_frames(bytes: &[u8], sent: &[u32], skipped: Vec<u32>, text: &str) -> Vec<Frame> {
     pdf_frames_from(bytes, sent, skipped, text, 1)
@@ -5531,7 +5532,8 @@ fn pdf_frames_from(
         source_kind: SourceKind::Document,
         reader: "pdf".to_string(),
         reader_version,
-        pages: sent.len() as u32,
+        // Every page the document declares, skipped ones included (D189).
+        pages: (sent.len() + skipped.len()) as u32,
     }];
     for page_no in sent {
         frames.push(Frame::Page {

@@ -49,12 +49,64 @@ fn main() {
             Some((mode, rest)) => (mode, rest),
             None => ("ok", request.path.as_str()),
         };
-        act(mode, rest, &mut stdout);
+        act(mode, rest, &request, &mut stdout);
     }
 }
 
-fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
+fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
     match mode {
+        // Answers with the two ceilings the request carried, as a failure
+        // message the test can read back. The only way to see from outside
+        // which number the pool put on the wire.
+        "echo-ceiling" => write_frame(
+            stdout,
+            &Frame::Failed {
+                message: format!(
+                    "max_bytes={} pdf_max_bytes={}",
+                    request.max_bytes, request.pdf_max_bytes
+                ),
+            },
+        ),
+        // `slow-pages:<n>:<ms>` — a document of n pages with a pause of ms
+        // before each one: an OCR'd volume, slow in total and never stuck.
+        "slow-pages" => {
+            let (n, ms) = rest.split_once(':').expect("slow-pages:<n>:<ms>");
+            let n: u32 = n.parse().expect("a page count");
+            let pause = Duration::from_millis(ms.parse().expect("milliseconds"));
+            header(stdout, n);
+            for page_no in 1..=n {
+                std::thread::sleep(pause);
+                page(stdout, page_no);
+            }
+            summary(stdout, Vec::new());
+        }
+        // `stall-after-page:<ms>` — two pages promised, one sent, then silence
+        // for ms before the second: a worker stuck mid-document.
+        "stall-after-page" => {
+            let pause = Duration::from_millis(rest.parse().expect("stall-after-page:<ms>"));
+            header(stdout, 2);
+            page(stdout, 1);
+            std::thread::sleep(pause);
+            page(stdout, 2);
+            summary(stdout, Vec::new());
+        }
+        // One page promised, three sent: the shape of a worker that would emit
+        // pages for ever, which the per-page deadline alone would never stop.
+        "extra-pages" => {
+            header(stdout, 1);
+            for page_no in 1..=3 {
+                page(stdout, page_no);
+            }
+            summary(stdout, Vec::new());
+        }
+        // A header counting only the pages that arrive while the summary names
+        // a skipped one — the meaning `Header.pages` had before D189.
+        "uncounted-skip" => {
+            header(stdout, 2);
+            page(stdout, 1);
+            page(stdout, 3);
+            summary(stdout, vec![2]);
+        }
         // Four times the 65,536-byte pipe capacity measured on this platform.
         // A parent that gave the child a stderr *pipe* and drained only stdout
         // wedges here; one that gave it a file does not notice.
@@ -266,7 +318,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
         // Announces more pages in the header than it then sends: a worker
         // binary that does not agree with the parent about the protocol, which
         // is the only way this disagreement occurs — the real worker takes
-        // both numbers from one vector. Without the count the parent cannot
+        // the count from the same vectors the pages and skips come from. Without the count the parent cannot
         // tell this from a genuinely short document, and the reason the header
         // carries one.
         "short-count" => {
@@ -298,8 +350,9 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 },
             );
         }
-        // A page reported as read *and* as skipped. The counts agree — one page
-        // promised, one page frame sent — so the check above passes it, and
+        // A page reported as read *and* as skipped. The counts agree — two
+        // pages promised, one page frame sent, one skipped — so the check
+        // above passes it, and
         // nothing further down ever sees the two lists side by side again. What
         // it would cost is a journal row saying page 1 has no text layer, in
         // the window that answers "why is this not in my index?", about a page
@@ -313,7 +366,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     source_kind: SourceKind::Document,
                     reader: "pdf".to_string(),
                     reader_version: 1,
-                    pages: 1,
+                    pages: 2,
                 },
             );
             write_frame(
@@ -345,7 +398,7 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     source_kind: SourceKind::Document,
                     reader: "pdf".to_string(),
                     reader_version: 1,
-                    pages: 2,
+                    pages: 3,
                 },
             );
             for page_no in [1, 3] {
@@ -527,6 +580,42 @@ fn answer_without_summary(stdout: &mut io::Stdout) {
             line_start: Some(1),
             line_end: Some(1),
         }),
+    );
+}
+
+fn header(stdout: &mut io::Stdout, pages: u32) {
+    write_frame(
+        stdout,
+        &Frame::Header {
+            sha256: "0".repeat(64),
+            mime: "application/pdf".to_string(),
+            source_kind: SourceKind::Document,
+            reader: "pdf".to_string(),
+            reader_version: 1,
+            pages,
+        },
+    );
+}
+
+fn page(stdout: &mut io::Stdout, page_no: u32) {
+    write_frame(
+        stdout,
+        &Frame::Page {
+            page_no,
+            section_title: None,
+            text_source: None,
+            ocr_confidence: None,
+        },
+    );
+}
+
+fn summary(stdout: &mut io::Stdout, skipped_pages: Vec<u32>) {
+    write_frame(
+        stdout,
+        &Frame::Summary {
+            skipped_pages,
+            text_source: "native:pdf".to_string(),
+        },
     );
 }
 

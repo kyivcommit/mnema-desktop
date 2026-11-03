@@ -937,3 +937,111 @@ fn a_refusal_under_an_unknown_rule_stops_the_job() {
     // mismatch is the job's problem, not this pool's permanent state.
     document(extract(&pool, "ok:after.txt").unwrap());
 }
+
+// --- The deadline is per page, and bounded by the header (D189) -------------
+
+/// A pool whose deadline is short enough that a whole document cannot fit in
+/// it, while every gap between pages does — with room: each gap is 40% of it.
+fn per_page_pool() -> Pool {
+    Pool::new(PoolConfig {
+        workers: 1,
+        batch: 100,
+        timeout: Duration::from_millis(1000),
+        ..config()
+    })
+    .unwrap()
+}
+
+/// Four pages 400 ms apart take 1.6 s against a 1 s deadline. Slow in total
+/// and never stuck — an OCR'd volume — so the document arrives whole.
+#[test]
+fn a_document_slower_than_the_deadline_but_never_silent_for_it_arrives_whole() {
+    let _watchdog = Watchdog::new("slow pages", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let document = document(extract(&pool, "slow-pages:4:400").unwrap());
+    assert_eq!(
+        document
+            .pages
+            .iter()
+            .map(|page| page.page_no)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+/// Silence after a page still kills the worker: the deadline is renewed by a
+/// page, not removed by one. 1.5 s of silence against 1 s.
+#[test]
+fn a_worker_silent_for_the_deadline_after_a_page_is_killed() {
+    let _watchdog = Watchdog::new("stall after a page", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let skipped = skip(extract(&pool, "stall-after-page:1500").unwrap());
+    assert_eq!(skipped.failure, Failure::Timeout);
+}
+
+/// More Page frames than the header promised stop the job **as they arrive**,
+/// not at the summary: this is the bound that keeps a per-page deadline from
+/// letting a worker run for ever.
+#[test]
+fn more_pages_than_the_header_promised_stop_the_job() {
+    let _watchdog = Watchdog::new("extra pages", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let error = extract(&pool, "extra-pages:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("more pages than the header promised"),
+        "caught on the page frame, not at the summary: {detail}"
+    );
+}
+
+/// `Header.pages` counts the skipped pages too. The `skipped-page` worker
+/// promises 3 for two pages and one skip and goes through (above, in
+/// `a_page_that_arrived_and_was_reported_skipped_stops_the_job`); one that
+/// promises only the 2 pages that arrive is the old meaning and stops the job.
+#[test]
+fn a_header_that_does_not_count_its_skipped_pages_stops_the_job() {
+    let _watchdog = Watchdog::new("uncounted skip", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "uncounted-skip:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("promised 2") && detail.contains("1 skipped"),
+        "the detail must name the promise and the skip: {detail}"
+    );
+
+    let document = document(extract(&pool, "skipped-page:x").unwrap());
+    assert_eq!(document.skipped_pages, vec![2]);
+}
+
+/// The PDF ceiling the request carries is the config's own, not `max_bytes`
+/// under another name.
+#[test]
+fn the_pdf_ceiling_crosses_the_wire_from_the_config() {
+    let _watchdog = Watchdog::new("pdf ceiling", Duration::from_secs(30));
+    let pool = Pool::new(PoolConfig {
+        max_bytes: 1000,
+        pdf_max_bytes: 7000,
+        ..config()
+    })
+    .unwrap();
+
+    let skipped = skip(extract(&pool, "echo-ceiling:x").unwrap());
+    assert_eq!(skipped.reason, "max_bytes=1000 pdf_max_bytes=7000");
+}
+
+/// The default PDF ceiling is the measured one (D189), and above the non-PDF
+/// one: the reason it exists is that scans are larger than text.
+#[test]
+fn the_default_pdf_ceiling_is_the_measured_one() {
+    let config = config();
+    assert_eq!(config.pdf_max_bytes, 512 << 20);
+    assert_eq!(config.max_bytes, 64 << 20);
+}

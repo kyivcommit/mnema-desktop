@@ -184,14 +184,16 @@ case_ "reader: a skipped page is named, not silently dropped" \
         }' \
   mnema-extract 'every_page_of_a_document_is_either_read_or_named' --test pdf
 
-# C15. The header's count taken a second way. The pool requires it to equal the
-# number of `Page` frames that arrive and deliberately does not look at the
-# largest `page_no`; announcing the document's page count would stop the job on
-# every PDF with a scanned page in it.
-case_ "worker: the header counts the pages sent, not the document's" \
+# C15. The header's count taken a second way. Since D189 the pool requires it to
+# equal the `Page` frames that arrive plus the skipped numbers (a streaming
+# reader writes the header before it knows which pages carry text), and
+# deliberately does not look at the largest `page_no`. Counting only the pages
+# sent — the meaning before D189 — would stop the job on every PDF with a
+# scanned page in it.
+case_ "worker: the header counts every page the document declares" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                    pages: doc\.pages\.len\(\) as u32,}{                    pages: (doc.pages.len() + doc.skipped.len()) as u32,}' \
-  'pages: (doc.pages.len() + doc.skipped.len()) as u32,' \
+  's{                    pages: \(doc\.pages\.len\(\) \+ doc\.skipped\.len\(\)\) as u32,}{                    pages: doc.pages.len() as u32,}' \
+  'pages: doc.pages.len() as u32,' \
   mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 
 # C16. The other half of the same pair: the summary's account of what was

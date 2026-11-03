@@ -885,9 +885,9 @@ fn a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced() {
         "the skipped page leaves a gap, which `Frame::Page`'s doc calls the honest record"
     );
     assert_eq!(
-        *pages,
-        sent.len() as u32,
-        "the header counts the page frames that arrive, not the document's pages"
+        *pages, 3,
+        "the header counts every page the document declares — the two that \
+         arrive and the one that is skipped (D189)"
     );
 
     let Some(Frame::Summary { skipped_pages, .. }) = frames.last() else {
@@ -1349,9 +1349,10 @@ fn an_epub_is_read_chapter_by_chapter_and_its_summary_names_what_it_skipped() {
     assert_eq!(reader, "epub");
     assert_eq!(*reader_version, 1);
     assert_eq!(mime, "application/epub+zip");
-    // Two, not three: a chapter that was skipped produces no page frame, and
-    // the pool checks this count against the frames that arrive.
-    assert_eq!(*pages, 2);
+    // Three, not two: the header counts every chapter the spine declares, and
+    // the pool checks it against the frames that arrive plus the skipped
+    // numbers (D189).
+    assert_eq!(*pages, 3);
 
     let sent: Vec<(u32, Option<String>)> = frames
         .iter()
@@ -1843,9 +1844,9 @@ fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
         mime,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    // The sheets that were *sent*, which is not the number the workbook
-    // declares: the empty one is named in the summary instead.
-    assert_eq!(*pages, 2);
+    // Every sheet the workbook declares, the empty one included: it is named in
+    // the summary, and the pool checks this count against both (D189).
+    assert_eq!(*pages, 3);
 
     let sent: Vec<(u32, Option<String>)> = frames
         .iter()

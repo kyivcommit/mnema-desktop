@@ -546,14 +546,17 @@ pub struct PoolConfig {
     /// alone.
     pub batch: usize,
 
-    /// How long one document may take before its worker is killed.
+    /// How long the worker may stay silent — from the request to the first
+    /// page, and from one page to the next — before it is killed. Per page,
+    /// not per document (D189): an OCR'd volume of several hundred pages takes
+    /// minutes. A document is still bounded, by `(Header.pages + 1) × timeout`,
+    /// because the pool refuses more `Page` frames than the header promised.
     ///
-    /// **Provisional: 120 s.** Unmeasured in both directions, and both hurt: too
-    /// short silently skips a legitimately slow document (a thousand-page PDF),
-    /// too long stalls a job on a file that will never finish. D40 puts this on
-    /// the measurement list, and notes it is also the answer to a Cancel that
-    /// cannot interrupt the file in flight. A ceiling that scales with the
-    /// file's size is the obvious refinement and is not implemented.
+    /// **Provisional: 120 s**, which covers the 46 s first OCR'd page after an
+    /// OS install measured for D189. Otherwise unmeasured in both directions,
+    /// and both hurt: too short silently skips a legitimately slow page, too
+    /// long stalls a job on a file that will never finish. D40 notes it is also
+    /// the answer to a Cancel that cannot interrupt the file in flight.
     pub timeout: Duration,
 
     /// A ceiling on the child's memory, in bytes, or `None` for no ceiling.
@@ -563,16 +566,28 @@ pub struct PoolConfig {
     /// number and quietly not applying it.
     pub memory_limit: Option<u64>,
 
-    /// The largest file the worker may read; anything above is refused from
-    /// `stat`, before a byte is loaded.
+    /// The largest **non-PDF** file the worker may read; anything above is
+    /// refused from `stat`, before a byte is loaded. PDFs have their own
+    /// ceiling, [`PoolConfig::pdf_max_bytes`].
     ///
     /// **Provisional: 64 MiB.** D40 records that this ceiling "is required and
     /// does not exist anywhere today" without naming a number. 64 MiB is
-    /// derived, not measured: the worker holds a document's bytes and its blocks
-    /// at once, so a handful of workers on files this size stays inside the
-    /// 3–4 GB §2.3 leaves the application. The number a real corpus justifies is
+    /// derived, not measured, and it stays this low because of what a text
+    /// format costs: the worker holds about 4× the file at once (bytes, decoded
+    /// text, blocks), and the application then builds a per-character
+    /// `View.offsets` over the text. The number a real corpus justifies is
     /// unknown.
     pub max_bytes: u64,
+
+    /// The largest PDF the worker may read; anything above is refused from
+    /// `stat`, before a byte is loaded.
+    ///
+    /// **512 MiB, measured (D189):** a PDF costs the worker about 2× its size at
+    /// peak — 96 MB → 285 MB, 337 MB → 689 MB — because pdfium reads pages
+    /// lazily and the text layer is a small fraction of the file. Most of a
+    /// scanned book's bytes are images that never become text, which is why
+    /// the non-PDF ceiling would refuse exactly the documents OCR is for.
+    pub pdf_max_bytes: u64,
 
     /// Where the workers' stderr goes. **Never a pipe** — see the module doc for
     /// the 65,536-byte deadlock that rules one out.
@@ -596,6 +611,7 @@ impl PoolConfig {
             timeout: Duration::from_secs(120),
             memory_limit: None,
             max_bytes: 64 << 20,
+            pdf_max_bytes: 512 << 20,
             diagnostics: None,
         }
     }
@@ -1230,8 +1246,7 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
     let request = to_request_line(&Request {
         path: path.to_string(),
         max_bytes: config.max_bytes,
-        // Task 5 gives PoolConfig its own PDF ceiling; until then it is the same.
-        pdf_max_bytes: config.max_bytes,
+        pdf_max_bytes: config.pdf_max_bytes,
     })
     .map_err(|source| PoolError::Encode { source })?;
 
@@ -1243,9 +1258,14 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
         return Ok(Answer::Unsendable(error));
     }
 
-    // One deadline for the whole document, not per frame: a worker that emits a
-    // block a second forever is as stuck as one that emits nothing.
-    let deadline = Instant::now() + config.timeout;
+    // A deadline per page, not per document: an OCR'd volume of several
+    // hundred pages takes minutes and is not stuck (D189). It is renewed on
+    // every accepted `Frame::Page` and on nothing else, so a worker emitting
+    // blocks forever inside one page still times out. A worker emitting
+    // *pages* forever is stopped by the other half of the rule: no more Page
+    // frames than `Header.pages` (checked below), so a document's total time
+    // is bounded by `(pages + 1) × timeout`, finite rather than "for ever".
+    let mut deadline = Instant::now() + config.timeout;
     let mut header: Option<Frame> = None;
     let mut pages: Vec<ExtractedPage> = Vec::new();
 
@@ -1326,9 +1346,21 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 // and confidence are wired through the pool by a later task.
                 ..
             } => {
-                if header.is_none() {
+                let Some(Frame::Header {
+                    pages: promised, ..
+                }) = header
+                else {
                     return Err(protocol(&line, "a page before any header"));
+                };
+                // The bound that makes the per-page deadline finite. Without
+                // it, a worker that keeps sending pages is never killed.
+                if pages.len() >= promised as usize {
+                    return Err(protocol(
+                        &line,
+                        &format!("more pages than the header promised ({promised})"),
+                    ));
                 }
+                deadline = Instant::now() + config.timeout;
                 pages.push(ExtractedPage {
                     page_no,
                     section_title,
@@ -1371,18 +1403,25 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 // frame, and the same remedy: stop the job rather than record
                 // ten thousand files against a binary mismatch.
                 //
+                // `Header.pages` is every page the document declares: the
+                // ones that arrived plus the ones this summary names as
+                // skipped. A streaming reader writes the header before it
+                // knows which pages carry text, so only the sum is known up
+                // front.
+                //
                 // **Not a truncation check**, which is what it looks like. A
                 // worker killed part-way through a document loses its summary
                 // too and never reaches here; it is classified by how it died.
-                // And the real worker takes the header's count and the page
-                // frames from one vector (`bin/worker.rs`), so this cannot
-                // fire for a correct reader at all.
-                if promised as usize != pages.len() {
+                // And the real worker takes the header's count from the same
+                // vectors the page frames and `skipped_pages` come from
+                // (`bin/worker.rs`), so this cannot fire for a correct reader.
+                if promised as usize != pages.len() + skipped_pages.len() {
                     return Err(protocol(
                         &line,
                         &format!(
-                            "the header promised {promised} pages and {} arrived",
-                            pages.len()
+                            "the header promised {promised} pages and {} arrived, {} skipped",
+                            pages.len(),
+                            skipped_pages.len()
                         ),
                     ));
                 }

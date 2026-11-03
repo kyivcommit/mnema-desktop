@@ -422,11 +422,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // number and nothing would go red.
                     reader: manifest::READER_PDF.to_string(),
                     reader_version: manifest::PDF_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // pages are NOT in this number: they produce no Page frame
-                    // and are named by `skipped_pages` instead.
-                    pages: doc.pages.len() as u32,
+                    // Every page the document declares: the ones that arrive
+                    // as Page frames plus the ones named by `skipped_pages`.
+                    // The pool checks exactly that sum, and bounds the Page
+                    // frames by it as they arrive.
+                    pages: (doc.pages.len() + doc.skipped.len()) as u32,
                 });
                 for page in doc.pages {
                     frames.push(Frame::Page {
@@ -504,11 +504,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // nothing goes red.
                     reader: manifest::READER_EPUB.to_string(),
                     reader_version: manifest::EPUB_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // chapters are NOT in this number: they produce no Page
-                    // frame and are named by `skipped_pages` instead.
-                    pages: book.chapters.len() as u32,
+                    // Every chapter the spine declares: the ones that arrive
+                    // as Page frames plus the ones named by `skipped_pages`.
+                    // The pool checks exactly that sum, and bounds the Page
+                    // frames by it as they arrive.
+                    pages: (book.chapters.len() + book.skipped.len()) as u32,
                 });
                 for chapter in book.chapters {
                     frames.push(Frame::Page {
@@ -671,11 +671,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // no sheet named on it and nothing saying which.
                     reader: manifest::READER_XLSX.to_string(),
                     reader_version: manifest::XLSX_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // sheets are NOT in this number: they produce no Page frame
-                    // and are named by `skipped_pages` instead.
-                    pages: workbook.sheets.len() as u32,
+                    // Every sheet the workbook declares: the ones that arrive
+                    // as Page frames plus the ones named by `skipped_pages`.
+                    // The pool checks exactly that sum, and bounds the Page
+                    // frames by it as they arrive.
+                    pages: (workbook.sheets.len() + workbook.skipped.len()) as u32,
                 });
                 for sheet in workbook.sheets {
                     frames.push(Frame::Page {
