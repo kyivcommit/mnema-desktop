@@ -227,6 +227,68 @@ final class ProtocolTests: XCTestCase {
         let choices = (try JSONSerialization.jsonObject(with: r.data) as? [String: Any])?["choices"] as? [[String: Any]]
         let message = choices?.first?["message"] as? [String: Any]
         XCTAssertEqual(message?["content"] as? String, "stub <c>1</c>")
+        // Without tools the answer keeps its old shape exactly: no finish_reason, no tool_calls.
+        XCTAssertEqual(choices?.first.map { Set($0.keys) }, ["message"])
+        XCTAssertEqual(message.map { Set($0.keys) }, ["content"])
+    }
+
+    private static let tools = #"[{"type":"function","function":{"name":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}]"#
+
+    /// With tools offered the model's call comes back in the OpenAI shape the Rust client reads.
+    func test_tools_answer_with_tool_calls() throws {
+        let (p, port) = try startStub(env: ["MNEMA_STUB_TOOL_QUERY": "grub пароль"])
+        defer { p.terminate() }
+        let r = http(port, "/v1/chat/completions", method: "POST",
+                     body: #"{"model":"x","messages":[{"role":"user","content":"hi"}],"tools":"# + Self.tools + "}")
+        XCTAssertEqual(r.status, 200)
+        let choice = ((try JSONSerialization.jsonObject(with: r.data) as? [String: Any])?["choices"] as? [[String: Any]])?.first
+        XCTAssertEqual(choice?["finish_reason"] as? String, "tool_calls")
+        let message = choice?["message"] as? [String: Any]
+        XCTAssertTrue(message?["content"] is NSNull, "content is null beside tool calls")
+        let call = (message?["tool_calls"] as? [[String: Any]])?.first
+        XCTAssertEqual(call?["id"] as? String, "call_0")
+        XCTAssertEqual(call?["type"] as? String, "function")
+        let function = call?["function"] as? [String: Any]
+        XCTAssertEqual(function?["name"] as? String, "search")
+        let args = (function?["arguments"] as? String).flatMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: String]
+        }
+        XCTAssertEqual(args, ["query": "grub пароль"], "arguments: a JSON string of an object")
+        // The same stub without tools on the request answers in prose: tools gate the call.
+        let plain = http(port, "/v1/chat/completions", method: "POST",
+                         body: #"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#)
+        let plainMessage = (((try JSONSerialization.jsonObject(with: plain.data) as? [String: Any])?["choices"]
+            as? [[String: Any]])?.first?["message"] as? [String: Any])
+        XCTAssertEqual(plainMessage?["content"] as? String, "stub <c>1</c>")
+    }
+
+    /// The request after a search carries the call and its result; both forms must decode, and a broken call must not.
+    func test_tool_turns_are_accepted_and_broken_ones_are_400() throws {
+        let (p, port) = try startStub()
+        defer { p.terminate() }
+        let call = { (content: String, function: String) in
+            #"{"role":"assistant","content":"# + content + #","tool_calls":[{"id":"c1","type":"function","function":"# + function + "}]}"
+        }
+        let result = #"{"role":"tool","tool_call_id":"c1","content":"[1] (a.pdf) text"}"#
+        let ok = #"{"name":"search","arguments":"{\"query\":\"grub\"}"}"#
+        let post = { (messages: [String], tools: String?) -> Int in
+            let t = tools.map { #","tools":"# + $0 } ?? ""
+            return http(port, "/v1/chat/completions", method: "POST",
+                        body: #"{"model":"x","messages":["# + messages.joined(separator: ",") + "]" + t + "}").status
+        }
+        let user = #"{"role":"user","content":"find more"}"#
+        XCTAssertEqual(post([user, call("null", ok), result], nil), 200, "null content, string arguments")
+        XCTAssertEqual(post([user, call(#""""#, ok), result], Self.tools), 200, "empty content, tools again")
+        XCTAssertEqual(post([user, call("null", #"{"name":"search","arguments":{"query":"grub"}}"#), result], nil), 200,
+                       "object arguments")
+        XCTAssertEqual(post([user, call("null", #"{"arguments":"{}"}"#), result], nil), 400, "a call without a name")
+        XCTAssertEqual(post([user, call("null", #"{"name":"search","arguments":"[1]"}"#), result], nil), 400,
+                       "arguments that are not an object")
+        XCTAssertEqual(post([user, call("null", #"{"name":"search","arguments":"{"}"#), result], nil), 400,
+                       "arguments that are not JSON")
+        XCTAssertEqual(post([user, #"{"role":"tool","tool_call_id":"c1","content":null}"#], nil), 400, "a tool result needs content")
+        XCTAssertEqual(post([user, #"{"role":"assistant","content":null}"#], nil), 400, "null content without tool calls")
+        XCTAssertEqual(post([user], #"{"type":"function"}"#), 400, "tools must be an array")
     }
 
     func test_load_unload_204() throws {

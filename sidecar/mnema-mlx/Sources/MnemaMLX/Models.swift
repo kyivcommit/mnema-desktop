@@ -40,7 +40,7 @@ public final class Engine {
             llm = try await LLMModelFactory.shared.loadContainer(from: chatDir, using: #huggingFaceTokenizerLoader())
             // Same for the first generation (2.7 s measured): pay it here, in the background load.
             do {
-                _ = try await generate([["role": "user", "content": "Hi"]], maxTokens: 1, report: false)
+                _ = try await generate([Turn(role: "user", content: "Hi")], tools: nil, maxTokens: 1, report: false)
             } catch { llm = nil; throw error }
         }
     }
@@ -89,30 +89,44 @@ public final class Engine {
     /// Greedy, no streaming. Prints `first_token_ms=<n>` to stderr: from the start of `generate` to the
     /// first token, so the 0.5 s gate measures the model, not the wire.
     public func chat(_ messages: [[String: String]]) async throws -> String {
-        try await generate(messages, maxTokens: 1024, report: true)
+        try await generate(messages.map { Turn(role: $0["role"] ?? "user", content: $0["content"] ?? "") },
+                           tools: nil, maxTokens: 1024, report: true).text
+    }
+
+    /// A turn that may end in tool calls: with `tools`, the model's calls come back parsed (D188).
+    public func chat(_ turns: [Turn], tools: [ToolSpec]?) async throws -> ChatOutput {
+        let (text, calls) = try await generate(turns, tools: tools, maxTokens: 1024, report: true)
+        return calls.isEmpty ? .text(text) : .toolCalls(calls)
     }
 
     /// `report: false` is the warm-up: the time goes to `warmupFirstTokenMs`, nothing to stderr.
-    private func generate(_ messages: [[String: String]], maxTokens: Int, report: Bool) async throws -> String {
+    private func generate(_ turns: [Turn], tools: [ToolSpec]?, maxTokens: Int, report: Bool) async throws
+        -> (text: String, calls: [ToolCall])
+    {
         guard let llm else { throw EngineError.notLoaded }
-        return try await llm.perform { ctx -> String in
-            let chat: [Chat.Message] = messages.map {
-                let text = $0["content"] ?? ""
-                switch $0["role"] {
-                case "system": return .system(text)
-                case "assistant": return .assistant(text)
-                default: return .user(text)
+        return try await llm.perform { ctx -> (text: String, calls: [ToolCall]) in
+            // A tool result names its call by id only; the template wants the tool's name too.
+            let names = Dictionary(turns.flatMap(\.toolCalls).compactMap { c in c.id.map { ($0, c.function.name) } },
+                                   uniquingKeysWith: { a, _ in a })
+            let chat: [Chat.Message] = turns.map {
+                switch $0.role {
+                case "system": return .system($0.content)
+                case "assistant": return .assistant($0.content, toolCalls: $0.toolCalls.isEmpty ? nil : $0.toolCalls)
+                case "tool": return .tool($0.content, id: $0.toolCallId, name: $0.toolCallId.flatMap { names[$0] })
+                default: return .user($0.content)
                 }
             }
             // The processor's own prepare() matches the Python template token for token; ChatSession did not.
             let input = try await ctx.processor.prepare(
-                input: UserInput(chat: chat, additionalContext: ["enable_thinking": false]))
+                input: UserInput(chat: chat, tools: tools, additionalContext: ["enable_thinking": false]))
             let start = Date()
             var first: Date?
             var out = ""
+            var calls: [ToolCall] = []
             for await g in try MLXLMCommon.generate(
-                input: input, parameters: .init(maxTokens: maxTokens, temperature: 0), context: ctx)
+                input: input, parameters: .init(maxTokens: maxTokens, temperature: 0), context: ctx, tools: tools)
             {
+                if case .toolCall(let call) = g { calls.append(call) }
                 if case .chunk(let x) = g {
                     if first == nil {
                         first = Date()
@@ -127,9 +141,30 @@ public final class Engine {
                     out += x
                 }
             }
-            return out
+            return (out, calls)
         }
     }
+}
+
+/// One chat message as the wire gives it. `toolCalls`: an assistant turn that asked for tools;
+/// role `tool`: what a tool returned.
+public struct Turn: Sendable {
+    public let role: String
+    public let content: String
+    public let toolCalls: [ToolCall]
+    public let toolCallId: String?
+
+    public init(role: String, content: String, toolCalls: [ToolCall] = [], toolCallId: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+    }
+}
+
+public enum ChatOutput: Equatable, Sendable {
+    case text(String)
+    case toolCalls([ToolCall])
 }
 
 public enum EngineError: Error {
