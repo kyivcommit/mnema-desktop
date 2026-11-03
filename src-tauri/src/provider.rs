@@ -759,13 +759,14 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
-    // With tools on, E4B is the only local chat model a role can take: its
-    // download chooses it (E2B could not fill the role anyway).
-    if ModelId::from(id) == ModelId::ChatTools && crate::prefs::chat_tools(state.data_dir()) {
-        let _ = choose_local_chat(&state, ModelId::ChatTools);
-    }
-    // The chat model not chosen fills no role: its download moves nothing.
-    if let Some(slot) = local.slot_of(id.into()) {
+    // The chat model not chosen fills no role: its download moves nothing —
+    // except E4B with tools on, the only local chat model a role can then take;
+    // `fill_roles` chooses it, under the job slot.
+    let slot = local.slot_of(id.into()).or_else(|| {
+        (ModelId::from(id) == ModelId::ChatTools && crate::prefs::chat_tools(state.data_dir()))
+            .then_some(ModelId::Chat)
+    });
+    if let Some(slot) = slot {
         on_configured(&state, ProviderChoice::Mnema, Some(slot));
     }
     Ok(())
@@ -854,6 +855,26 @@ pub(crate) fn fill_roles(
         return;
     };
     let before = state.roles();
+    // With tools on, a downloaded E4B is the only local chat model a role can
+    // take: chosen here, under the slot — the choice restarts the process a
+    // scan may be embedding through — and only for a chat role this fill may
+    // write (D188).
+    let chat_open = match before.chat {
+        None => empty_too,
+        Some(q) => q == ProviderChoice::Mnema,
+    };
+    if p == ProviderChoice::Mnema
+        && which.is_none_or(|w| w == ModelId::Chat)
+        && chat_open
+        && crate::prefs::chat_tools(state.data_dir())
+        && state.local().chat_model() != ModelId::ChatTools
+        && state
+            .local()
+            .downloaded_chat_models()
+            .contains(&ModelId::ChatTools)
+    {
+        let _ = choose_local_chat(state, ModelId::ChatTools);
+    }
     let configured = state.provider().configured();
     for (role, id, now) in [
         (Role::Chat, ModelId::Chat, before.chat),

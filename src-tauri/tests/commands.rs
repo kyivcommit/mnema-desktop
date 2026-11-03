@@ -12112,6 +12112,76 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
     );
 }
 
+/// D188: an E4B download with tools on chooses E4B only under the job slot —
+/// choosing it restarts the process, and a scan embedding through it would end
+/// Failed. During the scan nothing moves; when the slot is released E4B is
+/// chosen and fills the empty role.
+#[test]
+fn an_e4b_download_during_a_scan_chooses_e4b_only_when_the_scan_ends() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+    state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
+    let scan = state
+        .claim_job(
+            mnema_desktop::scan_state::Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+    assert_eq!(
+        state.local().chat_model(),
+        ModelId::Chat,
+        "E4B was chosen (and the process stopped) under a running scan"
+    );
+    assert_eq!(state.roles().chat, None, "the scan holds the slot");
+
+    drop(scan);
+    assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+    assert_eq!(state.roles().chat, Some(Mnema));
+}
+
+/// D188: an E4B download chooses nothing for a chat role on another provider —
+/// the choice would restart the process for a model nobody asks.
+#[test]
+fn an_e4b_download_leaves_a_cloud_chat_role_and_the_served_model_alone() {
+    use mnema_desktop::provider::{
+        LocalModel,
+        ProviderChoice::{Mnema, OpenRouter},
+        download_model,
+    };
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, Some(Mnema), Some(OpenRouter));
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.local().chat_model(), ModelId::Chat);
+    assert_eq!(state.roles().chat, Some(OpenRouter));
+}
+
 /// Mnema is configured per model: bge-m3 arriving says nothing new about
 /// chat, so an empty chat role stays empty though Gemma was already there.
 #[test]
