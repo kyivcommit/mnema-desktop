@@ -4,7 +4,9 @@
 
 use crate::ModelId;
 
-/// Our flat Gemma `config.json`; the upstream one is never downloaded.
+/// Our flat Gemma E2B `config.json`; its upstream one is never downloaded. E4B
+/// takes its upstream config as is: the pinned `mlx-swift-lm` reads the nested
+/// `text_config` (measured 2026-11-03).
 const GEMMA_CONFIG: &[u8] = include_bytes!("../assets/gemma-config.json");
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,7 @@ impl ModelSpec {
 pub struct Manifest {
     pub embed: ModelSpec,
     pub chat: ModelSpec,
+    pub chat_tools: ModelSpec,
 }
 
 impl Manifest {
@@ -59,6 +62,7 @@ impl Manifest {
         match id {
             ModelId::Embed => &self.embed,
             ModelId::Chat => &self.chat,
+            ModelId::ChatTools => &self.chat_tools,
         }
     }
 
@@ -140,6 +144,52 @@ impl Manifest {
                         "config.json",
                         GEMMA_CONFIG,
                         "6cd31231eb175b938c42a4fa3dd78f4956b91756e7b81a9b1d9a2e4136e812e2",
+                    ),
+                ],
+            },
+            chat_tools: ModelSpec {
+                repo: "mlx-community/gemma-4-e4b-it-4bit".into(),
+                commit: "475b9088d29754a3379866cf5aeb6b41acd313c2".into(),
+                files: vec![
+                    f(
+                        "model.safetensors",
+                        5_146_800_534,
+                        "932b8271fc3fe65adcc78b96c10c6268bbfb13e8f67d1358727c0d6ee97e1eff",
+                    ),
+                    f(
+                        "model.safetensors.index.json",
+                        240_961,
+                        "f8accac59ee7efe87e0c298c854610b262c3cadd477407503147c71209ff0093",
+                    ),
+                    f(
+                        "tokenizer.json",
+                        32_169_626,
+                        "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+                    ),
+                    f(
+                        "tokenizer_config.json",
+                        2_740,
+                        "080d9e1aff284e2f6043889cd05367966f7c7b80e025fbc0b06745e218158656",
+                    ),
+                    f(
+                        "chat_template.jinja",
+                        17_336,
+                        "2f1b4d75d067bae3fe44e676721c7f077d243bc007156cb9c2f8b5836613d082",
+                    ),
+                    f(
+                        "generation_config.json",
+                        208,
+                        "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+                    ),
+                    f(
+                        "processor_config.json",
+                        1_316,
+                        "de3e580aebdc98272d4c4547daffe6525fcbae18a83a0e0bcf0d7444d4ee6f37",
+                    ),
+                    f(
+                        "config.json",
+                        6_628,
+                        "780ccb3a514a5f1ced161d383f948fc22eca9b84b752ca19494f625bd9bad7a6",
                     ),
                 ],
             },

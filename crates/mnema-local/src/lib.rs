@@ -10,11 +10,18 @@ pub use models::{ModelState, Store};
 
 pub use process::{Endpoint, Sidecar};
 
-/// Which of the sidecar's two models a call is about.
+/// Which local model a call is about. The sidecar holds the embedder and one
+/// chat model: `Chat` (Gemma 4 E2B) and `ChatTools` (Gemma 4 E4B, which calls
+/// tools) are two models for the same slot (D188).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelId {
     Embed,
     Chat,
+    ChatTools,
+}
+
+impl ModelId {
+    pub const ALL: [ModelId; 3] = [ModelId::Embed, ModelId::Chat, ModelId::ChatTools];
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

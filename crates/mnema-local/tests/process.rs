@@ -280,3 +280,21 @@ fn available_is_true_here_only_on_apple_silicon() {
         assert!(!mnema_local::available());
     }
 }
+
+#[test]
+fn both_chat_models_load_into_the_one_chat_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fake.log");
+    let s = Sidecar::start_with_env(
+        Path::new(FAKE),
+        dir.path(),
+        dir.path(),
+        &[("FAKE_MLX_LOG", log.to_str().unwrap())],
+    )
+    .unwrap();
+    s.load(&[mnema_local::ModelId::ChatTools]).unwrap();
+    s.unload(Some(mnema_local::ModelId::ChatTools)).unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains(r#"body /mnema/load {"models":["chat"]}"#), "{text}");
+    assert!(text.contains(r#"body /mnema/unload {"models":["chat"]}"#), "{text}");
+}

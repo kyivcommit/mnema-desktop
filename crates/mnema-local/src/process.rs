@@ -225,7 +225,8 @@ impl Sidecar {
             let names: Vec<&str> = which
                 .iter()
                 .map(|m| match m {
-                    ModelId::Chat => r#""chat""#,
+                    // One chat slot: the sidecar was started with the chosen model's directory.
+                    ModelId::Chat | ModelId::ChatTools => r#""chat""#,
                     ModelId::Embed => r#""embed""#,
                 })
                 .collect();
@@ -238,7 +239,7 @@ impl Sidecar {
     pub fn unload(&self, which: Option<ModelId>) -> Result<(), Error> {
         let body = match which {
             None => "",
-            Some(ModelId::Chat) => r#"{"models":["chat"]}"#,
+            Some(ModelId::Chat | ModelId::ChatTools) => r#"{"models":["chat"]}"#,
             Some(ModelId::Embed) => r#"{"models":["embed"]}"#,
         };
         self.post("/mnema/unload", body, Duration::from_secs(30))
