@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -201,6 +201,15 @@ ALTER TABLE skipped ADD COLUMN reader TEXT;
 ALTER TABLE skipped ADD COLUMN reader_version INTEGER;
 UPDATE skipped SET size_bytes = NULL WHERE page_no IS NULL AND rule = 'no_text_layer';";
 
+/// The mean top-candidate confidence of a page read by OCR (D189), `NULL` for
+/// every native page and every page written before it. Kept for a future gold
+/// set, **not** a threshold: Vision's confidences are quantised. The bitmap's
+/// `width_px`/`height_px`/`dpi` needed no migration — migration 1 already has
+/// them, always `NULL` until OCR filled them.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` states.
+const ADD_PAGE_OCR_CONFIDENCE: &str = "ALTER TABLE page ADD COLUMN ocr_confidence REAL;";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -219,6 +228,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_QUERY_HISTORY),
         M::up(ADD_SEARCH_FOLDER),
         M::up(ADD_SKIP_READER),
+        M::up(ADD_PAGE_OCR_CONFIDENCE),
     ])
 }
 
@@ -470,11 +480,11 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(SCHEMA_VERSION, 8);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         let value: String = conn
             .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {
@@ -555,7 +565,7 @@ mod tests {
         .expect("the six-column statements a version-6 database could have written");
 
         apply(&mut conn).expect("a version-6 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 7);
+        assert_eq!(SCHEMA_VERSION, 8);
 
         let (reason, size, reader, reader_version): (
             String,
@@ -612,6 +622,58 @@ mod tests {
             "a page's row is not the file's, and clearing its size would be a \
              statement about the whole document"
         );
+    }
+
+    /// An index already at version 7 — pages written, no OCR yet — is given
+    /// `page.ocr_confidence` by the upgrade, and its pages keep their rows with
+    /// the column `NULL`. Asserts the column ABSENT at 7 first, for the reason
+    /// `file_mask_reaches_a_database_that_is_already_at_version_three` gives.
+    #[test]
+    fn a_v7_index_gains_page_ocr_confidence_and_keeps_its_pages() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations()
+            .to_version(&mut conn, 7)
+            .expect("version 7 is the schema before OCR");
+        let has_column = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('page') WHERE name = 'ocr_confidence'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        assert!(
+            !has_column(&conn),
+            "`ocr_confidence` must not be part of migration 7"
+        );
+        conn.execute(
+            "INSERT INTO document (id, mime, size_bytes, source_kind)
+             VALUES ('d1', 'application/pdf', 10, 'document')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO page (document_id, page_no, text_source) VALUES ('d1', 1, 'native:pdf')",
+            [],
+        )
+        .expect("the statement a version-7 database could have run");
+
+        apply(&mut conn).expect("a version-7 database migrates to the current version");
+        assert_eq!(SCHEMA_VERSION, 8);
+        assert!(
+            has_column(&conn),
+            "the upgrade must add `page.ocr_confidence`"
+        );
+        let kept: (String, Option<f64>) = conn
+            .query_row(
+                "SELECT text_source, ocr_confidence FROM page WHERE document_id = 'd1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("the page written before the migration is still there");
+        assert_eq!(kept, ("native:pdf".to_string(), None));
     }
 
     /// The DDL a version-1 database ends up with, comments removed and

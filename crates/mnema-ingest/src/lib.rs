@@ -33,7 +33,9 @@ use mnema_core::manifest::{
     Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
 };
 use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
-use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipEntry, SkipRule};
+use mnema_index::{
+    Db, DocumentStatus, INDEX_FORMAT_VERSION, PageOcr, PathEntry, SkipEntry, SkipRule,
+};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
 mod walk;
@@ -558,8 +560,13 @@ pub fn ingest_file(
             }
             let mut written = 0usize;
             for page in slice {
-                let page_id =
-                    db.insert_page(&id, page.page_no, &document.text_source, page.section_title)?;
+                let page_id = db.insert_page_read(
+                    &id,
+                    page.page_no,
+                    page.text_source,
+                    page.section_title,
+                    page.ocr,
+                )?;
                 // The rowids the chunker cannot invent: `Block` carries no id
                 // by design, so the caller that wrote the rows passes them in.
                 let mut placed: Vec<(i64, &Block)> = Vec::with_capacity(page.blocks.len());
@@ -1429,6 +1436,10 @@ fn extension_of(relative: &str) -> Option<&str> {
 /// chunker cannot see about it.
 struct PageOf<'a> {
     page_no: i64,
+    /// The page's own source when the frame named one (`ocr:vision`), else the
+    /// document's: since D189 one PDF can hold pages of both families.
+    text_source: &'a str,
+    ocr: PageOcr,
     section_title: Option<&'a str>,
     blocks: &'a [Block],
     context: PageContext,
@@ -1487,6 +1498,13 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
         .iter()
         .map(|page| PageOf {
             page_no: i64::from(page.page_no),
+            text_source: page.text_source.as_deref().unwrap_or(&document.text_source),
+            ocr: PageOcr {
+                confidence: page.ocr_confidence,
+                width_px: page.width_px,
+                height_px: page.height_px,
+                dpi: page.dpi,
+            },
             section_title: page.section_title.as_deref(),
             blocks: &page.blocks,
             context: match document.reader.as_str() {

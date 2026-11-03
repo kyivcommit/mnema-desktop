@@ -281,6 +281,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             });
             frames.extend(blocks.into_iter().map(Frame::Block));
             frames.push(Frame::Summary {
@@ -312,6 +315,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                     section_title: page.section_title,
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -361,6 +367,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                     section_title: page.section_title,
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -455,6 +464,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                     // bytes it was before OCR existed.
                     text_source: page.ocr.map(|_| page.text_source.to_string()),
                     ocr_confidence: page.ocr.map(|o| o.confidence),
+                    width_px: page.ocr.map(|o| o.width_px),
+                    height_px: page.ocr.map(|o| o.height_px),
+                    dpi: page.ocr.map(|o| o.dpi),
                 });
                 for block in page.blocks {
                     emit(Frame::Block(block));
@@ -563,6 +575,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                         section_title: chapter.section_title,
                         text_source: None,
                         ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(chapter.blocks.into_iter().map(Frame::Block));
                 }
@@ -648,6 +663,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                         section_title: section.section_title,
                         text_source: None,
                         ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(section.blocks.into_iter().map(Frame::Block));
                 }
@@ -734,6 +752,9 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                         section_title: sheet.section_title,
                         text_source: None,
                         ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(sheet.blocks.into_iter().map(Frame::Block));
                 }

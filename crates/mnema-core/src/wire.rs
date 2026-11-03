@@ -110,7 +110,8 @@ pub enum Frame {
     /// page, and every page before OCR existed), `Some("ocr:vision")` marks a
     /// page read by OCR. `ocr_confidence` is the mean top-candidate confidence
     /// of such a page, kept for a future gold set and **not** a threshold
-    /// (D189: Vision confidences are quantised). Both are skipped on the wire
+    /// (D189: Vision confidences are quantised). `width_px`, `height_px` and `dpi`
+    /// are the bitmap OCR read, for the `page` row. All are skipped on the wire
     /// when `None`, so a native page frame is byte-for-byte what it was.
     Page {
         page_no: u32,
@@ -119,6 +120,12 @@ pub enum Frame {
         text_source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ocr_confidence: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width_px: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height_px: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
     },
     /// One source block, in reading order within its page.
     Block(Block),
@@ -347,6 +354,9 @@ mod tests {
             section_title: Some("Розділ другий".to_string()),
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         }
     }
 
@@ -356,6 +366,9 @@ mod tests {
             section_title: None,
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         }
     }
 
@@ -681,10 +694,14 @@ mod tests {
             section_title: None,
             text_source: Some("ocr:vision".to_string()),
             ocr_confidence: Some(0.5),
+            width_px: Some(2480),
+            height_px: Some(3508),
+            dpi: Some(300),
         };
         let line = to_line(&page).unwrap();
         assert!(line.contains(r#""text_source":"ocr:vision""#), "{line}");
         assert!(line.contains(r#""ocr_confidence":0.5"#), "{line}");
+        assert!(line.contains(r#""dpi":300"#), "{line}");
         assert_eq!(from_line(&line).unwrap(), page);
     }
 }

@@ -340,12 +340,26 @@ pub struct Skip {
 /// `page_no` is the reader's own numbering rather than this page's index in the
 /// vector, and the two can differ — a reader that drops a page it cannot read
 /// leaves a gap, which `Document::skipped_pages` names and this preserves.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `text_source` is the page's own source when it differs from the document's
+/// (`None`: `Document::text_source` applies); `ocr_confidence` and the bitmap's
+/// `width_px`/`height_px`/`dpi` are set only for an OCR page. All carried from
+/// the `Page` frame unchanged.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExtractedPage {
     pub page_no: u32,
     pub section_title: Option<String>,
+    pub text_source: Option<String>,
+    pub ocr_confidence: Option<f32>,
+    pub width_px: Option<u32>,
+    pub height_px: Option<u32>,
+    pub dpi: Option<u32>,
     pub blocks: Vec<Block>,
 }
+
+// `f32` rules out a derived `Eq`; an OCR confidence is in 0..=1 and never NaN
+// (`mnema_extract::pdf::OcrPage` makes the same argument), so equality is total.
+impl Eq for ExtractedPage {}
 
 /// A document as the worker reported it: the header's facts, its pages with
 /// their blocks in reading order, and the summary's.
@@ -1347,9 +1361,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             Frame::Page {
                 page_no,
                 section_title,
-                // Not carried into `ExtractedPage` yet: the per-page source
-                // and confidence are wired through the pool by a later task.
-                ..
+                text_source,
+                ocr_confidence,
+                width_px,
+                height_px,
+                dpi,
             } => {
                 let Some(Frame::Header {
                     pages: promised, ..
@@ -1369,6 +1385,11 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 pages.push(ExtractedPage {
                     page_no,
                     section_title,
+                    text_source,
+                    ocr_confidence,
+                    width_px,
+                    height_px,
+                    dpi,
                     blocks: Vec::new(),
                 });
             }

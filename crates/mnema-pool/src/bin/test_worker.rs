@@ -368,6 +368,9 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
                     section_title: Some("Розділ перший".to_string()),
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 },
             );
             write_frame(
@@ -404,6 +407,9 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
                     section_title: None,
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 },
             );
             write_frame(
@@ -437,6 +443,9 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
                         section_title: None,
                         text_source: None,
                         ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     },
                 );
             }
@@ -473,6 +482,9 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
                     section_title: None,
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 },
             );
             write_frame(
@@ -596,6 +608,9 @@ fn answer_without_summary(stdout: &mut io::Stdout) {
             section_title: None,
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         },
     );
     write_frame(
@@ -633,6 +648,9 @@ fn page(stdout: &mut io::Stdout, page_no: u32) {
             section_title: None,
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         },
     );
 }

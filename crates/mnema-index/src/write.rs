@@ -824,6 +824,7 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A native page: [`Db::insert_page_read`] with nothing known about a bitmap.
     pub fn insert_page(
         &self,
         document_id: &str,
@@ -831,10 +832,40 @@ impl Db {
         text_source: &str,
         section_title: Option<&str>,
     ) -> Result<i64, Error> {
+        self.insert_page_read(
+            document_id,
+            page_no,
+            text_source,
+            section_title,
+            PageOcr::default(),
+        )
+    }
+
+    /// Writes one page and returns its rowid. `text_source` is the page's own
+    /// (`ocr:vision` for a page OCR read, D189), so one document can hold
+    /// pages of both families.
+    pub fn insert_page_read(
+        &self,
+        document_id: &str,
+        page_no: i64,
+        text_source: &str,
+        section_title: Option<&str>,
+        ocr: PageOcr,
+    ) -> Result<i64, Error> {
         self.conn().execute(
-            "INSERT INTO page (document_id, page_no, text_source, section_title)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![document_id, page_no, text_source, section_title],
+            "INSERT INTO page (document_id, page_no, text_source, section_title,
+                               ocr_confidence, width_px, height_px, dpi)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                document_id,
+                page_no,
+                text_source,
+                section_title,
+                ocr.confidence,
+                ocr.width_px,
+                ocr.height_px,
+                ocr.dpi
+            ],
         )?;
         Ok(self.conn().last_insert_rowid())
     }
@@ -1493,4 +1524,15 @@ fn hex(bytes: &[u8]) -> String {
         out.push(DIGITS[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// What OCR knew about a page beyond its text (D189): the mean confidence of
+/// its lines and the bitmap it read. All `None` for a native page, which is
+/// what the `page` columns hold for one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PageOcr {
+    pub confidence: Option<f32>,
+    pub width_px: Option<u32>,
+    pub height_px: Option<u32>,
+    pub dpi: Option<u32>,
 }

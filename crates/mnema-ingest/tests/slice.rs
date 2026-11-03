@@ -915,6 +915,9 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             },
             Frame::Block(unlined_block(&String::from_utf8_lossy(bytes))),
             Frame::Summary {
@@ -953,6 +956,9 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
                 section_title: Some("Умови постачання".to_string()),
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             },
             Frame::Block(unlined_block("Кошторис узгоджено сторонами.")),
             Frame::Summary {
@@ -5492,6 +5498,9 @@ fn html_frames(bytes: &[u8], pages: u32, reader_version: u32) -> Vec<Frame> {
             section_title: Some(format!("Розділ {page_no}")),
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         });
         frames.push(Frame::Block(unlined_block(&format!(
             "Комісія розглянула звернення, розділ {page_no}."
@@ -5541,6 +5550,9 @@ fn pdf_frames_from(
             section_title: None,
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         });
         frames.push(Frame::Block(unlined_block(&format!(
             "{text}, сторінка {page_no}."
@@ -5617,6 +5629,9 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             },
             Frame::Block(unlined_block(
                 "Річний звіт про виконання кошторису за минулий період.",
@@ -5626,6 +5641,9 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             },
             Frame::Block(unlined_block(
                 "Додаток до звіту: перелік придбаного обладнання для філії.",
@@ -5760,6 +5778,9 @@ fn html_docx_and_epub_cite_the_section_their_page_names() {
                     section_title: Some(title.to_string()),
                     text_source: None,
                     ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 },
                 Frame::Block(unlined_block(prose)),
                 Frame::Summary {
@@ -5824,6 +5845,9 @@ fn a_page_that_names_no_section_carries_an_empty_one_rather_than_none() {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             },
             Frame::Block(unlined_block(
                 "Текст, який не має над собою жодного заголовка.",
@@ -5884,6 +5908,9 @@ fn an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet() {
             section_title: Some("Кошторис".to_string()),
             text_source: None,
             ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         },
     ];
     frames.extend((0..12u32).map(|i| {
@@ -6000,4 +6027,242 @@ fn rows_of(fx: &Fixture, block_ids: &[i64]) -> (u32, u32) {
         end = end.max(b as u32);
     }
     (start, end)
+}
+
+// --------------------------------------- OCR pages beside native ones (D189)
+
+const MIXED_NATIVE_SCAN: &[u8] =
+    include_bytes!("../../mnema-extract/tests/fixtures/mixed-native-scan.pdf");
+const SCAN_UK: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/scan-uk.pdf");
+
+/// Vision's cold start is measured in tens of seconds (Task 8 gave the pool
+/// 300 s for it); the fixture's 10 s would time a correct read out.
+#[cfg(target_os = "macos")]
+const OCR_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `(page_no, text_source, ocr_confidence, width_px, height_px, dpi)` of every
+/// page the index holds for the document at `path`, ascending.
+#[allow(clippy::type_complexity)]
+#[cfg(target_os = "macos")]
+fn page_rows(
+    fx: &Fixture,
+    path: &str,
+) -> Vec<(
+    i64,
+    String,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+)> {
+    let document = fx
+        .db
+        .path_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the file is indexed")
+        .document_id;
+    fx.db
+        .conn()
+        .prepare(
+            "SELECT page_no, text_source, ocr_confidence, width_px, height_px, dpi
+               FROM page WHERE document_id = ?1 ORDER BY page_no",
+        )
+        .unwrap()
+        .query_map([document], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The journal's page rows for `path`, by number.
+#[cfg(target_os = "macos")]
+fn skipped_page_numbers(fx: &Fixture, path: &str) -> Vec<i64> {
+    fx.db
+        .skips_for_root(fx.root_id)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.relative_path == path)
+        .filter_map(|r| r.page_no)
+        .collect()
+}
+
+/// One PDF, two families: page 1 has a text layer and page 2 is a scan Vision
+/// reads. Each page row carries its own source, and only the OCR page carries
+/// what OCR knew — in both directions, because a writer that stamped every
+/// page with the document's `native:pdf`, or one that copied the OCR page's
+/// numbers onto its neighbour, would each satisfy half of this.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mixed_pdf_keeps_each_pages_own_source_and_what_ocr_knew() {
+    let fx = Fixture::new();
+    let path = "скани/змішаний.pdf";
+    fx.place_at(path, MIXED_NATIVE_SCAN, mtime());
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+
+    let rows = page_rows(&fx, path);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows[0],
+        (1, "native:pdf".to_string(), None, None, None, None),
+        "a native page names the document's source and carries no bitmap"
+    );
+    let (page_no, source, confidence, width, height, dpi) = rows[1].clone();
+    assert_eq!((page_no, source.as_str()), (2, "ocr:vision"), "{rows:?}");
+    assert!(
+        confidence.is_some_and(|c| (0.0..=1.0).contains(&c)),
+        "{rows:?}"
+    );
+    let dpi = dpi.expect("an OCR page records the dpi it was rendered at");
+    assert!(
+        (72..=300).contains(&dpi),
+        "300 dpi, or less under the cap: {dpi}"
+    );
+    // An A4-ish page at that dpi: hundreds of pixels a side at the very least.
+    assert!(
+        width.is_some_and(|w| w >= 500) && height.is_some_and(|h| h >= 500),
+        "{rows:?}"
+    );
+    assert!(
+        skipped_page_numbers(&fx, path).is_empty(),
+        "a page OCR read is not a missing page"
+    );
+}
+
+/// Spec «Що зникне» 4: a PDF indexed by reader v3, which skipped its scanned
+/// page and journalled it, gets that page back from v4 — the D55 version
+/// comparison on the path row is what sends it to a worker, and
+/// `journal_skipped_pages` is what clears the page's row.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_page_v3_skipped_is_indexed_by_v4_and_its_journal_row_goes() {
+    let fx = Fixture::new();
+    let path = "скани/змішаний.pdf";
+    let today = pdf_reader_version(&fx);
+    assert_eq!(today, 4, "the premise is the OCR release");
+    fx.place_at(path, MIXED_NATIVE_SCAN, mtime());
+    let scratch = tempfile::tempdir().unwrap();
+    let before_ocr = pdf_frames_from(MIXED_NATIVE_SCAN, &[1], vec![2], "Текст", today - 1);
+    assert!(matches!(
+        fx.ingest_with_worker(path, &worker_answering_in(scratch.path(), &before_ocr)),
+        Ingested::Indexed { .. }
+    ));
+    assert_eq!(
+        skipped_page_numbers(&fx, path),
+        vec![2],
+        "the premise is v3's account: page 2 missing"
+    );
+
+    // Same bytes, same mtime: only the reader moved.
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    let rows = page_rows(&fx, path);
+    assert_eq!(
+        rows.iter().map(|r| (r.0, r.1.as_str())).collect::<Vec<_>>(),
+        vec![(1, "native:pdf"), (2, "ocr:vision")],
+        "{rows:?}"
+    );
+    assert!(
+        skipped_page_numbers(&fx, path).is_empty(),
+        "the index holds page 2, so nothing may still report it missing"
+    );
+}
+
+/// The whole-file half: `scan-uk.pdf` refused as `no_text_layer` by pdf@3 is
+/// read by pdf@4 — the journal's reader comparison (D187) sends it to a worker
+/// rather than answering from the row — and the row goes once it is indexed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_whole_scan_v3_refused_is_indexed_by_v4_and_its_journal_row_goes() {
+    let fx = Fixture::new();
+    let path = "скани/скан.pdf";
+    let today = pdf_reader_version(&fx);
+    assert_eq!(today, 4, "the premise is the OCR release");
+    fx.place_at(path, SCAN_UK, mtime());
+    let scratch = tempfile::tempdir().unwrap();
+    let v3 = worker_answering_in(
+        scratch.path(),
+        &[refusal(
+            SCAN_UK,
+            "no_text_layer",
+            Some((READER_PDF, today - 1)),
+        )],
+    );
+    assert_eq!(
+        fx.ingest_with_worker(path, &v3),
+        Ingested::Skipped {
+            rule: SkipRule::NoTextLayer
+        }
+    );
+    let row = fx
+        .db
+        .skip_entry(fx.root_id, path)
+        .unwrap()
+        .expect("the premise is a journalled refusal");
+    assert_eq!(
+        (row.reader.as_deref(), row.reader_version),
+        (Some(READER_PDF), Some(i64::from(today - 1)))
+    );
+
+    assert!(matches!(
+        fx.ingest_with_timeout(path, OCR_TIMEOUT),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        fx.db.skip_entry(fx.root_id, path).unwrap().is_none(),
+        "an indexed file has no journal row saying it has no text"
+    );
+    assert_eq!(
+        page_rows(&fx, path)
+            .iter()
+            .map(|r| r.1.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ocr:vision"]
+    );
+    assert!(!fx.db.search_lexical("їжак", 10).unwrap().is_empty());
+}
+
+/// `too_large` under `pdf_max_bytes` is a fact about the setting, not the file
+/// (D44/D52): raising the PDF ceiling reads the same bytes. A native PDF, so
+/// this holds on every platform.
+#[test]
+fn a_raised_pdf_ceiling_reads_a_pdf_it_used_to_refuse() {
+    let fx = Fixture::new();
+    let path = "договори/один.pdf";
+    let bytes = include_bytes!("../../mnema-extract/tests/fixtures/one-page-text.pdf");
+    fx.place_at(path, bytes, mtime());
+    let low = PoolConfig {
+        pdf_max_bytes: 100,
+        ..fx.config()
+    };
+    assert!(bytes.len() > 100 && (bytes.len() as u64) < low.max_bytes);
+    assert_eq!(
+        fx.ingest_with(path, low),
+        Ingested::Skipped {
+            rule: SkipRule::TooLarge
+        }
+    );
+    assert!(fx.db.skip_entry(fx.root_id, path).unwrap().is_some());
+
+    assert!(matches!(
+        fx.ingest_with(path, fx.config()),
+        Ingested::Indexed { .. }
+    ));
+    assert!(
+        fx.db.skip_entry(fx.root_id, path).unwrap().is_none(),
+        "the refusal was the old ceiling's, and it goes with it"
+    );
 }
