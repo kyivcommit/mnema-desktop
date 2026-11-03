@@ -141,7 +141,7 @@ public final class Engine {
                     out += x
                 }
             }
-            return (out, calls)
+            return (withoutThinking(out), calls)
         }
     }
 }
@@ -169,4 +169,20 @@ public enum ChatOutput: Equatable, Sendable {
 
 public enum EngineError: Error {
     case notLoaded
+}
+
+/// The answer without Gemma 4's thinking channel. After a tool result the template continues the model's
+/// own turn and writes no empty thought block, so E4B thinks on its own (measured 2026-11-03: 9 of 24
+/// answers after a search); llama.cpp moves the block out of the content, and so does this. A block cut
+/// off by the token limit goes to the end: what follows its opening is thinking, never the answer.
+public func withoutThinking(_ text: String) -> String {
+    var out = text
+    while let open = out.range(of: "<|channel>thought") {
+        if let close = out.range(of: "<channel|>", range: open.upperBound ..< out.endIndex) {
+            out.removeSubrange(open.lowerBound ..< close.upperBound)
+        } else {
+            out.removeSubrange(open.lowerBound ..< out.endIndex)
+        }
+    }
+    return out.trimmingCharacters(in: .whitespacesAndNewlines)
 }
