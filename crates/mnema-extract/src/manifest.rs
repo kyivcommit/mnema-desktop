@@ -32,7 +32,9 @@ pub use mnema_core::manifest::{
 /// changing anything costs one re-read of every such file.
 pub const TEXT_READER_VERSION: u32 = 1;
 pub const MARKDOWN_READER_VERSION: u32 = 1;
-pub const PDF_READER_VERSION: u32 = 3;
+/// PDF: 4 since D189 — a page without a text layer is read by OCR where an engine
+/// exists (macOS: Apple Vision), so the same bytes can now yield pages they did not.
+pub const PDF_READER_VERSION: u32 = 4;
 pub const HTML_READER_VERSION: u32 = 1;
 pub const EPUB_READER_VERSION: u32 = 1;
 pub const DOCX_READER_VERSION: u32 = 1;

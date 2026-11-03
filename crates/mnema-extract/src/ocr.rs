@@ -23,7 +23,8 @@
 //! packaged worker pays it once per install, and a test binary once per
 //! `target/*/deps/<name>-<hash>` path (`tests/ocr.rs`: 45.9 s on its first run,
 //! 0.4 s after rebuilds — the hash did not move). A caller's per-page deadline
-//! has to cover it (the pool's 120 s does).
+//! has to cover it, two workers starting cold together included (66 s and 86 s,
+//! measured): the pool's 300 s does.
 //!
 //! **Memory.** Resident size grows ~35 MB per recognised page and keeps
 //! growing (2 GB after 60 calls), but `phys_footprint` does not (178 → 183 MB

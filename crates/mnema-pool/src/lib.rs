@@ -552,8 +552,13 @@ pub struct PoolConfig {
     /// minutes. A document is still bounded, by `(Header.pages + 1) × timeout`,
     /// because the pool refuses more `Page` frames than the header promised.
     ///
-    /// **Provisional: 120 s**, which covers the 46 s first OCR'd page after an
-    /// OS install measured for D189. Otherwise unmeasured in both directions,
+    /// **Provisional: 300 s.** Raised from 120 s by D189: the first OCR'd page
+    /// in a freshly installed worker waits for Vision's cold start, measured at
+    /// 46 s alone and **66 s and 86 s for two workers starting together** (M2
+    /// Max; the default pool runs two), and a slower machine waits longer. A
+    /// silent worker is now found after five minutes instead of two — the
+    /// price of not journalling every user's first scanned file as `Timeout`.
+    /// Otherwise unmeasured in both directions,
     /// and both hurt: too short silently skips a legitimately slow page, too
     /// long stalls a job on a file that will never finish. D40 notes it is also
     /// the answer to a Cancel that cannot interrupt the file in flight.
@@ -608,7 +613,7 @@ impl PoolConfig {
             worker: worker.into(),
             workers: 2,
             batch: 100,
-            timeout: Duration::from_secs(120),
+            timeout: Duration::from_secs(300),
             memory_limit: None,
             max_bytes: 64 << 20,
             pdf_max_bytes: 512 << 20,
