@@ -11778,6 +11778,7 @@ fn downloadable_local(
     let store = Store::new(dir.join("models"), server.base().to_string()).with_manifest(Manifest {
         embed: spec("embed"),
         chat: spec("chat"),
+        chat_tools: spec("chat-tools"),
     });
     if chat_ready {
         std::fs::create_dir_all(store.dir(ModelId::Chat)).unwrap();

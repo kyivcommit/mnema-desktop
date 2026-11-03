@@ -1256,6 +1256,7 @@ mod lifecycle {
             Store::new(dir.join("models"), "http://127.0.0.1:1".into()).with_manifest(Manifest {
                 embed: spec("embed"),
                 chat: spec("chat"),
+                chat_tools: spec("chat-tools"),
             });
         for id in [ModelId::Embed, ModelId::Chat] {
             std::fs::create_dir_all(store.dir(id)).unwrap();
