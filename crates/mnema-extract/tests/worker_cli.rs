@@ -724,6 +724,9 @@ fn a_text_file_opens_exactly_one_untitled_page_before_its_blocks() {
                 section_title: None,
                 text_source: None,
                 ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             }
         ),
         "the frame after the header must open page 1: {:?}",
@@ -822,11 +825,11 @@ fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
         panic!("expected a header, got {:?}", frames.first());
     };
     assert_eq!(reader, "pdf");
-    // 3 since the reader started reading within the page's own box instead of
-    // the rectangle `page_size()` gives from (0,0): every PDF read by version 2
-    // was read from the wrong rectangle, so the version is not optional. (2 was
-    // U+FFFD counting as text, D186; 1 is what predates both.)
-    assert_eq!(*reader_version, 3);
+    // 4 since a page with no text layer is read by OCR (D189): every scan
+    // version 3 skipped or refused is owed another look. (3 was reading within
+    // the page's own box instead of the rectangle `page_size()` gives from
+    // (0,0); 2 was U+FFFD counting as text, D186; 1 is what predates them.)
+    assert_eq!(*reader_version, 4);
     assert_eq!(*pages, 1);
     assert_eq!(mime, "application/pdf");
 
