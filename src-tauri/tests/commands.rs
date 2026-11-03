@@ -11378,7 +11378,7 @@ fn mnema_on_e4b_asks_through_the_conversation_with_its_own_hint() {
             let last: Value = text
                 .lines()
                 .filter_map(|l| l.strip_prefix("body /v1/chat/completions "))
-                .last()
+                .next_back()
                 .map(|l| serde_json::from_str(l).unwrap())
                 .unwrap();
             assert_eq!(
