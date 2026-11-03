@@ -432,6 +432,7 @@ impl AppState {
 
     /// Replaces the local provider (tests install a fake process and models).
     pub fn install_local(&self, local: crate::provider::Local) {
+        local.set_chat_model(crate::prefs::mnema_chat_model(&self.data_dir));
         *self
             .local
             .lock()

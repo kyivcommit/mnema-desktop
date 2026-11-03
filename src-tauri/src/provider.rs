@@ -71,6 +71,16 @@ impl Configured {
 pub const LOCAL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The chat model's name on the local wire — never the stored OpenRouter name.
 pub const LOCAL_CHAT_MODEL: &str = "gemma-4-e2b-it";
+/// The local chat model that calls tools (D188), on the same wire.
+pub const LOCAL_CHAT_TOOLS_MODEL: &str = "gemma-4-e4b-it";
+
+/// The wire name of a local chat model; `Embed` has none of its own here.
+pub fn local_chat_name(id: ModelId) -> &'static str {
+    match id {
+        ModelId::ChatTools => LOCAL_CHAT_TOOLS_MODEL,
+        ModelId::Chat | ModelId::Embed => LOCAL_CHAT_MODEL,
+    }
+}
 /// The one embedding model the local process serves, shared with OpenRouter's
 /// `baai/bge-m3` so switching providers keeps one space.
 pub const LOCAL_EMBED_MODEL: &str = "baai/bge-m3";
@@ -132,7 +142,10 @@ pub struct Local {
     /// running process.
     want: AtomicBool,
     loads: Arc<(Mutex<Loads>, Condvar)>,
-    cancel: [AtomicBool; 2],
+    cancel: [AtomicBool; 3],
+    /// The chat model the process serves: `ModelId::Chat` in the role code is
+    /// the chat slot, and this says which model fills it (D188).
+    chat_tools: AtomicBool,
     /// Whether this machine can run the process at all ([`mnema_local::available`]
     /// unless set otherwise). The one answer both the stored choice and the
     /// window's radios read, so a test can stand on any host as either kind.
@@ -161,7 +174,12 @@ impl Local {
             shown: AtomicU64::new(0),
             want: AtomicBool::new(false),
             loads: Arc::default(),
-            cancel: [AtomicBool::new(false), AtomicBool::new(false)],
+            cancel: [
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+            ],
+            chat_tools: AtomicBool::new(false),
             available: mnema_local::available(),
             question_wait: LOCAL_CHAT_TIMEOUT,
             load: Sidecar::load,
@@ -205,8 +223,51 @@ impl Local {
         self
     }
 
+    /// `id` as the role code names it: `Chat` is the chat slot, filled by
+    /// the chosen chat model.
     pub fn ready(&self, id: ModelId) -> bool {
-        self.store.state(id) == ModelState::Ready
+        self.store.state(self.model_of(id)) == ModelState::Ready
+    }
+
+    /// The model behind a slot: `Chat` → the chosen chat model.
+    fn model_of(&self, id: ModelId) -> ModelId {
+        match id {
+            ModelId::Chat => self.chat_model(),
+            other => other,
+        }
+    }
+
+    /// The chat model the process serves: E2B unless E4B was chosen.
+    pub fn chat_model(&self) -> ModelId {
+        if self.chat_tools.load(Ordering::SeqCst) {
+            ModelId::ChatTools
+        } else {
+            ModelId::Chat
+        }
+    }
+
+    /// Chooses the chat model (`Embed` is not one and is ignored). A change
+    /// stops a running process: it was started with the other model's
+    /// directory, and the next use starts one with this model's.
+    pub fn set_chat_model(&self, id: ModelId) {
+        if id == ModelId::Embed {
+            return;
+        }
+        let tools = id == ModelId::ChatTools;
+        if self.chat_tools.swap(tools, Ordering::SeqCst) != tools {
+            self.forget_loaded();
+            self.stop();
+        }
+    }
+
+    /// The role slot a downloaded or removed model stands for: the chosen chat
+    /// model fills the chat slot; the other one fills nothing.
+    pub fn slot_of(&self, id: ModelId) -> Option<ModelId> {
+        match id {
+            ModelId::Embed => Some(ModelId::Embed),
+            chat if chat == self.chat_model() => Some(ModelId::Chat),
+            _ => None,
+        }
     }
 
     /// [`Local::endpoint_within`] with no limit on the wait for a load: what
@@ -351,7 +412,7 @@ impl Local {
             *sidecar = Some(Arc::new(Sidecar::start_with_env(
                 &self.binary,
                 &self.store.dir(ModelId::Embed),
-                &self.store.dir(ModelId::Chat),
+                &self.store.dir(self.chat_model()),
                 &env,
             )?));
         }
@@ -570,6 +631,7 @@ impl Provider {
 pub enum LocalModel {
     Embed,
     Chat,
+    ChatTools,
 }
 
 impl From<LocalModel> for ModelId {
@@ -577,6 +639,7 @@ impl From<LocalModel> for ModelId {
         match m {
             LocalModel::Embed => ModelId::Embed,
             LocalModel::Chat => ModelId::Chat,
+            LocalModel::ChatTools => ModelId::ChatTools,
         }
     }
 }
@@ -648,7 +711,7 @@ pub fn mnema_available(state: tauri::State<'_, crate::state::AppState>) -> bool 
 #[tauri::command(async)]
 pub fn local_models(state: tauri::State<'_, crate::state::AppState>) -> Vec<LocalModelRow> {
     let local = state.local();
-    [LocalModel::Embed, LocalModel::Chat]
+    [LocalModel::Embed, LocalModel::Chat, LocalModel::ChatTools]
         .into_iter()
         .map(|id| LocalModelRow {
             id,
@@ -674,7 +737,10 @@ pub fn download_model<R: tauri::Runtime>(
         let _ = app.emit(PROGRESS_EVENT, Progress { id, done, total });
     };
     local.store.download(id.into(), &progress, flag)?;
-    on_configured(&state, ProviderChoice::Mnema, Some(id.into()));
+    // The chat model not chosen fills no role: its download moves nothing.
+    if let Some(slot) = local.slot_of(id.into()) {
+        on_configured(&state, ProviderChoice::Mnema, Some(slot));
+    }
     Ok(())
 }
 
@@ -707,8 +773,11 @@ pub fn remove(state: &crate::state::AppState, id: LocalModel) -> Result<(), Erro
     let _slot = adoption_slot(state)?;
     // The role first: a removal that then fails leaves a choice to make again,
     // never a role on a model that is gone.
-    on_unconfigured(state, ProviderChoice::Mnema, Some(id.into()))?;
     let local = state.local();
+    // The chat model not chosen holds no role: removing it empties none.
+    if let Some(slot) = local.slot_of(id.into()) {
+        on_unconfigured(state, ProviderChoice::Mnema, Some(slot))?;
+    }
     local.stop();
     local.store.remove(id.into())?;
     Ok(())
@@ -2043,5 +2112,123 @@ mod lifecycle {
         on_cold(&state);
         let text = logged(&log);
         assert!(text.lines().any(|l| l == "body /mnema/unload "), "{text}");
+    }
+
+    /// The spawns the fake logged, in order (`spawn <pid> <args>`), once at
+    /// least `n` are there (or `wait` passed): the fake logs after printing
+    /// its port, so the line can trail the start the test just made.
+    fn spawns(log: &Path, n: usize, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let s: Vec<String> = std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("spawn "))
+                .map(str::to_string)
+                .collect();
+            if s.len() >= n || Instant::now() > deadline {
+                return s;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn make_ready(local: &Local, id: ModelId) {
+        std::fs::create_dir_all(local.store.dir(id)).unwrap();
+        std::fs::write(local.store.dir(id).join("weights"), b"x").unwrap();
+    }
+
+    /// D188: the chat slot is served by the chosen model, so its directory is
+    /// the one the process gets, and a change of model starts a new process.
+    #[test]
+    fn the_process_gets_the_chosen_chat_models_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, log) = local_at(dir.path(), &[]);
+        make_ready(&local, ModelId::ChatTools);
+        local.endpoint().unwrap();
+        local.set_chat_model(ModelId::ChatTools);
+        local.endpoint().unwrap();
+        let s = spawns(&log, 2, Duration::from_secs(5));
+        assert_eq!(s.len(), 2, "a change of model starts a new process: {s:?}");
+        let chat = |id| format!("--chat {}", local.store.dir(id).display());
+        assert!(s[0].ends_with(&chat(ModelId::Chat)), "{}", s[0]);
+        assert!(s[1].ends_with(&chat(ModelId::ChatTools)), "{}", s[1]);
+    }
+
+    #[test]
+    fn choosing_the_chat_model_already_served_keeps_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, log) = local_at(dir.path(), &[]);
+        local.endpoint().unwrap();
+        local.set_chat_model(ModelId::Chat);
+        local.set_chat_model(ModelId::Embed);
+        local.endpoint().unwrap();
+        // A second spawn would follow the first at once; wait for two and see one.
+        let s = spawns(&log, 2, Duration::from_secs(1));
+        assert_eq!(s.len(), 1, "{s:?}");
+    }
+
+    #[test]
+    fn the_chat_slot_is_ready_when_the_chosen_model_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, _log) = local_at(dir.path(), &[]);
+        assert!(local.ready(ModelId::Chat), "E2B chosen and downloaded");
+        local.set_chat_model(ModelId::ChatTools);
+        assert!(!local.ready(ModelId::Chat), "E4B chosen, not downloaded");
+        make_ready(&local, ModelId::ChatTools);
+        assert!(local.ready(ModelId::Chat), "E4B chosen and downloaded");
+        local.store.remove(ModelId::Chat).unwrap();
+        assert!(
+            local.ready(ModelId::Chat),
+            "E2B gone does not matter to E4B"
+        );
+        local.set_chat_model(ModelId::Chat);
+        assert!(!local.ready(ModelId::Chat), "E2B chosen again, and gone");
+    }
+
+    #[test]
+    fn only_the_chosen_chat_model_stands_for_the_chat_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, _log) = local_at(dir.path(), &[]);
+        assert_eq!(local.slot_of(ModelId::Embed), Some(ModelId::Embed));
+        assert_eq!(local.slot_of(ModelId::Chat), Some(ModelId::Chat));
+        assert_eq!(local.slot_of(ModelId::ChatTools), None);
+        local.set_chat_model(ModelId::ChatTools);
+        assert_eq!(local.slot_of(ModelId::ChatTools), Some(ModelId::Chat));
+        assert_eq!(local.slot_of(ModelId::Chat), None);
+    }
+
+    #[test]
+    fn the_stored_choice_reaches_the_installed_process_manager() {
+        for (stored, want) in [
+            (Some(ModelId::ChatTools), ModelId::ChatTools),
+            (None, ModelId::Chat),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(id) = stored {
+                crate::prefs::write_mnema_chat_model(dir.path(), id).unwrap();
+            }
+            let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+            assert_eq!(state.local().chat_model(), want, "stored {stored:?}");
+        }
+    }
+
+    /// Removing the chat model nobody chose must not empty the chat role; the
+    /// chosen one still does (the positive control).
+    #[test]
+    fn removing_the_chat_model_not_chosen_leaves_the_chat_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _log) = app(dir.path(), ProviderChoice::Mnema, &[]);
+        crate::prefs::write_role(dir.path(), Role::Chat, Some(ProviderChoice::Mnema)).unwrap();
+        make_ready(&state.local(), ModelId::ChatTools);
+        remove(&state, LocalModel::ChatTools).unwrap();
+        assert_eq!(state.roles().chat, Some(ProviderChoice::Mnema), "E4B not chosen");
+        // E4B chosen: removing it empties the role, as removing E2B did before D188.
+        state.local().set_chat_model(ModelId::ChatTools);
+        make_ready(&state.local(), ModelId::ChatTools);
+        remove(&state, LocalModel::Chat).unwrap();
+        assert_eq!(state.roles().chat, Some(ProviderChoice::Mnema), "E2B not chosen");
+        remove(&state, LocalModel::ChatTools).unwrap();
+        assert_eq!(state.roles().chat, None, "the chosen model removed");
     }
 }
