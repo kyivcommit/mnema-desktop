@@ -2222,12 +2222,20 @@ mod lifecycle {
         crate::prefs::write_role(dir.path(), Role::Chat, Some(ProviderChoice::Mnema)).unwrap();
         make_ready(&state.local(), ModelId::ChatTools);
         remove(&state, LocalModel::ChatTools).unwrap();
-        assert_eq!(state.roles().chat, Some(ProviderChoice::Mnema), "E4B not chosen");
+        assert_eq!(
+            state.roles().chat,
+            Some(ProviderChoice::Mnema),
+            "E4B not chosen"
+        );
         // E4B chosen: removing it empties the role, as removing E2B did before D188.
         state.local().set_chat_model(ModelId::ChatTools);
         make_ready(&state.local(), ModelId::ChatTools);
         remove(&state, LocalModel::Chat).unwrap();
-        assert_eq!(state.roles().chat, Some(ProviderChoice::Mnema), "E2B not chosen");
+        assert_eq!(
+            state.roles().chat,
+            Some(ProviderChoice::Mnema),
+            "E2B not chosen"
+        );
         remove(&state, LocalModel::ChatTools).unwrap();
         assert_eq!(state.roles().chat, None, "the chosen model removed");
     }

@@ -11807,6 +11807,31 @@ fn a_finished_download_fills_its_models_empty_role() {
     assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
 }
 
+/// D188: only the chosen chat model's download fills the chat role; E4B
+/// downloaded while E2B is chosen moves nothing (both directions).
+#[test]
+fn only_the_chosen_chat_models_download_fills_the_chat_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    for (chosen, want) in [
+        (mnema_local::ModelId::Chat, None),
+        (mnema_local::ModelId::ChatTools, Some(Mnema)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![Reply::ok("x")]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        state.install_local(downloadable_local(dir.path(), &server, false));
+        state.local().set_chat_model(chosen);
+        write_roles(&state, None, None);
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+        let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+        assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+        assert_eq!(state.roles().chat, want, "chosen {chosen:?}");
+    }
+}
+
 /// With the tools switch on (the default) Gemma is no valid default: an empty
 /// chat role stays empty after its download, and nothing moves to the cloud.
 #[test]
