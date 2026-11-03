@@ -990,6 +990,9 @@ export const setUiScale = (choice: UiScale) => invoke<void>('set_ui_scale', { ch
 // from Mnema to OpenRouter, nothing was written, and `cloud` confirms the move.
 export type ToolsSwitch = { kind: 'stored'; on: boolean } | { kind: 'asksCloud' };
 export const chatTools = () => invoke<boolean>('chat_tools_enabled');
+// Whether a question joins a conversation (`bridge.rs` `conversations_on`): the
+// backend's own rule, so the launcher never keeps a second copy of it.
+export const conversationsOn = () => invoke<boolean>('conversations_on');
 // Starts a new conversation: the backend forgets the session (`new_chat`).
 export const newChat = () => invoke<void>('new_chat');
 export const setChatTools = (on: boolean, cloud = false) =>

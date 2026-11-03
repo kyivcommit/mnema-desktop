@@ -11397,6 +11397,26 @@ fn mnema_on_e4b_asks_through_the_conversation_with_its_own_hint() {
     }
 }
 
+/// D188: the window asks `conversations_on` instead of keeping its own copy of
+/// the rule — on Mnema it is on for E4B with tools on, off for E2B, off with
+/// the switch off.
+#[test]
+fn conversations_on_is_the_backends_rule_for_mnema() {
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    let state = fx.app.state::<AppState>();
+    let on = || call(&fx.webview, "conversations_on", json!({})).expect("registered");
+    assert_eq!(on(), json!(false), "E2B takes no tools");
+    let local = state.local();
+    std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+    std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+    local.set_chat_model(ModelId::ChatTools);
+    assert_eq!(on(), json!(true), "E4B with tools on");
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+    assert_eq!(on(), json!(false), "the switch off");
+}
+
 /// A local answer slower than OpenRouter's 15 s still arrives: the chat call
 /// under Mnema waits `LOCAL_CHAT_TIMEOUT`. Pays 20 s.
 #[test]

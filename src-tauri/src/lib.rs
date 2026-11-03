@@ -111,6 +111,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         prefs::set_autostart,
         prefs::set_cold_after,
         prefs::chat_tools_enabled,
+        bridge::conversations_on,
         prefs::set_chat_tools,
         prefs::agent_access_enabled,
         prefs::set_agent_access,

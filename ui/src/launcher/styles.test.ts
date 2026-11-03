@@ -56,7 +56,7 @@ beforeEach(() => {
       // news (owner, 2026-10-20), and the pin below needs one on screen.
       freshness: { kind: 'fileChanged' },
     });
-    if (cmd === 'chat_tools_enabled') return Promise.resolve(false);
+    if (cmd === 'conversations_on') return Promise.resolve(false);
     if (cmd === 'job_status') return Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
     throw new Error(`unexpected command ${cmd}`);
   });

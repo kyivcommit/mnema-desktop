@@ -1915,6 +1915,15 @@ fn dialogue_enabled(
     calls_tools && crate::prefs::chat_tools(state.data_dir())
 }
 
+/// [`dialogue_enabled`] for the window: the launcher draws a conversation
+/// exactly when this keeps one, so the screen never shows a fresh chat over a
+/// session that still remembers the earlier turns (D188: Mnema on E4B keeps
+/// one, and the window's own copy of the rule said it did not).
+#[tauri::command]
+pub fn conversations_on(state: State<'_, AppState>) -> bool {
+    dialogue_enabled(&state, state.roles().chat)
+}
+
 fn question_lang(query: &str) -> mnema_rag::Lang {
     mnema_rag::detect(query, None, sys_locale::get_locale().as_deref())
 }
