@@ -18,7 +18,15 @@ use sha2::{Digest, Sha256};
 /// exited cleanly: none of the scenarios this file exercises should ever
 /// crash the worker, only report a frame.
 fn run_worker(lines: &[&str]) -> String {
+    run_worker_with_env(lines, &[])
+}
+
+/// [`run_worker`] with extra environment for the child — the OCR seam is an
+/// environment variable read per process, so it is set here and never in
+/// this test binary.
+fn run_worker_with_env(lines: &[&str], env: &[(&str, &str)]) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -479,7 +487,23 @@ fn every_refusal_that_read_the_file_carries_the_digest_it_read() {
     ] {
         let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
         let out = run_worker(&[&request.to_string()]);
-        match frames_of(&out).as_slice() {
+        let frames = frames_of(&out);
+        // A PDF streams its pages (D189), so the page that will not load ends
+        // a stream page 1 already went out on: header and page frames, then
+        // the refusal, never a summary. Every other row is the refusal alone.
+        let (ending, streamed) = frames.split_last().expect("the worker answers");
+        if path.ends_with("unloadable-middle-page.pdf") {
+            assert!(
+                matches!(streamed.first(), Some(Frame::Header { .. }))
+                    && streamed[1..]
+                        .iter()
+                        .all(|f| matches!(f, Frame::Page { .. } | Frame::Block(_))),
+                "{frames:?}"
+            );
+        } else {
+            assert!(streamed.is_empty(), "{path}: {frames:?}");
+        }
+        match std::slice::from_ref(ending) {
             [
                 Frame::Refused {
                     rule,
@@ -2016,5 +2040,299 @@ fn an_xlsm_is_read_by_the_spreadsheet_reader() {
             .iter()
             .any(|f| matches!(f, Frame::Block(b) if b.text == "у макросі")),
         "{frames:?}"
+    );
+}
+
+// --- OCR of pages without a text layer (D189) --------------------------------
+
+fn pdf_request(name: &str) -> String {
+    serde_json::json!({
+        "path": format!("tests/fixtures/{name}"),
+        "max_bytes": 1_048_576,
+    })
+    .to_string()
+}
+
+/// Every `Page` frame as `(page_no, text_source, ocr_confidence)`.
+fn page_frames(frames: &[Frame]) -> Vec<(u32, Option<String>, Option<f32>)> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Page {
+                page_no,
+                text_source,
+                ocr_confidence,
+                ..
+            } => Some((*page_no, text_source.clone(), *ocr_confidence)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn block_texts(frames: &[Frame]) -> Vec<&str> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Block(b) => Some(b.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A scanned page is read by Vision, and its frame says so: `ocr:vision` and
+/// a confidence, where a native page's frame carries neither. Without an
+/// engine (not macOS) the same file is what it was before OCR: a scan with no
+/// text layer.
+#[test]
+fn a_scanned_page_is_recognised_and_its_frame_names_the_engine() {
+    let frames = frames_of(&run_worker(&[&pdf_request("scan-uk.pdf")]));
+
+    if !cfg!(target_os = "macos") {
+        assert!(
+            matches!(frames.as_slice(), [Frame::Refused { rule, .. }] if rule == "no_text_layer"),
+            "{frames:?}"
+        );
+        return;
+    }
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { pages: 1, .. })),
+        "{frames:?}"
+    );
+    let pages = page_frames(&frames);
+    assert_eq!(pages.len(), 1, "{frames:?}");
+    assert_eq!(pages[0].0, 1);
+    assert_eq!(pages[0].1.as_deref(), Some("ocr:vision"));
+    assert!(pages[0].2.is_some_and(|c| c > 0.0), "{pages:?}");
+
+    let text = block_texts(&frames).concat();
+    // Only words measured to survive Vision verbatim (Task 2's report).
+    for word in ["їжак", "єнот", "мʼясо", "памʼятна", "collegium"] {
+        assert!(text.contains(word), "{word:?} missing from {text:?}");
+    }
+    let Some(Frame::Summary { skipped_pages, .. }) = frames.last() else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert!(skipped_pages.is_empty(), "{skipped_pages:?}");
+}
+
+/// Two columns come back as two columns: every line of the left one before
+/// every line of the right one. Asserted on all sixteen prefixes, not on the
+/// first of each — a reading that interleaved the columns from the second line
+/// on would pass a check of the first. The prefixes rather than the numbers:
+/// Vision reads the `3` after them as `З` (Task 2).
+#[cfg(target_os = "macos")]
+#[test]
+fn two_columns_are_read_left_column_first() {
+    let frames = frames_of(&run_worker(&[&pdf_request("scan-two-columns.pdf")]));
+    let text = block_texts(&frames).concat();
+    let lines: Vec<&str> = text.lines().collect();
+    let left: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].starts_with("ЛІВА"))
+        .collect();
+    let right: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].starts_with("ПРАВА"))
+        .collect();
+
+    assert_eq!((left.len(), right.len()), (8, 8), "{lines:#?}");
+    assert!(
+        left.iter().max() < right.iter().min(),
+        "a right-column line among the left ones: {lines:#?}"
+    );
+}
+
+/// One document, both branches: the native page's frame is the bytes it was
+/// before OCR (no `text_source`, no confidence — the Summary's `native:pdf`
+/// stands for it) and the scanned page's names the engine.
+#[test]
+fn a_mixed_pdf_marks_only_its_recognised_page() {
+    let frames = frames_of(&run_worker(&[&pdf_request("mixed-native-scan.pdf")]));
+    let pages = page_frames(&frames);
+
+    assert_eq!(pages[0], (1, None, None), "{pages:?}");
+    let Some(Frame::Summary {
+        skipped_pages,
+        text_source,
+    }) = frames.last()
+    else {
+        panic!("expected a summary, got {:?}", frames.last());
+    };
+    assert_eq!(text_source, "native:pdf");
+    if cfg!(target_os = "macos") {
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(pages[1].0, 2);
+        assert_eq!(pages[1].1.as_deref(), Some("ocr:vision"));
+        assert!(pages[1].2.is_some(), "{pages:?}");
+        assert!(skipped_pages.is_empty(), "{skipped_pages:?}");
+    } else {
+        assert_eq!(pages.len(), 1, "{pages:?}");
+        assert_eq!(skipped_pages, &vec![2]);
+    }
+}
+
+/// An engine that does not run is not a fact about the file (D57): a scan is
+/// `Failed`, never `Refused` — `no_text_layer` would be journalled as content
+/// and outlive the engine's repair. On every platform, because the seam is
+/// read before the platform's engine.
+///
+/// Both directions: a PDF whose every page has a text layer never asks for
+/// OCR, so the same seam leaves it read normally.
+#[test]
+fn an_unavailable_engine_fails_a_scan_and_leaves_a_native_pdf_alone() {
+    let seam = [(mnema_extract::OCR_UNAVAILABLE_ENV, "1")];
+
+    let scan = frames_of(&run_worker_with_env(&[&pdf_request("scan-uk.pdf")], &seam));
+    assert!(
+        matches!(scan.as_slice(), [Frame::Failed { message }] if message.contains("unavailable")),
+        "{scan:?}"
+    );
+
+    let native = frames_of(&run_worker_with_env(
+        &[&pdf_request("one-page-text.pdf")],
+        &seam,
+    ));
+    assert!(
+        matches!(native.first(), Some(Frame::Header { .. })),
+        "{native:?}"
+    );
+    assert!(
+        matches!(native.last(), Some(Frame::Summary { .. })),
+        "{native:?}"
+    );
+}
+
+/// The failure that arrives mid-document: page 1 is native and is already on
+/// the wire when page 2 cannot be recognised. The stream ends in `Failed` —
+/// not a `Summary`, so no document can be built from it, and not `Refused`.
+/// The pool's half (it discards the pages) is
+/// `a_document_that_ends_in_failure_after_its_pages_began_is_skipped_whole`.
+#[test]
+fn an_engine_failure_after_a_page_was_written_ends_the_stream_in_failure() {
+    let seam = [(mnema_extract::OCR_UNAVAILABLE_ENV, "1")];
+    let frames = frames_of(&run_worker_with_env(
+        &[&pdf_request("mixed-native-scan.pdf")],
+        &seam,
+    ));
+
+    assert!(
+        matches!(frames.first(), Some(Frame::Header { pages: 2, .. })),
+        "{frames:?}"
+    );
+    assert_eq!(page_frames(&frames), vec![(1, None, None)]);
+    assert!(
+        matches!(frames.last(), Some(Frame::Failed { .. })),
+        "{frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f, Frame::Summary { .. } | Frame::Refused { .. })),
+        "{frames:?}"
+    );
+}
+
+/// Pages are written as they are read, not after the document: the pool's
+/// deadline is renewed per `Page` (D189) and would see nothing for minutes on
+/// an OCR'd volume otherwise. Page 1 of the mixed fixture is native and
+/// immediate; page 2 is recognised, hundreds of milliseconds at 300 dpi. A
+/// worker that collected the frames first writes all of them within
+/// microseconds of each other.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_page_reaches_stdout_before_the_next_one_is_recognised() {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the worker binary starts");
+    writeln!(
+        child.stdin.as_mut().unwrap(),
+        "{}",
+        pdf_request("mixed-native-scan.pdf")
+    )
+    .unwrap();
+    drop(child.stdin.take());
+
+    let mut arrivals = Vec::new();
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        arrivals.push((
+            Instant::now(),
+            serde_json::from_str::<Frame>(&line).unwrap(),
+        ));
+    }
+    child.wait().unwrap();
+
+    let first_page = arrivals
+        .iter()
+        .find(|(_, f)| matches!(f, Frame::Page { page_no: 1, .. }))
+        .expect("page 1 arrives")
+        .0;
+    let summary = arrivals
+        .iter()
+        .find(|(_, f)| matches!(f, Frame::Summary { .. }))
+        .expect("the summary arrives")
+        .0;
+    assert!(
+        summary - first_page >= Duration::from_millis(50),
+        "page 1 arrived only {:?} before the summary: it waited for page 2's recognition",
+        summary - first_page
+    );
+}
+
+/// `Header.pages` is every page the document declares — the ones that arrive
+/// plus the ones `Summary.skipped_pages` names — for every PDF fixture that is
+/// read, scans included (D189: the header is written before the first page).
+#[test]
+fn every_pdf_header_counts_the_pages_that_arrive_and_the_ones_skipped() {
+    let names = [
+        "one-page-text.pdf",
+        "text-stamp-text.pdf",
+        "text-then-stamp.pdf",
+        "replacement-chars.pdf",
+        "offset-cropbox.pdf",
+        "broken-utf16.pdf",
+        "page-boxes.pdf",
+        "mixed-native-scan.pdf",
+        "scan-uk.pdf",
+        "scan-two-columns.pdf",
+    ];
+    let requests: Vec<String> = names.iter().map(|n| pdf_request(n)).collect();
+    let requests: Vec<&str> = requests.iter().map(String::as_str).collect();
+    let frames = frames_of(&run_worker(&requests));
+
+    let mut documents = 0;
+    let mut promised = None;
+    let mut arrived = 0;
+    for frame in &frames {
+        match frame {
+            Frame::Header { pages, .. } => {
+                promised = Some(*pages);
+                arrived = 0;
+            }
+            Frame::Page { .. } => arrived += 1,
+            Frame::Summary { skipped_pages, .. } => {
+                documents += 1;
+                assert_eq!(
+                    promised.take(),
+                    Some(arrived + skipped_pages.len() as u32),
+                    "document {documents}: {frames:?}"
+                );
+            }
+            _ => {}
+        }
+    }
+    let read = if cfg!(target_os = "macos") {
+        names.len()
+    } else {
+        // The two scans have no page that a missing engine can read.
+        names.len() - 2
+    };
+    assert_eq!(
+        documents, read,
+        "every fixture but a scan without an engine is read"
     );
 }

@@ -15,7 +15,10 @@
 use std::path::{Path, PathBuf};
 
 use mnema_core::BlockType;
-use mnema_extract::{PdfError, TEXT_LAYER_MIN_CHARS, extract_pdf, probe_text_layer};
+use mnema_extract::{
+    PdfDocument, PdfError, TEXT_LAYER_MIN_CHARS, TEXT_SOURCE_NATIVE, TEXT_SOURCE_OCR, extract_pdf,
+    probe_text_layer,
+};
 
 /// The text pdfium reads back from page 1 of every body fixture, exactly.
 ///
@@ -36,6 +39,39 @@ const PAGE_THREE_TEXT: &str = "Schedule B lists forty pallets of dried barley, c
 /// Above zero and far below the threshold, which is the entire point of the
 /// fixture.
 const STAMP_PAGE_CHARS: usize = 8;
+
+/// The pages read from their own text layer, by number.
+fn native_pages(doc: &PdfDocument) -> Vec<u32> {
+    doc.pages
+        .iter()
+        .filter(|p| p.text_source == TEXT_SOURCE_NATIVE)
+        .map(|p| p.page_no)
+        .collect()
+}
+
+/// Where a page with no usable text layer goes since D189: read from its
+/// rendering where there is an engine (macOS), named as skipped where there is
+/// none — today's behaviour, unchanged. Returns the recognised text, if any.
+fn recognised_or_skipped(doc: &PdfDocument, page_no: u32) -> Option<String> {
+    let read = doc.pages.iter().find(|p| p.page_no == page_no);
+    if cfg!(target_os = "macos") {
+        let read = read.unwrap_or_else(|| panic!("page {page_no} was not recognised: {doc:?}"));
+        assert_eq!(read.text_source, TEXT_SOURCE_OCR, "page {page_no}");
+        assert!(read.ocr.is_some(), "page {page_no}");
+        assert!(
+            !doc.skipped.contains(&page_no),
+            "page {page_no} in both lists"
+        );
+        Some(read.blocks[0].text.clone())
+    } else {
+        assert!(
+            read.is_none(),
+            "no engine, yet page {page_no} was read: {read:?}"
+        );
+        assert!(doc.skipped.contains(&page_no), "page {page_no} is named");
+        None
+    }
+}
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -162,26 +198,35 @@ const BROKEN_PAGE_TEXT: &str = "A damaged mapping in the middle of this line\r\n
 /// its raw CropBox: the part of a page a viewer clips.
 const OUTSIDE_MEDIA_SLUG: &str = "INVENTED COVER SPREAD";
 
-/// A page whose every glyph came back as U+FFFD is a page without text, the
-/// same as a scan, however many of them it holds.
+/// A page whose every glyph came back as U+FFFD has no text *layer*, the same
+/// as a scan, however many of them it holds — so it is not read from it.
 ///
 /// Measured on a real library: a book whose prose font has a wrong
 /// `/ToUnicode` gave pages of two thousand U+FFFD each, every one of them over
 /// the threshold, and those pages won searches they had no words for.
+///
+/// Since D189 such a page goes where a scan goes: its glyphs are drawn
+/// correctly, so where there is an engine Vision reads the words the page
+/// shows; elsewhere it is skipped as before.
 #[test]
-fn a_page_drawn_only_in_replacement_characters_is_skipped_like_a_scan() {
+fn a_page_drawn_only_in_replacement_characters_is_not_read_from_its_text_layer() {
     let doc =
         extract_pdf(include_bytes!("fixtures/replacement-chars.pdf")).expect("the fixture parses");
 
-    assert_eq!(doc.skipped, vec![2], "only the page of U+FFFD is skipped");
     assert_eq!(
-        doc.pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
-        vec![1, 3]
+        native_pages(&doc),
+        vec![1, 3],
+        "only the page of U+FFFD is not native"
     );
     assert_eq!(
-        doc.pages[1].blocks[0].text, ANNEX_PAGE_TEXT,
+        doc.pages.last().unwrap().blocks[0].text,
+        ANNEX_PAGE_TEXT,
         "the page numbered 3 must carry page 3's own words"
     );
+    if let Some(text) = recognised_or_skipped(&doc, 2) {
+        assert!(text.contains("broken map"), "{text:?}");
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+    }
 }
 
 /// A run of U+FFFD between words is one space: the words on either side stay
@@ -397,22 +442,24 @@ fn the_probe_reads_the_pages_the_reader_reads() {
 /// decodes the bounded text of the whole page with that one bad unit in it and
 /// fails, so `all()` answers `""` — measured on the worker before the fix:
 /// `pages: 1, skipped_pages: [2, 3]`, and the page the person can read is
-/// journalled as a scan. Page 3 is nothing but the broken code and stays
-/// skipped, which is what keeps the fallback from turning garbage into text.
+/// journalled as a scan. Page 3 is nothing but the broken code and is not
+/// admitted from its text layer, which is what keeps the fallback from turning
+/// garbage into text.
+///
+/// Since D189 page 3 is no longer simply skipped: it *draws* its sixty broken
+/// codes as glyphs, and where there is an engine Vision reads what is drawn.
+/// What this test still holds is the native half — the fallback does not admit
+/// page 3 from its text layer.
 #[test]
 fn a_glyph_that_is_not_a_character_loses_its_word_and_not_its_page() {
     let doc = extract_pdf(include_bytes!("fixtures/broken-utf16.pdf")).expect("the fixture parses");
 
     assert_eq!(
-        doc.pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+        native_pages(&doc),
         vec![1, 2],
         "page 1 has no broken glyph and page 2 is readable apart from one word"
     );
-    assert_eq!(
-        doc.skipped,
-        vec![3],
-        "a page of nothing but the broken code is a page without text"
-    );
+    recognised_or_skipped(&doc, 3);
 }
 
 /// …and the word it loses leaves exactly one space, with its neighbours whole.
@@ -495,9 +542,12 @@ fn the_fixtures_written_before_this_change_read_the_same_text() {
         let bytes = std::fs::read(fixture(name)).expect("the fixture is on disk");
         let doc = extract_pdf(&bytes).expect("the fixture parses");
 
+        // The native pages: a page OCR now reads (`replacement-chars.pdf`
+        // page 2, on macOS) is new text, not moved text.
         assert_eq!(
             doc.pages
                 .iter()
+                .filter(|p| p.text_source == TEXT_SOURCE_NATIVE)
                 .map(|p| p.blocks[0].text.as_str())
                 .collect::<Vec<_>>(),
             expected,
@@ -507,6 +557,11 @@ fn the_fixtures_written_before_this_change_read_the_same_text() {
 }
 
 /// A scan of a paper document: every page exists, none has text.
+///
+/// Since D189 this goes through recognition where there is an engine, and
+/// means "Vision found nothing worth a page": each page is a stamp of
+/// `Page N of 3`, which Vision reads as 8 characters against the threshold of
+/// 48 (fixtures' report) — the same rule that skips a native stamp page.
 ///
 /// Both halves, because either alone is satisfied by a mistake. A reader that
 /// returned nothing at all would pass the first assertion; one that skipped

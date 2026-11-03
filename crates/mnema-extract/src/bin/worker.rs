@@ -19,8 +19,9 @@ use mnema_extract::manifest;
 use mnema_extract::typing::{PDF_MAGIC, Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, XlsxError, extract_docx, extract_epub,
-    extract_html, extract_markdown, extract_pdf, extract_text, extract_xlsx,
+    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, TEXT_SOURCE_NATIVE, XlsxError,
+    extract_docx, extract_epub, extract_html, extract_markdown, extract_pdf_pages, extract_text,
+    extract_xlsx,
 };
 use sha2::{Digest, Sha256};
 
@@ -103,7 +104,8 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        for frame in handle_request(&line) {
+        let rest = handle_request(&line, &mut |frame| write_frame(&mut stdout, &frame));
+        for frame in rest {
             write_frame(&mut stdout, &frame);
         }
     }
@@ -139,7 +141,16 @@ fn too_large(path: &str, size: u64, ceiling: u64, non_pdf: bool) -> Frame {
 /// Page, Block..., Summary]` for a file this crate can read — one `Page` per
 /// page, each followed by its own blocks — or exactly one `Refused`/`Failed`
 /// frame for a file it declines or cannot read.
-fn handle_request(line: &str) -> Vec<Frame> {
+///
+/// **A PDF streams.** Its `Header`, `Page` and `Block` frames go to `emit` as
+/// each page is read — an OCR'd volume is minutes of work, and the pool's
+/// deadline is renewed per `Page` (D189) — and only what ends the document is
+/// returned. That ending may therefore follow a header: a page 40 that will
+/// not load (`Refused`) or will not recognise (`Failed`) after 39 pages went
+/// out. The pool discards the pages it has collected in that case; nothing
+/// is indexed from a partial stream. Every other reader returns all of its
+/// frames and emits none.
+fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(e) => {
@@ -392,95 +403,128 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 Some(sha256),
             )]
         }
-        Reader::Pdf => match extract_pdf(&bytes) {
-            // Every page was below the text-layer threshold, so there is no
-            // document to build — but the file *was* read, and this says so
-            // under a rule about content rather than under `unsupported`,
-            // which promises a reader that is coming. `SkipRule::NoTextLayer`
-            // is what the parent records.
-            Ok(doc) if doc.pages.is_empty() => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "no_text_layer",
-                format!(
-                    "no page of this PDF carries a text layer of at least \
-                     {TEXT_LAYER_MIN_CHARS} characters"
-                ),
-                Some(sha256),
-            )],
-            Ok(doc) => {
-                let blocks: usize = doc.pages.iter().map(|p| p.blocks.len()).sum();
-                let mut frames = Vec::with_capacity(blocks + doc.pages.len() + 2);
-                frames.push(Frame::Header {
+        Reader::Pdf => {
+            let mut header = Some(Frame::Header {
+                sha256: sha256.clone(),
+                mime: file_type.mime.to_string(),
+                source_kind: file_type.source_kind,
+                // The constant, not the literal `"pdf"`. `pages_of` on the
+                // other side of the wire picks a PDF chunk's coordinate by
+                // this exact string and may not link this crate (D40), so
+                // a typo here would cost every PDF citation its page
+                // number and nothing would go red.
+                reader: manifest::READER_PDF.to_string(),
+                reader_version: manifest::PDF_READER_VERSION,
+                // Filled in from the document below.
+                pages: 0,
+            });
+            let read = extract_pdf_pages(&bytes, |declared, page| {
+                // Written before the first page and not before: a document
+                // none of whose pages has text answers `no_text_layer`
+                // *instead of* a header, and that is only known at the end.
+                if let Some(Frame::Header {
                     sha256,
-                    mime: file_type.mime.to_string(),
-                    source_kind: file_type.source_kind,
-                    // The constant, not the literal `"pdf"`. `pages_of` on the
-                    // other side of the wire picks a PDF chunk's coordinate by
-                    // this exact string and may not link this crate (D40), so
-                    // a typo here would cost every PDF citation its page
-                    // number and nothing would go red.
-                    reader: manifest::READER_PDF.to_string(),
-                    reader_version: manifest::PDF_READER_VERSION,
-                    // Every page the document declares: the ones that arrive
-                    // as Page frames plus the ones named by `skipped_pages`.
-                    // The pool checks exactly that sum, and bounds the Page
-                    // frames by it as they arrive.
-                    pages: (doc.pages.len() + doc.skipped.len()) as u32,
-                });
-                for page in doc.pages {
-                    frames.push(Frame::Page {
-                        page_no: page.page_no,
-                        // A PDF page is not a section. `pages_of` gives this
-                        // reader `Coordinate::Page`, which is what a citation
-                        // into a PDF points at.
-                        section_title: None,
-                        text_source: None,
-                        ocr_confidence: None,
+                    mime,
+                    source_kind,
+                    reader,
+                    reader_version,
+                    ..
+                }) = header.take()
+                {
+                    emit(Frame::Header {
+                        sha256,
+                        mime,
+                        source_kind,
+                        reader,
+                        reader_version,
+                        // Every page the document declares: the ones that
+                        // arrive as Page frames plus the ones named by
+                        // `skipped_pages`. The pool checks exactly that sum,
+                        // and bounds the Page frames by it as they arrive.
+                        pages: declared,
                     });
-                    frames.extend(page.blocks.into_iter().map(Frame::Block));
                 }
-                frames.push(Frame::Summary {
+                emit(Frame::Page {
+                    page_no: page.page_no,
+                    // A PDF page is not a section. `pages_of` gives this
+                    // reader `Coordinate::Page`, which is what a citation
+                    // into a PDF points at.
+                    section_title: None,
+                    // `None` for a native page: the Summary's `native:pdf`
+                    // stands for it, and a native page's frame stays the
+                    // bytes it was before OCR existed.
+                    text_source: page.ocr.map(|_| page.text_source.to_string()),
+                    ocr_confidence: page.ocr.map(|o| o.confidence),
+                });
+                for block in page.blocks {
+                    emit(Frame::Block(block));
+                }
+            });
+            match read {
+                // Every page was below the text-layer threshold, so there is no
+                // document to build — but the file *was* read, and this says so
+                // under a rule about content rather than under `unsupported`,
+                // which promises a reader that is coming. `SkipRule::NoTextLayer`
+                // is what the parent records. Since D189 "below the threshold"
+                // includes what OCR read, where there is an engine.
+                Ok(_) if header.is_some() => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "no_text_layer",
+                    format!(
+                        "no page of this PDF carries a text layer of at least \
+                         {TEXT_LAYER_MIN_CHARS} characters"
+                    ),
+                    Some(sha256),
+                )],
+                Ok(skipped) => vec![Frame::Summary {
                     // The numbers, not their count. This reader is the only
                     // thing in the product that ever knows *which* page of a
                     // contract the scanner missed, and the parent owes a
                     // journal row per page — which a count cannot fill in.
-                    skipped_pages: doc.skipped,
-                    text_source: "native:pdf".to_string(),
-                });
-                frames
+                    skipped_pages: skipped,
+                    text_source: TEXT_SOURCE_NATIVE.to_string(),
+                }],
+                Err(PdfError::Encrypted) => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "encrypted",
+                    "this PDF is password-protected".to_string(),
+                    Some(sha256),
+                )],
+                // A reader that could not load its own library is NOT a damaged
+                // file, and this arm must not swallow it. Under `malformed` the
+                // walk would not stop (`suggests_broken_environment() == false`)
+                // and the verdict would outlive the repair
+                // (`is_about_content() == true`): every PDF in a folder journalled
+                // as damaged by a green walk, and a fixed install returning
+                // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
+                // that outcome, and a quarantined `libpdfium.dylib` has already
+                // happened on this machine.
+                Err(PdfError::Library(e)) => vec![Frame::Failed {
+                    message: format!("pdfium could not be loaded: {e}"),
+                }],
+                // Bound to the one remaining variant rather than written as a
+                // catch-all `Err(e)`. A catch-all is how a later variant — a
+                // timeout, a page limit — would arrive silently as "this file is
+                // damaged", which is the mistake the arm above exists to undo.
+                Err(e @ PdfError::Malformed(_)) => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "malformed",
+                    e.to_string(),
+                    Some(sha256),
+                )],
+                // The engine that reads a textless page did not run — the same
+                // kind as `Library`, and for the same reason never a refusal:
+                // `no_text_layer` or a skipped page would be journalled as content
+                // and outlive the engine's repair (D57). May follow a header and
+                // pages; the pool keeps none of them.
+                Err(PdfError::Ocr(e)) => vec![Frame::Failed {
+                    message: format!("a page without a text layer could not be recognised: {e}"),
+                }],
             }
-            Err(PdfError::Encrypted) => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "encrypted",
-                "this PDF is password-protected".to_string(),
-                Some(sha256),
-            )],
-            // A reader that could not load its own library is NOT a damaged
-            // file, and this arm must not swallow it. Under `malformed` the
-            // walk would not stop (`suggests_broken_environment() == false`)
-            // and the verdict would outlive the repair
-            // (`is_about_content() == true`): every PDF in a folder journalled
-            // as damaged by a green walk, and a fixed install returning
-            // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
-            // that outcome, and a quarantined `libpdfium.dylib` has already
-            // happened on this machine.
-            Err(PdfError::Library(e)) => vec![Frame::Failed {
-                message: format!("pdfium could not be loaded: {e}"),
-            }],
-            // Bound to the one remaining variant rather than written as a
-            // catch-all `Err(e)`. A catch-all is how a later variant — a
-            // timeout, a page limit — would arrive silently as "this file is
-            // damaged", which is the mistake the arm above exists to undo.
-            Err(e @ PdfError::Malformed(_)) => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "malformed",
-                e.to_string(),
-                Some(sha256),
-            )],
-        },
+        }
         // **The first reader that opens an archive, so the mapping from zip
         // failures to refusal rules is declared here and repeated by docx and
         // xlsx.** Three errors, three rules, and every one of them reachable —

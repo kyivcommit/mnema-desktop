@@ -34,6 +34,16 @@
 //! The split is structural rather than careful: this variant can only be
 //! produced by [`pdfium_probe::pdfium`], which names no file and opens none.
 //!
+//! A fourth, [`PdfError::Ocr`], is the same kind as `Library`: the engine that
+//! reads a page without a text layer did not run (D189). See its doc comment.
+//!
+//! **A page without a text layer is rendered and recognised** (D189,
+//! [`crate::ocr`]) before it is skipped: BGRA at 300 dpi, the long side capped
+//! at [`OCR_MAX_SIDE_PX`]. What Vision reads is held to the same
+//! `TEXT_LAYER_MIN_CHARS` as a native page — one rule for "is this a page of
+//! text" — so a blank scan still lands in `skipped`, and so does every
+//! textless page on a platform with no engine (`recognise` answers `Ok(None)`).
+//!
 //! **One block per page, and no attempt at paragraphs.** pdfium hands back a
 //! page's text layer as one string in its own extraction order; splitting it
 //! would mean inventing a paragraph rule out of line breaks that a PDF's text
@@ -46,9 +56,25 @@
 use std::borrow::Cow;
 
 use mnema_core::{Block, BlockType, nfc};
-use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
+use pdfium_render::prelude::{
+    PdfBitmapFormat, PdfPage as PdfiumPage, PdfRenderConfig, PdfiumError, PdfiumInternalError,
+};
 
+use crate::ocr::{self, OcrError, PageImage};
 use crate::pdfium_probe::{self, has_text_layer, lock_pdfium, page_text, text_layer_chars};
+
+/// `PdfPage::text_source` of a page read from its own text layer — and the
+/// document-level value `Summary::text_source` carries for a PDF.
+pub const TEXT_SOURCE_NATIVE: &str = "native:pdf";
+/// `PdfPage::text_source` of a page Vision read from its rendering.
+pub const TEXT_SOURCE_OCR: &str = "ocr:vision";
+
+/// The resolution a textless page is rendered at for recognition.
+const OCR_DPI: f32 = 300.0;
+/// The longest side of that rendering, in pixels. A page large enough to
+/// exceed it at 300 dpi is rendered smaller instead, aspect kept, and the dpi
+/// it was actually rendered at is what [`OcrPage::dpi`] records.
+pub const OCR_MAX_SIDE_PX: f32 = 4000.0;
 
 /// One page of a PDF that had a text layer worth keeping.
 ///
@@ -63,7 +89,24 @@ pub struct PdfPage {
     /// the reader's bookkeeping instead of the document.
     pub page_no: u32,
     pub blocks: Vec<Block>,
+    /// [`TEXT_SOURCE_NATIVE`] or [`TEXT_SOURCE_OCR`]; `ocr` is `Some` exactly
+    /// for the second.
+    pub text_source: &'static str,
+    pub ocr: Option<OcrPage>,
 }
+
+/// What recognition of a page knew beyond its text: the bitmap it read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OcrPage {
+    pub confidence: f32,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub dpi: u32,
+}
+
+// `f32` in `OcrPage` rules out a derived `Eq`; no confidence here is NaN
+// (Vision's are in 0..=1, and an empty page is 0), so equality is total.
+impl Eq for OcrPage {}
 
 /// What a PDF read produced: the pages that had text, and the numbers of the
 /// pages that did not.
@@ -114,6 +157,22 @@ pub enum PdfError {
     /// pdfium had the bytes and could not make a document of them.
     #[error("pdfium could not read this document: {0}")]
     Malformed(String),
+
+    /// A page without a text layer could not be recognised: the engine is
+    /// missing (no Ukrainian model, the test seam) or failed on the image.
+    /// **Not a fact about the file**, the same as [`PdfError::Library`], and
+    /// for the same reason it must never become a content verdict (D57).
+    /// `no_text_layer` or a skipped page would be journalled and remembered
+    /// until the reader's version moves — no repair of the engine reaches that
+    /// row — so a library of scans would be recorded as textless for good over
+    /// an engine that did not run. The worker sends `Frame::Failed`: nothing is
+    /// journalled as content, nothing the index holds is displaced (D44), and
+    /// the next walk tries again.
+    ///
+    /// For the whole document, not the page: a skipped page is exactly the
+    /// remembered verdict above, at page scale.
+    #[error("{0}")]
+    Ocr(OcrError),
 }
 
 /// Reads a PDF's text layer into pages of blocks.
@@ -130,13 +189,40 @@ pub enum PdfError {
 /// existed.
 ///
 /// An empty `pages` is a real answer, not an error, and it now means exactly
-/// one thing: a scan of a paper contract, whose pages exist and hold no text.
+/// one thing: a scan of a paper contract, whose pages exist and hold no text —
+/// in their text layer, and (since D189, where there is an engine) in what
+/// Vision read from them.
 /// The caller refuses such a file under `no_text_layer` (`src/bin/worker.rs`),
 /// which is a rule about content and is remembered as one — so the two other
 /// ways to produce no pages must not arrive here. A document with no pages at
 /// all, and a document with a page that would not load, are both `Malformed`
 /// below.
 pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
+    let mut pages = Vec::new();
+    let skipped = extract_pdf_pages(bytes, |_, page| pages.push(page))?;
+    Ok(PdfDocument { pages, skipped })
+}
+
+/// [`extract_pdf`] as a stream: each page that has text is handed to `on_page`
+/// as soon as it is read, together with the number of pages the document
+/// declares, and the skipped page numbers come back at the end.
+///
+/// The declared count rides with every page rather than through a callback of
+/// its own because the one caller that streams (the worker) writes its
+/// `Header` lazily, before the first page: a document none of whose pages has
+/// text must answer `no_text_layer` *instead of* a header, and it is only known
+/// to be one at the end. Every page is still either handed over or returned by
+/// number — the loop is the same loop — and an `Err` after some pages were
+/// handed over means the pages handed over are not a document: the caller must
+/// discard them (the pool does, `run_one`).
+///
+/// OCR runs on the calling thread, under the same lock, between pages; on
+/// a 356-page scanned volume that is minutes, which is why the caller writes
+/// each page as it arrives and the pool's deadline is per page (D189).
+pub fn extract_pdf_pages(
+    bytes: &[u8],
+    mut on_page: impl FnMut(u32, PdfPage),
+) -> Result<Vec<u32>, PdfError> {
     // First, and on its own line, because everything after it is about the
     // document and this is the only thing here that is not. `pdfium()` has not
     // been shown a file at this point and cannot fail for one.
@@ -173,7 +259,7 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
         ));
     }
 
-    let mut pages = Vec::new();
+    let declared = count as u32;
     let mut skipped = Vec::new();
 
     for index in 0..count {
@@ -211,40 +297,102 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
         // store `About the Authorsxxi`, one word the page does not show.
         let raw = replacement_runs_to_spaces(&raw);
 
-        if !has_text_layer(text_layer_chars(&raw)) {
-            skipped.push(page_no);
-            continue;
-        }
+        let (raw, text_source, ocr) = if has_text_layer(text_layer_chars(&raw)) {
+            (raw, TEXT_SOURCE_NATIVE, None)
+        } else {
+            match recognise(&page, page_no)? {
+                // The same threshold as a native page, and no second one.
+                // `replacement_runs_to_spaces` is not applied: Vision returns
+                // characters it recognised, and U+FFFD is not among the shapes
+                // it reads (none in any page measured for D189).
+                Some(read) if has_text_layer(text_layer_chars(&read.text)) => {
+                    let ocr = OcrPage {
+                        confidence: read.confidence,
+                        width_px: read.width_px,
+                        height_px: read.height_px,
+                        dpi: read.dpi,
+                    };
+                    (Cow::Owned(read.text), TEXT_SOURCE_OCR, Some(ocr))
+                }
+                // Vision found nothing worth a page, or there is no engine on
+                // this platform: a scan without text, as before OCR existed.
+                _ => {
+                    skipped.push(page_no);
+                    continue;
+                }
+            }
+        };
 
         // Once, before the text is stored and after the threshold has been
         // taken from the same normalisation (D32, D38): `text_layer_chars`
         // normalises to count, so the string admitted and the string kept are
         // the same string.
         let text = nfc::normalise(&raw).into_owned();
-        pages.push(PdfPage {
-            page_no,
-            blocks: vec![Block {
-                block_type: BlockType::Paragraph,
-                // Restarts at 0 on every page: uniqueness in the schema is on
-                // `(page_id, reading_order)`.
-                reading_order: 0,
-                // Nothing here detects language, as in every other reader:
-                // a per-block guess is the extraction spec's subject.
-                language: None,
-                text,
-                // **A PDF has no line to name.** Not a gap left to fill later:
-                // `mnema_ingest::pages_of` gives this reader
-                // `PageContext::Fixed(Coordinate::Page)` precisely because a
-                // line range computed from these blocks would be
-                // `Coordinate::None`, and a number invented here would be
-                // cited as "рядки 1–1" of a page that has no rows.
-                line_start: None,
-                line_end: None,
-            }],
-        });
+        on_page(
+            declared,
+            PdfPage {
+                page_no,
+                text_source,
+                ocr,
+                blocks: vec![Block {
+                    block_type: BlockType::Paragraph,
+                    // Restarts at 0 on every page: uniqueness in the schema is on
+                    // `(page_id, reading_order)`.
+                    reading_order: 0,
+                    // Nothing here detects language, as in every other reader:
+                    // a per-block guess is the extraction spec's subject.
+                    language: None,
+                    text,
+                    // **A PDF has no line to name.** Not a gap left to fill later:
+                    // `mnema_ingest::pages_of` gives this reader
+                    // `PageContext::Fixed(Coordinate::Page)` precisely because a
+                    // line range computed from these blocks would be
+                    // `Coordinate::None`, and a number invented here would be
+                    // cited as "рядки 1–1" of a page that has no rows.
+                    line_start: None,
+                    line_end: None,
+                }],
+            },
+        );
     }
 
-    Ok(PdfDocument { pages, skipped })
+    Ok(skipped)
+}
+
+/// Renders `page` to BGRA — the only format Vision reads (`ocr` module doc) —
+/// at [`OCR_DPI`], or smaller if its long side would pass
+/// [`OCR_MAX_SIDE_PX`], and recognises it.
+///
+/// A render pdfium refuses is the page's fault and refuses the document as
+/// `Malformed`, like a page that will not load; an engine failure is
+/// [`PdfError::Ocr`].
+fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>, PdfError> {
+    let scale = render_scale(page.width().value, page.height().value);
+    let config = PdfRenderConfig::new()
+        .scale_page_by_factor(scale)
+        .set_format(PdfBitmapFormat::BGRA);
+    let bitmap = page.render_with_config(&config).map_err(|e| {
+        PdfError::Malformed(format!(
+            "page {page_no} of this PDF could not be rendered: {e}"
+        ))
+    })?;
+    let bgra = bitmap.as_raw_bytes();
+    let (width, height) = (bitmap.width() as u32, bitmap.height() as u32);
+    let image = PageImage {
+        bgra: &bgra,
+        width,
+        height,
+        // pdfium's buffer is `stride * height`; the stride is what is left.
+        stride: bgra.len() / (height.max(1) as usize),
+        dpi: (scale * 72.0).round() as u32,
+    };
+    ocr::recognise(&image).map_err(PdfError::Ocr)
+}
+
+/// Pixels per point for a page of `width` × `height` points: [`OCR_DPI`], or
+/// whatever brings its long side down to [`OCR_MAX_SIDE_PX`].
+fn render_scale(width: f32, height: f32) -> f32 {
+    (OCR_DPI / 72.0).min(OCR_MAX_SIDE_PX / width.max(height).max(1.0))
 }
 
 /// Every run of U+FFFD, however long, as one space — and as none where a
@@ -294,7 +442,24 @@ fn load_failure(e: PdfiumError) -> PdfError {
 
 #[cfg(test)]
 mod tests {
-    use super::replacement_runs_to_spaces;
+    use super::{render_scale, replacement_runs_to_spaces};
+
+    #[test]
+    fn a_page_is_rendered_at_300_dpi_unless_its_long_side_would_pass_the_cap() {
+        // A4, and the measured volume page (631×866 pt → 2630×3609 px).
+        assert_eq!(render_scale(595.0, 842.0), 300.0 / 72.0);
+        assert_eq!((866.0 * render_scale(631.0, 866.0)).round(), 3608.0);
+        // A3 portrait or landscape: 1191 pt × 300/72 = 4963 px, over the cap.
+        for (w, h) in [(842.0, 1191.0), (1191.0, 842.0)] {
+            let scale = render_scale(w, h);
+            assert_eq!((1191.0 * scale).round(), 4000.0, "{w}x{h}");
+            assert_eq!(
+                (scale * 72.0).round(),
+                242.0,
+                "the dpi recorded is the one used"
+            );
+        }
+    }
 
     #[test]
     fn a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any() {

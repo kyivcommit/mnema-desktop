@@ -90,6 +90,34 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
             page(stdout, 2);
             summary(stdout, Vec::new());
         }
+        // Two pages promised, one sent, then the document's ending: what the
+        // real worker writes when a PDF's page 2 cannot be recognised
+        // (`fail-after-page`) or will not load (`refuse-after-page`) after
+        // page 1 already went out (D189 streams pages).
+        "fail-after-page" => {
+            header(stdout, 2);
+            page(stdout, 1);
+            write_frame(
+                stdout,
+                &Frame::Failed {
+                    message: format!("{rest}: OCR engine unavailable"),
+                },
+            );
+        }
+        "refuse-after-page" => {
+            header(stdout, 2);
+            page(stdout, 1);
+            write_frame(
+                stdout,
+                &Frame::Refused {
+                    rule: "malformed".to_string(),
+                    reason: format!("{rest}: page 2 of this PDF could not be loaded"),
+                    sha256: Some("0".repeat(64)),
+                    reader: Some("pdf".to_string()),
+                    reader_version: Some(1),
+                },
+            );
+        }
         // One page promised, three sent: the shape of a worker that would emit
         // pages for ever, which the per-page deadline alone would never stop.
         "extra-pages" => {

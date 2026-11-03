@@ -1468,9 +1468,13 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     text_source,
                 }));
             }
-            // A refusal or a failure is the whole answer, so one arriving
-            // after a header means the two binaries disagree about the
-            // protocol.
+            // A refusal or a failure is the whole answer, and since D189 it
+            // may follow a header: a PDF streams its pages, and its page 40
+            // can fail to load (`Refused`) or to be recognised (`Failed`) after
+            // 39 went out. Whatever arrived is dropped with `pages` here — a
+            // partial stream is not a document and nothing is built from it.
+            // Accusing the binaries of a protocol mismatch instead would stop
+            // the whole job over one file.
             Frame::Refused {
                 rule,
                 reason,
@@ -1478,9 +1482,6 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 reader,
                 reader_version,
             } => {
-                if header.is_some() {
-                    return Err(protocol(&line, "a refusal after a header"));
-                }
                 let failure = match rule.as_str() {
                     "unsupported" => Failure::Unsupported,
                     "not_text" => Failure::NotText,
@@ -1509,9 +1510,6 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                 });
             }
             Frame::Failed { message } => {
-                if header.is_some() {
-                    return Err(protocol(&line, "a failure frame after a header"));
-                }
                 return Ok(Answer::Skipped {
                     failure: Failure::Unreadable,
                     reason: message,

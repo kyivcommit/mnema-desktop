@@ -981,6 +981,37 @@ fn a_worker_silent_for_the_deadline_after_a_page_is_killed() {
     assert_eq!(skipped.failure, Failure::Timeout);
 }
 
+/// A PDF streams its pages (D189), so a document can end in `Failed` or
+/// `Refused` after its header and some pages: page 40 would not be recognised,
+/// or would not load, after 39 went out. That is one file's answer — the pages
+/// that arrived are not a document and none is returned — and not a protocol
+/// mismatch, which would stop the whole job. The file after them is read
+/// normally: the job went on.
+#[test]
+fn a_document_that_ends_in_failure_after_its_pages_began_is_skipped_whole() {
+    let _watchdog = Watchdog::new("failure after a page", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let failed = skip(
+        extract(&pool, "fail-after-page:scan.pdf")
+            .expect("an ending after pages is one file's answer, not a protocol error"),
+    );
+    assert_eq!(failed.failure, Failure::Unreadable, "{failed:?}");
+    assert!(
+        failed.reason.contains("OCR engine unavailable"),
+        "{failed:?}"
+    );
+
+    let refused = skip(
+        extract(&pool, "refuse-after-page:scan.pdf")
+            .expect("an ending after pages is one file's answer, not a protocol error"),
+    );
+    assert_eq!(refused.failure, Failure::Malformed, "{refused:?}");
+
+    let after = document(extract(&pool, "after.txt").unwrap());
+    assert_eq!(after.pages.len(), 1);
+}
+
 /// More Page frames than the header promised stop the job **as they arrive**,
 /// not at the summary: this is the bound that keeps a per-page deadline from
 /// letting a worker run for ever.
