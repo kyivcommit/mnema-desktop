@@ -11,6 +11,12 @@
 //! finally one `Summary`; a file it declines or cannot read produces exactly
 //! one `Refused` or `Failed` frame and nothing else.
 //!
+//! A third shape since D189, and only from a reader that streams (PDF): a
+//! `Header` and some pages, then one `Refused` or `Failed` in place of the
+//! `Summary` — a page that would not load or not be recognised after earlier
+//! pages went out. It is the file's answer, and the pages before it are not a
+//! document: the parent builds nothing from them.
+//!
 //! **Why this module lives in `mnema-core` and not in `mnema-extract`, where
 //! task 7 first wrote it.** D40 requires that `mnema-extract` be linked *only*
 //! into the worker binary and never into the application: that is what makes
