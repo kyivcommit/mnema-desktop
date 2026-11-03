@@ -286,6 +286,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 &Frame::Page {
                     page_no: 1,
                     section_title: Some("Розділ перший".to_string()),
+                    text_source: None,
+                    ocr_confidence: None,
                 },
             );
             write_frame(
@@ -319,6 +321,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 &Frame::Page {
                     page_no: 1,
                     section_title: None,
+                    text_source: None,
+                    ocr_confidence: None,
                 },
             );
             write_frame(
@@ -350,6 +354,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                     &Frame::Page {
                         page_no,
                         section_title: None,
+                        text_source: None,
+                        ocr_confidence: None,
                     },
                 );
             }
@@ -384,6 +390,8 @@ fn act(mode: &str, rest: &str, stdout: &mut io::Stdout) {
                 &Frame::Page {
                     page_no: 1,
                     section_title: None,
+                    text_source: None,
+                    ocr_confidence: None,
                 },
             );
             write_frame(
@@ -505,6 +513,8 @@ fn answer_without_summary(stdout: &mut io::Stdout) {
         &Frame::Page {
             page_no: 1,
             section_title: None,
+            text_source: None,
+            ocr_confidence: None,
         },
     );
     write_frame(

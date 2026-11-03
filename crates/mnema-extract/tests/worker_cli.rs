@@ -591,7 +591,9 @@ fn a_text_file_opens_exactly_one_untitled_page_before_its_blocks() {
             frames[1],
             Frame::Page {
                 page_no: 1,
-                section_title: None
+                section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             }
         ),
         "the frame after the header must open page 1: {:?}",
@@ -643,7 +645,8 @@ fn a_markdown_file_announces_one_page_per_section_and_sends_that_many() {
         sent[1],
         Frame::Page {
             page_no: 2,
-            section_title: Some(title)
+            section_title: Some(title),
+            ..
         } if title == "Розділ перший"
     ));
 
@@ -701,6 +704,7 @@ fn a_pdf_is_read_and_its_header_names_the_pdf_reader() {
         Frame::Page {
             page_no,
             section_title,
+            ..
         } => {
             assert_eq!(*page_no, 1);
             // A PDF page is not a section: `pages_of` cites `Coordinate::Page`
@@ -1089,6 +1093,7 @@ fn an_html_file_is_read_as_prose_and_its_header_names_the_html_reader() {
             Frame::Page {
                 page_no: 2,
                 section_title: Some(title),
+                ..
             } if title == "Розділ перший"
         ),
         // Unlike a PDF's, an HTML page carries a section title: it is the whole
@@ -1248,6 +1253,7 @@ fn an_epub_is_read_chapter_by_chapter_and_its_summary_names_what_it_skipped() {
             Frame::Page {
                 page_no,
                 section_title,
+                ..
             } => Some((*page_no, section_title.clone())),
             _ => None,
         })
@@ -1476,6 +1482,7 @@ fn a_docx_is_read_section_by_section_and_its_summary_skips_nothing() {
             Frame::Page {
                 page_no,
                 section_title,
+                ..
             } => Some((*page_no, section_title.clone())),
             _ => None,
         })
@@ -1740,6 +1747,7 @@ fn an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped() {
             Frame::Page {
                 page_no,
                 section_title,
+                ..
             } => Some((*page_no, section_title.clone())),
             _ => None,
         })

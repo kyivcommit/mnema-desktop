@@ -913,6 +913,8 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
             Frame::Page {
                 page_no: 1,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             },
             Frame::Block(unlined_block(&String::from_utf8_lossy(bytes))),
             Frame::Summary {
@@ -949,6 +951,8 @@ fn a_file_indexed_by_another_reader_is_rebuilt_rather_than_left_as_it_was() {
             Frame::Page {
                 page_no: 1,
                 section_title: Some("Умови постачання".to_string()),
+                text_source: None,
+                ocr_confidence: None,
             },
             Frame::Block(unlined_block("Кошторис узгоджено сторонами.")),
             Frame::Summary {
@@ -5486,6 +5490,8 @@ fn html_frames(bytes: &[u8], pages: u32, reader_version: u32) -> Vec<Frame> {
         frames.push(Frame::Page {
             page_no,
             section_title: Some(format!("Розділ {page_no}")),
+            text_source: None,
+            ocr_confidence: None,
         });
         frames.push(Frame::Block(unlined_block(&format!(
             "Комісія розглянула звернення, розділ {page_no}."
@@ -5531,6 +5537,8 @@ fn pdf_frames_from(
         frames.push(Frame::Page {
             page_no: *page_no,
             section_title: None,
+            text_source: None,
+            ocr_confidence: None,
         });
         frames.push(Frame::Block(unlined_block(&format!(
             "{text}, сторінка {page_no}."
@@ -5605,6 +5613,8 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
             Frame::Page {
                 page_no: 7,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             },
             Frame::Block(unlined_block(
                 "Річний звіт про виконання кошторису за минулий період.",
@@ -5612,6 +5622,8 @@ fn a_pdf_chunk_cites_its_page_not_nothing() {
             Frame::Page {
                 page_no: 9,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             },
             Frame::Block(unlined_block(
                 "Додаток до звіту: перелік придбаного обладнання для філії.",
@@ -5744,6 +5756,8 @@ fn html_docx_and_epub_cite_the_section_their_page_names() {
                 Frame::Page {
                     page_no: 1,
                     section_title: Some(title.to_string()),
+                    text_source: None,
+                    ocr_confidence: None,
                 },
                 Frame::Block(unlined_block(prose)),
                 Frame::Summary {
@@ -5806,6 +5820,8 @@ fn a_page_that_names_no_section_carries_an_empty_one_rather_than_none() {
             Frame::Page {
                 page_no: 1,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             },
             Frame::Block(unlined_block(
                 "Текст, який не має над собою жодного заголовка.",
@@ -5864,6 +5880,8 @@ fn an_xlsx_chunk_cites_the_rows_it_covers_not_the_whole_sheet() {
         Frame::Page {
             page_no: 1,
             section_title: Some("Кошторис".to_string()),
+            text_source: None,
+            ocr_confidence: None,
         },
     ];
     frames.extend((0..12u32).map(|i| {

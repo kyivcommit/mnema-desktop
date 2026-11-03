@@ -92,9 +92,21 @@ pub enum Frame {
     /// `page_no` is the reader's own numbering, not a counter of these frames:
     /// a reader that skips a page (`Summary::skipped_pages` names it) leaves a
     /// gap here, and the gap is the honest record of it.
+    ///
+    /// `text_source` is the page's own source when it differs from the
+    /// document's: `None` means `Summary::text_source` applies (every native
+    /// page, and every page before OCR existed), `Some("ocr:vision")` marks a
+    /// page read by OCR. `ocr_confidence` is the mean top-candidate confidence
+    /// of such a page, kept for a future gold set and **not** a threshold
+    /// (D189: Vision confidences are quantised). Both are skipped on the wire
+    /// when `None`, so a native page frame is byte-for-byte what it was.
     Page {
         page_no: u32,
         section_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ocr_confidence: Option<f32>,
     },
     /// One source block, in reading order within its page.
     Block(Block),
@@ -230,9 +242,38 @@ pub enum Frame {
 /// what constructs these lines, the same split `Frame` has between the two
 /// sides of the boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RequestWire")]
 pub struct Request {
     pub path: String,
+    /// Ceiling for every file that is not a PDF.
     pub max_bytes: u64,
+    /// Ceiling for a PDF. Separate because the worker's memory per input byte
+    /// differs by format (D189, measured: a PDF costs about 2x its size, a
+    /// non-PDF about 4x plus the application's per-char offsets).
+    ///
+    /// A line without this field deserialises with `pdf_max_bytes ==
+    /// max_bytes` (not 0, which would refuse every PDF), so a request from an
+    /// old parent means what it meant before the field existed.
+    pub pdf_max_bytes: u64,
+}
+
+/// The shape `Request` is read from. serde's `default` cannot see a sibling
+/// field, so the absent-means-`max_bytes` rule lives in the `From` below.
+#[derive(Deserialize)]
+struct RequestWire {
+    path: String,
+    max_bytes: u64,
+    pdf_max_bytes: Option<u64>,
+}
+
+impl From<RequestWire> for Request {
+    fn from(wire: RequestWire) -> Self {
+        Request {
+            pdf_max_bytes: wire.pdf_max_bytes.unwrap_or(wire.max_bytes),
+            path: wire.path,
+            max_bytes: wire.max_bytes,
+        }
+    }
 }
 
 /// Serialises `frame` as a single NDJSON line: compact JSON followed by
@@ -292,6 +333,8 @@ mod tests {
         Frame::Page {
             page_no: 4,
             section_title: Some("Розділ другий".to_string()),
+            text_source: None,
+            ocr_confidence: None,
         }
     }
 
@@ -299,6 +342,8 @@ mod tests {
         Frame::Page {
             page_no: 1,
             section_title: None,
+            text_source: None,
+            ocr_confidence: None,
         }
     }
 
@@ -573,6 +618,7 @@ mod tests {
         let request = Request {
             path: "документи/звіт.txt".to_string(),
             max_bytes: 1 << 26,
+            pdf_max_bytes: 1 << 29,
         };
         let line = to_request_line(&request).unwrap();
         assert_eq!(line.matches('\n').count(), 1);
@@ -582,5 +628,51 @@ mod tests {
         // — mirrored here rather than trimming first.
         let back: Request = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(back, request);
+    }
+
+    #[test]
+    fn a_request_without_pdf_max_bytes_means_max_bytes() {
+        let old = r#"{"path":"a.pdf","max_bytes":1234}"#;
+        let request: Request = serde_json::from_str(old).unwrap();
+        assert_eq!(request.max_bytes, 1234);
+        assert_eq!(request.pdf_max_bytes, 1234);
+    }
+
+    #[test]
+    fn a_request_carries_its_own_pdf_ceiling_through_the_line() {
+        let request = Request {
+            path: "a.pdf".to_string(),
+            max_bytes: 10,
+            pdf_max_bytes: 99,
+        };
+        let line = to_request_line(&request).unwrap();
+        assert!(line.contains(r#""pdf_max_bytes":99"#), "{line}");
+        let back: Request = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(back, request);
+    }
+
+    #[test]
+    fn a_native_page_frame_is_the_line_it_always_was() {
+        let line = to_line(&sample_untitled_page()).unwrap();
+        assert_eq!(
+            line,
+            "{\"frame\":\"page\",\"page_no\":1,\"section_title\":null}\n"
+        );
+        // And the old line still reads, with both new fields absent.
+        assert_eq!(from_line(&line).unwrap(), sample_untitled_page());
+    }
+
+    #[test]
+    fn an_ocr_page_frame_round_trips_its_source_and_confidence() {
+        let page = Frame::Page {
+            page_no: 2,
+            section_title: None,
+            text_source: Some("ocr:vision".to_string()),
+            ocr_confidence: Some(0.5),
+        };
+        let line = to_line(&page).unwrap();
+        assert!(line.contains(r#""text_source":"ocr:vision""#), "{line}");
+        assert!(line.contains(r#""ocr_confidence":0.5"#), "{line}");
+        assert_eq!(from_line(&line).unwrap(), page);
     }
 }

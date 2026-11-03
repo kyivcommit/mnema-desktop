@@ -224,6 +224,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
             frames.push(Frame::Page {
                 page_no: 1,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
             });
             frames.extend(blocks.into_iter().map(Frame::Block));
             frames.push(Frame::Summary {
@@ -253,6 +255,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 frames.push(Frame::Page {
                     page_no: page.page_no,
                     section_title: page.section_title,
+                    text_source: None,
+                    ocr_confidence: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -300,6 +304,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // Unlike a PDF's, an HTML page *is* a section, and this is
                     // the whole of what a citation into it points at.
                     section_title: page.section_title,
+                    text_source: None,
+                    ocr_confidence: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -385,6 +391,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // reader `Coordinate::Page`, which is what a citation
                         // into a PDF points at.
                         section_title: None,
+                        text_source: None,
+                        ocr_confidence: None,
                     });
                     frames.extend(page.blocks.into_iter().map(Frame::Block));
                 }
@@ -465,6 +473,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // is the whole of what a citation into a book points
                         // at.
                         section_title: chapter.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
                     });
                     frames.extend(chapter.blocks.into_iter().map(Frame::Block));
                 }
@@ -548,6 +558,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // EPUB chapter are, and it is the whole of what a
                         // citation into a document points at.
                         section_title: section.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
                     });
                     frames.extend(section.blocks.into_iter().map(Frame::Block));
                 }
@@ -632,6 +644,8 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // here would give the citation and the coordinate two
                         // different names.
                         section_title: sheet.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
                     });
                     frames.extend(sheet.blocks.into_iter().map(Frame::Block));
                 }

@@ -1230,6 +1230,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
     let request = to_request_line(&Request {
         path: path.to_string(),
         max_bytes: config.max_bytes,
+        // Task 5 gives PoolConfig its own PDF ceiling; until then it is the same.
+        pdf_max_bytes: config.max_bytes,
     })
     .map_err(|source| PoolError::Encode { source })?;
 
@@ -1320,6 +1322,9 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
             Frame::Page {
                 page_no,
                 section_title,
+                // Not carried into `ExtractedPage` yet: the per-page source
+                // and confidence are wired through the pool by a later task.
+                ..
             } => {
                 if header.is_none() {
                     return Err(protocol(&line, "a page before any header"));
