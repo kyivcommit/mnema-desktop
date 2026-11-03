@@ -9,6 +9,7 @@ import type {
 } from '../lib/ipc';
 
 const mnemaAvailable = vi.fn();
+const memoryIsLow = vi.fn();
 const localModels = vi.fn();
 const downloadModel = vi.fn();
 const cancelDownload = vi.fn();
@@ -19,6 +20,7 @@ const unlisten = vi.fn();
 let deliver: ((p: LocalModelProgress) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
   mnemaAvailable: (...a: unknown[]) => mnemaAvailable(...a),
+  memoryIsLow: (...a: unknown[]) => memoryIsLow(...a),
   localModels: (...a: unknown[]) => localModels(...a),
   downloadModel: (...a: unknown[]) => downloadModel(...a),
   cancelDownload: (...a: unknown[]) => cancelDownload(...a),
@@ -33,9 +35,10 @@ vi.mock('../lib/ipc', () => ({
 const ABSENT: LocalModelRow[] = [
   { id: 'embed', state: { kind: 'absent' } },
   { id: 'chat', state: { kind: 'absent' } },
+  { id: 'chatTools', state: { kind: 'absent' } },
 ];
 const rows = (embed: LocalModelRow['state'], chat: LocalModelRow['state']): LocalModelRow[] => [
-  { id: 'embed', state: embed }, { id: 'chat', state: chat },
+  { id: 'embed', state: embed }, { id: 'chat', state: chat }, { id: 'chatTools', state: { kind: 'absent' } },
 ];
 const READY = { kind: 'ready' } as const;
 
@@ -64,8 +67,10 @@ const settle = () => new Promise<void>((r) => setTimeout(r, 0));
 
 async function mount(over: {
   available?: boolean; choice?: ProviderChoice; rows?: LocalModelRow[]; settings?: ModelSettings;
+  lowMemory?: boolean;
 } = {}) {
   mnemaAvailable.mockResolvedValue(over.available ?? true);
+  memoryIsLow.mockResolvedValue(over.lowMemory ?? false);
   localModels.mockResolvedValue(over.rows ?? ABSENT);
   modelSettings.mockResolvedValue(over.settings ?? settings('baai/bge-m3', 0, over.choice ? { roles: { embed: over.choice, chat: over.choice } } : {}));
   const view = render(Provider, { children: keyField });
@@ -99,7 +104,7 @@ afterEach(() => { cleanup(); setLocale('en'); });
 // A mounted component with Mnema already chosen: the rows are what is under test.
 const mountRows = (r: LocalModelRow[]) => mount({ choice: 'mnema', rows: r });
 // The chat model's row, found by its heading so a button belongs to a model.
-const chatRow = () => screen.getByRole('group', { name: 'Модель відповідей' });
+const chatRow = () => screen.getByRole('group', { name: 'Модель відповідей (E2B)' });
 const inRow = (row: HTMLElement) => ({ button: (name: string) => within(row).getByRole('button', { name }) });
 
 test('a row walks absent → downloading → ready', async () => {
@@ -218,12 +223,12 @@ test('the dot has a spoken state too', async () => {
 
 test('mnema rows render inside the card', async () => {
   await mount();
-  expect(screen.queryByRole('group', { name: 'Модель відповідей' })).toBeNull();
+  expect(screen.queryByRole('group', { name: 'Модель відповідей (E2B)' })).toBeNull();
   await pick('Mnema');
   const card = await screen.findByTestId('provider-card');
   expect(within(card).getByRole('group', { name: 'Модель пошуку' })).toBeTruthy();
-  expect(within(card).getByRole('group', { name: 'Модель відповідей' })).toBeTruthy();
-  expect(within(card).getByText("~3,1 ГБ диска, ~4 ГБ пам'яті")).toBeTruthy();
+  expect(within(card).getByRole('group', { name: 'Модель відповідей (E2B)' })).toBeTruthy();
+  expect(within(card).getByText("з E2B — ~3,1 ГБ диска, ~4 ГБ пам'яті; з E4B — ~5,8 ГБ диска, ~6 ГБ пам'яті")).toBeTruthy();
 });
 
 test('choosing a provider writes nothing', async () => {
@@ -260,4 +265,35 @@ test('the dot follows the name, in the closed button and in the list', async () 
   expect(after(picker())).toBe(true);
   await fireEvent.click(picker());
   for (const o of screen.getAllByRole('option')) expect(after(o)).toBe(true);
+});
+
+// D188: E4B is a third row, downloaded by its own id.
+test('the E4B row is a model of its own', async () => {
+  await mountRows(ABSENT);
+  const row = await waitFor(() => screen.getByRole('group', { name: 'Модель відповідей з пошуком (E4B)' }));
+  expect(screen.getAllByRole('group').map((g) => g.getAttribute('aria-label'))).toEqual(
+    ['Модель пошуку', 'Модель відповідей (E2B)', 'Модель відповідей з пошуком (E4B)'],
+  );
+  await fireEvent.click(inRow(row).button('Завантажити'));
+  expect(downloadModel).toHaveBeenCalledWith('chatTools');
+});
+
+// D188: under 16 GiB the E4B row says so and is described by the sentence;
+// E2B's row is not; on a larger Mac nothing is said (both directions).
+test('a small Mac warns on the E4B row only', async () => {
+  const sentence = "На цьому Mac менше 16 ГБ пам'яті: E4B займає близько 6 ГБ і може сповільнити роботу.";
+  for (const low of [true, false]) {
+    cleanup();
+    await mount({ choice: 'mnema', lowMemory: low });
+    const e4b = await waitFor(() => screen.getByRole('group', { name: 'Модель відповідей з пошуком (E4B)' }));
+    const warning = screen.queryByTestId('provider-low-memory');
+    expect(chatRow().hasAttribute('aria-describedby')).toBe(false);
+    if (low) {
+      expect(warning?.textContent).toBe(sentence);
+      expect(e4b.getAttribute('aria-describedby')).toBe(warning?.id);
+    } else {
+      expect(warning).toBeNull();
+      expect(e4b.hasAttribute('aria-describedby')).toBe(false);
+    }
+  }
 });

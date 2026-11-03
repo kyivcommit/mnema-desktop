@@ -4,7 +4,7 @@
   import { locale, t } from '../i18n';
   import {
     modelSettings, setKey, forgetKey, providerModels, setChatModel, chatTools, setChatTools,
-    setEmbeddingModel, jobStatus,
+    setEmbeddingModel, jobStatus, memoryIsLow, LOCAL_CHAT_TOOLS_MODEL,
     type ModelSettings, type KeyRemoval, type RoleCatalogue, type RoleModel, type ProviderChoice,
     type ModelEntry, type ModelRefusal, type Price, type UnreadableRecord,
     type ExistingVectors, type RetiredSpace,
@@ -174,6 +174,7 @@
     refresh().catch(() => {});
     void loadCatalogue('embedding');
     chatTools().then((on) => (toolsOn = on), () => {});
+    memoryIsLow().then((low) => (lowMemory = low), () => {});
     // The index is asked again whenever a scan ends, because an ending is the
     // one moment the counts `degraded` is read from can have changed. The
     // listener that used to do this belonged to a channel this component
@@ -608,6 +609,15 @@
 
   const activeCatalogue = $derived(catalogues[activeTab]);
   const activeCatalogueError = $derived(catalogueErrors[activeTab]);
+
+  // Under 16 GiB, beside a chat list that offers the local E4B: a warning, not
+  // a refusal — the choice stays the person's (D188).
+  let lowMemory = $state(false);
+  const lowMemoryText = $derived.by(() => { void $locale; return t('provider_low_memory'); });
+  const warnLowMemory = $derived(
+    lowMemory && activeTab === 'chat'
+      && (activeCatalogue?.entries ?? []).some((e) => e.provider === 'mnema' && e.id === LOCAL_CHAT_TOOLS_MODEL),
+  );
 
   // `catalogue.rs`'s `Refusal`, exhaustively: a fixed catalogue sentence per
   // variant, never the provider's own `raw` text — one of the five variants
@@ -1391,6 +1401,7 @@
         >ⓘ</button>
       {/if}
     </div>
+    {#if warnLowMemory}<p data-testid="model-low-memory">{lowMemoryText}</p>{/if}
     {#if hasNotes}
       <div id="model-notes" class="notes" popover="auto" data-testid="model-notes">
         {#if hasPriceNote}

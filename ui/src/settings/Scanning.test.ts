@@ -32,6 +32,8 @@ const unlisten = vi.fn();
 // deliver the states a real scan would.
 let deliver: ((state: ScanState) => void) | null = null;
 vi.mock('../lib/ipc', () => ({
+  memoryIsLow: () => Promise.resolve(false),
+  LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   startScanJob: (...a: unknown[]) => startScanJob(...a),
   cancelJob: (...a: unknown[]) => cancelJob(...a),
   jobStatus: (...a: unknown[]) => jobStatus(...a),

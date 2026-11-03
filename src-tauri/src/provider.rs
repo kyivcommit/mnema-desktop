@@ -717,6 +717,19 @@ pub fn mnema_available(state: tauri::State<'_, crate::state::AppState>) -> bool 
     state.mnema_available()
 }
 
+/// Below 16 GiB the E4B (~6 GB resident, measured peak 5.9 GB) leaves little
+/// for the rest of the Mac: the window warns, and does not forbid (D188).
+pub fn low_memory(bytes: u64) -> bool {
+    bytes < 16 << 30
+}
+
+/// Whether this Mac is one the window warns about before E4B. Unknown memory
+/// is not low: no warning on a guess.
+#[tauri::command]
+pub fn memory_is_low() -> bool {
+    mnema_local::physical_memory().is_some_and(low_memory)
+}
+
 #[tauri::command(async)]
 pub fn local_models(state: tauri::State<'_, crate::state::AppState>) -> Vec<LocalModelRow> {
     let local = state.local();
@@ -2262,5 +2275,26 @@ mod lifecycle {
         );
         remove(&state, LocalModel::ChatTools).unwrap();
         assert_eq!(state.roles().chat, None, "the chosen model removed");
+    }
+
+    /// D188: the warning's line is 16 GiB exactly — a 16 GB Mac is not warned
+    /// about, an 8 GB one is.
+    #[test]
+    fn memory_under_16_gib_is_low() {
+        const GIB: u64 = 1 << 30;
+        assert!(low_memory(8 * GIB));
+        assert!(low_memory(16 * GIB - 1));
+        assert!(!low_memory(16 * GIB));
+        assert!(!low_memory(32 * GIB));
+    }
+
+    #[test]
+    fn this_mac_reports_its_memory() {
+        let m = mnema_local::physical_memory();
+        if cfg!(target_os = "macos") {
+            assert!(m.is_some_and(|b| b >= 4 << 30), "{m:?}");
+        } else {
+            assert_eq!(m, None);
+        }
     }
 }

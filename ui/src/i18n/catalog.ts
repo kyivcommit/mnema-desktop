@@ -42,7 +42,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'composer_send' | 'answer_pending'
   | 'phase_text' | 'phase_content' | 'phase_chat'
   | 'toggle_recents' | 'toggle_files' | 'tree_title' | 'toggle_tree' | 'toolbar_settings'
-  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
+  | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_model_chat_tools' | 'provider_low_memory' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'tree_empty' | 'tree_failed' | 'tree_search_in' | 'tree_add_folder'
@@ -405,9 +405,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_missing_role: 'Не обрано провайдера для ролі — відкрити налаштування моделей',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (локально)',
-    provider_mnema_hint: '~3,1 ГБ диска, ~4 ГБ пам\'яті',
+    provider_mnema_hint: 'з E2B — ~3,1 ГБ диска, ~4 ГБ пам\'яті; з E4B — ~5,8 ГБ диска, ~6 ГБ пам\'яті',
     provider_model_embed: 'Модель пошуку',
-    provider_model_chat: 'Модель відповідей',
+    provider_model_chat: 'Модель відповідей (E2B)',
+    provider_model_chat_tools: 'Модель відповідей з пошуком (E4B)',
+    provider_low_memory: 'На цьому Mac менше 16 ГБ пам\'яті: E4B займає близько 6 ГБ і може сповільнити роботу.',
     provider_download: 'Завантажити',
     provider_cancel: 'Скасувати',
     provider_remove: 'Видалити',
@@ -1325,9 +1327,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_missing_role: 'No provider chosen for the role — open the model settings',
     provider_openrouter: 'OpenRouter',
     provider_mnema: 'Mnema (local)',
-    provider_mnema_hint: '~3.1 GB of disk, ~4 GB of memory',
+    provider_mnema_hint: 'with E2B ~3.1 GB of disk, ~4 GB of memory; with E4B ~5.8 GB of disk, ~6 GB of memory',
     provider_model_embed: 'Search model',
-    provider_model_chat: 'Answer model',
+    provider_model_chat: 'Answer model (E2B)',
+    provider_model_chat_tools: 'Answer model with search (E4B)',
+    provider_low_memory: 'This Mac has less than 16 GB of memory: E4B takes about 6 GB and can slow it down.',
     provider_download: 'Download',
     provider_cancel: 'Cancel',
     provider_remove: 'Remove',

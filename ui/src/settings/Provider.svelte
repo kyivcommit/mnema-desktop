@@ -3,7 +3,7 @@
   import Picker from './Picker.svelte';
   import { locale, t } from '../i18n';
   import {
-    mnemaAvailable, localModels, downloadModel, cancelDownload,
+    mnemaAvailable, memoryIsLow, localModels, downloadModel, cancelDownload,
     removeModel, listenLocalModelProgress, modelSettings,
     type Configured, type ProviderChoice, type LocalModelId, type LocalModelState, type DownloadError,
   } from '../lib/ipc';
@@ -29,16 +29,19 @@
   });
 
   const LABEL_ID = 'model-provider-label';
-  const IDS: LocalModelId[] = ['embed', 'chat'];
+  const IDS: LocalModelId[] = ['embed', 'chat', 'chatTools'];
   let states = $state<Record<LocalModelId, LocalModelState>>({
-    embed: { kind: 'absent' }, chat: { kind: 'absent' },
+    embed: { kind: 'absent' }, chat: { kind: 'absent' }, chatTools: { kind: 'absent' },
   });
+  // Under 16 GiB the E4B row carries a warning; it never forbids (D188).
+  let lowMemory = $state(false);
+  const LOW_MEMORY_ID = 'provider-low-memory';
   // What belongs to a row and not to the re-read: a download this window has in
   // flight, how far it has got, and why the last one stopped. A re-read of
   // `local_models` must not erase the reason, so it lives apart from `states`.
-  let active = $state<Record<LocalModelId, boolean>>({ embed: false, chat: false });
-  let progress = $state<Record<LocalModelId, number>>({ embed: 0, chat: 0 });
-  let failure = $state<Record<LocalModelId, DownloadError | null>>({ embed: null, chat: null });
+  let active = $state<Record<LocalModelId, boolean>>({ embed: false, chat: false, chatTools: false });
+  let progress = $state<Record<LocalModelId, number>>({ embed: 0, chat: 0, chatTools: 0 });
+  let failure = $state<Record<LocalModelId, DownloadError | null>>({ embed: null, chat: null, chatTools: null });
 
   async function readRows() {
     try {
@@ -113,6 +116,7 @@
     void (async () => {
       try {
         available = await mnemaAvailable();
+        if (available) lowMemory = await memoryIsLow();
         const settings = await modelSettings();
         configured = settings.configured;
         choice = available && settings.roles.chat === 'mnema' ? 'mnema' : 'openRouter';
@@ -143,7 +147,9 @@
     if (f?.kind === 'failed') return f.message;
     return state.kind === 'failed' ? state.message : '';
   }
-  const rowName = (id: LocalModelId) => { void $locale; return t(id === 'embed' ? 'provider_model_embed' : 'provider_model_chat'); };
+  const ROW_NAMES = { embed: 'provider_model_embed', chat: 'provider_model_chat', chatTools: 'provider_model_chat_tools' } as const;
+  const rowName = (id: LocalModelId) => { void $locale; return t(ROW_NAMES[id]); };
+  const lowMemoryText = $derived.by(() => { void $locale; return t('provider_low_memory'); });
   const downloadingLabel = (id: LocalModelId) => { void $locale; return t('provider_downloading', { name: rowName(id) }); };
   const downloadLabel = $derived.by(() => { void $locale; return t('provider_download'); });
   const retryLabel = $derived.by(() => { void $locale; return t('provider_retry'); });
@@ -169,7 +175,8 @@
     <p>{hint}</p>
     {#each IDS as id (id)}
       {@const state = states[id]}
-      <div role="group" aria-label={rowName(id)} class="row">
+      {@const warned = id === 'chatTools' && lowMemory}
+      <div role="group" aria-label={rowName(id)} class="row" aria-describedby={warned ? LOW_MEMORY_ID : undefined}>
         <span>{rowName(id)}</span>
         {#if active[id] || state.kind === 'downloading'}
           <div role="progressbar" aria-label={downloadingLabel(id)} aria-valuemin="0" aria-valuemax="100"
@@ -185,6 +192,7 @@
           <button type="button" onclick={() => download(id)}>{downloadLabel}</button>
         {/if}
       </div>
+      {#if warned}<p id={LOW_MEMORY_ID} data-testid="provider-low-memory">{lowMemoryText}</p>{/if}
     {/each}
   </div>
 {/if}

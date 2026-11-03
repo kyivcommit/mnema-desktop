@@ -85,3 +85,27 @@ fn macos_major() -> Option<u32> {
 fn macos_major() -> Option<u32> {
     None
 }
+
+/// This machine's physical memory in bytes (`hw.memsize`), read in-process.
+#[cfg(target_os = "macos")]
+pub fn physical_memory() -> Option<u64> {
+    let name = c"hw.memsize";
+    let mut bytes: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: `bytes`/`len` describe a writable u64; `name` is NUL-terminated.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && len == std::mem::size_of::<u64>()).then_some(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn physical_memory() -> Option<u64> {
+    None
+}

@@ -95,6 +95,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         models::model_settings,
         provider_status::provider_status,
         provider::mnema_available,
+        provider::memory_is_low,
         provider::local_models,
         provider::download_model,
         provider::cancel_download,

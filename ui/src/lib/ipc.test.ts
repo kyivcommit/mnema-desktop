@@ -948,6 +948,17 @@ test('the local-model-progress event name is the one provider.rs actually emits'
   expect(LOCAL_MODEL_PROGRESS_EVENT).toBe(rustStrConst(PROVIDER_RS, 'PROGRESS_EVENT'));
 });
 
+// D188: a third local model reached the window unnoticed once — no guard
+// compared `LocalModel` with the TS union. `Record<LocalModelId, …>` makes a TS
+// arm left out here a compile error; the list is compared against Rust.
+test('LocalModelId is exactly what provider.rs defines, and E4B is named as Rust names it', () => {
+  const PROVIDER_RS = readFileSync(join(HERE, '../../../src-tauri/src/provider.rs'), 'utf8');
+  const ids: Record<ipc.LocalModelId, true> = { embed: true, chat: true, chatTools: true };
+  expect(Object.keys(ids).sort()).toEqual(rustEnumVariants(PROVIDER_RS, 'LocalModel').map(camelOf).sort());
+  expect(PROVIDER_RS).toMatch(/#\[serde\(rename_all = "camelCase"\)\]\s*pub enum LocalModel\b/);
+  expect(ipc.LOCAL_CHAT_TOOLS_MODEL).toBe(rustStrConst(PROVIDER_RS, 'LOCAL_CHAT_TOOLS_MODEL'));
+});
+
 // Task 3 of query-history: the two history wire types, pinned against the Rust
 // structs in `bridge.rs` the same way the scan and subfolder mirrors are above.
 // `HistoryOpen` is a tagged enum, and `rustVariantFields` refuses an enum that
