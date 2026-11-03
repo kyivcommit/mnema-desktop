@@ -990,6 +990,9 @@ export const setUiScale = (choice: UiScale) => invoke<void>('set_ui_scale', { ch
 // from Mnema to OpenRouter, nothing was written, and `cloud` confirms the move.
 export type ToolsSwitch = { kind: 'stored'; on: boolean } | { kind: 'asksCloud' };
 export const chatTools = () => invoke<boolean>('chat_tools_enabled');
+// Whether a question joins a conversation (`bridge.rs` `conversations_on`): the
+// backend's own rule, so the launcher never keeps a second copy of it.
+export const conversationsOn = () => invoke<boolean>('conversations_on');
 // Starts a new conversation: the backend forgets the session (`new_chat`).
 export const newChat = () => invoke<void>('new_chat');
 export const setChatTools = (on: boolean, cloud = false) =>
@@ -1094,7 +1097,9 @@ export const providerStatus = () => invoke<RoleStatuses>('provider_status');
 // the serde ones: camelCase variants, `kind`-tagged unions.
 // ---------------------------------------------------------------------------
 export type ProviderChoice = 'openRouter' | 'mnema';
-export type LocalModelId = 'embed' | 'chat';
+export type LocalModelId = 'embed' | 'chat' | 'chatTools';
+// `LOCAL_CHAT_TOOLS_MODEL` in provider.rs: the local E4B's id in the chat list.
+export const LOCAL_CHAT_TOOLS_MODEL = 'gemma-4-e4b-it';
 export type LocalModelState =
   | { kind: 'absent' }
   | { kind: 'downloading'; done: number; total: number }
@@ -1108,6 +1113,8 @@ export type DownloadError =
   | { kind: 'failed'; message: string };
 
 export const mnemaAvailable = () => invoke<boolean>('mnema_available');
+// Physical memory under 16 GiB: the window warns before E4B (D188).
+export const memoryIsLow = () => invoke<boolean>('memory_is_low');
 export const localModels = () => invoke<LocalModelRow[]>('local_models');
 export const downloadModel = (id: LocalModelId) => invoke<void>('download_model', { id });
 export const cancelDownload = (id: LocalModelId) => invoke<void>('cancel_download', { id });

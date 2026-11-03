@@ -12,6 +12,8 @@ const applyAgentClients = vi.fn();
 
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
+  memoryIsLow: () => Promise.resolve(false),
+  LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   agentAccessEnabled: () => agentAccessEnabled(),
   setAgentAccess: (on: boolean) => setAgentAccess(on),
   agentLog: () => agentLog(),

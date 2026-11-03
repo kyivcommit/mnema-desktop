@@ -1098,8 +1098,9 @@ enum ChatReadiness {
     /// question's wait: the passages are still this machine's to give (D171).
     Unavailable(NoAnswer),
     /// A model and an endpoint: the only state that opens the generation
-    /// branch. Under Mnema the model is always [`crate::provider::LOCAL_CHAT_MODEL`]
-    /// — the stored name is OpenRouter's and means nothing to the local process.
+    /// branch. Under Mnema the model is the chosen local one
+    /// ([`crate::provider::local_chat_name`]) — the stored name means nothing
+    /// to the local process.
     Ready {
         model: String,
         endpoint: crate::provider::Endpoint,
@@ -1119,7 +1120,7 @@ fn chat_readiness(
     };
     let model = match choice {
         crate::provider::ProviderChoice::Mnema => {
-            Some(crate::provider::LOCAL_CHAT_MODEL.to_string())
+            Some(crate::provider::local_chat_name(state.local().chat_model()).to_string())
         }
         crate::provider::ProviderChoice::OpenRouter => {
             state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))?
@@ -1585,9 +1586,9 @@ fn answer_question(
     // Read once: retrieval answers for the embed role's provider; readiness,
     // voice, timeout and the conversation for the chat role's.
     let roles = state.roles();
-    // The conversation is off with chat under Mnema (the local model has no
-    // tool call) and with the switch off; either way each question stands
-    // alone, and a session left from before is dropped.
+    // The conversation is off with chat on Mnema's E2B (it has no tool call)
+    // and with the switch off; either way each question stands alone, and a
+    // session left from before is dropped.
     let dialogue = dialogue_enabled(state, roles.chat);
     if !dialogue {
         state.dialogue.clear();
@@ -1897,15 +1898,30 @@ fn follow_up(
     })
 }
 
-/// Whether questions join a conversation: only with chat on OpenRouter (the
-/// local model has no tool call, and no chat role has no model), and only
+/// Whether questions join a conversation: only with chat on OpenRouter or on
+/// Mnema's E4B (E2B has no tool call, and no chat role has no model), and only
 /// with the tool-support switch on.
 fn dialogue_enabled(
     state: &State<'_, AppState>,
     chat: Option<crate::provider::ProviderChoice>,
 ) -> bool {
-    chat == Some(crate::provider::ProviderChoice::OpenRouter)
-        && crate::prefs::chat_tools(state.data_dir())
+    let calls_tools = match chat {
+        Some(crate::provider::ProviderChoice::OpenRouter) => true,
+        Some(crate::provider::ProviderChoice::Mnema) => {
+            state.local().chat_model() == mnema_local::ModelId::ChatTools
+        }
+        None => false,
+    };
+    calls_tools && crate::prefs::chat_tools(state.data_dir())
+}
+
+/// [`dialogue_enabled`] for the window: the launcher draws a conversation
+/// exactly when this keeps one, so the screen never shows a fresh chat over a
+/// session that still remembers the earlier turns (D188: Mnema on E4B keeps
+/// one, and the window's own copy of the rule said it did not).
+#[tauri::command]
+pub fn conversations_on(state: State<'_, AppState>) -> bool {
+    dialogue_enabled(&state, state.roles().chat)
 }
 
 fn question_lang(query: &str) -> mnema_rag::Lang {

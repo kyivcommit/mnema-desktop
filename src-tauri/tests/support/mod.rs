@@ -131,6 +131,7 @@ pub fn ready_local(root: &Path, env: &[(&str, &str)]) -> mnema_desktop::provider
         Store::new(root.join("models"), "http://127.0.0.1:1".into()).with_manifest(Manifest {
             embed: spec("embed"),
             chat: spec("chat"),
+            chat_tools: spec("chat-tools"),
         });
     for id in [ModelId::Embed, ModelId::Chat] {
         std::fs::create_dir_all(store.dir(id)).expect("model dir");

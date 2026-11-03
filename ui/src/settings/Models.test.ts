@@ -36,7 +36,10 @@ const unlisten = vi.fn();
 // The `scan-progress` handler the mounted controller registered, so a test can
 // deliver the states a real scan would.
 let deliver: ((state: ScanState) => void) | null = null;
+const memoryIsLow = vi.fn(() => Promise.resolve(false));
 vi.mock('../lib/ipc', () => ({
+  memoryIsLow: () => memoryIsLow(),
+  LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   modelSettings: (...a: unknown[]) => modelSettings(...a),
   setKey: (...a: unknown[]) => setKey(...a),
   forgetKey: (...a: unknown[]) => forgetKey(...a),
@@ -3852,4 +3855,32 @@ test('turning_the_tools_switch_on_re_reads_the_roles_before_the_list', async () 
   const reads = modelSettings.mock.calls.length;
   await fireEvent.click(await screen.findByRole('checkbox'));
   await waitFor(() => expect(modelSettings.mock.calls.length).toBeGreaterThan(reads));
+});
+
+// D188: under 16 GiB the chat list warns beside the local E4B — only on the
+// chat tab, only when E4B is in the list, only on a small Mac (each direction).
+test('the low-memory warning stands beside a chat list that offers E4B on a small Mac', async () => {
+  const e4b = entry('gemma-4-e4b-it', { provider: 'mnema', name: 'Google: Gemma 4 E4B', tools: true });
+  const cases = [
+    { low: true, entries: [e4b, entry(CHAT_DEFAULT)], shown: true },
+    { low: false, entries: [e4b, entry(CHAT_DEFAULT)], shown: false },
+    { low: true, entries: [entry(CHAT_DEFAULT)], shown: false },
+  ];
+  try {
+    for (const c of cases) {
+      cleanup();
+      memoryIsLow.mockImplementation(() => Promise.resolve(c.low));
+      mockCatalogues({ chat: catalogueOf(c.entries) });
+      await renderWith(settings({ key: { kind: 'present' } }));
+      expect(screen.queryByTestId('model-low-memory'), 'not on the embedding tab').toBeNull();
+      await openChat();
+      await waitFor(() => expect(optionsFor(CHAT_DEFAULT).length).toBe(1));
+      for (let i = 0; i < 4; i += 1) await tick();
+      const warning = screen.queryByTestId('model-low-memory');
+      if (c.shown) expect(warning?.textContent).toBe('This Mac has less than 16 GB of memory: E4B takes about 6 GB and can slow it down.');
+      else expect(warning, JSON.stringify({ low: c.low, ids: c.entries.map((e) => e.id) })).toBeNull();
+    }
+  } finally {
+    memoryIsLow.mockImplementation(() => Promise.resolve(false));
+  }
 });

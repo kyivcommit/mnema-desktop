@@ -10,11 +10,18 @@ pub use models::{ModelState, Store};
 
 pub use process::{Endpoint, Sidecar};
 
-/// Which of the sidecar's two models a call is about.
+/// Which local model a call is about. The sidecar holds the embedder and one
+/// chat model: `Chat` (Gemma 4 E2B) and `ChatTools` (Gemma 4 E4B, which calls
+/// tools) are two models for the same slot (D188).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelId {
     Embed,
     Chat,
+    ChatTools,
+}
+
+impl ModelId {
+    pub const ALL: [ModelId; 3] = [ModelId::Embed, ModelId::Chat, ModelId::ChatTools];
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -76,5 +83,29 @@ fn macos_major() -> Option<u32> {
 
 #[cfg(not(target_os = "macos"))]
 fn macos_major() -> Option<u32> {
+    None
+}
+
+/// This machine's physical memory in bytes (`hw.memsize`), read in-process.
+#[cfg(target_os = "macos")]
+pub fn physical_memory() -> Option<u64> {
+    let name = c"hw.memsize";
+    let mut bytes: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: `bytes`/`len` describe a writable u64; `name` is NUL-terminated.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && len == std::mem::size_of::<u64>()).then_some(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn physical_memory() -> Option<u64> {
     None
 }

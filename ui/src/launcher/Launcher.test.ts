@@ -1020,7 +1020,7 @@ test('the too-long message goes when the line is emptied', async () => {
 // a delete takes the row out of it; `history_entry` answers `opened`, or rejects.
 // `asks` answers each `ask` in turn and is loud past its end, as `mockAsks` is.
 const OLD = { id: 7, query: 'old q', askedAt: 1_700_000_000 };
-function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; provider?: string; embed?: string; noKey?: boolean; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
+function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: unknown; openedFor?: Record<number, unknown>; list?: unknown[]; openedReject?: boolean; chatTools?: boolean; conversations?: boolean; provider?: string; embed?: string; noKey?: boolean; newChatReject?: boolean; continued?: Promise<boolean> } = {}) {
   let entries = (opts.list ?? [OLD]) as Array<typeof OLD>;
   let next = 0;
   invoke.mockImplementation((cmd: string, args?: { id?: number }) => {
@@ -1036,7 +1036,12 @@ function mockRecents(opts: { asks?: unknown[]; ask?: Promise<unknown>; opened?: 
     // Every answered question opens the pane, so a command left unmocked would
     // be read as nothing and fail the pane's read (`Ruling Y`'s reason).
     if (cmd === 'open_document') return Promise.resolve(OPEN_DOCUMENT);
-    if (cmd === 'chat_tools_enabled') return Promise.resolve(opts.chatTools ?? false);
+    // The backend's answer (`conversations_on`). By default what it says for
+    // OpenRouter or E2B: a conversation only with the switch on and the chat
+    // role not on Mnema; `conversations` stands for Mnema on E4B (D188).
+    if (cmd === 'conversations_on') {
+      return Promise.resolve(opts.conversations ?? ((opts.chatTools ?? false) && (opts.provider ?? 'openRouter') !== 'mnema'));
+    }
     if (cmd === 'new_chat' && opts.newChatReject) return Promise.reject('boom');
     if (cmd === 'delete_history_entry') { entries = entries.filter((e) => e.id !== args?.id); return Promise.resolve(); }
     if (cmd === 'history_entry') {
@@ -1302,15 +1307,15 @@ test('two opens that resolve out of order: the later click wins', async () => {
   expect(screen.getByTestId('recents-row-7').getAttribute('aria-current')).toBeNull();
 });
 
-// Task 8: the launcher draws a conversation. `chat_tools_enabled` is the «Tool
-// support» switch (ruling R4): off keeps today's one-turn launcher.
+// Task 8: the launcher draws a conversation when `conversations_on` says the
+// backend keeps one (ruling R4: the switch off keeps the one-turn launcher).
 const callsOf = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
 const echoes = () => screen.queryAllByTestId('query-echo').map((e) => e.textContent);
 async function askTwice(chatTools: boolean) {
   mockRecents({ chatTools, asks: [generated, generatedOther] });
   render(Launcher);
   if (chatTools) await screen.findByTestId('new-chat');
-  else await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  else await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
   await submit('first');
   await screen.findByTestId('preview-3');
   await submit('second');
@@ -1334,7 +1339,7 @@ test('with tool support off the second ask replaces the first turn', async () =>
 test('with tool support off the first turn leaves the screen while the second ask is in flight', async () => {
   mockRecents({ chatTools: false, asks: [generated] });
   render(Launcher);
-  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
   await submit('first');
   await screen.findByTestId('preview-3');
   mockRecents({ chatTools: false, ask: new Promise(() => {}) });
@@ -1361,10 +1366,25 @@ test('New chat calls new_chat, empties the centre and leaves the search line alo
   expect(echoes()).toEqual(['third']);
 });
 
+// D188: the launcher draws a conversation exactly when the backend keeps one —
+// under Mnema on E4B too. Its own copy of the rule ("never under Mnema") once
+// cleared the screen before every question while the backend remembered them.
+test('under Mnema where the backend keeps a conversation, the launcher keeps every turn', async () => {
+  mockRecents({ chatTools: true, provider: 'mnema', conversations: true, asks: [generated, generatedOther] });
+  render(Launcher);
+  await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('provider_status')).toHaveLength(1));
+  await submit('first');
+  await screen.findByTestId('preview-3');
+  await submit('second');
+  await screen.findByTestId('preview-2');
+  expect(echoes()).toEqual(['first', 'second']);
+});
+
 test('under Mnema with the switch on the launcher shows one turn', async () => {
   mockRecents({ chatTools: true, provider: 'mnema', asks: [generated, generatedOther] });
   render(Launcher);
-  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
   await waitFor(() => expect(callsOf('provider_status')).toHaveLength(1));
   await submit('first');
   await screen.findByTestId('preview-3');
@@ -1387,7 +1407,7 @@ for (const [name, opts] of [
   test(`+ New under ${name} clears the screen, the opened file and the tree mark without calling new_chat`, async () => {
     mockRecents({ ...opts, asks: [generated] });
     render(Launcher);
-    await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+    await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
     await waitFor(() => expect(callsOf('provider_status')).toHaveLength(1));
     const box = screen.getByRole('textbox') as HTMLInputElement;
     await submit('first');
@@ -1454,10 +1474,10 @@ test('New chat is disabled while an ask is in flight', async () => {
 test('the switch is read again when the window gains focus', async () => {
   mockRecents({ chatTools: false });
   render(Launcher);
-  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(1));
+  await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(1));
   mockRecents({ chatTools: true });
   await fireEvent.focus(window);
-  await waitFor(() => expect(callsOf('chat_tools_enabled')).toHaveLength(2));
+  await waitFor(() => expect(callsOf('conversations_on')).toHaveLength(2));
   // The read is what turns a conversation on: the second ask now draws two turns.
   mockRecents({ chatTools: true, asks: [generated, generatedOther] });
   await submit('first');

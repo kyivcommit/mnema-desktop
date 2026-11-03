@@ -781,6 +781,27 @@ pub fn set_agent_access<R: tauri::Runtime>(
     Ok(true)
 }
 
+/// Which local chat model Mnema serves (`mnema_chat_model`, D188): E4B when
+/// it names E4B; anything else, absent included, is E2B — what every install
+/// before D188 has.
+pub fn mnema_chat_model(data_dir: &Path) -> mnema_local::ModelId {
+    match read_all(data_dir)
+        .get("mnema_chat_model")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(crate::provider::LOCAL_CHAT_TOOLS_MODEL) => mnema_local::ModelId::ChatTools,
+        _ => mnema_local::ModelId::Chat,
+    }
+}
+
+pub fn write_mnema_chat_model(data_dir: &Path, id: mnema_local::ModelId) -> std::io::Result<()> {
+    write_key(
+        data_dir,
+        "mnema_chat_model",
+        serde_json::Value::from(crate::provider::local_chat_name(id)),
+    )
+}
+
 /// Whether the chat list shows only models that take tools (`chat_tools`): a
 /// bool, else on.
 pub fn chat_tools(data_dir: &Path) -> bool {
@@ -924,6 +945,25 @@ mod tests {
             assert_eq!(set(bad.clone()), 5, "{bad} must fall back to 5");
         }
         assert_eq!(set(json!(7)), 7);
+    }
+
+    #[test]
+    fn the_local_chat_model_is_e2b_unless_e4b_is_named() {
+        use mnema_local::ModelId;
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            mnema_chat_model(dir.path()),
+            ModelId::Chat,
+            "absent: every install before D188"
+        );
+        write_mnema_chat_model(dir.path(), ModelId::ChatTools).unwrap();
+        assert_eq!(mnema_chat_model(dir.path()), ModelId::ChatTools);
+        write_mnema_chat_model(dir.path(), ModelId::Chat).unwrap();
+        assert_eq!(mnema_chat_model(dir.path()), ModelId::Chat);
+        for junk in [json!(7), json!("gemma-4-e4b"), json!(null), json!(true)] {
+            write_key(dir.path(), "mnema_chat_model", junk.clone()).unwrap();
+            assert_eq!(mnema_chat_model(dir.path()), ModelId::Chat, "{junk}");
+        }
     }
 
     #[test]

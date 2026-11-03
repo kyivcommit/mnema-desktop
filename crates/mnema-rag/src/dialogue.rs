@@ -29,10 +29,32 @@ const HINT: &str = concat!(
     "search: cite only the numbers of the sources returned by the most recent search, never numbers from earlier turns.",
 );
 
-/// Per-model exceptions go here; none yet, so every model gets the hint.
-pub fn profile(_model: &str) -> Profile {
+/// [`HINT`] and one sentence more, for the local Gemma 4 E4B: without it the
+/// model answers "the sources do not contain it" from the sources it already
+/// has instead of searching (measured 2026-11-03, D188: "find more" 22/24 →
+/// 24/24). Written out again because `concat!` takes literals only.
+const HINT_SEARCH_INSTEAD: &str = concat!(
+    " You have a tool, search, that searches the user's document library. Call it whenever the user asks for ",
+    "something from the library that the sources already in this conversation do not contain, including when the ",
+    "user asks to find more or to look up another topic. Do not answer library questions from memory. Do not call it ",
+    "for thanks, shortening, translation, or questions about this conversation. Source numbers restart with every ",
+    "search: cite only the numbers of the sources returned by the most recent search, never numbers from earlier turns.",
+    " If the sources already in this conversation do not contain the answer, call search instead of saying that the ",
+    "sources do not contain it.",
+);
+
+/// The local E4B's name on the wire (`src-tauri`'s `LOCAL_CHAT_TOOLS_MODEL`).
+const LOCAL_E4B: &str = "gemma-4-e4b-it";
+
+/// Per-model exceptions: the local E4B gets one sentence more (D188); every
+/// other model, the hint as measured on the cloud.
+pub fn profile(model: &str) -> Profile {
     Profile {
-        system_addendum: HINT,
+        system_addendum: if model == LOCAL_E4B {
+            HINT_SEARCH_INSTEAD
+        } else {
+            HINT
+        },
     }
 }
 
@@ -233,6 +255,21 @@ mod tests {
         let d = build_dialogue(&[], "q", None, &p, EN);
         assert!(d[0].content.ends_with(p.system_addendum));
         assert_eq!(profile("other/y").system_addendum, p.system_addendum);
+    }
+
+    #[test]
+    fn the_local_e4b_gets_the_hint_and_one_sentence_more() {
+        let e4b = profile("gemma-4-e4b-it").system_addendum;
+        let rest = e4b
+            .strip_prefix(HINT)
+            .expect("the hint itself, unchanged, comes first");
+        assert_eq!(
+            rest,
+            " If the sources already in this conversation do not contain the answer, call search instead of saying that the sources do not contain it."
+        );
+        for other in ["gemma-4-e2b-it", "openai/gpt-6-luna", "gemma-4-e4b"] {
+            assert_eq!(profile(other).system_addendum, HINT, "{other}");
+        }
     }
 
     #[test]

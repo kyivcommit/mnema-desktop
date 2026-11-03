@@ -40,7 +40,7 @@ public final class Engine {
             llm = try await LLMModelFactory.shared.loadContainer(from: chatDir, using: #huggingFaceTokenizerLoader())
             // Same for the first generation (2.7 s measured): pay it here, in the background load.
             do {
-                _ = try await generate([["role": "user", "content": "Hi"]], maxTokens: 1, report: false)
+                _ = try await generate([Turn(role: "user", content: "Hi")], tools: nil, maxTokens: 1, report: false)
             } catch { llm = nil; throw error }
         }
     }
@@ -89,30 +89,42 @@ public final class Engine {
     /// Greedy, no streaming. Prints `first_token_ms=<n>` to stderr: from the start of `generate` to the
     /// first token, so the 0.5 s gate measures the model, not the wire.
     public func chat(_ messages: [[String: String]]) async throws -> String {
-        try await generate(messages, maxTokens: 1024, report: true)
+        try await generate(messages.map { Turn(role: $0["role"] ?? "user", content: $0["content"] ?? "") },
+                           tools: nil, maxTokens: 1024, report: true).text
+    }
+
+    /// A turn that may end in tool calls: with `tools`, the model's calls come back parsed (D188).
+    public func chat(_ turns: [Turn], tools: [ToolSpec]?) async throws -> ChatOutput {
+        let (text, calls) = try await generate(turns, tools: tools, maxTokens: 1024, report: true)
+        return calls.isEmpty ? .text(text) : .toolCalls(calls)
     }
 
     /// `report: false` is the warm-up: the time goes to `warmupFirstTokenMs`, nothing to stderr.
-    private func generate(_ messages: [[String: String]], maxTokens: Int, report: Bool) async throws -> String {
+    private func generate(_ turns: [Turn], tools: [ToolSpec]?, maxTokens: Int, report: Bool) async throws
+        -> (text: String, calls: [ToolCall])
+    {
         guard let llm else { throw EngineError.notLoaded }
-        return try await llm.perform { ctx -> String in
-            let chat: [Chat.Message] = messages.map {
-                let text = $0["content"] ?? ""
-                switch $0["role"] {
-                case "system": return .system(text)
-                case "assistant": return .assistant(text)
-                default: return .user(text)
+        return try await llm.perform { ctx -> (text: String, calls: [ToolCall]) in
+            let names = toolNames(turns)
+            let chat: [Chat.Message] = zip(turns, names).map { turn, name in
+                switch turn.role {
+                case "system": return .system(turn.content)
+                case "assistant": return .assistant(turn.content, toolCalls: turn.toolCalls.isEmpty ? nil : turn.toolCalls)
+                case "tool": return .tool(turn.content, id: turn.toolCallId, name: name)
+                default: return .user(turn.content)
                 }
             }
             // The processor's own prepare() matches the Python template token for token; ChatSession did not.
             let input = try await ctx.processor.prepare(
-                input: UserInput(chat: chat, additionalContext: ["enable_thinking": false]))
+                input: UserInput(chat: chat, tools: tools, additionalContext: ["enable_thinking": false]))
             let start = Date()
             var first: Date?
             var out = ""
+            var calls: [ToolCall] = []
             for await g in try MLXLMCommon.generate(
-                input: input, parameters: .init(maxTokens: maxTokens, temperature: 0), context: ctx)
+                input: input, parameters: .init(maxTokens: maxTokens, temperature: 0), context: ctx, tools: tools)
             {
+                if case .toolCall(let call) = g { calls.append(call) }
                 if case .chunk(let x) = g {
                     if first == nil {
                         first = Date()
@@ -127,11 +139,59 @@ public final class Engine {
                     out += x
                 }
             }
-            return out
+            return (withoutThinking(out), calls)
         }
     }
 }
 
+/// One chat message as the wire gives it. `toolCalls`: an assistant turn that asked for tools;
+/// role `tool`: what a tool returned.
+/// The tool's name for each `tool` turn (nil elsewhere): a tool result names its call by id only, and the
+/// template wants the name too. Ids restart with every response (`call_0`…), so an id means the call of the
+/// latest assistant turn before it that used it.
+public func toolNames(_ turns: [Turn]) -> [String?] {
+    var seen: [String: String] = [:]
+    return turns.map { turn in
+        for c in turn.toolCalls { if let id = c.id { seen[id] = c.function.name } }
+        return turn.role == "tool" ? turn.toolCallId.flatMap { seen[$0] } : nil
+    }
+}
+
+public struct Turn: Sendable {
+    public let role: String
+    public let content: String
+    public let toolCalls: [ToolCall]
+    public let toolCallId: String?
+
+    public init(role: String, content: String, toolCalls: [ToolCall] = [], toolCallId: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+    }
+}
+
+public enum ChatOutput: Equatable, Sendable {
+    case text(String)
+    case toolCalls([ToolCall])
+}
+
 public enum EngineError: Error {
     case notLoaded
+}
+
+/// The answer without Gemma 4's thinking channel. After a tool result the template continues the model's
+/// own turn and writes no empty thought block, so E4B thinks on its own (measured 2026-11-03: 9 of 24
+/// answers after a search); llama.cpp moves the block out of the content, and so does this. A block cut
+/// off by the token limit goes to the end: what follows its opening is thinking, never the answer.
+public func withoutThinking(_ text: String) -> String {
+    var out = text
+    while let open = out.range(of: "<|channel>thought") {
+        if let close = out.range(of: "<channel|>", range: open.upperBound ..< out.endIndex) {
+            out.removeSubrange(open.lowerBound ..< close.upperBound)
+        } else {
+            out.removeSubrange(open.lowerBound ..< out.endIndex)
+        }
+    }
+    return out.trimmingCharacters(in: .whitespacesAndNewlines)
 }

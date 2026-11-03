@@ -11327,6 +11327,96 @@ fn the_ask_path_sends_the_mnema_voice_only_for_mnema() {
     );
 }
 
+/// D188: Mnema on E4B with tools on asks through the conversation: the chat
+/// body names E4B and its system prompt ends with E4B's own hint; on E2B the
+/// question keeps the Mnema voice (both directions).
+#[test]
+fn mnema_on_e4b_asks_through_the_conversation_with_its_own_hint() {
+    use mnema_local::ModelId;
+    const SENTENCE: &str = "call search instead of saying that the sources do not contain it.";
+    for e4b in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("fake-mlx.log");
+        let log_env = log.display().to_string();
+        let fx = mnema_app(dir.path(), 1, &[("FAKE_MLX_LOG", &log_env)]);
+        let state = fx.app.state::<AppState>();
+        if e4b {
+            let local = state.local();
+            std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+            std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+            mnema_desktop::prefs::write_mnema_chat_model(state.data_dir(), ModelId::ChatTools)
+                .unwrap();
+            local.set_chat_model(ModelId::ChatTools);
+        }
+        assert!(
+            mnema_desktop::prefs::chat_tools(state.data_dir()),
+            "premise: tools on"
+        );
+        scan_to_completion(fx.app.handle());
+        call(&fx.webview, "ask", json!({ "query": "synthetic topic" })).expect("ask");
+        let body = logged_chat_body(&log);
+        let system = body["messages"][0]["content"].as_str().unwrap_or_default();
+        let user = body["messages"]
+            .as_array()
+            .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        if e4b {
+            assert_eq!(body["model"], json!("gemma-4-e4b-it"), "{body}");
+            assert!(
+                system.ends_with(SENTENCE),
+                "E4B's hint closes the prompt: {system:?}"
+            );
+            assert!(
+                !user.contains("Answer briefly:"),
+                "the conversation, not the Mnema voice: {user:?}"
+            );
+            // A second question continues the conversation and offers the local
+            // model the search tool.
+            call(&fx.webview, "ask", json!({ "query": "find more" })).expect("follow-up");
+            let text = std::fs::read_to_string(&log).unwrap();
+            let last: Value = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("body /v1/chat/completions "))
+                .next_back()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .unwrap();
+            assert_eq!(
+                last["tools"][0]["function"]["name"],
+                json!("search"),
+                "{last}"
+            );
+        } else {
+            assert_eq!(body["model"], json!("gemma-4-e2b-it"), "{body}");
+            assert!(!system.contains(SENTENCE), "{system:?}");
+            assert!(
+                user.contains("Answer briefly:"),
+                "E2B keeps the Mnema voice: {user:?}"
+            );
+        }
+    }
+}
+
+/// D188: the window asks `conversations_on` instead of keeping its own copy of
+/// the rule — on Mnema it is on for E4B with tools on, off for E2B, off with
+/// the switch off.
+#[test]
+fn conversations_on_is_the_backends_rule_for_mnema() {
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let fx = mnema_app(dir.path(), 1, &[]);
+    let state = fx.app.state::<AppState>();
+    let on = || call(&fx.webview, "conversations_on", json!({})).expect("registered");
+    assert_eq!(on(), json!(false), "E2B takes no tools");
+    let local = state.local();
+    std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+    std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+    local.set_chat_model(ModelId::ChatTools);
+    assert_eq!(on(), json!(true), "E4B with tools on");
+    mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+    assert_eq!(on(), json!(false), "the switch off");
+}
+
 /// A local answer slower than OpenRouter's 15 s still arrives: the chat call
 /// under Mnema waits `LOCAL_CHAT_TIMEOUT`. Pays 20 s.
 #[test]
@@ -11746,7 +11836,7 @@ fn mnema_cannot_serve_a_foreign_space() {
     let state = app.state::<AppState>();
     state.install_local(support::ready_local(dir.path(), &[]));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     mnema_desktop::provider::on_configured(&state, Mnema, None);
@@ -11778,6 +11868,7 @@ fn downloadable_local(
     let store = Store::new(dir.join("models"), server.base().to_string()).with_manifest(Manifest {
         embed: spec("embed"),
         chat: spec("chat"),
+        chat_tools: spec("chat-tools"),
     });
     if chat_ready {
         std::fs::create_dir_all(store.dir(ModelId::Chat)).unwrap();
@@ -11796,7 +11887,7 @@ fn a_finished_download_fills_its_models_empty_role() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
 
     let done = download_model(app.handle().clone(), app.state(), LocalModel::Chat);
@@ -11804,6 +11895,203 @@ fn a_finished_download_fills_its_models_empty_role() {
 
     assert_eq!(state.roles().chat, Some(Mnema));
     assert_eq!(state.roles().embed, None, "bge-m3 was not downloaded");
+}
+
+/// D188: only the chosen chat model's download fills the chat role; E4B
+/// downloaded while E2B is chosen moves nothing (both directions).
+#[test]
+fn only_the_chosen_chat_models_download_fills_the_chat_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    for (chosen, want) in [
+        (mnema_local::ModelId::Chat, None),
+        (mnema_local::ModelId::ChatTools, Some(Mnema)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![Reply::ok("x")]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        state.install_local(downloadable_local(dir.path(), &server, false));
+        state.local().set_chat_model(chosen);
+        write_roles(&state, None, None);
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+        let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+        assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+        assert_eq!(state.roles().chat, want, "chosen {chosen:?}");
+    }
+}
+
+/// D188: a choice of E4B that the index refuses (shut) moves neither the served
+/// model nor the stored choice — from the list or by the tools switch.
+#[test]
+fn a_refused_e4b_choice_leaves_the_served_model_alone() {
+    use mnema_desktop::models::{choose_chat_model, choose_chat_tools};
+    use mnema_desktop::provider::{LOCAL_CHAT_TOOLS_MODEL, ProviderChoice::Mnema};
+    use mnema_local::ModelId;
+    for by_switch in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        // No `boot_index`: the index is shut.
+        state.install_local(downloadable_local(dir.path(), &server, true));
+        let local = state.local();
+        std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+        std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+        write_roles(&state, None, Some(Mnema));
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+        let answer = if by_switch {
+            choose_chat_tools(&state, true, false).map(|_| ())
+        } else {
+            choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema)
+        };
+        assert!(
+            answer.is_err(),
+            "premise: the shut index refused ({by_switch}): {answer:?}"
+        );
+
+        assert_eq!(local.chat_model(), ModelId::Chat, "served ({by_switch})");
+        assert_eq!(
+            mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+            ModelId::Chat,
+            "stored ({by_switch})"
+        );
+        assert!(!mnema_desktop::prefs::chat_tools(state.data_dir()));
+    }
+}
+
+/// The chat model the index stores (`META_CHAT_MODEL`).
+fn chat_model_stored(app: &tauri::App<MockRuntime>) -> Option<String> {
+    app.state::<AppState>()
+        .with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL))
+        .unwrap()
+}
+
+/// D188: E4B is chosen in the list like any model, only when downloaded; the
+/// choice reaches the process and the stored name, and E2B can be chosen back.
+#[test]
+fn the_local_chat_model_is_chosen_from_the_list_only_when_downloaded() {
+    use mnema_desktop::models::choose_chat_model;
+    use mnema_desktop::provider::{
+        LOCAL_CHAT_MODEL, LOCAL_CHAT_TOOLS_MODEL, ProviderChoice::Mnema,
+    };
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    mnema_desktop::boot_index(app.handle());
+    state.install_local(downloadable_local(dir.path(), &server, true));
+    write_roles(&state, None, None);
+
+    let refused = choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema);
+    assert!(
+        matches!(refused, Err(mnema_desktop::error::Error::ProviderNotReady)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        state.local().chat_model(),
+        ModelId::Chat,
+        "a refusal chooses nothing"
+    );
+    assert_eq!(state.roles().chat, None);
+
+    let local = state.local();
+    std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+    std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+    choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema).unwrap();
+    assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+    assert_eq!(
+        mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+        ModelId::ChatTools
+    );
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(
+        chat_model_stored(&app).as_deref(),
+        Some(LOCAL_CHAT_TOOLS_MODEL)
+    );
+
+    choose_chat_model(&state, LOCAL_CHAT_MODEL.into(), Mnema).unwrap();
+    assert_eq!(state.local().chat_model(), ModelId::Chat);
+    assert_eq!(
+        mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+        ModelId::Chat
+    );
+    assert_eq!(chat_model_stored(&app).as_deref(), Some(LOCAL_CHAT_MODEL));
+}
+
+/// D188: turning tools on with Mnema's chat on E2B takes E4B when it is
+/// downloaded — no question about the cloud, the role stays on Mnema; on E4B
+/// already, nothing moves. Without E4B the old answer (ask about the cloud).
+#[test]
+fn tools_on_takes_e4b_for_a_mnema_chat_role_when_it_is_downloaded() {
+    use mnema_desktop::models::{ToolsSwitch, choose_chat_tools};
+    use mnema_desktop::provider::ProviderChoice::Mnema;
+    use mnema_local::ModelId;
+    for e4b in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        mnema_desktop::boot_index(app.handle());
+        state.install_local(downloadable_local(dir.path(), &server, true));
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+        write_roles(&state, None, Some(Mnema));
+        if e4b {
+            let local = state.local();
+            std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+            std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+        }
+        let answer = choose_chat_tools(&state, true, false).unwrap();
+        if e4b {
+            assert_eq!(answer, ToolsSwitch::Stored { on: true });
+            assert_eq!(state.roles().chat, Some(Mnema));
+            assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+            // Again, on E4B: nothing to move.
+            assert_eq!(
+                choose_chat_tools(&state, true, false).unwrap(),
+                ToolsSwitch::Stored { on: true }
+            );
+            assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+            assert_eq!(state.roles().chat, Some(Mnema), "on E4B the role stays");
+        } else {
+            assert_eq!(
+                state.local().chat_model(),
+                ModelId::Chat,
+                "no E4B: E2B stays chosen"
+            );
+            assert_ne!(
+                state.roles().chat,
+                Some(Mnema),
+                "E2B cannot hold the role with tools on: {answer:?}"
+            );
+        }
+    }
+}
+
+/// D188: with tools on, a finished E4B download fills an empty chat role with
+/// E4B — the E2B download does not (the test below).
+#[test]
+fn an_e4b_download_with_tools_on_fills_an_empty_chat_role() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.roles().chat, Some(Mnema));
+    assert_eq!(state.local().chat_model(), mnema_local::ModelId::ChatTools);
 }
 
 /// With the tools switch on (the default) Gemma is no valid default: an empty
@@ -11840,7 +12128,7 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
     let state = app.state::<AppState>();
     state.install_local(downloadable_local(dir.path(), &server, false));
     write_roles(&state, None, None);
-    // Gemma takes no tools: with the switch on it is not filled.
+    // E2B takes no tools: with the switch on it is not filled.
     mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
     state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
     let scan = state
@@ -11862,6 +12150,76 @@ fn a_download_during_a_scan_fills_the_role_when_the_scan_ends() {
         Some(Mnema),
         "the deferred substitution is applied when the slot is released"
     );
+}
+
+/// D188: an E4B download with tools on chooses E4B only under the job slot —
+/// choosing it restarts the process, and a scan embedding through it would end
+/// Failed. During the scan nothing moves; when the slot is released E4B is
+/// chosen and fills the empty role.
+#[test]
+fn an_e4b_download_during_a_scan_chooses_e4b_only_when_the_scan_ends() {
+    use mnema_desktop::provider::{LocalModel, ProviderChoice::Mnema, download_model};
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, None, None);
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+    state.set_job_observer(mnema_desktop::job_observer(app.handle().clone()));
+    let scan = state
+        .claim_job(
+            mnema_desktop::scan_state::Phase::Embedding {
+                counts: mnema_desktop::job::Progress::default(),
+            },
+            true,
+        )
+        .expect("the slot is free");
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+    assert_eq!(
+        state.local().chat_model(),
+        ModelId::Chat,
+        "E4B was chosen (and the process stopped) under a running scan"
+    );
+    assert_eq!(state.roles().chat, None, "the scan holds the slot");
+
+    drop(scan);
+    assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+    assert_eq!(state.roles().chat, Some(Mnema));
+}
+
+/// D188: an E4B download chooses nothing for a chat role on another provider —
+/// the choice would restart the process for a model nobody asks.
+#[test]
+fn an_e4b_download_leaves_a_cloud_chat_role_and_the_served_model_alone() {
+    use mnema_desktop::provider::{
+        LocalModel,
+        ProviderChoice::{Mnema, OpenRouter},
+        download_model,
+    };
+    use mnema_local::ModelId;
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![Reply::ok("x")]);
+    let app = app_with_provider(dir.path(), NO_PROVIDER);
+    let state = app.state::<AppState>();
+    state.install_local(downloadable_local(dir.path(), &server, false));
+    write_roles(&state, Some(Mnema), Some(OpenRouter));
+    assert!(
+        mnema_desktop::prefs::chat_tools(state.data_dir()),
+        "premise: on"
+    );
+
+    let done = download_model(app.handle().clone(), app.state(), LocalModel::ChatTools);
+    assert!(done.is_ok(), "premise: the download finished: {done:?}");
+
+    assert_eq!(state.local().chat_model(), ModelId::Chat);
+    assert_eq!(state.roles().chat, Some(OpenRouter));
 }
 
 /// Mnema is configured per model: bge-m3 arriving says nothing new about

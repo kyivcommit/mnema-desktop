@@ -1,4 +1,5 @@
 import Foundation
+import MLXLMCommon
 import Network
 
 struct Request {
@@ -191,14 +192,18 @@ public final class Server {
             guard let raw = json["messages"] as? [[String: Any]], !raw.isEmpty else {
                 return reply(Response(400, ["error": "messages must be a non-empty array"]))
             }
-            let messages = raw.compactMap { m -> [String: String]? in
-                guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
-                return ["role": role, "content": content]
-            }
-            guard messages.count == raw.count else {
+            let turns = raw.compactMap(Self.turn)
+            guard turns.count == raw.count else {
                 return reply(Response(400, ["error": "each message needs a string role and content"]))
             }
-            work.submit(urgent: true) { reply(self.chat(messages)) }
+            var tools: [ToolSpec]?
+            if let t = json["tools"] {
+                guard let list = t as? [[String: Any]] else {
+                    return reply(Response(400, ["error": "tools must be an array of objects"]))
+                }
+                tools = list.map { $0.mapValues(sendable) }
+            }
+            work.submit(urgent: true) { reply(self.chat(turns, tools: tools)) }
         // Load and unload wait for the running job in the same queue: never free a model in use.
         case "/mnema/load":
             let names = json["models"] as? [String] ?? ["chat", "embed"]
@@ -242,14 +247,57 @@ public final class Server {
         return Response(204)
     }
 
-    private func chat(_ messages: [[String: String]]) -> Response {
-        guard let m = models else { return Response(200, ["choices": [["message": ["content": "stub <c>1</c>"]]]]) }
+    /// One wire message, or nil when it does not decode. Content may be null only on an assistant turn that
+    /// carries tool calls (the OpenAI form); every call needs a name and object arguments (a JSON string or an object).
+    private static func turn(_ m: [String: Any]) -> Turn? {
+        guard let role = m["role"] as? String else { return nil }
+        if role == "assistant", let raw = m["tool_calls"] as? [[String: Any]], !raw.isEmpty {
+            let calls = raw.compactMap { c -> ToolCall? in
+                guard let f = c["function"] as? [String: Any], let name = f["name"] as? String else { return nil }
+                let object: Any? = (f["arguments"] as? String).flatMap {
+                    try? JSONSerialization.jsonObject(with: Data($0.utf8))
+                } ?? f["arguments"]
+                guard let args = object as? [String: Any] else { return nil }
+                return ToolCall(function: .init(name: name, arguments: args.mapValues(JSONValue.from)),
+                                id: c["id"] as? String)
+            }
+            guard calls.count == raw.count, m["content"] is String || m["content"] is NSNull || m["content"] == nil
+            else { return nil }
+            return Turn(role: role, content: m["content"] as? String ?? "", toolCalls: calls)
+        }
+        guard let content = m["content"] as? String else { return nil }
+        return Turn(role: role, content: content, toolCallId: role == "tool" ? m["tool_call_id"] as? String : nil)
+    }
+
+    private func chat(_ turns: [Turn], tools: [ToolSpec]?) -> Response {
+        guard let m = models else { return Self.stubChat(tools: tools) }
         let r = load(["chat"])
         guard r.status == 204 else { return r }
-        switch blocking({ try await m.engine.chat(messages) }) {
-        case .success(let content): return Response(200, ["choices": [["message": ["content": content]]]])
+        switch blocking({ try await m.engine.chat(turns, tools: tools) }) {
+        case .success(.text(let content)): return Response(200, ["choices": [["message": ["content": content]]]])
+        case .success(.toolCalls(let calls)): return Self.toolCallsResponse(calls)
         case .failure(let e): return Response(500, ["error": "chat: \(e)"])
         }
+    }
+
+    /// The OpenAI shape: arguments as a JSON string, ids `call_<n>` in order.
+    private static func toolCallsResponse(_ calls: [ToolCall]) -> Response {
+        let wire = calls.enumerated().map { i, c -> [String: Any] in
+            let args = (try? JSONEncoder().encode(c.function.arguments)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            return ["id": "call_\(i)", "type": "function", "function": ["name": c.function.name, "arguments": args]]
+        }
+        return Response(200, ["choices": [[
+            "message": ["role": "assistant", "content": NSNull(), "tool_calls": wire],
+            "finish_reason": "tool_calls",
+        ]]])
+    }
+
+    /// `--stub`: with `MNEMA_STUB_TOOL_QUERY` set and tools offered, asks for `search` with that query.
+    private static func stubChat(tools: [ToolSpec]?) -> Response {
+        if tools != nil, let q = ProcessInfo.processInfo.environment["MNEMA_STUB_TOOL_QUERY"] {
+            return toolCallsResponse([ToolCall(function: .init(name: "search", arguments: ["query": JSONValue.string(q)]))])
+        }
+        return Response(200, ["choices": [["message": ["content": "stub <c>1</c>"]]]])
     }
 
     private func embed(_ inputs: [String]) -> Response {
@@ -271,6 +319,17 @@ public final class Server {
             return ["index": i, "embedding": v]
         }
         return Response(200, ["data": data])
+    }
+}
+
+/// JSONSerialization's values as the `Sendable` tree a tool schema is.
+private func sendable(_ v: Any) -> any Sendable {
+    switch v {
+    case let d as [String: Any]: return d.mapValues(sendable)
+    case let a as [Any]: return a.map(sendable)
+    case let s as String: return s
+    case let n as NSNumber: return CFGetTypeID(n) == CFBooleanGetTypeID() ? n.boolValue : n.doubleValue
+    default: return Optional<String>.none
     }
 }
 

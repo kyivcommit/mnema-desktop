@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
-  import { ask, chatTools, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
+  import { ask, conversationsOn, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
   import { checkQuery, firstCard, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import AddFolder from './AddFolder.svelte';
@@ -85,9 +85,6 @@
   );
   // The conversation on screen, oldest first (the backend keeps the same session).
   let turns = $state.raw<Turn[]>([]);
-  // The «Tool support» switch (ruling R4): off keeps the launcher at one turn
-  // and hides «New chat». Read like the provider status, on mount and on focus.
-  let chatOn = $state(false);
   let status = $state<ProviderStatus | null>(null);
   // Which provider the status is about: the two are written together.
   let statusProvider = $state<ProviderChoice>('openRouter');
@@ -97,10 +94,12 @@
   // clamps them to the window and owns the splitters.
   let panels = $state<PanelState>(loadLayout());
 
-  // Under the Mnema provider the backend keeps no conversation, whatever the switch says.
-  // The CHAT role decides, as `dialogue_enabled` does; `statusProvider` may speak
-  // for embedding. Until settings are read, the status's provider stands in.
-  const dialogue = $derived(chatOn && (chatProvider ?? statusProvider) !== 'mnema');
+  // Whether the backend keeps a conversation: asked of it (`conversations_on`),
+  // on mount and on focus, like the provider status. Off keeps the launcher at
+  // one turn and hides «New chat» (ruling R4). The rule is never worked out
+  // here: a copy of it that said "no conversation under Mnema" once drew a
+  // fresh chat over a session that remembered its start (D188).
+  let dialogue = $state(false);
   const newChatLabel = $derived.by(() => { void $locale; return t('new_conversation'); });
 
   // Read on mount and again whenever the window gains focus: the key and the
@@ -138,10 +137,10 @@
       .catch((e) => console.error('provider_status failed', e));
   }
 
-  function refreshChatTools() {
-    chatTools().then((on) => { chatOn = on === true; }).catch((e) => console.error('chat_tools_enabled failed', e));
+  function refreshConversations() {
+    conversationsOn().then((on) => { dialogue = on === true; }).catch((e) => console.error('conversations_on failed', e));
   }
-  function refreshAll() { refreshProvider(); refreshChatTools(); }
+  function refreshAll() { refreshProvider(); refreshConversations(); }
 
   // Every call that changes the backend session (ask, new chat, continue a
   // stored one) goes through this chain, so they arrive in the order the person

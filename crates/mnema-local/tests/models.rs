@@ -49,6 +49,7 @@ fn manifest() -> Manifest {
             "org/chat",
             files(Some(FileSpec::bundled("config.json", CONFIG, &sha(CONFIG)))),
         ),
+        chat_tools: spec("org/chat-tools", files(None)),
     }
 }
 
@@ -347,4 +348,71 @@ fn cancel_works_on_a_silent_body() {
         started.elapsed()
     );
     assert!(s.dir(ModelId::Embed).join("big.bin.part").exists());
+}
+
+#[test]
+fn chat_tools_is_a_model_of_its_own() {
+    let t = tempfile::tempdir().unwrap();
+    let server = MockServer::new(vec![
+        Reply::ok(&big()),
+        Reply::ok(&small()),
+        Reply::ok(&big()),
+        Reply::ok(&small()),
+    ]);
+    let s = store(t.path(), &server);
+    assert_ne!(s.dir(ModelId::Chat), s.dir(ModelId::ChatTools));
+    dl_ok(&s, ModelId::ChatTools);
+    assert_eq!(s.state(ModelId::ChatTools), ModelState::Ready);
+    assert_ne!(
+        s.state(ModelId::Chat),
+        ModelState::Ready,
+        "downloading E4B must not make E2B ready"
+    );
+    dl_ok(&s, ModelId::Chat);
+    s.remove(ModelId::ChatTools).unwrap();
+    assert_ne!(s.state(ModelId::ChatTools), ModelState::Ready);
+    assert_eq!(
+        s.state(ModelId::Chat),
+        ModelState::Ready,
+        "removing E4B must leave E2B"
+    );
+}
+
+#[test]
+fn every_pinned_model_is_pinned_by_commit_and_sha256() {
+    let m = Manifest::pinned();
+    let hex = |s: &str, n: usize| {
+        s.len() == n
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut dirs = std::collections::HashSet::new();
+    for id in ModelId::ALL {
+        let spec = m.spec(id);
+        assert!(hex(&spec.commit, 40), "{id:?}: commit {}", spec.commit);
+        assert!(!spec.files.is_empty(), "{id:?}: no files");
+        for f in &spec.files {
+            assert!(hex(&f.sha256, 64), "{id:?} {}: sha256 {}", f.name, f.sha256);
+            assert!(f.size > 0, "{id:?} {}: size 0", f.name);
+        }
+        assert!(dirs.insert(spec.dir_name()), "{id:?}: directory shared");
+    }
+}
+
+#[test]
+fn e4b_downloads_its_upstream_config_and_e2b_gets_ours() {
+    let m = Manifest::pinned();
+    let config = |id| {
+        m.spec(id)
+            .files
+            .iter()
+            .find(|f| f.name == "config.json")
+            .map(|f| f.bundled.is_some())
+    };
+    assert_eq!(config(ModelId::Chat), Some(true), "E2B: our flat config");
+    assert_eq!(
+        config(ModelId::ChatTools),
+        Some(false),
+        "E4B: the upstream config, downloaded"
+    );
 }
