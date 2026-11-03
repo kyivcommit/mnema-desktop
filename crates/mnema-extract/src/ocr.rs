@@ -20,9 +20,16 @@
 //! **Cold start.** The first recognition in an executable costs ~46 s, once per
 //! executable *path* — not per process, not per boot: the same binary copied to
 //! a new path paid it again, a rebuilt binary at the old path did not. The
-//! packaged worker pays it once per install; a test binary under
-//! `target/*/deps/` pays it after every rebuild, because its path carries a
-//! hash. A caller's per-page deadline has to cover it (the pool's 120 s does).
+//! packaged worker pays it once per install, and a test binary once per
+//! `target/*/deps/<name>-<hash>` path (`tests/ocr.rs`: 45.9 s on its first run,
+//! 0.4 s after rebuilds — the hash did not move). A caller's per-page deadline
+//! has to cover it (the pool's 120 s does).
+//!
+//! **Memory.** Resident size grows ~35 MB per recognised page and keeps
+//! growing (2 GB after 60 calls), but `phys_footprint` does not (178 → 183 MB
+//! over 20 calls): the growth is IOSurface memory Vision leaves *reclaimable*,
+//! which the OS takes back under pressure. Measured with `footprint`; a peak
+//! read from RSS will look like a leak and is not one.
 //!
 //! The text is the observations' top candidates in the order Vision returned
 //! them, joined with `\n`. It is **not** NFC-normalised and not thresholded:
@@ -155,9 +162,10 @@ mod platform {
         };
         let pixels = &image.bgra[..len];
 
-        // Per call: the worker serves 100 requests, and Vision's temporaries are
-        // autoreleased — without a pool of our own they would live until the
-        // process does.
+        // Per call: the worker serves 100 requests, and anything Vision
+        // autoreleases would otherwise live until the thread's outermost pool,
+        // which a worker never drains. Insurance: over 20 calls the footprint
+        // was the same without it.
         autoreleasepool(|_| {
             // Copied, not lent. `CGDataProvider::with_data` would avoid the
             // copy, but then nothing bounds how long CoreGraphics keeps reading

@@ -5,10 +5,10 @@
 //! libc, which std's lock does not cover) is the race `set_var` is `unsafe` for.
 //! Here there is one test per platform and nothing else runs beside it.
 //!
-//! The macOS test pays Vision's ~46 s cold start after every rebuild — this
-//! binary's path carries a hash, and the cold start is per executable path. It
-//! is the only lib-level Vision test for that reason; the rest go through the
-//! worker, whose path is stable.
+//! The macOS test pays Vision's ~46 s cold start on the first run of this
+//! binary's path (`deps/ocr-<hash>`; measured 45.9 s once, 0.4 s after
+//! rebuilds). Every new test binary would pay it again, which is why this is
+//! the only lib-level Vision test; the rest go through the worker.
 
 use mnema_extract::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, recognise};
 
@@ -57,8 +57,9 @@ fn a_scanned_page_is_read_and_the_seam_makes_the_engine_unavailable() {
     eprintln!("recognise took {:.1}s", started.elapsed().as_secs_f64());
 
     // Only words measured to survive Vision verbatim (fixtures' report): `ґ`
-    // comes back as `г` and the apostrophe as U+02BC, so neither is asserted
-    // in its drawn form.
+    // is not reliably kept (this page has come back with `ґанку` and with
+    // `ганку`) and the apostrophe returns as U+02BC, so neither is asserted in
+    // its drawn form.
     for word in ["їжак", "єнот", "мʼясо", "памʼятна", "collegium"] {
         assert!(
             read.text.contains(word),
