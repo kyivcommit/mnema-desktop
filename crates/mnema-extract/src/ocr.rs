@@ -87,8 +87,26 @@ pub fn recognise(image: &PageImage) -> Result<Option<Recognised>, OcrError> {
 
 /// The languages asked for, in priority order. Measured: an English scan reads
 /// byte-for-byte the same under this list as under `[en-US]` alone.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const LANGUAGES: [&str; 3] = ["uk-UA", "ru-RU", "en-US"];
+
+/// [`LANGUAGES`] that `supported` contains, in [`LANGUAGES`]' order — or
+/// `Unavailable` without `uk-UA`: an engine that cannot read Ukrainian would
+/// turn every scan in the library into "no text", which is not a fact about
+/// the scans.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn languages(supported: &[String]) -> Result<Vec<&'static str>, OcrError> {
+    let chosen: Vec<&'static str> = LANGUAGES
+        .into_iter()
+        .filter(|l| supported.iter().any(|s| s == l))
+        .collect();
+    if chosen.first() != Some(&LANGUAGES[0]) {
+        return Err(OcrError::Unavailable(format!(
+            "{} is not among the supported languages {supported:?}",
+            LANGUAGES[0]
+        )));
+    }
+    Ok(chosen)
+}
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
@@ -113,7 +131,7 @@ mod platform {
         VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
     };
 
-    use super::{LANGUAGES, OcrError, PageImage, Recognised};
+    use super::{OcrError, PageImage, Recognised, languages};
 
     fn describe(e: &NSError) -> String {
         e.localizedDescription().to_string()
@@ -183,16 +201,9 @@ mod platform {
             let supported = unsafe { request.supportedRecognitionLanguagesAndReturnError() }
                 .map_err(|e| OcrError::Unavailable(describe(&e)))?;
             let supported: Vec<String> = supported.iter().map(|s| s.to_string()).collect();
-            if !supported.iter().any(|s| s == LANGUAGES[0]) {
-                return Err(OcrError::Unavailable(format!(
-                    "{} is not among the supported languages {supported:?}",
-                    LANGUAGES[0]
-                )));
-            }
-            let languages: Vec<Retained<NSString>> = LANGUAGES
-                .iter()
-                .filter(|l| supported.iter().any(|s| s == *l))
-                .map(|l| NSString::from_str(l))
+            let languages: Vec<Retained<NSString>> = languages(&supported)?
+                .into_iter()
+                .map(NSString::from_str)
                 .collect();
             request.setRecognitionLanguages(&NSArray::from_retained_slice(&languages));
 
@@ -229,5 +240,50 @@ mod platform {
                 dpi: image.dpi,
             }))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn languages_are_the_intersection_in_priority_order() {
+        let supported = owned(&["en-US", "fr-FR", "uk-UA"]);
+        assert_eq!(languages(&supported), Ok(vec!["uk-UA", "en-US"]));
+    }
+
+    #[test]
+    fn an_engine_without_ukrainian_is_unavailable() {
+        let supported = owned(&["en-US", "ru-RU"]);
+        assert!(
+            matches!(languages(&supported), Err(OcrError::Unavailable(_))),
+            "{:?}",
+            languages(&supported)
+        );
+    }
+
+    // Returns before Vision is reached, so no cold start. The seam variable is
+    // only read here, never set: setting it belongs to `tests/ocr.rs`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_buffer_shorter_than_its_geometry_is_refused_not_read() {
+        let pixels = [0u8; 15];
+        let image = PageImage {
+            bgra: &pixels,
+            width: 2,
+            height: 2,
+            stride: 8,
+            dpi: 300,
+        };
+        assert!(
+            matches!(recognise(&image), Err(OcrError::Failed(_))),
+            "{:?}",
+            recognise(&image)
+        );
     }
 }
