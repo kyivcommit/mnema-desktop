@@ -96,9 +96,9 @@
 
   // Whether the backend keeps a conversation: asked of it (`conversations_on`),
   // on mount and on focus, like the provider status. Off keeps the launcher at
-  // one turn and hides «New chat» (ruling R4).
-  // never worked out here — a copy of the rule that said "no conversation under
-  // Mnema" once drew a fresh chat over a session that remembered its start (D188).
+  // one turn and hides «New chat» (ruling R4). The rule is never worked out
+  // here: a copy of it that said "no conversation under Mnema" once drew a
+  // fresh chat over a session that remembered its start (D188).
   let dialogue = $state(false);
   const newChatLabel = $derived.by(() => { void $locale; return t('new_conversation'); });
 

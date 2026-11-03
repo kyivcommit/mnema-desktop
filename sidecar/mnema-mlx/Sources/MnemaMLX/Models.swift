@@ -105,15 +105,13 @@ public final class Engine {
     {
         guard let llm else { throw EngineError.notLoaded }
         return try await llm.perform { ctx -> (text: String, calls: [ToolCall]) in
-            // A tool result names its call by id only; the template wants the tool's name too.
-            let names = Dictionary(turns.flatMap(\.toolCalls).compactMap { c in c.id.map { ($0, c.function.name) } },
-                                   uniquingKeysWith: { a, _ in a })
-            let chat: [Chat.Message] = turns.map {
-                switch $0.role {
-                case "system": return .system($0.content)
-                case "assistant": return .assistant($0.content, toolCalls: $0.toolCalls.isEmpty ? nil : $0.toolCalls)
-                case "tool": return .tool($0.content, id: $0.toolCallId, name: $0.toolCallId.flatMap { names[$0] })
-                default: return .user($0.content)
+            let names = toolNames(turns)
+            let chat: [Chat.Message] = zip(turns, names).map { turn, name in
+                switch turn.role {
+                case "system": return .system(turn.content)
+                case "assistant": return .assistant(turn.content, toolCalls: turn.toolCalls.isEmpty ? nil : turn.toolCalls)
+                case "tool": return .tool(turn.content, id: turn.toolCallId, name: name)
+                default: return .user(turn.content)
                 }
             }
             // The processor's own prepare() matches the Python template token for token; ChatSession did not.
@@ -148,6 +146,17 @@ public final class Engine {
 
 /// One chat message as the wire gives it. `toolCalls`: an assistant turn that asked for tools;
 /// role `tool`: what a tool returned.
+/// The tool's name for each `tool` turn (nil elsewhere): a tool result names its call by id only, and the
+/// template wants the name too. Ids restart with every response (`call_0`…), so an id means the call of the
+/// latest assistant turn before it that used it.
+public func toolNames(_ turns: [Turn]) -> [String?] {
+    var seen: [String: String] = [:]
+    return turns.map { turn in
+        for c in turn.toolCalls { if let id = c.id { seen[id] = c.function.name } }
+        return turn.role == "tool" ? turn.toolCallId.flatMap { seen[$0] } : nil
+    }
+}
+
 public struct Turn: Sendable {
     public let role: String
     public let content: String
