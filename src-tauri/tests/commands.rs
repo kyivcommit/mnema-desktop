@@ -11922,6 +11922,46 @@ fn only_the_chosen_chat_models_download_fills_the_chat_role() {
     }
 }
 
+/// D188: a choice of E4B that the index refuses (shut) moves neither the served
+/// model nor the stored choice — from the list or by the tools switch.
+#[test]
+fn a_refused_e4b_choice_leaves_the_served_model_alone() {
+    use mnema_desktop::models::{choose_chat_model, choose_chat_tools};
+    use mnema_desktop::provider::{LOCAL_CHAT_TOOLS_MODEL, ProviderChoice::Mnema};
+    use mnema_local::ModelId;
+    for by_switch in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::new(vec![]);
+        let app = app_with_provider(dir.path(), NO_PROVIDER);
+        let state = app.state::<AppState>();
+        // No `boot_index`: the index is shut.
+        state.install_local(downloadable_local(dir.path(), &server, true));
+        let local = state.local();
+        std::fs::create_dir_all(local.store.dir(ModelId::ChatTools)).unwrap();
+        std::fs::write(local.store.dir(ModelId::ChatTools).join("weights"), b"x").unwrap();
+        write_roles(&state, None, Some(Mnema));
+        mnema_desktop::prefs::write_key(state.data_dir(), "chat_tools", json!(false)).unwrap();
+
+        let answer = if by_switch {
+            choose_chat_tools(&state, true, false).map(|_| ())
+        } else {
+            choose_chat_model(&state, LOCAL_CHAT_TOOLS_MODEL.into(), Mnema)
+        };
+        assert!(
+            answer.is_err(),
+            "premise: the shut index refused ({by_switch}): {answer:?}"
+        );
+
+        assert_eq!(local.chat_model(), ModelId::Chat, "served ({by_switch})");
+        assert_eq!(
+            mnema_desktop::prefs::mnema_chat_model(state.data_dir()),
+            ModelId::Chat,
+            "stored ({by_switch})"
+        );
+        assert!(!mnema_desktop::prefs::chat_tools(state.data_dir()));
+    }
+}
+
 /// The chat model the index stores (`META_CHAT_MODEL`).
 fn chat_model_stored(app: &tauri::App<MockRuntime>) -> Option<String> {
     app.state::<AppState>()

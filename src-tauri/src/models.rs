@@ -879,14 +879,12 @@ pub fn choose_chat_model(
         });
     }
     let before = state.roles();
-    let model = match local {
-        None => model,
-        Some(id) => {
-            crate::provider::choose_local_chat(state, id)?;
-            crate::provider::local_chat_name(id).to_string()
-        }
-    };
+    let model = local.map_or(model, |id| crate::provider::local_chat_name(id).to_string());
+    // The index first: a shut index refuses before the served model moves.
     state.with_index(|db| db.meta_set(mnema_index::META_CHAT_MODEL, &model))?;
+    if let Some(id) = local {
+        crate::provider::choose_local_chat(state, id)?;
+    }
     crate::prefs::write_role(
         state.data_dir(),
         crate::provider::Role::Chat,
@@ -940,14 +938,15 @@ pub fn choose_chat_tools(state: &AppState, on: bool, cloud: bool) -> Result<Tool
         let _slot = crate::provider::adoption_slot(state)?;
         let before = state.roles();
         key(true)?;
+        // The index first: a shut index refuses before the served model moves.
         let moved = (|| -> Result<(), Error> {
-            crate::provider::choose_local_chat(state, mnema_local::ModelId::ChatTools)?;
             state.with_index(|db| {
                 db.meta_set(
                     mnema_index::META_CHAT_MODEL,
                     crate::provider::LOCAL_CHAT_TOOLS_MODEL,
                 )
             })?;
+            crate::provider::choose_local_chat(state, mnema_local::ModelId::ChatTools)?;
             Ok(())
         })();
         if let Err(e) = moved {
