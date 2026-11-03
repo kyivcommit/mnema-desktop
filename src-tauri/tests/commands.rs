@@ -11925,6 +11925,7 @@ fn tools_on_takes_e4b_for_a_mnema_chat_role_when_it_is_downloaded() {
                 ToolsSwitch::Stored { on: true }
             );
             assert_eq!(state.local().chat_model(), ModelId::ChatTools);
+            assert_eq!(state.roles().chat, Some(Mnema), "on E4B the role stays");
         } else {
             assert_eq!(
                 state.local().chat_model(),
