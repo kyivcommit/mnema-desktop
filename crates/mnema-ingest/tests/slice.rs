@@ -6141,9 +6141,13 @@ fn a_mixed_pdf_keeps_each_pages_own_source_and_what_ocr_knew() {
 }
 
 /// Spec «Що зникне» 4: a PDF indexed by reader v3, which skipped its scanned
-/// page and journalled it, gets that page back from v4 — the D55 version
-/// comparison on the path row is what sends it to a worker, and
-/// `journal_skipped_pages` is what clears the page's row.
+/// page and journalled it, gets that page back from v4. Not the cheap arm's
+/// doing: no manifest predicts `pdf` from an extension, so a PDF reaches a
+/// worker on every pass. It is step 3's `stale_reading` (recorded v3 against
+/// the header's v4) that makes the pass rewrite the document instead of
+/// answering `AlreadyIndexed`, and `journal_skipped_pages` that clears the
+/// page's row — measured: with the version left out of `stale_reading` the
+/// second pass is not `Indexed`.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_page_v3_skipped_is_indexed_by_v4_and_its_journal_row_goes() {
