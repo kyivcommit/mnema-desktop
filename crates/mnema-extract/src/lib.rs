@@ -19,6 +19,7 @@ mod epub;
 mod html;
 pub mod manifest;
 mod markdown;
+mod ocr;
 mod pdf;
 mod pdfium_probe;
 mod text;
@@ -51,6 +52,7 @@ pub use docx::{DocxError, DocxSection, extract_docx};
 pub use epub::{BOOK_MAX_BYTES, EpubBook, EpubChapter, EpubError, extract_epub};
 pub use html::{HtmlPage, extract_html};
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
+pub use ocr::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, Recognised, recognise};
 pub use pdf::{PdfDocument, PdfError, PdfPage, extract_pdf};
 pub use pdfium_probe::{
     Error, PDFIUM_API_BUILD, PDFIUM_LIB_DIR_ENV, PageProbe, Stage, TEXT_LAYER_MIN_CHARS,
