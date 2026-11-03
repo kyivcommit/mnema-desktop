@@ -295,6 +295,12 @@ fn both_chat_models_load_into_the_one_chat_slot() {
     s.load(&[mnema_local::ModelId::ChatTools]).unwrap();
     s.unload(Some(mnema_local::ModelId::ChatTools)).unwrap();
     let text = std::fs::read_to_string(&log).unwrap();
-    assert!(text.contains(r#"body /mnema/load {"models":["chat"]}"#), "{text}");
-    assert!(text.contains(r#"body /mnema/unload {"models":["chat"]}"#), "{text}");
+    assert!(
+        text.contains(r#"body /mnema/load {"models":["chat"]}"#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"body /mnema/unload {"models":["chat"]}"#),
+        "{text}"
+    );
 }

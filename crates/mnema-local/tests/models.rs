@@ -381,7 +381,11 @@ fn chat_tools_is_a_model_of_its_own() {
 #[test]
 fn every_pinned_model_is_pinned_by_commit_and_sha256() {
     let m = Manifest::pinned();
-    let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let hex = |s: &str, n: usize| {
+        s.len() == n
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
     let mut dirs = std::collections::HashSet::new();
     for id in ModelId::ALL {
         let spec = m.spec(id);
@@ -398,7 +402,17 @@ fn every_pinned_model_is_pinned_by_commit_and_sha256() {
 #[test]
 fn e4b_downloads_its_upstream_config_and_e2b_gets_ours() {
     let m = Manifest::pinned();
-    let config = |id| m.spec(id).files.iter().find(|f| f.name == "config.json").map(|f| f.bundled.is_some());
+    let config = |id| {
+        m.spec(id)
+            .files
+            .iter()
+            .find(|f| f.name == "config.json")
+            .map(|f| f.bundled.is_some())
+    };
     assert_eq!(config(ModelId::Chat), Some(true), "E2B: our flat config");
-    assert_eq!(config(ModelId::ChatTools), Some(false), "E4B: the upstream config, downloaded");
+    assert_eq!(
+        config(ModelId::ChatTools),
+        Some(false),
+        "E4B: the upstream config, downloaded"
+    );
 }
