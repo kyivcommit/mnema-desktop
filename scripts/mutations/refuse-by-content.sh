@@ -237,7 +237,7 @@ case_ "wire: the worker sends the digest for a note that stopped being text" \
   '                None,
             )]
         }
-        Reader::Pdf => match extract_pdf(&bytes) {' \
+        Reader::Pdf => {' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # The digest has to survive two hops inside the pool, and each is a separate
