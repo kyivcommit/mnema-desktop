@@ -238,3 +238,54 @@ fn a_documents_only_path_is_named_and_several_are_not() {
         "two copies are not one honest location"
     );
 }
+
+/// `page_view_text` answers the page asked for: block 0 of that page and no
+/// other block, that page's source, and `None` where the reader wrote no row.
+#[test]
+fn a_pages_view_text_is_its_first_block_and_its_source() {
+    let db = support::temp_db();
+    let doc = db
+        .insert_document(&"a".repeat(64), "application/pdf", 1, SourceKind::Document)
+        .unwrap();
+    let other = db
+        .insert_document(&"b".repeat(64), "application/pdf", 1, SourceKind::Document)
+        .unwrap();
+    let one = db.insert_page(&doc, 1, "native:pdf", None).unwrap();
+    db.insert_block(one, &paragraph(1, "not the page text"))
+        .unwrap();
+    db.insert_block(one, &paragraph(0, "page one")).unwrap();
+    let three = db.insert_page(&doc, 3, "ocr:vision", None).unwrap();
+    db.insert_block(three, &paragraph(0, "page three")).unwrap();
+    let neighbour = db.insert_page(&other, 1, "native:pdf", None).unwrap();
+    db.insert_block(neighbour, &paragraph(0, "someone else's"))
+        .unwrap();
+    db.insert_page(&doc, 4, "native:pdf", None).unwrap();
+
+    assert_eq!(
+        db.page_view_text(&doc, 1).unwrap(),
+        Some(("page one".to_string(), "native:pdf".to_string()))
+    );
+    assert_eq!(
+        db.page_view_text(&doc, 3).unwrap(),
+        Some(("page three".to_string(), "ocr:vision".to_string()))
+    );
+    assert_eq!(
+        db.page_view_text(&doc, 4).unwrap(),
+        Some((String::new(), "native:pdf".to_string())),
+        "a page row without blocks is a page that stored nothing, not a skipped one"
+    );
+    assert_eq!(db.page_view_text(&doc, 2).unwrap(), None, "no page row");
+    assert_eq!(db.page_view_text("missing", 1).unwrap(), None);
+}
+
+#[test]
+fn the_view_carries_the_documents_mime() {
+    let db = support::temp_db();
+    let doc = db
+        .insert_document(&"c".repeat(64), "application/pdf", 1, SourceKind::Document)
+        .unwrap();
+    assert_eq!(
+        db.document_view(&doc, 10).unwrap().unwrap().mime,
+        "application/pdf"
+    );
+}

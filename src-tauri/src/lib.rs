@@ -15,6 +15,7 @@ pub mod job;
 pub mod locale;
 pub mod models;
 pub mod os_services;
+mod page_view;
 pub mod paths;
 pub mod prefs;
 pub mod provider;
@@ -85,6 +86,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         tree::set_folder_searched,
         tree::mask_preview,
         tree::open_document,
+        page_view::render_pdf_page,
         models::provider_models,
         models::key_present,
         models::set_key,

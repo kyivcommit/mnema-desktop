@@ -455,6 +455,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const paragraph = 'The whole file, rendered by the pane.';
       return {
         kind: 'file',
+        mime: 'text/plain',
         blocks: [
           { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
           { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 1, sectionTitle: null },

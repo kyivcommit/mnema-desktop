@@ -221,6 +221,8 @@ export type PaneSpan = { blockId: number; blockStart: number; length: number; pr
 // tree's name for the watched root that path belongs to, null when there is none.
 export type DocumentView =
   | { kind: 'file';
+      // `document.mime`: a PDF is drawn as its page, anything else as text.
+      mime: string;
       blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
       focusBlockIds: number[]; spans: PaneSpan[]; relativePath: string | null; rootName: string | null;
       freshness: Freshness }

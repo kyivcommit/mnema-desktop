@@ -28,6 +28,8 @@ pub struct ViewBlockRow {
 /// the list must be able to tell a whole file from the first `limit` blocks of
 /// one, and a caller that cannot show a partial file refuses instead.
 pub struct DocumentViewRow {
+    /// `document.mime`, for the pane to choose how to draw the file.
+    pub mime: String,
     pub blocks: Vec<ViewBlockRow>,
     pub truncated: bool,
 }
@@ -50,17 +52,17 @@ impl Db {
         document_id: &str,
         limit: usize,
     ) -> Result<Option<DocumentViewRow>, Error> {
-        let exists: Option<i64> = self
+        let mime: Option<String> = self
             .conn()
             .query_row(
-                "SELECT 1 FROM document WHERE id = ?1",
+                "SELECT mime FROM document WHERE id = ?1",
                 params![document_id],
                 |r| r.get(0),
             )
             .optional()?;
-        if exists.is_none() {
+        let Some(mime) = mime else {
             return Ok(None);
-        }
+        };
 
         // `LIMIT -1` means *no limit* in SQLite, so a `usize` that does not fit
         // an `i64` must not wrap round to a negative number here.
@@ -92,7 +94,11 @@ impl Db {
 
         let truncated = blocks.len() > limit;
         blocks.truncate(limit);
-        Ok(Some(DocumentViewRow { blocks, truncated }))
+        Ok(Some(DocumentViewRow {
+            mime,
+            blocks,
+            truncated,
+        }))
     }
 
     /// The one `path` row naming a document, or `None` when it has none or
@@ -117,5 +123,32 @@ impl Db {
             [one] => Some(one.clone()),
             _ => None,
         })
+    }
+
+    /// The text of one page as the PDF reader stored it — `block.text` of the
+    /// block with `reading_order = 0` — and the page's `text_source`, which
+    /// is what the page view hashes to ask the worker whether the file still
+    /// says this.
+    ///
+    /// `None` when the document has no such page row (a page the reader
+    /// skipped). A page row with no block 0 answers an empty text: the page
+    /// exists, it just stored nothing.
+    pub fn page_view_text(
+        &self,
+        document_id: &str,
+        page_no: u32,
+    ) -> Result<Option<(String, String)>, Error> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT COALESCE((SELECT b.text FROM block b
+                                   WHERE b.page_id = p.id AND b.reading_order = 0), ''),
+                        p.text_source
+                   FROM page p
+                  WHERE p.document_id = ?1 AND p.page_no = ?2",
+                params![document_id, page_no],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 }
