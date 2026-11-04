@@ -44,5 +44,9 @@ fn a_page_drawn_as_a_data_image_is_allowed_and_nothing_else_is_widened() {
     assert_eq!(sources("default-src"), ["'self'"]);
     assert_eq!(sources("img-src"), ["'self'", "data:"]);
     let names: Vec<String> = policy().into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["default-src", "img-src"], "a new directive is a new decision");
+    assert_eq!(
+        names,
+        ["default-src", "img-src"],
+        "a new directive is a new decision"
+    );
 }
