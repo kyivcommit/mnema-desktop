@@ -49,7 +49,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -410,6 +410,11 @@ pub struct Document {
 pub enum Outcome {
     Extracted(Document),
     Skipped(Skip),
+    /// The caller's cancel flag was raised while the file was in flight, and
+    /// its worker was killed. **Nothing was learned about the file** — not a
+    /// skip, not a poison record — so a caller must record nothing for it.
+    /// Only [`Pool::extract_cancellable`] answers this.
+    Cancelled,
 }
 
 /// The pool itself is broken, or the worker binary is not the one this pool
@@ -563,8 +568,10 @@ pub struct PoolConfig {
     /// How long the worker may stay silent — from the request to the first
     /// page, and from one page to the next — before it is killed. Per page,
     /// not per document (D189): an OCR'd volume of several hundred pages takes
-    /// minutes. A document is still bounded, by `(Header.pages + 1) × timeout`,
-    /// because the pool refuses more `Page` frames than the header promised.
+    /// minutes. A document is still bounded, by
+    /// `(min(Header.pages, MAX_PAGES) + 1) × timeout`: the pool refuses a
+    /// header promising more than [`MAX_PAGES`] and more `Page` frames than
+    /// the header promised.
     ///
     /// **Provisional: 300 s.** Raised from 120 s by D189: the first OCR'd page
     /// in a freshly installed worker waits for Vision's cold start, measured at
@@ -574,8 +581,9 @@ pub struct PoolConfig {
     /// price of not journalling every user's first scanned file as `Timeout`.
     /// Otherwise unmeasured in both directions,
     /// and both hurt: too short silently skips a legitimately slow page, too
-    /// long stalls a job on a file that will never finish. D40 notes it is also
-    /// the answer to a Cancel that cannot interrupt the file in flight.
+    /// long stalls a job on a file that will never finish. It is **no longer**
+    /// what bounds a Stop, as D40 once had it: [`Pool::extract_cancellable`]
+    /// kills the worker in flight within [`CANCEL_POLL`].
     pub timeout: Duration,
 
     /// A ceiling on the child's memory, in bytes, or `None` for no ceiling.
@@ -731,8 +739,20 @@ impl Pool {
     ///
     /// `Ok(Outcome::Skipped)` is an ordinary answer: record it and carry on.
     /// `Err` means the pool or the worker binary is broken and the job should
-    /// stop.
+    /// stop. Never answers [`Outcome::Cancelled`].
     pub fn extract(&self, path: &Path) -> Result<Outcome, PoolError> {
+        self.extract_cancellable(path, &AtomicBool::new(false))
+    }
+
+    /// [`extract`](Self::extract), but a raised `cancel` stops the document in
+    /// flight: the worker is killed within [`CANCEL_POLL`] and the answer is
+    /// [`Outcome::Cancelled`]. Without it, a Stop waits out the whole document,
+    /// which for an OCR'd volume is minutes (D189).
+    pub fn extract_cancellable(
+        &self,
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, PoolError> {
         // The request carries the path as JSON, so a path that is not UTF-8
         // cannot be expressed. `Path::display()` would substitute a replacement
         // character and ask the worker to read a file that does not exist —
@@ -785,7 +805,7 @@ impl Pool {
             let fresh = lease.worker.as_ref().is_some_and(|w| w.successes == 0);
             let worker = lease.worker.as_mut().expect("a worker was just put here");
 
-            match run_one(worker, text, &self.config) {
+            match run_one(worker, text, &self.config, cancel) {
                 // The stream is out of step; this worker cannot be trusted with
                 // another file, and the caller has to hear about it.
                 Err(error) => {
@@ -804,6 +824,12 @@ impl Pool {
                     if fresh {
                         return Err(PoolError::WorkerUnreachable { source });
                     }
+                }
+                // Killed on the caller's word, not the file's: no poison record,
+                // because the file did nothing wrong.
+                Ok(Answer::Cancelled) => {
+                    lease.retire();
+                    return Ok(Outcome::Cancelled);
                 }
                 Ok(Answer::Document(document)) => {
                     let worker = lease.worker.as_mut().expect("the worker answered");
@@ -1257,11 +1283,28 @@ enum Answer {
         note: Option<String>,
     },
     Unsendable(io::Error),
+    /// The caller's cancel flag was raised and the worker was killed.
+    Cancelled,
 }
+
+/// How often [`run_one`] looks at the cancel flag while a worker is silent —
+/// the worst case between a Stop and the worker in flight being killed.
+pub const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// The most pages one document's header may promise. D1 documents ~100,000
+/// pages as the ceiling of the whole *corpus*, so a single document beyond it
+/// is not one this product supports — and an unbounded promise would make the
+/// per-page deadline unbounded too (`PoolConfig::timeout`).
+pub const MAX_PAGES: u32 = 100_000;
 
 /// Sends one request and reads until the worker has answered it, the deadline
 /// passes, or the process ends.
-fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answer, PoolError> {
+fn run_one(
+    worker: &mut Worker,
+    path: &str,
+    config: &PoolConfig,
+    cancel: &AtomicBool,
+) -> Result<Answer, PoolError> {
     let request = to_request_line(&Request {
         path: path.to_string(),
         max_bytes: config.max_bytes,
@@ -1283,18 +1326,25 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
     // blocks forever inside one page still times out. A worker emitting
     // *pages* forever is stopped by the other half of the rule: no more Page
     // frames than `Header.pages` (checked below), so a document's total time
-    // is bounded by `(pages + 1) × timeout`, finite rather than "for ever".
+    // is bounded by `(pages + 1) × timeout`, finite rather than "for ever",
+    // and `pages` itself by `MAX_PAGES`.
     let mut deadline = Instant::now() + config.timeout;
     let mut header: Option<Frame> = None;
     let mut pages: Vec<ExtractedPage> = Vec::new();
 
     loop {
+        // Checked on every turn, not only when the worker is silent: a worker
+        // streaming pages faster than `CANCEL_POLL` never lets a wait time out.
+        if cancel.load(Ordering::SeqCst) {
+            worker.stop(false)?;
+            return Ok(Answer::Cancelled);
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let lines = worker
             .lines
             .as_ref()
             .expect("a worker is only read from before it is dropped");
-        let line = match lines.recv_timeout(remaining) {
+        let line = match lines.recv_timeout(remaining.min(CANCEL_POLL)) {
             Ok(Ok(line)) => line,
             // The worker's stdout could not be read — `read_line` refuses bytes
             // that are not UTF-8. This is **not** a protocol disagreement, and
@@ -1312,6 +1362,8 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
                     note: Some(format!("the worker's output could not be read: {error}")),
                 });
             }
+            // A slice of the wait ran out, not necessarily the deadline.
+            Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
             Err(RecvTimeoutError::Timeout) => {
                 return Ok(Answer::Ended {
                     ending: worker.stop(true)?,
@@ -1333,9 +1385,17 @@ fn run_one(worker: &mut Worker, path: &str, config: &PoolConfig) -> Result<Answe
         })?;
 
         match frame {
-            Frame::Header { ref reader, .. } => {
+            Frame::Header {
+                ref reader, pages, ..
+            } => {
                 if header.is_some() {
                     return Err(protocol(&line, "a second header inside one document"));
+                }
+                if pages > MAX_PAGES {
+                    return Err(protocol(
+                        &line,
+                        &format!("a header promising {pages} pages, over {MAX_PAGES} (D1)"),
+                    ));
                 }
                 // `reader` being a required field stops a header that omits it,
                 // and stops nothing else: `""` is a perfectly good `String` and

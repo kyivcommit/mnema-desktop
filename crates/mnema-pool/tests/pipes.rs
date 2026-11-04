@@ -76,6 +76,7 @@ fn a_concurrent_spawn_does_not_keep_a_departed_workers_pipe_open() {
                     assert!(matches!(first, Outcome::Extracted(_)), "{first:?}");
                     match pool.extract("ok:second.txt".as_ref()).unwrap() {
                         Outcome::Extracted(_) => {}
+                        Outcome::Cancelled => unreachable!("`extract` never cancels"),
                         Outcome::Skipped(skip) => panic!(
                             "round {round}, worker generation {}: the request to a departed \
                              worker was buffered instead of refused — its pipe was inherited \

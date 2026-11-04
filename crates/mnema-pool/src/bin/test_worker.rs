@@ -82,6 +82,13 @@ fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {
             }
             summary(stdout, Vec::new());
         }
+        // `promise:<n>` — a header promising n pages, every one of them then
+        // named skipped: a promise as large as a test likes, in two lines.
+        "promise" => {
+            let n: u32 = rest.parse().expect("promise:<n>");
+            header(stdout, n);
+            summary(stdout, (1..=n).collect());
+        }
         // `stall-after-page:<ms>` — two pages promised, one sent, then silence
         // for ms before the second: a worker stuck mid-document.
         "stall-after-page" => {

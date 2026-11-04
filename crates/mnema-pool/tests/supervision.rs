@@ -46,6 +46,7 @@ fn skip(outcome: mnema_pool::Outcome) -> Skip {
         mnema_pool::Outcome::Extracted(document) => {
             panic!("expected a skip, got {} pages", document.pages.len())
         }
+        mnema_pool::Outcome::Cancelled => panic!("expected a skip, got a cancellation"),
     }
 }
 
@@ -968,6 +969,61 @@ fn a_document_slower_than_the_deadline_but_never_silent_for_it_arrives_whole() {
             .collect::<Vec<_>>(),
         vec![1, 2, 3, 4]
     );
+}
+
+/// Stop reaches the document in flight (review of D189): with the deadline
+/// renewed per page, a 20-page document 400 ms apart would take 8 s, and a
+/// Stop checked only between files would wait all of it. Raised after the
+/// first page, the flag kills the worker within `CANCEL_POLL` and the file
+/// is neither a document nor a skip.
+#[test]
+fn a_raised_cancel_kills_the_worker_in_the_middle_of_a_document() {
+    let _watchdog = Watchdog::new("cancel mid-document", Duration::from_secs(30));
+    let pool = per_page_pool();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+
+    let started = Instant::now();
+    let outcome = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(600));
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        pool.extract_cancellable(Path::new("slow-pages:20:400"), &cancel)
+            .unwrap()
+    });
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome, mnema_pool::Outcome::Cancelled);
+    assert!(elapsed < Duration::from_secs(2), "Stop waited {elapsed:?}");
+    assert_eq!(pool.live_workers(), 0, "the cancelled worker is gone");
+    // And the file is not poisoned: asked again without a cancel, it is read.
+    assert_eq!(
+        document(extract(&pool, "slow-pages:2:10").unwrap())
+            .pages
+            .len(),
+        2
+    );
+}
+
+/// A header may promise at most `MAX_PAGES` (D1's corpus ceiling): exactly
+/// that is a document, one more is a worker that does not speak the protocol.
+#[test]
+fn a_header_promising_more_than_max_pages_is_a_protocol_error() {
+    let _watchdog = Watchdog::new("page cap", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+    let cap = mnema_pool::MAX_PAGES;
+
+    let at_cap = extract(&pool, &format!("promise:{cap}")).expect("the cap itself is accepted");
+    assert!(
+        matches!(at_cap, mnema_pool::Outcome::Extracted(_)),
+        "{at_cap:?}"
+    );
+
+    let error = extract(&pool, &format!("promise:{}", cap + 1)).unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(detail.contains("promising"), "{detail}");
 }
 
 /// Silence after a page still kills the worker: the deadline is renewed by a
