@@ -54,6 +54,9 @@ pub enum Highlight {
     Changed,
     /// The page is a scan: it has no text layer to box.
     Scan,
+    /// The index holds no text for this page (the reader skipped it): there is
+    /// no citation on it to box, and nothing has changed — no note.
+    NoText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -160,7 +163,8 @@ pub(crate) fn render_page_in(
         None => (None, Some(Highlight::Changed)),
         Some(Some((_, source))) if source.starts_with("ocr:") => (None, Some(Highlight::Scan)),
         Some(Some((text, _))) => (Some(sha256_hex(&text)), None),
-        Some(None) => (None, None),
+        // Not `Changed`: nothing was indexed here, so nothing can have moved.
+        Some(None) => (None, Some(Highlight::NoText)),
     };
     let request = RenderRequest {
         path: path.to_string(),
@@ -546,7 +550,7 @@ mod tests {
 
         let view = s.render(&worker, "h1", "doc.pdf", 800);
 
-        assert_eq!(highlight(&view), Highlight::Changed);
+        assert_eq!(highlight(&view), Highlight::NoText);
         assert_eq!(s.request().text_sha256, None);
     }
 
@@ -605,7 +609,11 @@ mod tests {
                 (Some("unavailable"), Some(tag))
             );
         }
-        for (h, tag) in [(Highlight::Changed, "changed"), (Highlight::Scan, "scan")] {
+        for (h, tag) in [
+            (Highlight::Changed, "changed"),
+            (Highlight::Scan, "scan"),
+            (Highlight::NoText, "noText"),
+        ] {
             assert_eq!(serde_json::to_value(h).unwrap(), tag);
         }
 
