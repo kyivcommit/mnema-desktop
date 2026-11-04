@@ -27,6 +27,7 @@
 //!   recomputes one.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::manifest::{
@@ -132,6 +133,11 @@ pub enum IngestError {
     /// make that decision expressible.
     #[error("the index is busy: {0}")]
     Busy(mnema_index::Error),
+    /// The walk's cancel flag was raised while this file's worker was reading
+    /// it. Nothing was written, journalled or displaced for the file; the walk
+    /// turns this into `StopReason::Cancelled` and never lets it out.
+    #[error("cancelled while the file was being read")]
+    Cancelled,
 }
 
 /// Sorts a database error into "stop" and "come back to this file".
@@ -205,6 +211,25 @@ pub fn ingest_file(
     relative: &str,
     on_disk: Option<OnDisk>,
     manifest: &Manifest,
+) -> Result<Ingested, IngestError> {
+    let never = AtomicBool::new(false);
+    ingest_file_cancellable(
+        pool, db, root_id, absolute, relative, on_disk, manifest, &never,
+    )
+}
+
+/// [`ingest_file`], but a raised `cancel` stops the worker in the middle of
+/// the file and answers [`IngestError::Cancelled`] having written nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingest_file_cancellable(
+    pool: &Pool,
+    db: &Db,
+    root_id: i64,
+    absolute: &Path,
+    relative: &str,
+    on_disk: Option<OnDisk>,
+    manifest: &Manifest,
+    cancel: &AtomicBool,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -387,7 +412,11 @@ pub fn ingest_file(
     };
 
     // 2. The pool.
-    let document = match pool.extract(absolute)? {
+    let document = match pool.extract_cancellable(absolute, cancel)? {
+        // Nothing is known about the file, so nothing is recorded: no skip
+        // row, no displacement, the previous document and `path` row as they
+        // were. Steps 1 above only read.
+        Outcome::Cancelled => return Err(IngestError::Cancelled),
         Outcome::Skipped(skip) => {
             let rule = SkipRule::from(skip.failure);
             record_skip(

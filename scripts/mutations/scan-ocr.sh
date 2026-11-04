@@ -19,8 +19,9 @@
 #     as content (`no_text_layer`) and outlives the repair of the engine;
 #   * **the ceilings** — a scanned book refused by a number meant for text, or a
 #     500 MB text file loaded because its name ended in `.pdf`;
-#   * **the pool's clock** — a slow scanned volume killed mid-way, or a worker
-#     that never stops sending pages never killed;
+#   * **the pool's clock** — a slow scanned volume killed mid-way, a worker
+#     that never stops sending pages never killed, or a Stop that waits out a
+#     whole volume, and the file it interrupted journalled as a skip;
 #   * **what a page remembers** — a page read by OCR indistinguishable from one
 #     with a text layer, and the confidence and bitmap that say how far to trust it
 #     gone.
@@ -66,13 +67,42 @@ case_ "pool: a page renews the deadline" \
 # P2. The bound that makes the per-page deadline finite, removed. A worker that
 # keeps sending pages renews the clock for ever and is never killed; the test
 # names the bound by its detail, so the check moved to the summary (where it
-# would still fire for a finite stream) is red too.
+# would still fire for a finite stream) is red too. The comment above the check
+# goes with it, so the marker anchors on code: the let-else straight into the
+# renewal.
 case_ "pool: no more pages than the header promised" \
   crates/mnema-pool/src/lib.rs \
-  's#                if pages\.len\(\) >= promised as usize \{\n                    return Err\(protocol\(\n                        &line,\n                        &format!\("more pages than the header promised \(\{promised\}\)"\),\n                    \)\);\n                \}\n##' \
-  '                // it, a worker that keeps sending pages is never killed.
+  's#                // The bound that makes the per-page deadline finite\. Without\n                // it, a worker that keeps sending pages is never killed\.\n                if pages\.len\(\) >= promised as usize \{\n                    return Err\(protocol\(\n                        &line,\n                        &format!\("more pages than the header promised \(\{promised\}\)"\),\n                    \)\);\n                \}\n##' \
+  '                    return Err(protocol(&line, "a page before any header"));
+                };
                 deadline = Instant::now() + config.timeout;' \
   mnema-pool 'more_pages_than_the_header_promised_stop_the_job' --test supervision
+
+# P5. The header's promise unbounded: a `u32` straight off the wire makes a
+# document's bound `(4·10⁹ + 1) × timeout`. D1's corpus ceiling is the cap.
+case_ "pool: a header may promise at most MAX_PAGES" \
+  crates/mnema-pool/src/lib.rs \
+  's#                if pages > MAX_PAGES \{#                if false && pages > MAX_PAGES {#' \
+  '                if false && pages > MAX_PAGES {' \
+  mnema-pool 'a_header_promising_more_than_max_pages_is_a_protocol_error' --test supervision
+
+# P6. The cancel flag never read while a document is in flight. Stop then waits
+# out the whole document — minutes for an OCR'd volume — which is what the
+# per-page deadline made possible (review of D189).
+case_ "pool: a raised cancel stops the document in flight" \
+  crates/mnema-pool/src/lib.rs \
+  's#        if cancel\.load\(Ordering::SeqCst\) \{\n            worker\.stop\(false\)\?;#        if false && cancel.load(Ordering::SeqCst) {\n            worker.stop(false)?;#' \
+  '        if false && cancel.load(Ordering::SeqCst) {
+            worker.stop(false)?;' \
+  mnema-pool 'a_raised_cancel_kills_the_worker_in_the_middle_of_a_document' --test supervision
+
+# I1. A cancelled file journalled as a skip. Nothing was learned about it, and a
+# skip row is a verdict the next walk answers from without a worker.
+case_ "ingest: a file cancelled in flight records nothing" \
+  crates/mnema-ingest/src/lib.rs \
+  's#        Outcome::Cancelled => return Err\(IngestError::Cancelled\),#        Outcome::Cancelled => {\n            db.record_skip(root_id, relative, None, "cancelled", SkipRule::Unreadable, None, None)?;\n            return Err(IngestError::Cancelled);\n        }#' \
+  '            db.record_skip(root_id, relative, None, "cancelled", SkipRule::Unreadable, None, None)?;' \
+  mnema-ingest 'a_cancel_in_the_middle_of_a_file_leaves_its_previous_document_untouched' --test walk
 
 # P3. One ceiling for everything: `max_bytes` sent as the PDF ceiling too. A
 # scanned book is refused by a number chosen for text, which is the whole reason

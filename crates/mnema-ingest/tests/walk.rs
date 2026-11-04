@@ -410,8 +410,8 @@ fn progress_knows_the_total_before_the_first_file_is_read() {
     );
 }
 
-/// Cancellation is checked between files. The file in flight is not
-/// interrupted — that is the worker timeout's job, and D40 records it as open.
+/// Cancellation is checked between files. The file in flight is interrupted
+/// too, by the pool — see the test after this one.
 #[test]
 fn cancellation_stops_the_walk_between_files() {
     let f = Fixture::new();
@@ -439,6 +439,79 @@ fn cancellation_stops_the_walk_between_files() {
 
     assert_eq!(report.stopped, StopReason::Cancelled);
     assert!(report.indexed < 20);
+}
+
+/// What disappears when a Stop lands in the middle of a file (D189 review):
+/// nothing. A file already indexed is changed on disk and re-read by a worker
+/// that never answers; the cancel kills it, and the previous document, its
+/// `path` row and the skip journal are exactly as they were — no skip, no
+/// displacement — and the walk stops `Cancelled` long before the pool's own
+/// deadline would have.
+#[cfg(unix)]
+#[test]
+fn a_cancel_in_the_middle_of_a_file_leaves_its_previous_document_untouched() {
+    let f = Fixture::new();
+    f.write("book.txt", "the first edition");
+    assert_eq!(f.walk().indexed, 1);
+    let tables = ["document", "path", "page", "block", "chunk", "skipped"];
+    let snapshot = |f: &Fixture| {
+        (
+            f.db.path_entry(f.root, "book.txt").unwrap(),
+            f.db.skip_entry(f.root, "book.txt").unwrap(),
+            tables.map(|t| f.count(t)),
+        )
+    };
+    let before = snapshot(&f);
+    assert!(before.0.is_some(), "the premise: the file is indexed");
+
+    // A different size, so the cheap arm cannot answer and a worker is asked.
+    f.write("book.txt", "the second, longer edition");
+    let started_marker = f._index.path().join("reading");
+    let silent = f.wrong_worker(&format!(
+        "touch \"{}\"; exec sleep 30",
+        started_marker.display()
+    ));
+    let pool = Pool::new(PoolConfig {
+        timeout: Duration::from_secs(10),
+        ..PoolConfig::new(silent)
+    })
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+
+    let (report, waited) = std::thread::scope(|scope| {
+        let waited = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !started_marker.exists() {
+                assert!(Instant::now() < deadline, "the worker never got the file");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let raised = Instant::now();
+            cancel.store(true, Ordering::SeqCst);
+            raised
+        });
+        let report = walk_root(
+            &pool,
+            &f.db,
+            f.root,
+            f.dir(),
+            &WalkRules::none(),
+            &cancel,
+            &mut |_| {},
+        )
+        .unwrap();
+        (report, waited.join().unwrap().elapsed())
+    });
+
+    assert_eq!(report.stopped, StopReason::Cancelled, "{report:?}");
+    assert_eq!(
+        report.skipped, 0,
+        "a cancelled file is not a skip: {report:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(3),
+        "the walk outlived the cancel by {waited:?}"
+    );
+    assert_eq!(snapshot(&f), before, "a cancelled file changed the index");
 }
 
 // -------------------------------------------- a refusal the walk remembers
