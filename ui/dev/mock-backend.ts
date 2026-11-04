@@ -16,7 +16,7 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, HistoryEntry, IndexRead,
+  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, PdfPageView, HistoryEntry, IndexRead,
   KeyState, LocaleChoice, ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
@@ -455,10 +455,12 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const paragraph = 'The whole file, rendered by the pane.';
       return {
         kind: 'file',
-        mime: 'text/plain',
+        // A PDF with a block per page, so both modes of the pane can be seen.
+        mime: 'application/pdf',
         blocks: [
           { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
-          { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 1, sectionTitle: null },
+          { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 2, sectionTitle: null },
+          { blockId: 3, kind: 'paragraph', text: 'The last page.', pageNo: 3, sectionTitle: null },
         ],
         focusBlockIds: [2],
         spans: [{ blockId: 2, blockStart: 0, length: paragraph.length, primary: true }],
@@ -467,6 +469,26 @@ export function installMockBackend(win: 'settings' | 'launcher') {
         rootName: s.tree.roots.find((r) => r.rootId === a.rootId)?.name ?? null,
         freshness: { kind: 'current' },
       } satisfies DocumentView;
+    },
+
+    // A drawn page: an SVG sheet with a few lines, the cited one boxed.
+    render_pdf_page: (a) => {
+      const no = Number(a.pageNo);
+      const lines = [0.12, 0.2, 0.28, 0.36, 0.44]
+        .map((y) => `<rect x="60" y="${y * 800}" width="480" height="14" fill="#bbb"/>`).join('');
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">`
+        + `<rect width="600" height="800" fill="#fff"/><text x="60" y="60" font-size="28" fill="#222">Page ${no}</text>${lines}</svg>`;
+      return {
+        kind: 'page',
+        pages: 3,
+        widthPx: 600,
+        heightPx: 800,
+        image: `data:image/svg+xml;base64,${btoa(svg)}`,
+        highlight: 'shown',
+        rects: (a.ranges as unknown[]).length > 0
+          ? [{ x: 0.1, y: 0.19, w: 0.8, h: 0.025, primary: true }, { x: 0.1, y: 0.27, w: 0.5, h: 0.025, primary: false }]
+          : [],
+      } satisfies PdfPageView;
     },
 
     'plugin:dialog|open': () => '/Users/demo/Documents/Projects',
