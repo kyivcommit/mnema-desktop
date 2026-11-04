@@ -313,3 +313,18 @@ test('the header is the drag handle, and it is the only one', () => {
   expect(capability.permissions).toContain('core:window:allow-start-dragging');
   expect(capability.permissions).not.toContain('core:window:allow-internal-toggle-maximize');
 });
+
+test('a drag refuses text selection for its length only', async () => {
+  render(Shell);
+  const [recents] = screen.getAllByRole('separator');
+  const selects = () => document.dispatchEvent(new Event('selectstart', { cancelable: true }));
+  expect(selects()).toBe(true);
+  await fireEvent.pointerDown(recents, { clientX: 100, pointerId: 1 });
+  expect(selects()).toBe(false);
+  await fireEvent.pointerUp(recents, { clientX: 120, pointerId: 1 });
+  expect(selects()).toBe(true);
+  // A pane closed mid-drag must not leave the whole window unselectable.
+  await fireEvent.pointerDown(recents, { clientX: 100, pointerId: 1 });
+  cleanup();
+  expect(selects()).toBe(true);
+});
