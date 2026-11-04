@@ -5,12 +5,16 @@
 //!
 //! The cap stands on what the stream actually produces, never on the member's
 //! declared uncompressed size. That size lives in the archive's central
-//! directory, which is written by whoever crafted the file, and the `zip`
-//! crate does not enforce it while decompressing: a Deflate member's declared
-//! size is informational, and decoding runs until the compressed stream's own
-//! end-of-block marker, however much output that turns out to be. A zip bomb
-//! can declare its size small and still fully inflate under a naive
-//! `read_to_end`. The server measured exactly this and capped the read on the
+//! directory, which is written by whoever crafted the file. Up to `zip` 8 the
+//! crate did not enforce it while decompressing: a Deflate member's declared
+//! size was informational, and decoding ran until the compressed stream's own
+//! end-of-block marker, however much output that turned out to be, so a zip
+//! bomb could declare its size small and still fully inflate under a naive
+//! `read_to_end`. Measured on `zip` 9.3: the stream now errors as soon as it
+//! passes the declared size, so that bomb comes back [`ZipPartError::Malformed`]
+//! before the cap is reached. The cap stays, because a bomb can just as well
+//! declare its true size: that one only the cap refuses, as
+//! [`ZipPartError::TooLarge`]. The server measured the forged case and capped the read on the
 //! stream for the same reason (`app/textdoc/office.py:41-52`, the comment at
 //! `:45` names the forged-size case directly) — but only for `docx`/`xlsx`;
 //! its `epub` reader (`app/textdoc/adapters.py:118`) reads a chapter

@@ -53,7 +53,7 @@
 //!
 //! - **`worksheets()` — the obvious API — silently drops a sheet it cannot
 //!   read.** It is `filter_map(|n| self.worksheet_range(&n).ok()?)`
-//!   (`calamine-0.36.0/src/xlsx/mod.rs:2628`), so a sheet whose XML stops in the
+//!   (`calamine-0.38.0/src/xlsx/mod.rs:2888`), so a sheet whose XML stops in the
 //!   middle of an element comes back as *no sheet at all*: measured, a workbook
 //!   of one truncated sheet answered `[]`, with no error anywhere. This reader
 //!   asks for each sheet by name and handles the error.

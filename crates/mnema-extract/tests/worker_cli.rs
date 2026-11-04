@@ -1803,7 +1803,7 @@ fn unzip_of(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     (0..archive.len())
         .map(|i| {
             let mut member = archive.by_index(i).unwrap();
-            let name = member.name().to_string();
+            let name = member.name().unwrap().to_string();
             let mut body = Vec::new();
             member.read_to_end(&mut body).unwrap();
             (name, body)

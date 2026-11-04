@@ -61,11 +61,24 @@ fn zip_with_forged_size() -> Vec<u8> {
 }
 
 #[test]
-fn a_declared_size_does_not_decide_anything() {
+fn a_declared_size_forged_small_is_refused() {
     // A member whose central-directory size is small and whose real content is
-    // not. `zip`'s reader must not be trusted to pre-check this: the cap has to
-    // stand on the stream (app/textdoc/office.py:45 measured the same thing).
+    // not. Up to `zip` 8 it inflated whole and only the stream cap refused it
+    // (app/textdoc/office.py:45 measured the same thing); `zip` 9 errors once
+    // the stream passes the declared size, so the refusal is `Malformed`.
+    // Either way the member does not come back.
     let archive = zip_with_forged_size();
+    assert!(matches!(
+        read_member(&archive, "word/document.xml", 1024),
+        Err(ZipPartError::Malformed)
+    ));
+}
+
+/// The bomb that declares its true size: `zip` has nothing to object to, so
+/// the stream cap is the only thing that refuses it.
+#[test]
+fn a_member_honestly_past_the_cap_is_too_large() {
+    let archive = zip_with_member("word/document.xml", &vec![b'A'; 4096]);
     assert!(matches!(
         read_member(&archive, "word/document.xml", 1024),
         Err(ZipPartError::TooLarge)

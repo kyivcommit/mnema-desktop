@@ -321,7 +321,10 @@ fn is_epub<R: Read + std::io::Seek>(archive: &mut zip::ZipArchive<R>) -> bool {
     let Ok(mut first) = archive.by_index(0) else {
         return false;
     };
-    if first.name() != "mimetype" || first.compression() != zip::CompressionMethod::Stored {
+    // A name the archive cannot decode is not `mimetype`.
+    if !matches!(first.name().as_deref(), Ok("mimetype"))
+        || first.compression() != zip::CompressionMethod::Stored
+    {
         return false;
     }
     let mut content = String::new();
