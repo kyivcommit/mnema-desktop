@@ -353,7 +353,7 @@ fn a_page_far_taller_than_wide_is_drawn_within_the_height_cap() {
     let (_, w, h) = decode(&r.png);
     assert_eq!((w, h), (r.width_px, r.height_px));
     assert!(
-        h <= mnema_extract::page_view::MAX_HEIGHT_PX && h >= 4000,
+        (4000..=mnema_extract::page_view::MAX_HEIGHT_PX).contains(&h),
         "{w}x{h}"
     );
     assert!(w <= 3, "the page keeps its shape: {w}x{h}");
