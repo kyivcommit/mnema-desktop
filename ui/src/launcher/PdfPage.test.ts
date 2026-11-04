@@ -156,6 +156,25 @@ test('a late answer for an older request is not painted', async () => {
   expect(image()).toBe('data:image/png;base64,THREE');
 });
 
+test('a late failure for an older request does not replace a newer page', async () => {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  let failTwo: (e: unknown) => void = () => {};
+  renderReply = (a) => a.pageNo === 2
+    ? new Promise((_, reject) => { failTwo = reject; })
+    : Promise.resolve(page({ image: `data:image/png;base64,P${a.pageNo}` }));
+  mount();
+  await screen.findByTestId('page-image');
+
+  await fireEvent.click(screen.getByTestId('page-next')); // page 2, held
+  await fireEvent.click(screen.getByTestId('page-next')); // page 3, answered
+  await waitFor(() => expect(image()).toBe('data:image/png;base64,P3'));
+  failTwo('boom');
+  await new Promise((r) => setTimeout(r, 20));
+  expect(image()).toBe('data:image/png;base64,P3');
+  expect(screen.queryByTestId('page-unavailable')).toBeNull();
+  error.mockRestore();
+});
+
 test('prev and next stop at the first and the last page', async () => {
   mount();
   await screen.findByTestId('page-image');

@@ -68,7 +68,7 @@ case_ "page: a late rejection replaces a newer page" \
   $PP \
   's~if \(id !== request\) return;~void id;~' \
   'void id;' \
-  $PT 'a late answer for an older request is not painted' runner=vitest
+  $PT 'a late failure for an older request does not replace a newer page' runner=vitest
 
 # ── Turning the page ─────────────────────────────────────────────────────────
 
