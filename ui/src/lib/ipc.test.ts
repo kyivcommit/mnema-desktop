@@ -236,7 +236,7 @@ test('forgetKey invokes forget_key with no arguments', async () => {
 
 test('DocumentView rejects Rust snake_case wire fields', () => {
   const view: DocumentView = {
-    kind: 'file', blocks: [], focusBlockIds: [], spans: [], relativePath: null, rootName: null,
+    kind: 'file', mime: 'text/plain', blocks: [], focusBlockIds: [], spans: [], relativePath: null, rootName: null,
     freshness: { kind: 'current' },
     // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
     focus_block_ids: [],

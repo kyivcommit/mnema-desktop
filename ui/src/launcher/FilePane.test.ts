@@ -25,6 +25,7 @@ beforeEach(() => {
   scroll.mockReset();
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [
       { blockId: 1, kind: 'headline', text: '## Розділ', pageNo: 1, sectionTitle: null },
       { blockId: 2, kind: 'paragraph', text: 'Перший абзац.', pageNo: 1, sectionTitle: null },
@@ -47,6 +48,7 @@ const blocks = () => screen.getAllByTestId('file-block').map((el) => el.textCont
 test('blocks render in document order, each in the element its kind names', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [
       { blockId: 1, kind: 'headline', text: '## Розділ', pageNo: 1, sectionTitle: null },
       { blockId: 2, kind: 'paragraph', text: 'Перший абзац.', pageNo: 1, sectionTitle: null },
@@ -76,6 +78,7 @@ test('the highlight is placed by code points, not UTF-16 units', async () => {
   const text = '🌍 Ціна оцифрування становить чотири гривні.';
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text, pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     // Code points [2, 18) = 'Ціна оцифрування'; `text.slice(2, 18)` would start
@@ -94,6 +97,7 @@ test('the highlight is placed by code points, not UTF-16 units', async () => {
 test('a cited span is highlighted inside its block, and the rest is plain', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [
       { blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null },
       { blockId: 2, kind: 'paragraph', text: 'Другий абзац.', pageNo: 1, sectionTitle: null },
@@ -122,6 +126,7 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
   const acknowledged = vi.fn();
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [
       { blockId: 1, kind: 'paragraph', text: 'Перший.', pageNo: 1, sectionTitle: null },
       { blockId: 2, kind: 'paragraph', text: 'Другий.', pageNo: 1, sectionTitle: null },
@@ -154,6 +159,7 @@ test('the first focus block is scrolled into view and the focus is acknowledged'
 test('clearing the handled focus neither refetches nor drops the highlight', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
@@ -180,6 +186,7 @@ test('clearing the handled focus neither refetches nor drops the highlight', asy
 test('a headline from a reader that is not markdown keeps its leading hash', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'headline', text: '#1 Priority', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -198,6 +205,7 @@ test('a headline from a reader that is not markdown keeps its leading hash', asy
 test('a span that starts inside the heading marker keeps its end', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'headline', text: '##   Heading text', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 2, length: 10, primary: true }],
@@ -214,6 +222,7 @@ test('a span that starts inside the heading marker keeps its end', async () => {
 test('a gone file shows the badge and keeps its text', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст, який усе ще в індексі.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -234,6 +243,7 @@ test('a gone file shows the badge and keeps its text', async () => {
 test('an unchanged file draws no badge', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без змін.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -252,6 +262,7 @@ test('an unchanged file draws no badge', async () => {
 test('a file without a path opens without a badge', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Без шляху.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -290,6 +301,7 @@ test('an unavailable document says why instead of drawing an empty file', async 
 test('a setext heading loses its underline and an ATX closing run its hashes', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [
       { blockId: 1, kind: 'headline', text: 'Заголовок\n=========', pageNo: 1, sectionTitle: null },
       { blockId: 2, kind: 'headline', text: '## Розділ ##', pageNo: 1, sectionTitle: null },
@@ -313,6 +325,7 @@ test('a setext heading loses its underline and an ATX closing run its hashes', a
 test('a citation with no path is titled from the path the backend resolved', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Без шляху в цитаті.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -336,6 +349,7 @@ test('a citation with no path is titled from the path the backend resolved', asy
 test('the title is the root name and the path, reported through onTitle and not drawn in the card', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -362,6 +376,7 @@ test('the title is the root name and the path, reported through onTitle and not 
 test('switching files never reports the old root with the new path', async () => {
   const fileView = (rootName: string, relativePath: string): DocumentView => ({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -396,6 +411,7 @@ test('switching files never reports the old root with the new path', async () =>
 test('a view that names no root titles the file by its path alone', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -422,6 +438,7 @@ test('a view that names no root titles the file by its path alone', async () => 
 test('a focus the backend rejected says the passage is gone', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без того уривка.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [],
     spans: [],
@@ -442,10 +459,41 @@ test('a focus the backend rejected says the passage is gone', async () => {
   expect(blocks()).toEqual(['Текст без того уривка.']);
 });
 
+// The page mode answers a gone passage with page 1, which looks like an
+// answer; the line has to be there too.
+test('a focus the backend rejected says the passage is gone in the page mode too', async () => {
+  const view: DocumentView = {
+    kind: 'file',
+    mime: 'application/pdf',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без того уривка.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'books/a.pdf',
+    rootName: null,
+    freshness: { kind: 'current' },
+  };
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'open_document'
+      ? view
+      : { kind: 'unavailable', reason: 'failed' }),
+  );
+  render(FilePane, {
+    location,
+    focus: { chunkId: 9, ord: 0, text: 'зниклий уривок' },
+    onFocusHandled: () => {},
+    mode: 'page',
+  });
+
+  expect((await screen.findByTestId('file-focus-gone')).textContent).toBe(
+    'The passage this citation pointed at is no longer in this file.',
+  );
+});
+
 // The other branch: a focus that was accepted says nothing at all.
 test('an accepted focus draws no gone-passage line', async () => {
   mockView({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
@@ -470,6 +518,7 @@ test('an accepted focus draws no gone-passage line', async () => {
 test('a window focus refreshes the file and keeps the highlight and the scroll', async () => {
   const focused = {
     kind: 'file' as const,
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],
@@ -527,6 +576,7 @@ test('a window focus during the first read does not start a second one', async (
 
   answer({
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text: 'Ціна становить дві гривні.', pageNo: 1, sectionTitle: null }],
     focusBlockIds: [1],
     spans: [{ blockId: 1, blockStart: 0, length: 4, primary: true }],

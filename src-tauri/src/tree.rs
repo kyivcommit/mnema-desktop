@@ -502,7 +502,7 @@ impl From<Segment> for WireSegment {
 /// entirely. Only a citation with no root to name — `citedRootId: null` — still
 /// falls back to the blunt "exactly one candidate, or `None`" rule, which is
 /// unchanged from before this PR.
-fn cited_occupant(
+pub(crate) fn cited_occupant(
     db: &Db,
     cited_root_id: Option<i64>,
     cited_relative_path: Option<&str>,
@@ -593,6 +593,8 @@ const MAX_BLOCKS: usize = 50_000;
 )]
 pub enum DocumentView {
     File {
+        /// `document.mime`: a PDF is drawn as its page, anything else as text.
+        mime: String,
         blocks: Vec<ViewBlock>,
         /// Every block the focused citation covers, in reading order — a chunk
         /// can span several. Empty when no focus was accepted.
@@ -659,6 +661,7 @@ pub enum UnavailableReason {
 /// [`DocumentView::File`] minus the verdict only a `stat` can give: the index
 /// half is read inside one snapshot, and the `stat` happens after it.
 struct FileFields {
+    mime: String,
     blocks: Vec<ViewBlock>,
     focus_block_ids: Vec<i64>,
     spans: Vec<PaneSpan>,
@@ -673,6 +676,7 @@ struct FileFields {
 impl FileFields {
     fn with(self, freshness: Freshness) -> DocumentView {
         DocumentView::File {
+            mime: self.mime,
             blocks: self.blocks,
             focus_block_ids: self.focus_block_ids,
             spans: self.spans,
@@ -794,6 +798,7 @@ fn build_document_view(
 
     Ok(ComposedView::Pending {
         file: FileFields {
+            mime: view.mime,
             blocks: view
                 .blocks
                 .into_iter()
@@ -1681,6 +1686,7 @@ mod tests {
     /// One `DocumentView::File` carrying every camelCase field the pane reads.
     fn sample_view() -> DocumentView {
         DocumentView::File {
+            mime: "application/pdf".into(),
             blocks: vec![ViewBlock {
                 block_id: 41,
                 kind: "paragraph".into(),
@@ -1741,6 +1747,7 @@ mod tests {
         assert_eq!(v["relativePath"], "notes/a.md");
         assert!(v.get("relative_path").is_none());
         assert_eq!(v["rootName"], "docs");
+        assert_eq!(v["mime"], "application/pdf");
         assert!(v.get("root_name").is_none());
 
         // The refusal carries its reason as a bare tag — the window switches on
@@ -1760,6 +1767,7 @@ mod tests {
     #[test]
     fn a_block_with_no_section_title_still_carries_the_key() {
         let DocumentView::File {
+            mime,
             blocks,
             focus_block_ids,
             spans,
@@ -1771,6 +1779,7 @@ mod tests {
             unreachable!("sample_view is a File")
         };
         let untitled = serde_json::to_value(DocumentView::File {
+            mime,
             blocks: blocks
                 .into_iter()
                 .map(|b| ViewBlock {

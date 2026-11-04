@@ -2418,3 +2418,80 @@ fn a_document_with_more_sections_than_the_ceiling_is_refused_under_its_reader() 
         "{at_cap:?}"
     );
 }
+
+/// `--render-page`: one line on stdin, one line on stdout, exit 0. Returns the
+/// raw stdout.
+fn render_page_run(stdin_text: &str) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--render-page")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the worker binary starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(stdin_text.as_bytes())
+        .expect("the worker reads its stdin");
+    let output = child.wait_with_output().expect("the worker exits");
+    assert!(output.status.success(), "{:?}", output.status);
+    String::from_utf8(output.stdout).expect("stdout is UTF-8")
+}
+
+fn render_request(path: &str) -> String {
+    format!(
+        "{{\"path\":{path:?},\"page_no\":1,\"width_px\":400,\"text_sha256\":null,\"ranges\":[]}}\n"
+    )
+}
+
+fn one_reply(stdout: &str) -> mnema_core::render::RenderReply {
+    assert!(
+        stdout.ends_with('\n') && stdout.matches('\n').count() == 1,
+        "stdout is exactly one line: {stdout:?}"
+    );
+    serde_json::from_str(stdout).expect("the line is a RenderReply")
+}
+
+#[test]
+fn render_page_answers_a_pdf_with_one_rendered_line() {
+    use mnema_core::render::{RenderReply, TextMatch};
+    let out = render_page_run(&render_request(&format!(
+        "{}/tests/fixtures/one-page-text.pdf",
+        env!("CARGO_MANIFEST_DIR")
+    )));
+    match one_reply(&out) {
+        RenderReply::Rendered {
+            pages,
+            width_px,
+            png_base64,
+            text,
+            ..
+        } => {
+            assert_eq!((pages, width_px, text), (1, 400, TextMatch::None));
+            assert!(png_base64.starts_with("iVBOR"), "a PNG, base64");
+        }
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
+#[test]
+fn render_page_names_a_non_pdf_and_a_line_that_is_not_a_request() {
+    use mnema_core::render::{RenderError, RenderReply};
+    let png = format!("{}/tests/fixtures/solid.png", env!("CARGO_MANIFEST_DIR"));
+    match one_reply(&render_page_run(&render_request(&png))) {
+        RenderReply::Refused { error, .. } => assert_eq!(error, RenderError::NotPdf),
+        other => panic!("{other:?}"),
+    }
+
+    for garbage in ["not json at all\n", "{\"path\":\"x\",\"zoom\":2}\n", ""] {
+        match one_reply(&render_page_run(garbage)) {
+            RenderReply::Refused { error, message } => {
+                assert_eq!(error, RenderError::Unreadable, "{garbage:?}");
+                assert!(!message.is_empty(), "{garbage:?}");
+            }
+            other => panic!("{garbage:?}: {other:?}"),
+        }
+    }
+}

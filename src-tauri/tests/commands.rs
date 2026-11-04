@@ -4865,6 +4865,11 @@ fn open_document_opens_the_whole_file_and_highlights_the_cited_blocks() {
     .expect("open_document was rejected");
 
     assert_eq!(v["kind"], json!("file"), "{v}");
+    assert_eq!(
+        v["mime"],
+        json!("text/plain"),
+        "the pane picks how to draw the file from the document's mime: {v}"
+    );
     let texts: Vec<&str> = v["blocks"]
         .as_array()
         .expect("a blocks array")

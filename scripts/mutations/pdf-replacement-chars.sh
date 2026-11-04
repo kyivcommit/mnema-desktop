@@ -42,8 +42,8 @@ case_ "pdf: a run of U+FFFD is not kept in the stored text" \
 # the page does not show.
 case_ "pdf: a run of U+FFFD leaves a space between the words" \
   crates/mnema-extract/src/pdf.rs \
-  "s{out\\.push\\(' '\\);}{out.push_str(\"\");}" \
-  'out.push_str("");' \
+  "s{out\\.push\\(\\(' ', T::default\\(\\)\\)\\);}{let _ = T::default();}" \
+  'let _ = T::default();' \
   mnema-extract 'a_run_of_replacement_characters_becomes_one_space' --test pdf
 
 # R4. A run beside whitespace still writes its space: `a  b`, a doubled space
@@ -51,13 +51,13 @@ case_ "pdf: a run of U+FFFD leaves a space between the words" \
 case_ "pdf: no space is written for a run beside whitespace" \
   crates/mnema-extract/src/pdf.rs \
   's{if after_run && !c\.is_whitespace\(\) && }{if after_run && }' \
-  'if after_run && out.ends_with' \
+  'if after_run && out.last' \
   mnema-extract 'pdf::tests::a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any' --lib
 
 # R5. A run at the start of the page writes its space: a page that begins
 # with a leading space it does not show.
 case_ "pdf: no space is written for a run at the start of the page" \
   crates/mnema-extract/src/pdf.rs \
-  's{ && out\.ends_with\(\|p: char\| !p\.is_whitespace\(\)\)}{}' \
+  's{ && out\.last\(\)\.is_some_and\(\|\(p, _\)\| !p\.is_whitespace\(\)\)}{}' \
   'if after_run && !c.is_whitespace() {' \
   mnema-extract 'pdf::tests::a_run_between_two_words_is_one_space_and_nowhere_else_is_there_any' --lib

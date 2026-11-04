@@ -56,6 +56,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mnema_core::manifest::Manifest;
+use mnema_core::render::{RenderReply, RenderRequest};
 use mnema_core::wire::{Frame, Request, from_line, to_request_line};
 use mnema_core::{Block, SourceKind};
 use mnema_index::SkipRule;
@@ -448,6 +449,89 @@ pub enum PoolError {
     Wait { source: io::Error },
     #[error("a request could not be encoded: {source}")]
     Encode { source: serde_json::Error },
+    #[error("the worker did not draw the page within {after:?} and was killed")]
+    RenderTimeout { after: Duration },
+}
+
+// --------------------------------------------------------- drawing one page
+
+/// Asks `worker --render-page` to draw one PDF page: one request line in, one
+/// reply line out, one process per call. Outside the pool's slots, like
+/// [`Pool::manifest`] — the window waits on this one, a scan must not.
+///
+/// A worker that outlives `timeout` is killed and reaped before this returns,
+/// so an `Err` never leaves a process behind. A crash in the PDF library (a
+/// nonzero exit or a signal) and a stdout that is not a [`RenderReply`] are
+/// both [`PoolError::Protocol`], with the worker's stderr as the line.
+pub fn render_page(
+    worker: &Path,
+    req: &RenderRequest,
+    timeout: Duration,
+) -> Result<RenderReply, PoolError> {
+    let mut line = serde_json::to_string(req).map_err(|source| PoolError::Encode { source })?;
+    line.push('\n');
+    let mut command = Command::new(worker);
+    command
+        .arg("--render-page")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = {
+        let _one_at_a_time = spawn_guard();
+        command.spawn()
+    }
+    .map_err(|source| PoolError::Spawn {
+        worker: worker.to_path_buf(),
+        source,
+    })?;
+    // On its own thread, so a worker that never reads cannot hold this one
+    // past the deadline. A worker that died before reading its line is
+    // reported by its exit status below, which says more than a broken pipe.
+    let deadline = Instant::now() + timeout;
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || stdin.write_all(line.as_bytes()));
+    }
+    // Both pipes drain on their own threads, so a reply larger than the pipe
+    // buffer (a PNG) cannot stall the worker while this thread polls for exit.
+    fn drain(mut pipe: impl io::Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    }
+    let stdout = drain(child.stdout.take().expect("stdout was piped"));
+    let stderr = drain(child.stderr.take().expect("stderr was piped"));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PoolError::RenderTimeout { after: timeout });
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PoolError::Wait { source });
+            }
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    if !status.success() {
+        return Err(protocol(
+            &stderr,
+            &format!("{worker:?} --render-page ended with {status}"),
+        ));
+    }
+    serde_json::from_slice(&stdout).map_err(|source| {
+        protocol(
+            &String::from_utf8_lossy(&stdout),
+            &format!("--render-page did not answer with a reply line: {source}"),
+        )
+    })
 }
 
 // ------------------------------------------------------- the memory ceiling

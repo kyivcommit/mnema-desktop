@@ -107,7 +107,7 @@ case_ "reader: the fallback drops the characters outside the box" \
 # written to fix.
 case_ "reader: a page whose bounded read fails is rebuilt from its characters" \
   crates/mnema-extract/src/pdfium_probe.rs \
-  's#    if !bounded\.is_empty\(\) \{\n        return Ok\(bounded\);\n    \}\n\n    Ok\(text_from_code_points\(chars_within\(&text, bound\)\)\)#    Ok(bounded)#' \
+  's#    if !bounded\.is_empty\(\) \{\n        return Ok\(bounded\);\n    \}\n\n    Ok\(text_from_code_points\(\n        chars_within\(&text, bound\)\n            \.into_iter\(\)\n            \.map\(\|\(value, _\)\| value\),\n    \)\)#    Ok(bounded)#' \
   '    let bounded = text.inside_rect(bound);
     Ok(bounded)' \
   mnema-extract 'a_glyph_that_is_not_a_character_loses_its_word_and_not_its_page' --test pdf
@@ -139,7 +139,7 @@ case_ "reader: a code point that is not a character becomes U+FFFD" \
 # run-on line.
 case_ "reader: the fallback writes the break the box cut away" \
   crates/mnema-extract/src/pdfium_probe.rs \
-  's#            if y != pos_y && !after_text && line_feed_due \{\n                pos_y = y;\n                if !values\.is_empty\(\) \{\n                    values\.extend\(\[u32::from\(b\x27\\r\x27\), u32::from\(b\x27\\n\x27\)\]\);\n                \}\n            \}#            if y != pos_y && !after_text && line_feed_due {\n                pos_y = y;\n            }#' \
+  's#            if y != pos_y && !after_text && line_feed_due \{\n                pos_y = y;\n                if !values\.is_empty\(\) \{\n                    values\.extend\(\[\(u32::from\(b\x27\\r\x27\), None\), \(u32::from\(b\x27\\n\x27\), None\)\]\);\n                \}\n            \}#            if y != pos_y && !after_text && line_feed_due {\n                pos_y = y;\n            }#' \
   '            if y != pos_y && !after_text && line_feed_due {
                 pos_y = y;
             }' \

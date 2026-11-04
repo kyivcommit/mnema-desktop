@@ -33,6 +33,9 @@ const SELF_DESTRUCT: Duration = Duration::from_secs(600);
 const SELF_DESTRUCT_CODE: i32 = 97;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--render-page") {
+        return render_once();
+    }
     std::thread::spawn(|| {
         std::thread::sleep(SELF_DESTRUCT);
         eprintln!("test worker: self-destruct after {SELF_DESTRUCT:?}");
@@ -52,6 +55,50 @@ fn main() {
             None => ("ok", request.path.as_str()),
         };
         act(mode, rest, &request, &mut stdout);
+    }
+}
+
+/// `--render-page`: one request line in, one reply line out. The mode is the
+/// request's `path` prefix, as everywhere else in this file:
+/// `ok` answers a canned `Rendered` that echoes the request's `width_px` and
+/// whether it carried a hash; `sleep:<pidfile>` writes its pid there and then
+/// outlives any timeout; `exit:<code>` and `garbage` end it the wrong ways.
+fn render_once() {
+    use mnema_core::render::{RenderReply, RenderRequest, TextMatch};
+
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).expect("a line");
+    let request: RenderRequest = serde_json::from_str(&line).expect("a render request");
+    let (mode, rest) = request
+        .path
+        .split_once(':')
+        .unwrap_or(("ok", &request.path));
+    match mode {
+        "sleep" => {
+            std::fs::write(rest, std::process::id().to_string()).expect("the pid file");
+            std::thread::sleep(SELF_DESTRUCT);
+        }
+        "exit" => {
+            eprintln!("pdfium crashed");
+            std::process::exit(rest.parse().expect("exit:<code>"));
+        }
+        "garbage" => println!("this is not a reply"),
+        _ => {
+            let reply = RenderReply::Rendered {
+                pages: 7,
+                width_px: request.width_px,
+                height_px: 2 * request.width_px,
+                png_base64: if request.text_sha256.is_some() {
+                    "hashed"
+                } else {
+                    "bare"
+                }
+                .into(),
+                text: TextMatch::None,
+                rects: Vec::new(),
+            };
+            println!("{}", serde_json::to_string(&reply).unwrap());
+        }
     }
 }
 

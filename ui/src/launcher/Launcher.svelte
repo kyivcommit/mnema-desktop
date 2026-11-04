@@ -42,6 +42,24 @@
   // The open file's path from its root, reported by the pane and drawn in the
   // right panel's head.
   let fileTitle = $state<string | null>(null);
+  // The open document's type, reported by the pane: a PDF offers the choice of
+  // its page or its text, anything else only text.
+  let fileMime = $state<string | null>(null);
+  // Remembered in the webview's own storage — a convenience, so a storage that
+  // is missing, refuses, or holds something else is the default, the page.
+  const PDF_VIEW_KEY = 'mnema.pdfView';
+  const readPdfView = (): 'page' | 'text' => {
+    try { return localStorage.getItem(PDF_VIEW_KEY) === 'text' ? 'text' : 'page'; } catch { return 'page'; }
+  };
+  let pdfView = $state<'page' | 'text'>(readPdfView());
+  function setPdfView(v: 'page' | 'text') {
+    pdfView = v;
+    try { localStorage.setItem(PDF_VIEW_KEY, v); } catch { /* not remembered, still shown */ }
+  }
+  const pdfViewLabels = $derived.by(() => {
+    void $locale;
+    return { group: t('pdf_view_label'), text: t('pdf_view_text'), page: t('pdf_view_page') };
+  });
   // The tree's mark is the (root, path) pair, never `documentId` (spec §3):
   // one document can sit at several paths, and a key on the id would mark
   // every row that names it.
@@ -284,6 +302,16 @@
 <svelte:window onfocus={refreshAll} onkeydown={onKeydown} />
 
 <Shell bind:panels fileOpen={openFile !== null} {fileTitle}>
+  {#snippet fileTools()}
+    {#if fileMime === 'application/pdf'}
+      <span class="pdf-view" role="group" aria-label={pdfViewLabels.group} data-testid="pdf-view">
+        {#each ['text', 'page'] as const as v (v)}
+          <button type="button" data-testid="pdf-view-{v}" aria-pressed={pdfView === v}
+            onclick={() => setPdfView(v)}>{pdfViewLabels[v]}</button>
+        {/each}
+      </span>
+    {/if}
+  {/snippet}
   {#snippet transcript()}
     <Transcript {turns} state={shownState} onSelected={showCitation} />
     <Composer bind:this={composer} bind:value={query} state={launcherState} {scopeOff} onSubmit={runSearch} />
@@ -300,7 +328,8 @@
   {#snippet file()}
     {#if openFile !== null}
       <FilePane location={openFile} focus={openFocus} onFocusHandled={() => (openFocus = null)}
-        onTitle={(title) => (fileTitle = title)} />
+        onTitle={(title) => (fileTitle = title)} onMime={(mime) => (fileMime = mime)}
+        mode={pdfView} onShowText={() => setPdfView('text')} />
     {/if}
   {/snippet}
   {#snippet tools()}

@@ -54,6 +54,10 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
+  | 'pdf_view_label' | 'pdf_view_text' | 'pdf_view_page'
+  | 'page_prev' | 'page_next' | 'page_of' | 'page_image_alt'
+  | 'page_note_changed' | 'page_note_scan' | 'page_note_unplaced'
+  | 'page_unavailable' | 'page_unavailable_missing' | 'page_show_text'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
@@ -458,6 +462,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     file_unavailable_no_blocks: 'У цьому документі немає тексту.',
     file_unavailable_rebuilding: 'Документ зараз переіндексовується — спробуйте після сканування.',
     file_unavailable_too_large: 'Файл завеликий, щоб показати його повністю.',
+    pdf_view_label: 'Вигляд PDF',
+    pdf_view_text: 'Текст',
+    pdf_view_page: 'Сторінка',
+    page_prev: 'Попередня сторінка',
+    page_next: 'Наступна сторінка',
+    page_of: 'стор. {n} з {m}',
+    page_image_alt: 'Сторінка документа',
+    page_note_changed: 'Файл змінено після індексації — підсвітки немає. Текст цитати — у режимі «Текст».',
+    page_note_scan: 'Сторінка зі скану — підсвітка лише в режимі «Текст».',
+    page_note_unplaced: 'Уривок не вдалося позначити на сторінці — він є в режимі «Текст».',
+    page_unavailable: 'Не вдалося показати сторінку.',
+    page_unavailable_missing: 'Файла немає на диску.',
+    page_show_text: 'Показати текст',
     // 🔴 Ruling AF: `bridge.rs:536-540` opens state E for any non-`Ready`
     // readiness, `bridge.rs:293-302` gives that three variants, and the wire
     // shape at `bridge.rs:476-480` carries none of them. So this sentence says
@@ -1371,6 +1388,19 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     file_unavailable_no_blocks: 'This document has no text.',
     file_unavailable_rebuilding: 'This document is being reindexed — try again after the scan.',
     file_unavailable_too_large: 'The file is too large to show in full.',
+    pdf_view_label: 'PDF view',
+    pdf_view_text: 'Text',
+    pdf_view_page: 'Page',
+    page_prev: 'Previous page',
+    page_next: 'Next page',
+    page_of: 'page {n} of {m}',
+    page_image_alt: 'Document page',
+    page_note_changed: 'The file changed after indexing — there is no highlight. The citation text is in “Text” mode.',
+    page_note_scan: 'This page is a scan — the highlight is only available in “Text” mode.',
+    page_note_unplaced: 'The passage could not be marked on this page — it is shown in “Text” mode.',
+    page_unavailable: 'The page could not be shown.',
+    page_unavailable_missing: 'The file is missing from disk.',
+    page_show_text: 'Show text',
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',

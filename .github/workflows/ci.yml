@@ -605,6 +605,11 @@ jobs:
     # (`^[^#]*`: a file whose comment only mentions the runner, as
     # `debt-rust-mutants.sh`'s does, holds no vitest case.)
     #
+    # `pdf-page-view pdf-page-view-ui` joined the bucket that held the least
+    # (`pr8-exclusions citation-identity`): measured on an Apple M2 Max with a
+    # warm target directory, 1m53s + 24s before, and the two new files 1m41s
+    # (Rust) and 1m16s (vitest, compiles nothing).
+    #
     # Each entry of `leg:` is the file names of one bucket, space-separated,
     # and the job's display name is that entry. Guard 5 reads every name of
     # every entry, and refuses a name written in two entries.
@@ -621,7 +626,7 @@ jobs:
           - wayland-shortcut branch-review refuse-by-content task-d61
           - pr7-default-models pr10f-tray-locale task-11 task-4
           - pr8c-mask-differential pr9-ui task-10 task-7
-          - pr8-exclusions citation-identity
+          - pr8-exclusions citation-identity pdf-page-view pdf-page-view-ui
           - task-9 tree task-12 task-2 pr9-index pr8-subfolders-linux
           - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer scan-ocr
           - watcher source debt-rust-mutants pdf-broken-utf16

@@ -46,6 +46,7 @@ const SETTINGS_READY = {
 // focus, so a click has no highlight to paint.
 const OPEN_DOCUMENT = {
   kind: 'file',
+  mime: 'text/plain',
   blocks: [{ blockId: 1, kind: 'paragraph', text: 'The whole file, opened from the tree.', pageNo: 1, sectionTitle: null }],
   focusBlockIds: [],
   spans: [],
@@ -531,6 +532,7 @@ function answeredPane(args: Record<string, unknown>) {
   const focused = typeof args.chunkId === 'number';
   return {
     kind: 'file',
+    mime: 'text/plain',
     blocks: [{ blockId: 1, kind: 'paragraph', text, pageNo: 1, sectionTitle: null }],
     focusBlockIds: focused ? [1] : [],
     spans: focused ? [{ blockId: 1, blockStart: 0, length: [...text].length, primary: true }] : [],

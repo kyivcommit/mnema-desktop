@@ -47,6 +47,7 @@ beforeEach(() => {
     if (cmd === 'ask') return Promise.resolve({ answer: generated, historyId: null });
     if (cmd === 'open_document') return Promise.resolve({
       kind: 'file',
+      mime: 'text/plain',
       blocks: [{ blockId: 1, kind: 'paragraph', text: 'A cited passage. And more.', pageNo: 1, sectionTitle: null }],
       focusBlockIds: [1],
       spans: [{ blockId: 1, blockStart: 2, length: 6, primary: true }],

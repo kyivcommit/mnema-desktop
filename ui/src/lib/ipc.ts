@@ -221,6 +221,8 @@ export type PaneSpan = { blockId: number; blockStart: number; length: number; pr
 // tree's name for the watched root that path belongs to, null when there is none.
 export type DocumentView =
   | { kind: 'file';
+      // `document.mime`: a PDF is drawn as its page, anything else as text.
+      mime: string;
       blocks: Array<{ blockId: number; kind: string; text: string; pageNo: number; sectionTitle: string | null }>;
       focusBlockIds: number[]; spans: PaneSpan[]; relativePath: string | null; rootName: string | null;
       freshness: Freshness }
@@ -275,6 +277,23 @@ export const openDocument = (location: DocumentLocation, focus: DocumentFocus | 
   invoke<DocumentView>('open_document', {
     documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath,
     chunkId: focus?.chunkId ?? null, citedOrd: focus?.ord ?? null, citedText: focus?.text ?? null,
+  });
+
+// One PDF page drawn by `render_pdf_page` (`page_view.rs`). `image` is a data URL;
+// `rects` are fractions 0..1 of the page's width and height. `highlight` says
+// whether they can be trusted: `shown` the citation, `changed` the file moved
+// since indexing, `scan` no text layer, `noText` nothing indexed for the page,
+// `unplaced` the same text but the passage could not be placed on the page.
+export type PageRect = { x: number; y: number; w: number; h: number; primary: boolean };
+export type PdfPageView =
+  | { kind: 'page'; pages: number; widthPx: number; heightPx: number; image: string;
+      highlight: 'shown' | 'changed' | 'scan' | 'noText' | 'unplaced'; rects: PageRect[] }
+  | { kind: 'unavailable'; reason: 'noPath' | 'fileMissing' | 'failed' };
+// `ranges` are the page's block spans (`PaneSpan`); the backend ignores `blockId`.
+export const renderPdfPage = (location: DocumentLocation, pageNo: number, widthPx: number, ranges: PaneSpan[]) =>
+  invoke<PdfPageView>('render_pdf_page', {
+    documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath,
+    pageNo, widthPx, ranges,
   });
 
 // A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only

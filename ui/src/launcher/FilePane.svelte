@@ -74,6 +74,7 @@
   import { tick } from 'svelte';
   import { locale, t } from '../i18n';
   import { openDocument } from '../lib/ipc';
+  import PdfPage from './PdfPage.svelte';
   import { scrollWithin } from '../lib/scroll';
   import type { DocumentFocus, DocumentLocation, DocumentView, Freshness } from '../lib/ipc';
 
@@ -88,11 +89,19 @@
   //
   // The path is not drawn here: the pane reports it through `onTitle` and the
   // right panel's head, which never scrolls, draws it.
-  let { location, focus, onFocusHandled, onTitle }: {
+  //
+  // A PDF can be drawn as its page instead of as text: `mode` says which, and
+  // `onMime` reports the document's type upward so the caller knows whether to
+  // offer the choice at all. The text view above is the same either way — the
+  // page mode still reads the document here, for its blocks, spans and focus.
+  let { location, focus, onFocusHandled, onTitle, onMime, mode = 'text', onShowText }: {
     location: DocumentLocation;
     focus: DocumentFocus | null;
     onFocusHandled: () => void;
     onTitle?: (title: string | null) => void;
+    onMime?: (mime: string | null) => void;
+    mode?: 'page' | 'text';
+    onShowText?: () => void;
   } = $props();
 
   let view = $state<DocumentView | null>(null);
@@ -212,6 +221,7 @@
   // After the read effect above, so a new location's `view = null` has landed
   // before the title is reported and the old root is never joined to a new path.
   $effect(() => onTitle?.(title));
+  $effect(() => onMime?.(view?.kind === 'file' ? view.mime : null));
   const badge = $derived.by(() => {
     void $locale;
     const got = view;
@@ -259,6 +269,13 @@
     <p data-testid="file-loading">{loadingLabel}</p>
   {:else if view.kind === 'unavailable'}
     <p role="status" data-testid="file-unavailable">{unavailableText(view.reason)}</p>
+  {:else if mode === 'page' && view.mime === 'application/pdf'}
+    <!-- The page mode opens page 1 when the cited passage is gone; without
+         this line a person would take page 1 for the citation. -->
+    {#if focusGone}
+      <p role="status" data-testid="file-focus-gone">{focusGoneLabel}</p>
+    {/if}
+    <PdfPage {location} {view} onShowText={() => onShowText?.()} />
   {:else}
     {#if badge !== ''}
       <p role="status" data-testid="file-badge">{badge}</p>

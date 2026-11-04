@@ -213,6 +213,7 @@ def build(
     boxes: dict[int, tuple[str | None, str | None]] | None = None,
     layout: dict[int, list[tuple[tuple[int, int, int], list]]] | None = None,
     pages_boxes: tuple[str | None, str | None] | None = None,
+    rotate: dict[int, int] | None = None,
 ) -> bytes:
     """Assembles a PDF whose pages draw the given lines, in the given order.
 
@@ -279,6 +280,10 @@ def build(
             page_boxes = (b" /MediaBox %s" % media.encode("ascii") if media else b"") + (
                 b" /CropBox %s" % crop.encode("ascii") if crop else b""
             )
+            # `rotate` adds `/Rotate` only to the pages it names, so every
+            # fixture written before `rotated-90.pdf` keeps its bytes.
+            if i in (rotate or {}):
+                page_boxes += b" /Rotate %d" % rotate[i]
             objs.append(
                 b"<< /Type /Page /Parent 2 0 R%s "
                 b"/Resources << /Font << %s >> >> /Contents %d 0 R >>"
@@ -488,4 +493,9 @@ if __name__ == "__main__":
             ],
         },
     )
+    # A page a viewer turns a quarter: `/Rotate 90` on an ordinary page. The
+    # page view's highlight boxes are converted from page points to bitmap
+    # pixels, and on this page the two axes swap — a conversion that ignores
+    # the rotation puts the box beside the words, not on them.
+    write("rotated-90.pdf", [[BODY_TEXT, BODY_TEXT_2]], rotate={0: 90})
     write_solid_png()

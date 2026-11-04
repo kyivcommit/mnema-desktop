@@ -88,6 +88,44 @@ fn main() {
         return;
     }
 
+    // The third one-shot branch, and the only one that reads stdin: one
+    // `RenderRequest` line in, one `RenderReply` line out, exit 0 whatever the
+    // answer (a refusal is an answer; a nonzero exit means the process died).
+    // The page view cannot link this crate (D40), so it spawns this.
+    if args.len() == 2 && args[1] == "--render-page" {
+        use mnema_core::render::{RenderError, RenderReply, RenderRequest};
+        let mut line = String::new();
+        let reply = match io::stdin().lock().read_line(&mut line) {
+            Err(e) => (
+                RenderError::Unreadable,
+                format!("could not read the request: {e}"),
+            ),
+            Ok(_) => match serde_json::from_str::<RenderRequest>(&line) {
+                Ok(request) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&mnema_extract::render_page(&request))
+                            .expect("a reply serialises")
+                    );
+                    return;
+                }
+                Err(e) => (
+                    RenderError::Unreadable,
+                    format!("not a render request: {e}"),
+                ),
+            },
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&RenderReply::Refused {
+                error: reply.0,
+                message: reply.1,
+            })
+            .expect("a reply serialises")
+        );
+        return;
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

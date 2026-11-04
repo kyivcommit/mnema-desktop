@@ -421,3 +421,31 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 }
 .file-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
 
+/* The right head's Text / Page choice for a PDF. */
+.right-head .pdf-view { flex: none; display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--surface-2); }
+.right-head .pdf-view button {
+  font: inherit; font-size: 12px; color: var(--ink-soft); background: none;
+  border: 0; border-radius: 5px; padding: 2px 8px; cursor: pointer;
+}
+.right-head .pdf-view button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+
+/* A PDF page as a picture, the cited passage boxed in the text mode's colours. */
+.pdf-page { display: flex; flex-direction: column; gap: 10px; outline: none; }
+.pdf-page p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); overflow-wrap: anywhere; }
+.pdf-page [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
+.pdf-page .page-nav { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 12px; color: var(--ink-soft); }
+.pdf-page .page-nav button, .pdf-page .page-show-text {
+  font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 5px; padding: 1px 9px; cursor: pointer;
+}
+.pdf-page .page-nav button:disabled { opacity: 0.4; cursor: default; }
+.pdf-page .page-show-text { align-self: flex-start; padding: 3px 10px; }
+.pdf-page .page-strip { overflow-x: auto; overflow-y: hidden; }
+.pdf-page .page-sheet { position: relative; display: inline-block; line-height: 0; }
+.pdf-page .page-sheet img { display: block; width: auto; max-width: none; border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
+/* The paper is white in either theme, so the wash is a marker's, not a theme
+   token (the dark theme's wash is near-black and hid the words). `multiply`
+   keeps the ink black under it. */
+.pdf-page .page-box { position: absolute; background: rgb(255 200 0 / 0.28); mix-blend-mode: multiply; border-radius: 2px; pointer-events: none; }
+.pdf-page .page-box[data-primary="true"] { background: rgb(255 190 0 / 0.5); }
+

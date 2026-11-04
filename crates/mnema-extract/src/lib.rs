@@ -20,6 +20,7 @@ mod html;
 pub mod manifest;
 mod markdown;
 mod ocr;
+pub mod page_view;
 mod pdf;
 mod pdfium_probe;
 mod text;
@@ -53,6 +54,7 @@ pub use epub::{BOOK_MAX_BYTES, EpubBook, EpubChapter, EpubError, extract_epub};
 pub use html::{HtmlPage, extract_html};
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
 pub use ocr::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, Recognised, recognise};
+pub use page_view::render_page;
 pub use pdf::{
     MAX_PAGES_ENV, OCR_MAX_SIDE_PX, OcrPage, PdfDocument, PdfError, PdfPage, TEXT_SOURCE_NATIVE,
     TEXT_SOURCE_OCR, extract_pdf, extract_pdf_pages, page_cap,

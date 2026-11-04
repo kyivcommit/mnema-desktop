@@ -24,6 +24,7 @@
     transcript,
     tree,
     file,
+    fileTools,
   }: {
     panels?: PanelState;
     // No file open means the file stripe stays empty: the tree keeps its own
@@ -38,6 +39,8 @@
     transcript?: Snippet;
     tree?: Snippet;
     file?: Snippet;
+    // Beside the path in the right head: what the open file offers to change.
+    fileTools?: Snippet;
   } = $props();
 
   // The window can be resized at any moment (minimum 900×600). `view` is what is
@@ -167,6 +170,7 @@
         <!-- Cut at the START when it does not fit (rtl + ellipsis), so the file
              name stays visible; the inner span keeps the text itself left to right. -->
         <span class="file-path" data-testid="file-header" title={fileTitle}><span>{fileTitle}</span></span>
+        {@render fileTools?.()}
       {/if}
     </div>
     <div class="right-body" style={rightStyle}>

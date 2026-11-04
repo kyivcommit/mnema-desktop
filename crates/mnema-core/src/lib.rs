@@ -5,6 +5,7 @@ mod block;
 mod locator;
 pub mod manifest;
 pub mod nfc;
+pub mod render;
 mod source_kind;
 pub mod wire;
 
