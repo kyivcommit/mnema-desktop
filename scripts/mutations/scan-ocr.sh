@@ -70,7 +70,7 @@ case_ "pool: a page renews the deadline" \
 case_ "pool: no more pages than the header promised" \
   crates/mnema-pool/src/lib.rs \
   's#                if pages\.len\(\) >= promised as usize \{\n                    return Err\(protocol\(\n                        &line,\n                        &format!\("more pages than the header promised \(\{promised\}\)"\),\n                    \)\);\n                \}\n##' \
-  '                };
+  '                // it, a worker that keeps sending pages is never killed.
                 deadline = Instant::now() + config.timeout;' \
   mnema-pool 'more_pages_than_the_header_promised_stop_the_job' --test supervision
 
