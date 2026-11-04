@@ -196,7 +196,17 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
     let size = metadata.len();
     let widest = request.max_bytes.max(request.pdf_max_bytes);
     if size > widest {
-        return vec![too_large(&request.path, size, widest, false)];
+        // Over the larger ceiling is over both, and the file's type is not
+        // known yet, so the reason names both rather than one that may not
+        // be the one that applies to this file.
+        return vec![refused_before_a_reader(
+            "too_large",
+            format!(
+                "{} is {size} bytes, over both ceilings ({} bytes for a PDF, {} for any other file)",
+                request.path, request.pdf_max_bytes, request.max_bytes
+            ),
+            None,
+        )];
     }
 
     // Past `stat` the file is opened, but only five bytes are read to learn

@@ -23,8 +23,10 @@ use mnema_core::{Block, BlockType, SourceKind};
 
 /// Nothing this binary does may outlive the test that started it. Every mode
 /// that waits, waits under this bound: if the supervisor fails to kill a hung
-/// worker, the leak lasts two minutes rather than until the machine reboots.
-const SELF_DESTRUCT: Duration = Duration::from_secs(120);
+/// worker, the leak lasts ten minutes rather than until the machine reboots.
+/// Longer than `PoolConfig::new`'s 300 s timeout, so a test that relies on the
+/// default deadline sees `Timeout`, not this exit.
+const SELF_DESTRUCT: Duration = Duration::from_secs(600);
 
 /// Exit code for the self-destruct path, chosen not to collide with anything
 /// meaningful: a test that sees it knows the worker outlived its usefulness.

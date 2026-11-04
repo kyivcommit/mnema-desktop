@@ -155,8 +155,10 @@ fn a_pdf_over_both_ceilings_is_refused_as_too_large() {
         "path": "tests/fixtures/one-page-text.pdf", "max_bytes": 16, "pdf_max_bytes": 100,
     }));
     assert_eq!(rule, "too_large");
-    assert!(reason.contains("over the 100-byte ceiling"), "{reason}");
-    assert!(!reason.contains("non-PDF"), "{reason}");
+    assert!(
+        reason.contains("over both ceilings (100 bytes for a PDF, 16 for any other file)"),
+        "{reason}"
+    );
     assert_eq!(sha256, None);
 }
 
