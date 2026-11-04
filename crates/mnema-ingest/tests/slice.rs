@@ -6031,8 +6031,10 @@ fn rows_of(fx: &Fixture, block_ids: &[i64]) -> (u32, u32) {
 
 // --------------------------------------- OCR pages beside native ones (D189)
 
+#[cfg(target_os = "macos")]
 const MIXED_NATIVE_SCAN: &[u8] =
     include_bytes!("../../mnema-extract/tests/fixtures/mixed-native-scan.pdf");
+#[cfg(target_os = "macos")]
 const SCAN_UK: &[u8] = include_bytes!("../../mnema-extract/tests/fixtures/scan-uk.pdf");
 
 /// Vision's cold start is measured in tens of seconds (Task 8 gave the pool
