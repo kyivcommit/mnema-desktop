@@ -440,8 +440,12 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 }
 .pdf-page .page-nav button:disabled { opacity: 0.4; cursor: default; }
 .pdf-page .page-show-text { align-self: flex-start; padding: 3px 10px; }
-.pdf-page .page-sheet { position: relative; line-height: 0; }
-.pdf-page .page-sheet img { display: block; width: 100%; height: auto; border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
-.pdf-page .page-box { position: absolute; background: var(--cite-wash); border-radius: 3px; pointer-events: none; }
-.pdf-page .page-box[data-primary="true"] { outline: 1px solid var(--cite-line); }
+.pdf-page .page-strip { overflow-x: auto; overflow-y: hidden; }
+.pdf-page .page-sheet { position: relative; display: inline-block; line-height: 0; }
+.pdf-page .page-sheet img { display: block; width: auto; max-width: none; border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
+/* The paper is white in either theme, so the wash is a marker's, not a theme
+   token (the dark theme's wash is near-black and hid the words). `multiply`
+   keeps the ink black under it. */
+.pdf-page .page-box { position: absolute; background: rgb(255 200 0 / 0.28); mix-blend-mode: multiply; border-radius: 2px; pointer-events: none; }
+.pdf-page .page-box[data-primary="true"] { background: rgb(255 190 0 / 0.5); }
 

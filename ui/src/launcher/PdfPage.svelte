@@ -6,10 +6,19 @@
   export function widthFor(clientWidth: number, ratio: number): number {
     return Math.min(3000, Math.max(200, Math.ceil((clientWidth * ratio) / 200) * 200));
   }
+
+  // The page is drawn as tall as the pane, less the page line above it, and
+  // scrolls sideways (owner, 2026-11-04: fitted to the width, a dictionary
+  // page was unreadable). Never shorter than this, on a very low window.
+  const CHROME_PX = 56;
+  const MIN_HEIGHT_PX = 240;
+  export function heightFor(paneHeight: number): number {
+    return Math.max(MIN_HEIGHT_PX, paneHeight - CHROME_PX);
+  }
 </script>
 
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { locale, t } from '../i18n';
   import { renderPdfPage } from '../lib/ipc';
   import type { DocumentLocation, DocumentView, PdfPageView } from '../lib/ipc';
@@ -40,18 +49,28 @@
   });
 
   let box = $state<HTMLElement | null>(null);
-  // The smallest step until `onMount` measures the pane, which is before the
-  // first request goes out.
-  let width = $state(200);
+  let strip = $state<HTMLElement | null>(null);
+  // The pane's height in CSS pixels, measured on mount and on every resize of
+  // the pane's scroller (the window, outside the launcher's own layout).
+  let paneHeight = $state(0);
+  let ratio = $state(1);
+  // Width over height of the last page drawn; a book's pages share it, so the
+  // first page's guess (portrait A4/letter) is usually the answer already.
+  let aspect = $state(0.75);
+  const tall = $derived(heightFor(paneHeight));
+  // Rounded, so an equal value does not re-run the request.
+  const width = $derived(widthFor(tall * aspect, ratio));
   onMount(() => {
     if (box === null) return;
-    const el = box;
-    const measure = () => { width = widthFor(el.clientWidth, window.devicePixelRatio || 1); };
+    const scroller = box.closest<HTMLElement>('.pane-body');
+    const measure = () => {
+      paneHeight = scroller?.clientHeight ?? window.innerHeight;
+      ratio = window.devicePixelRatio || 1;
+    };
     measure();
-    // `width` is already rounded, so an equal value does not re-run the request.
     if (typeof ResizeObserver === 'undefined') return;
     const watcher = new ResizeObserver(measure);
-    watcher.observe(el);
+    watcher.observe(scroller ?? box);
     return () => watcher.disconnect();
   });
 
@@ -61,19 +80,40 @@
   // Monotonic: a late answer for an older request must not be painted over a
   // newer one (a person turns pages faster than the renderer answers).
   let request = 0;
+  function accept(got: PdfPageView) {
+    shown = got;
+    if (got.kind === 'page' && got.heightPx > 0) aspect = got.widthPx / got.heightPx;
+  }
   $effect(() => {
     // A re-read of the document (the window came back) hands a new `view`, so
     // `ranges` is a new array and the same page is drawn again.
     const asked = { place: location, no: page, w: width, spans: ranges };
     const id = ++request;
     renderPdfPage(asked.place, asked.no, asked.w, asked.spans).then(
-      (got) => { if (id === request) shown = got; },
+      (got) => { if (id === request) accept(got); },
       (e) => {
         if (id !== request) return;
         console.error('render_pdf_page failed', e);
         shown = { kind: 'unavailable', reason: 'failed' };
       },
     );
+  });
+
+  // A new page opens on its citation: the strip scrolls sideways to centre the
+  // first primary box. Only once per page — a redraw of the same page (window
+  // focus, resize) leaves where the person scrolled.
+  let centred = 0;
+  $effect(() => {
+    const got = shown;
+    if (got?.kind !== 'page' || page === centred) return;
+    centred = page;
+    const r = got.rects.find((x) => x.primary) ?? got.rects[0];
+    if (r === undefined) return;
+    void tick().then(() => {
+      if (strip === null) return;
+      const w = strip.scrollWidth;
+      strip.scrollLeft = Math.max(0, r.x * w - (strip.clientWidth - r.w * w) / 2);
+    });
   });
 
   const pages = $derived(shown?.kind === 'page' ? shown.pages : 0);
@@ -139,13 +179,15 @@
       <button type="button" data-testid="page-next" disabled={page >= shown.pages}
         aria-label={L.next} onclick={() => turn(1)}>›</button>
     </div>
+    <div class="page-strip" data-testid="page-strip" bind:this={strip}>
     <div class="page-sheet">
-      <img src={shown.image} alt={L.alt} data-testid="page-image" />
+      <img src={shown.image} alt={L.alt} data-testid="page-image" style:height="{tall}px" />
       {#each shown.rects as r}
         <span class="page-box" data-testid="page-box" data-primary={r.primary ? 'true' : undefined}
           style:left="{r.x * 100}%" style:top="{r.y * 100}%"
           style:width="{r.w * 100}%" style:height="{r.h * 100}%"></span>
       {/each}
+    </div>
     </div>
   {/if}
 </section>

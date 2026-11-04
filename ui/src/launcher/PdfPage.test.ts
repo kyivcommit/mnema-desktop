@@ -39,9 +39,11 @@ let renderReply: (args: Record<string, unknown>) => Promise<unknown>;
 const renderCalls = () => invoke.mock.calls.filter(([cmd]) => cmd === 'render_pdf_page').map(([, a]) => a as Record<string, unknown>);
 const openCalls = () => invoke.mock.calls.filter(([cmd]) => cmd === 'open_document');
 
-// jsdom has no layout: the pane's width and the observer that watches it are
-// stood in for here.
-let clientWidth = 600;
+// jsdom has no layout: the pane's height (FilePane alone has no `.pane-body`,
+// so the window's) and the observer that watches it are stood in for here.
+function paneHeight(px: number) {
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: px });
+}
 let resize: (() => void) | null = null;
 class FakeObserver {
   constructor(cb: () => void) { resize = cb; }
@@ -58,8 +60,7 @@ beforeEach(() => {
     if (cmd === 'render_pdf_page') return renderReply(args);
     return Promise.resolve();
   });
-  clientWidth = 600;
-  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => clientWidth });
+  paneHeight(856); // 800 px of page at 0.75 = 600 px wide
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 });
   vi.stubGlobal('ResizeObserver', FakeObserver);
 });
@@ -273,8 +274,8 @@ test('the window coming back reads the document again and draws the same page ag
   expect(renderCalls().at(-1)!.pageNo).toBe(2);
 });
 
-test('the width asked is the pane\'s device pixels, rounded up to 200 and capped at 3000', async () => {
-  clientWidth = 523;
+test('the page is as tall as the pane: the width asked follows, rounded up to 200 and capped at 3000', async () => {
+  paneHeight(753); // 697 tall x 0.75 = 522.75 wide, x2 = 1045.5 -> 1200
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
   const { unmount } = mount();
   await screen.findByTestId('page-image');
@@ -282,27 +283,27 @@ test('the width asked is the pane\'s device pixels, rounded up to 200 and capped
   unmount();
 
   invoke.mockClear();
-  clientWidth = 2000;
+  paneHeight(3000);
   mount();
   await waitFor(() => expect(renderCalls()).toHaveLength(1));
   expect(renderCalls()[0].widthPx).toBe(3000);
 });
 
 test('a resize asks again only when the rounded width changes', async () => {
-  clientWidth = 523;
+  paneHeight(753);
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
   mount();
   await screen.findByTestId('page-image');
   expect(renderCalls()).toHaveLength(1);
 
-  clientWidth = 590; // 1180 -> still 1200
+  paneHeight(840); // 784 x 0.75 x 2 = 1176 -> still 1200
   resize!();
   await new Promise((r) => setTimeout(r, 20));
   expect(renderCalls()).toHaveLength(1);
 
-  clientWidth = 700; // 1400
+  paneHeight(990); // 934 x 0.75 x 2 = 1401 -> 1600
   resize!();
-  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([1200, 1400]));
+  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([1200, 1600]));
 });
 
 test('the text mode draws no page, and neither does a document that is not a PDF', async () => {
@@ -323,4 +324,42 @@ test('the pane reports the document\'s type upward', async () => {
   mount({ onMime });
   await screen.findByTestId('page-image');
   expect(onMime).toHaveBeenLastCalledWith('application/pdf');
+});
+
+test('the image is drawn as tall as the pane, less the page line', async () => {
+  paneHeight(856);
+  mount();
+  const img = await screen.findByTestId('page-image');
+  expect(img.style.height).toBe('800px');
+});
+
+test('a page of another shape asks again for the width that fills the height', async () => {
+  // 856 - 56 = 800 tall; portrait guess 0.75 -> 600; the answer is landscape 4:3.
+  renderReply = () => Promise.resolve(page({ widthPx: 800, heightPx: 600 }));
+  mount();
+  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([600, 1200]));
+});
+
+test('a new page opens scrolled sideways to its citation, and a redraw keeps the person\'s scroll', async () => {
+  Object.defineProperty(HTMLElement.prototype, 'scrollWidth', { configurable: true, get: () => 2000 });
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 500 });
+  renderReply = () => Promise.resolve(page({
+    rects: [{ x: 0.1, y: 0.1, w: 0.1, h: 0.01, primary: false }, { x: 0.5, y: 0.2, w: 0.1, h: 0.01, primary: true }],
+  }));
+  try {
+    mount();
+    const strip = await screen.findByTestId('page-strip');
+    // The primary box: 0.5 x 2000 = 1000, 200 wide, centred in 500 -> 1000 - 150.
+    await waitFor(() => expect(strip.scrollLeft).toBe(850));
+
+    strip.scrollLeft = 0;
+    const drawn = renderCalls().length;
+    await fireEvent.focus(window);
+    await waitFor(() => expect(renderCalls().length).toBe(drawn + 1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByTestId('page-strip').scrollLeft).toBe(0);
+  } finally {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollWidth;
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
+  }
 });

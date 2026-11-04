@@ -23,8 +23,8 @@ LT=src/launcher/LauncherPdf.test.ts
 # P1. A late answer for an older request is painted over a newer one.
 case_ "page: a late reply is painted over a newer one" \
   $PP \
-  's~\(got\) => \{ if \(id === request\) shown = got; \},~(got) => { shown = got; },~' \
-  '(got) => { shown = got; },' \
+  's~\(got\) => \{ if \(id === request\) accept\(got\); \},~(got) => { accept(got); },~' \
+  '(got) => { accept(got); },' \
   $PT 'a late answer for an older request is not painted' runner=vitest
 
 # P2. The page opens on the first, not on the cited one.
@@ -168,21 +168,21 @@ case_ "width: rounded to the nearest 200, not up" \
   $PP \
   's~Math\.ceil\(\(clientWidth \* ratio\) / 200\) \* 200~Math.round((clientWidth * ratio) / 200) * 200~' \
   'Math.round((clientWidth * ratio) / 200) * 200' \
-  $PT "the width asked is the pane's device pixels, rounded up to 200 and capped at 3000" runner=vitest
+  $PT "the page is as tall as the pane: the width asked follows, rounded up to 200 and capped at 3000" runner=vitest
 
 # W2. The device pixel ratio is not applied: a retina screen gets half the pixels.
 case_ "width: the device pixel ratio is not applied" \
   $PP \
   's~Math\.ceil\(\(clientWidth \* ratio\) / 200\)~Math.ceil(clientWidth / 200)~' \
   'Math.ceil(clientWidth / 200)' \
-  $PT "the width asked is the pane's device pixels, rounded up to 200 and capped at 3000" runner=vitest
+  $PT "the page is as tall as the pane: the width asked follows, rounded up to 200 and capped at 3000" runner=vitest
 
 # W3. The cap is above the backend's.
 case_ "width: the cap is not 3000" \
   $PP \
   's~Math\.min\(3000, Math\.max\(200,~Math.min(30000, Math.max(200,~' \
   'Math.min(30000, Math.max(200,' \
-  $PT "the width asked is the pane's device pixels, rounded up to 200 and capped at 3000" runner=vitest
+  $PT "the page is as tall as the pane: the width asked follows, rounded up to 200 and capped at 3000" runner=vitest
 
 # W4. Not rounded at all: every pixel of a drag asks for a new picture.
 case_ "width: not rounded, every pixel of a resize asks again" \
@@ -279,3 +279,33 @@ case_ "launcher: show-text on an unavailable page does nothing" \
   "s~onShowText=\\{\\(\\) => setPdfView\\('text'\\)\\}~onShowText={() => {}}~" \
   'onShowText={() => {}}' \
   $LT '"Show text" on an unavailable page switches the whole pane to the text' runner=vitest
+
+# ── The page fitted to the pane's height (owner, 2026-11-04) ─────────────────
+
+# H1. The image keeps its natural size instead of the pane's height.
+case_ "fit: the image is not drawn as tall as the pane" \
+  $PP \
+  's~ style:height="\{tall\}px"~~' \
+  'alt={L.alt} data-testid="page-image" />' \
+  $PT 'the image is drawn as tall as the pane, less the page line' runner=vitest
+
+# H2. A page of another shape is drawn at the portrait guess's width.
+case_ "fit: the page's own shape never corrects the width asked" \
+  $PP \
+  's~if \(got\.kind === '"'"'page'"'"' && got\.heightPx > 0\) aspect = got\.widthPx / got\.heightPx;~void got;~' \
+  'void got;' \
+  $PT 'a page of another shape asks again for the width that fills the height' runner=vitest
+
+# H3. Every redraw scrolls back to the citation, over the person's own scroll.
+case_ "fit: a redraw of the same page re-centres the citation" \
+  $PP \
+  "s~if \(got\?\.kind !== 'page' \|\| page === centred\) return;~if (got?.kind !== 'page') return;~" \
+  "if (got?.kind !== 'page') return;" \
+  $PT "a new page opens scrolled sideways to its citation, and a redraw keeps the person's scroll" runner=vitest
+
+# H4. A new page opens at its left edge, the citation possibly out of sight.
+case_ "fit: a new page does not scroll to its citation" \
+  $PP \
+  's~strip\.scrollLeft = Math\.max~void Math.max~' \
+  'void Math.max' \
+  $PT "a new page opens scrolled sideways to its citation, and a redraw keeps the person's scroll" runner=vitest
