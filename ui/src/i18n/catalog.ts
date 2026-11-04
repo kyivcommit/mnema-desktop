@@ -56,7 +56,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
   | 'pdf_view_label' | 'pdf_view_text' | 'pdf_view_page'
   | 'page_prev' | 'page_next' | 'page_of' | 'page_image_alt'
-  | 'page_note_changed' | 'page_note_scan'
+  | 'page_note_changed' | 'page_note_scan' | 'page_note_unplaced'
   | 'page_unavailable' | 'page_unavailable_missing' | 'page_show_text'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
@@ -471,6 +471,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_image_alt: 'Сторінка документа',
     page_note_changed: 'Файл змінено після індексації — підсвітки немає. Текст цитати — у режимі «Текст».',
     page_note_scan: 'Сторінка зі скану — підсвітка лише в режимі «Текст».',
+    page_note_unplaced: 'Уривок не вдалося позначити на сторінці — він є в режимі «Текст».',
     page_unavailable: 'Не вдалося показати сторінку.',
     page_unavailable_missing: 'Файла немає на диску.',
     page_show_text: 'Показати текст',
@@ -1396,6 +1397,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_image_alt: 'Document page',
     page_note_changed: 'The file changed after indexing — there is no highlight. The citation text is in “Text” mode.',
     page_note_scan: 'This page is a scan — the highlight is only available in “Text” mode.',
+    page_note_unplaced: 'The passage could not be marked on this page — it is shown in “Text” mode.',
     page_unavailable: 'The page could not be shown.',
     page_unavailable_missing: 'The file is missing from disk.',
     page_show_text: 'Show text',

@@ -25,6 +25,7 @@ use tauri::State;
 use crate::error::Error;
 use crate::state::AppState;
 use crate::tree::cited_occupant;
+use mnema_pool::PoolConfig;
 
 /// The widest page asked of the worker, whatever the window sends: a PNG of a
 /// page is width x height x 4 bytes in the worker before it is encoded.
@@ -54,6 +55,9 @@ pub enum Highlight {
     Changed,
     /// The page is a scan: it has no text layer to box.
     Scan,
+    /// The file reads as indexed, but the passage could not be placed on the
+    /// page (the worker's [`TextMatch::Unplaced`]). Not a change to the file.
+    Unplaced,
     /// The index holds no text for this page (the reader skipped it): there is
     /// no citation on it to box, and nothing has changed — no note.
     NoText,
@@ -151,8 +155,29 @@ pub(crate) fn render_page_in(
         return unavailable(PageUnavailable::NoPath);
     };
     let full = Path::new(&occupant.root_absolute_path).join(&occupant.relative_path);
-    if mnema_walk::stat(&full).is_none() {
-        return unavailable(PageUnavailable::FileMissing);
+    // Only "not found" is a missing file; a permission or I/O error on a file
+    // that is there is a failure, and its cause goes to the log.
+    match std::fs::metadata(&full) {
+        Ok(meta) if meta.len() > PoolConfig::new(worker).pdf_max_bytes => {
+            // The worker reads the whole file; ingest would refuse it too.
+            eprintln!(
+                "mnema: the page view refused {}: {} bytes, over the PDF ceiling",
+                full.display(),
+                meta.len()
+            );
+            return unavailable(PageUnavailable::Failed);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return unavailable(PageUnavailable::FileMissing);
+        }
+        Err(e) => {
+            eprintln!(
+                "mnema: the page view could not stat {}: {e}",
+                full.display()
+            );
+            return unavailable(PageUnavailable::Failed);
+        }
     }
     let Some(path) = full.to_str() else {
         return unavailable(PageUnavailable::Failed);
@@ -196,6 +221,7 @@ pub(crate) fn render_page_in(
             image: format!("data:image/png;base64,{png_base64}"),
             highlight: fixed.unwrap_or(match text {
                 TextMatch::Match => Highlight::Shown,
+                TextMatch::Unplaced => Highlight::Unplaced,
                 TextMatch::Mismatch | TextMatch::None => Highlight::Changed,
             }),
             rects,
@@ -517,6 +543,67 @@ mod tests {
     }
 
     #[test]
+    fn a_passage_the_worker_could_not_place_is_unplaced_not_changed() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Unplaced));
+        assert_eq!(
+            highlight(&s.render(&worker, "h1", "doc.pdf", 800)),
+            Highlight::Unplaced
+        );
+    }
+
+    /// Only "not found" means the file is gone. A path that cannot be stat'ed
+    /// for another reason (here a symlink loop, ELOOP) is a failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_stated_is_failed_not_missing_and_starts_no_worker() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        let doc = s.root_dir.path().join("doc.pdf");
+        std::fs::remove_file(&doc).unwrap();
+        std::os::unix::fs::symlink(&doc, &doc).unwrap();
+
+        let view = s.render(&worker, "h1", "doc.pdf", 800);
+
+        assert_eq!(
+            view,
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            }
+        );
+        assert!(!s.log.exists(), "the worker was started");
+    }
+
+    /// The worker reads the whole file, so a file over the pool's PDF ceiling
+    /// is refused before it is started. Sparse: no disk is spent.
+    #[test]
+    fn a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        let ceiling = PoolConfig::new(&worker).pdf_max_bytes;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(s.root_dir.path().join("doc.pdf"))
+            .unwrap();
+        file.set_len(ceiling + 1).unwrap();
+
+        assert_eq!(
+            s.render(&worker, "h1", "doc.pdf", 800),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            }
+        );
+        assert!(!s.log.exists(), "the worker was started");
+
+        // At the ceiling exactly it is drawn.
+        file.set_len(ceiling).unwrap();
+        assert_eq!(
+            highlight(&s.render(&worker, "h1", "doc.pdf", 800)),
+            Highlight::Shown
+        );
+    }
+
+    #[test]
     fn a_path_that_now_names_another_document_is_drawn_bare_and_changed() {
         let s = stand();
         // Even a worker that claimed a match could not make this `shown`.
@@ -613,6 +700,7 @@ mod tests {
             (Highlight::Changed, "changed"),
             (Highlight::Scan, "scan"),
             (Highlight::NoText, "noText"),
+            (Highlight::Unplaced, "unplaced"),
         ] {
             assert_eq!(serde_json::to_value(h).unwrap(), tag);
         }

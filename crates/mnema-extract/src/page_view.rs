@@ -78,23 +78,23 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
         Err(e) => return refused(RenderError::Unreadable, e.to_string()),
     };
     let (w, h) = (bitmap.width() as u32, bitmap.height() as u32);
-    let bgra = bitmap.as_raw_bytes();
-    let stride = bgra.len() / h.max(1) as usize;
+    // RGBA already: `PdfRenderConfig` sets FPDF_REVERSE_BYTE_ORDER by default,
+    // so pdfium writes the BGRA format's bytes in R, G, B, A order.
+    let raw = bitmap.as_raw_bytes();
+    let stride = raw.len() / h.max(1) as usize;
     // A buffer shorter than the rows it claims would slice past its end below.
     if w == 0 || h == 0 || stride < w as usize * 4 {
         return refused(
             RenderError::Unreadable,
             format!(
                 "pdfium drew an empty or short bitmap ({w}x{h}, {} bytes)",
-                bgra.len()
+                raw.len()
             ),
         );
     }
     let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
-    for row in bgra.chunks_exact(stride).take(h as usize) {
-        for px in row[..w as usize * 4].chunks_exact(4) {
-            rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
+    for row in raw.chunks_exact(stride).take(h as usize) {
+        rgba.extend_from_slice(&row[..w as usize * 4]);
     }
     let png = match encode_png(&rgba, w, h) {
         Ok(png) => png,
@@ -103,8 +103,12 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
 
     let (text, rects) = match mapped_page_text(&page) {
         Ok(mapped) => text_and_rects(&page, &config, req, mapped, (w, h)),
-        // A text layer that cannot be read has nothing to compare with.
-        Err(_) => (TextMatch::None, Vec::new()),
+        // The file read and drew; only its text layer did not. Nothing says
+        // the file changed, so the page is not reported as changed.
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page {} text: {e}", req.page_no);
+            (TextMatch::Unplaced, Vec::new())
+        }
     };
 
     RenderReply::Rendered {
@@ -145,15 +149,22 @@ fn text_and_rects(
     for byte in Sha256::digest(mapped.text.as_bytes()) {
         write!(hex, "{byte:02x}").expect("a String takes a write");
     }
-    // The map lines up with the text only when NFC left it alone.
-    if hex != *wanted || !mapped.nfc_ok {
+    if hex != *wanted {
         return (TextMatch::Mismatch, Vec::new());
     }
-    let rects = req
-        .ranges
-        .iter()
-        .flat_map(|range| range_rects(page, config, range, &mapped.map, size))
-        .collect();
+    // The same text, but the map lines up with it only when NFC left it alone.
+    if !mapped.nfc_ok {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    let mut rects = Vec::new();
+    for range in &req.ranges {
+        let boxes = range_rects(page, config, range, &mapped.map, size);
+        // A citation with no box would read as "nothing cited here".
+        if range.len > 0 && boxes.is_empty() {
+            return (TextMatch::Unplaced, Vec::new());
+        }
+        rects.extend(boxes);
+    }
     (TextMatch::Match, rects)
 }
 
@@ -165,8 +176,12 @@ fn range_rects(
     map: &[Option<usize>],
     (w, h): (u32, u32),
 ) -> Vec<RenderRect> {
-    let Ok(text) = page.text() else {
-        return Vec::new();
+    let text = match page.text() {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page text for boxes: {e}");
+            return Vec::new();
+        }
     };
     let chars = text.chars();
     let start = (range.start as usize).min(map.len());

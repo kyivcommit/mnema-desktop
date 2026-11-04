@@ -139,9 +139,11 @@
   });
 
   const pages = $derived(shown?.kind === 'page' ? shown.pages : 0);
+  // Before the first page arrives the count is unknown (0), so there is no
+  // turning: a turn past the end would land on a refusal with no way back.
   function turn(by: number) {
     const to = page + by;
-    if (to >= 1 && (pages === 0 || to <= pages)) chosen = to;
+    if (to >= 1 && to <= pages) chosen = to;
   }
   function onKeydown(e: KeyboardEvent) {
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
@@ -155,6 +157,7 @@
     switch (shown.highlight) {
       case 'changed': return t('page_note_changed');
       case 'scan': return t('page_note_scan');
+      case 'unplaced': return t('page_note_unplaced');
       case 'shown': return '';
       case 'noText': return '';
     }

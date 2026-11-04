@@ -69,9 +69,13 @@ pub enum RenderReply {
 pub enum TextMatch {
     /// Same text: the boxes are where the citation is.
     Match,
-    /// Different text — the file or the reader changed — or a text whose
-    /// char positions cannot be trusted: no boxes.
+    /// Different text: the file or the reader changed. No boxes.
     Mismatch,
+    /// The same text, but its ranges could not be placed on the page: the
+    /// char map does not line up with it (NFC rewrote the page), the text
+    /// layer could not be read again, or a range yielded no box. Not a change
+    /// to the file, so not [`TextMatch::Mismatch`].
+    Unplaced,
     /// No text to compare: the page has no text layer, or no hash was sent.
     None,
 }

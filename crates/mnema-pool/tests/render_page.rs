@@ -99,3 +99,41 @@ fn a_worker_that_is_not_there_is_a_spawn_error() {
     .unwrap_err();
     assert!(matches!(error, PoolError::Spawn { .. }), "{error:?}");
 }
+
+/// A worker that never reads its stdin, handed a request bigger than a pipe
+/// holds: the write must not keep the call past its deadline.
+#[test]
+fn a_worker_that_never_reads_its_request_still_times_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let deaf = dir.path().join("deaf-worker");
+    std::fs::write(&deaf, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&deaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut big = request("ok:/a.pdf", None);
+    big.ranges = vec![
+        mnema_core::render::RenderRange {
+            start: 1_000_000,
+            len: 1_000_000,
+            primary: false,
+        };
+        20_000
+    ];
+    assert!(serde_json::to_string(&big).unwrap().len() > 256 << 10);
+
+    let began = Instant::now();
+    let error = loop {
+        match render_page(&deaf, &big, Duration::from_millis(300)) {
+            // Linux refuses a script another thread is still forking past
+            // (ETXTBSY) for a moment after it was written.
+            Err(PoolError::Spawn { .. }) if began.elapsed() < SECOND => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            other => break other.unwrap_err(),
+        }
+    };
+    assert!(
+        matches!(error, PoolError::RenderTimeout { .. }),
+        "{error:?}"
+    );
+    assert!(began.elapsed() < SECOND, "{:?}", began.elapsed());
+}

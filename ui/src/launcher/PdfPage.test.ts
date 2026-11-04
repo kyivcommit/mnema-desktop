@@ -215,8 +215,25 @@ test('the arrow keys turn the page inside the pane, and stop at both ends', asyn
   await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
 });
 
+test('the arrow keys do not turn before the first page has come, when the count is unknown', async () => {
+  let answer: (v: unknown) => void = () => {};
+  renderReply = () => new Promise((resolve) => { answer = resolve; });
+  mount();
+  const pane = await screen.findByTestId('pdf-page');
+  await screen.findByTestId('file-loading');
+  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
+  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
+  await new Promise((r) => setTimeout(r, 10));
+  expect(renderCalls().map((c) => c.pageNo)).toEqual([1]);
+
+  answer(page());
+  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 1 of 3'));
+  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
+  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
+});
+
 test('each note state says its line, and shown and noText say nothing', async () => {
-  const note = async (highlight: 'shown' | 'changed' | 'scan' | 'noText') => {
+  const note = async (highlight: 'shown' | 'changed' | 'scan' | 'noText' | 'unplaced') => {
     invoke.mockClear();
     renderReply = () => Promise.resolve(page({ highlight }));
     const { unmount } = mount();
@@ -228,12 +245,14 @@ test('each note state says its line, and shown and noText say nothing', async ()
   };
   expect(await note('changed')).toBe('The file changed after indexing — there is no highlight. The citation text is in “Text” mode.');
   expect(await note('scan')).toBe('This page is a scan — the highlight is only available in “Text” mode.');
+  expect(await note('unplaced')).toBe('The passage could not be marked on this page — it is shown in “Text” mode.');
   expect(await note('shown')).toBeNull();
   expect(await note('noText')).toBeNull();
 
   setLocale('uk');
   expect(await note('changed')).toBe('Файл змінено після індексації — підсвітки немає. Текст цитати — у режимі «Текст».');
   expect(await note('scan')).toBe('Сторінка зі скану — підсвітка лише в режимі «Текст».');
+  expect(await note('unplaced')).toBe('Уривок не вдалося позначити на сторінці — він є в режимі «Текст».');
 });
 
 test('an unavailable page says so and offers the text, which switches the mode', async () => {

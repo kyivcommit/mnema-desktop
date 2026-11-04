@@ -246,9 +246,15 @@ fn a_range_past_the_end_of_the_text_is_clamped_and_draws_what_is_there() {
     };
     let tail = past(n - 7, 1000);
     assert_eq!((tail.text, tail.rects.len()), (TextMatch::Match, 1));
+    // A range with nothing left of it on the page has no box, and that is
+    // said rather than shown as a page with nothing cited on it.
     let none = past(n + 5, 3);
-    assert_eq!((none.text, none.rects.len()), (TextMatch::Match, 0));
-    assert_eq!(past(u32::MAX, u32::MAX).rects.len(), 0);
+    assert_eq!((none.text, none.rects.len()), (TextMatch::Unplaced, 0));
+    let far = past(u32::MAX, u32::MAX);
+    assert_eq!((far.text, far.rects.len()), (TextMatch::Unplaced, 0));
+    // No ranges at all (a page turned to, not cited): a match with no boxes.
+    let bare = rendered(&request("one-page-text.pdf", 1, 612, vec![]));
+    assert_eq!((bare.text, bare.rects.len()), (TextMatch::Match, 0));
 }
 
 #[test]
@@ -364,14 +370,21 @@ fn a_page_far_taller_than_wide_is_drawn_within_the_height_cap() {
 /// one "й". Written here rather than as a fixture file because it is a handful
 /// of lines and nothing else wants it.
 fn decomposed_pdf(media_box: &str) -> Vec<u8> {
+    one_page_pdf(
+        media_box,
+        "BT /F1 12 Tf 72 700 Td (xAB the quick brown fox jumps over the lazy dog \
+        again and again) Tj ET",
+    )
+}
+
+/// A one-page PDF drawing `content`, with the font of [`decomposed_pdf`] as F1.
+fn one_page_pdf(media_box: &str, content: &str) -> Vec<u8> {
     let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
         /CMapName /D def /CMapType 2 def \
         1 begincodespacerange <00> <FF> endcodespacerange \
         2 beginbfrange <20> <40> <0020> <43> <7E> <0043> endbfrange \
         2 beginbfchar <41> <0438> <42> <0306> endbfchar \
         endcmap CMapName currentdict /CMap defineresource pop end end";
-    let content = "BT /F1 12 Tf 72 700 Td (xAB the quick brown fox jumps over the lazy dog \
-        again and again) Tj ET";
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -425,5 +438,38 @@ fn a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line
         ranges: vec![range_of(&text, "quick", true)],
     };
     let r = rendered(&req);
-    assert_eq!((r.text, r.rects.len()), (TextMatch::Mismatch, 0));
+    // The file did not change, so it is not reported as changed.
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Unplaced, 0));
+}
+
+/// Three filled rectangles in pure red, green and blue, read back pixel by
+/// pixel. A black-on-white page cannot tell RGBA from BGRA; this one can
+/// (`pdftoppm` draws the same file red on the left, blue lower right).
+#[test]
+fn colours_are_drawn_as_the_page_has_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("colours.pdf");
+    std::fs::write(
+        &path,
+        one_page_pdf(
+            "[0 0 200 200]",
+            "1 0 0 rg 0 0 100 200 re f 0 1 0 rg 100 100 100 100 re f 0 0 1 rg 100 0 100 100 re f",
+        ),
+    )
+    .unwrap();
+    let r = rendered(&RenderRequest {
+        path: path.display().to_string(),
+        page_no: 1,
+        width_px: 200,
+        text_sha256: None,
+        ranges: vec![],
+    });
+    let (px, w, h) = decode(&r.png);
+    let at = |fx: f32, fy: f32| {
+        let o = (((fy * h as f32) as usize) * w as usize + (fx * w as f32) as usize) * 4;
+        (px[o], px[o + 1], px[o + 2], px[o + 3])
+    };
+    assert_eq!(at(0.25, 0.5), (255, 0, 0, 255), "left: red");
+    assert_eq!(at(0.75, 0.25), (0, 255, 0, 255), "upper right: green");
+    assert_eq!(at(0.75, 0.75), (0, 0, 255, 255), "lower right: blue");
 }

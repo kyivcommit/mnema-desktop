@@ -53,17 +53,40 @@ case_ "map: a synthesised line break is given a pdfium index" \
 # under the index is boxed with offsets counted in other text.
 case_ "hash: the page text is not compared with the hash the offsets were counted in" \
   $V \
-  's~if hex != \*wanted \|\| !mapped\.nfc_ok \{~if !mapped.nfc_ok {~' \
-  'if !mapped.nfc_ok {' \
+  's~if hex != \*wanted \{~if false {~' \
+  'if false {' \
   mnema-extract 'text_that_is_not_the_text_the_offsets_were_counted_in_gets_the_page_and_no_boxes' --test page_view
 
 # H2. NFC recomposed the page and the map no longer lines up, and the boxes are
 # drawn anyway: the hash matches (it is the stored text's own), the chars do not.
 case_ "nfc: a page NFC rewrote still gets boxes from a map that no longer lines up" \
   $V \
-  's~if hex != \*wanted \|\| !mapped\.nfc_ok \{~if hex != *wanted {~' \
-  'if hex != *wanted {' \
+  's~if !mapped\.nfc_ok \{\s*return \(TextMatch::Unplaced, Vec::new\(\)\);~if false { return (TextMatch::Unplaced, Vec::new());~' \
+  'if false { return (TextMatch::Unplaced' \
   mnema-extract 'a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line_up' --test page_view
+
+# H2b. A page NFC rewrote is reported as changed: the file did not change.
+case_ "nfc: a page NFC rewrote is reported as a changed file" \
+  $V \
+  's~if !mapped\.nfc_ok \{\s*return \(TextMatch::Unplaced, Vec::new\(\)\);~if !mapped.nfc_ok { return (TextMatch::Mismatch, Vec::new());~' \
+  'if !mapped.nfc_ok { return (TextMatch::Mismatch' \
+  mnema-extract 'a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line_up' --test page_view
+
+# H2c. A cited range that yields no box is passed off as a match: the page
+# reads as one with nothing cited on it.
+case_ "unplaced: a range with no box is still a match" \
+  $V \
+  's~if range\.len > 0 && boxes\.is_empty\(\) \{~if false {~' \
+  'if false {' \
+  mnema-extract 'a_range_past_the_end_of_the_text_is_clamped_and_draws_what_is_there' --test page_view
+
+# C1. The bitmap's bytes swapped once more: pdfium already wrote them RGBA, so
+# red is drawn blue — invisible on a black-on-white page.
+case_ "colour: red and blue are swapped" \
+  $V \
+  's~rgba\.extend_from_slice\(&row\[\.\.w as usize \* 4\]\);~for px in row[..w as usize * 4].chunks_exact(4) { rgba.extend_from_slice(\&[px[2], px[1], px[0], px[3]]); }~' \
+  'rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);' \
+  mnema-extract 'colours_are_drawn_as_the_page_has_them' --test page_view
 
 # H3. A mismatch is reported as one and the boxes are returned with it.
 case_ "mismatch: the boxes are returned together with the word that they cannot be trusted" \
@@ -93,8 +116,8 @@ case_ "boxes: chars of one line are not merged" \
 # neighbouring passages, one cited and one not, become one box with one flag.
 case_ "boxes: two ranges are merged into one span" \
   $V \
-  's~let rects = req\s*\.ranges\s*\.iter\(\)\s*\.flat_map\(\|range\| range_rects\(page, config, range, &mapped\.map, size\)\)\s*\.collect\(\);~let start = req.ranges.iter().map(|r| r.start).min().unwrap_or(0); let end = req.ranges.iter().map(|r| r.start.saturating_add(r.len)).max().unwrap_or(0); let rects = range_rects(page, config, &RenderRange { start, len: end - start, primary: true }, &mapped.map, size);~' \
-  'let rects = range_rects(page, config, &RenderRange { start, len: end - start' \
+  's~for range in &req\.ranges \{~let start = req.ranges.iter().map(|r| r.start).min().unwrap_or(0); let end = req.ranges.iter().map(|r| r.start.saturating_add(r.len)).max().unwrap_or(0); for range in \&[RenderRange { start, len: end - start, primary: true }] {~' \
+  'for range in &[RenderRange { start, len: end - start' \
   mnema-extract 'ranges_are_boxed_per_line_and_never_merged_with_each_other' --test page_view
 
 # B4/B5. Points turned into pixels by hand: the page's width and height scale
@@ -218,9 +241,31 @@ case_ "app: the worker is started when the path is not in the index" \
 # A2. The worker is started for a file that is gone.
 case_ "app: the worker is started when the file is missing" \
   $AP \
-  's~if mnema_walk::stat\(&full\)\.is_none\(\) \{~if false \&\& mnema_walk::stat(\&full).is_none() {~' \
-  'if false && mnema_walk::stat(&full).is_none()' \
+  's~Err\(e\) if e\.kind\(\) == std::io::ErrorKind::NotFound => \{~Err(e) if e.kind() == std::io::ErrorKind::Other => {~' \
+  'std::io::ErrorKind::Other => {' \
   mnema-desktop "${AT}a_file_that_is_gone_is_file_missing_and_starts_no_worker" --lib
+
+# A2b. Any stat failure is "missing": a symlink loop or a permission error
+# tells the person the file is gone.
+case_ "app: a stat that fails for another reason is reported as missing" \
+  $AP \
+  's~Err\(e\) if e\.kind\(\) == std::io::ErrorKind::NotFound => \{~Err(_) => {~' \
+  'Err(_) => {' \
+  mnema-desktop "${AT}a_file_that_cannot_be_stated_is_failed_not_missing_and_starts_no_worker" --lib
+
+# A2c. No size gate: the worker reads a file of any size whole.
+case_ "app: a file over the PDF ceiling is handed to the worker" \
+  $AP \
+  's~Ok\(meta\) if meta\.len\(\) > PoolConfig~Ok(meta) if false \&\& meta.len() > PoolConfig~' \
+  'Ok(meta) if false && meta.len()' \
+  mnema-desktop "${AT}a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker" --lib
+
+# A2d. The ceiling itself refused: off by one.
+case_ "app: a file exactly at the PDF ceiling is refused" \
+  $AP \
+  's~Ok\(meta\) if meta\.len\(\) > PoolConfig~Ok(meta) if meta.len() >= PoolConfig~' \
+  'Ok(meta) if meta.len() >= PoolConfig' \
+  mnema-desktop "${AT}a_file_over_the_pdf_ceiling_is_failed_and_starts_no_worker" --lib
 
 # A3. A path that now names another document still sends the hash of the
 # window's document: a worker that says Match makes the page "shown".
@@ -285,3 +330,18 @@ case_ "app: a mismatch or an absent text is shown" \
   's~TextMatch::Mismatch \| TextMatch::None => Highlight::Changed,~TextMatch::Mismatch | TextMatch::None => Highlight::Shown,~' \
   'TextMatch::None => Highlight::Shown,' \
   mnema-desktop "${AT}a_text_that_differs_or_is_absent_is_changed_not_shown" --lib
+
+# A12. A passage the worker could not place is reported as a changed file.
+case_ "app: unplaced is reported as changed" \
+  $AP \
+  's~TextMatch::Unplaced => Highlight::Unplaced,~TextMatch::Unplaced => Highlight::Changed,~' \
+  'TextMatch::Unplaced => Highlight::Changed,' \
+  mnema-desktop "${AT}a_passage_the_worker_could_not_place_is_unplaced_not_changed" --lib
+
+# P1. The request is written on the calling thread: a worker that never reads
+# holds the call past its deadline.
+case_ "pool: the request write blocks the deadline" \
+  crates/mnema-pool/src/lib.rs \
+  's~std::thread::spawn\(move \|\| stdin\.write_all\(line\.as_bytes\(\)\)\);~let _ = std::thread::spawn(move || stdin.write_all(line.as_bytes())).join();~' \
+  '.write_all(line.as_bytes())).join();' \
+  mnema-pool 'a_worker_that_never_reads_its_request_still_times_out' --test render_page

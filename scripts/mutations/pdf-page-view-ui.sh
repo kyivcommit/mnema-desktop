@@ -75,14 +75,21 @@ case_ "page: a late rejection replaces a newer page" \
 # N1. Before the first page.
 case_ "nav: the keys turn before the first page" \
   $PP \
-  's~if \(to >= 1 && \(pages === 0 \|\| to <= pages\)\) chosen = to;~if (pages === 0 \|\| to <= pages) chosen = to;~' \
-  'if (pages === 0 || to <= pages) chosen = to;' \
+  's~if \(to >= 1 && to <= pages\) chosen = to;~if (to >= 1 \&\& (pages === 0 \|\| to <= pages)) chosen = to;~' \
+  'if (to >= 1 && (pages === 0 || to <= pages)) chosen = to;' \
+  $PT 'the arrow keys do not turn before the first page has come, when the count is unknown' runner=vitest
+
+# N1b. Off the front.
+case_ "nav: the keys turn before page 1" \
+  $PP \
+  's~if \(to >= 1 && to <= pages\) chosen = to;~if (to <= pages) chosen = to;~' \
+  'if (to <= pages) chosen = to;' \
   $PT 'the arrow keys turn the page inside the pane, and stop at both ends' runner=vitest
 
 # N2. Past the last page.
 case_ "nav: the keys turn past the last page" \
   $PP \
-  's~if \(to >= 1 && \(pages === 0 \|\| to <= pages\)\) chosen = to;~if (to >= 1) chosen = to;~' \
+  's~if \(to >= 1 && to <= pages\) chosen = to;~if (to >= 1) chosen = to;~' \
   'if (to >= 1) chosen = to;' \
   $PT 'the arrow keys turn the page inside the pane, and stop at both ends' runner=vitest
 
@@ -317,3 +324,10 @@ case_ "fit: the lines above the page are not taken from its height" \
   's~      if \(at > 0\) above = at;~      void at;~' \
   '      void at;' \
   $PT 'a note above the page takes its height from the page, not from below the pane' runner=vitest
+
+# U1. The unplaced note says nothing: a cited page with no box and no word.
+case_ "note: an unplaced passage has no note" \
+  $PP \
+  's~case .unplaced.: return t\(.page_note_unplaced.\);~case \x27unplaced\x27: return \x27\x27;~' \
+  "case 'unplaced': return '';" \
+  $PT 'each note state says its line, and shown and noText say nothing' runner=vitest

@@ -282,11 +282,12 @@ export const openDocument = (location: DocumentLocation, focus: DocumentFocus | 
 // One PDF page drawn by `render_pdf_page` (`page_view.rs`). `image` is a data URL;
 // `rects` are fractions 0..1 of the page's width and height. `highlight` says
 // whether they can be trusted: `shown` the citation, `changed` the file moved
-// since indexing, `scan` no text layer, `noText` nothing indexed for the page.
+// since indexing, `scan` no text layer, `noText` nothing indexed for the page,
+// `unplaced` the same text but the passage could not be placed on the page.
 export type PageRect = { x: number; y: number; w: number; h: number; primary: boolean };
 export type PdfPageView =
   | { kind: 'page'; pages: number; widthPx: number; heightPx: number; image: string;
-      highlight: 'shown' | 'changed' | 'scan' | 'noText'; rects: PageRect[] }
+      highlight: 'shown' | 'changed' | 'scan' | 'noText' | 'unplaced'; rects: PageRect[] }
   | { kind: 'unavailable'; reason: 'noPath' | 'fileMissing' | 'failed' };
 // `ranges` are the page's block spans (`PaneSpan`); the backend ignores `blockId`.
 export const renderPdfPage = (location: DocumentLocation, pageNo: number, widthPx: number, ranges: PaneSpan[]) =>

@@ -484,10 +484,12 @@ pub fn render_page(
         worker: worker.to_path_buf(),
         source,
     })?;
-    // A worker that died before reading its line is reported by its exit
-    // status below, which says more than a broken pipe does.
+    // On its own thread, so a worker that never reads cannot hold this one
+    // past the deadline. A worker that died before reading its line is
+    // reported by its exit status below, which says more than a broken pipe.
+    let deadline = Instant::now() + timeout;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(line.as_bytes());
+        std::thread::spawn(move || stdin.write_all(line.as_bytes()));
     }
     // Both pipes drain on their own threads, so a reply larger than the pipe
     // buffer (a PNG) cannot stall the worker while this thread polls for exit.
@@ -500,7 +502,6 @@ pub fn render_page(
     }
     let stdout = drain(child.stdout.take().expect("stdout was piped"));
     let stderr = drain(child.stderr.take().expect("stderr was piped"));
-    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
