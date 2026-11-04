@@ -33,6 +33,14 @@
 use crate::{Block, SourceKind};
 use serde::{Deserialize, Serialize};
 
+/// The most pages one document may declare. D1 documents ~100,000 pages as
+/// the ceiling of the whole *corpus*, so a single document beyond it is not one
+/// this product supports. The worker refuses such a file (`malformed`) before
+/// it writes a header; the pool, which bounds a document's time by
+/// `Header.pages`, treats a header over it as that one file's worker
+/// misbehaving. On this side of the boundary because both sides read it.
+pub const MAX_PAGES: u32 = 100_000;
+
 /// One line of the wire protocol.
 ///
 /// Internally tagged on a field named `frame` rather than `type`, so it does

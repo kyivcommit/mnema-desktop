@@ -569,9 +569,9 @@ pub struct PoolConfig {
     /// page, and from one page to the next — before it is killed. Per page,
     /// not per document (D189): an OCR'd volume of several hundred pages takes
     /// minutes. A document is still bounded, by
-    /// `(min(Header.pages, MAX_PAGES) + 1) × timeout`: the pool refuses a
-    /// header promising more than [`MAX_PAGES`] and more `Page` frames than
-    /// the header promised.
+    /// `(min(Header.pages, MAX_PAGES) + 1) × timeout`: a header promising more
+    /// than [`MAX_PAGES`] ends that one file (the worker refuses such a file
+    /// itself), and no more `Page` frames than the header promised are taken.
     ///
     /// **Provisional: 300 s.** Raised from 120 s by D189: the first OCR'd page
     /// in a freshly installed worker waits for Vision's cold start, measured at
@@ -1291,11 +1291,7 @@ enum Answer {
 /// the worst case between a Stop and the worker in flight being killed.
 pub const CANCEL_POLL: Duration = Duration::from_millis(200);
 
-/// The most pages one document's header may promise. D1 documents ~100,000
-/// pages as the ceiling of the whole *corpus*, so a single document beyond it
-/// is not one this product supports — and an unbounded promise would make the
-/// per-page deadline unbounded too (`PoolConfig::timeout`).
-pub const MAX_PAGES: u32 = 100_000;
+pub use mnema_core::wire::MAX_PAGES;
 
 /// Sends one request and reads until the worker has answered it, the deadline
 /// passes, or the process ends.
@@ -1391,11 +1387,19 @@ fn run_one(
                 if header.is_some() {
                     return Err(protocol(&line, "a second header inside one document"));
                 }
+                // The worker refuses such a file itself, so this is a worker
+                // disagreeing with itself — but on one file, whose page count
+                // the file declares (`FPDF_GetPageCount`). A `Protocol` error
+                // here would let one crafted PDF stop the whole job; it is a
+                // per-file ending instead, like unreadable output above.
                 if pages > MAX_PAGES {
-                    return Err(protocol(
-                        &line,
-                        &format!("a header promising {pages} pages, over {MAX_PAGES} (D1)"),
-                    ));
+                    return Ok(Answer::Ended {
+                        ending: worker.stop(false)?,
+                        note: Some(format!(
+                            "the worker's header promised {pages} pages, over the {MAX_PAGES} \
+                             one document may have (D1)"
+                        )),
+                    });
                 }
                 // `reader` being a required field stops a header that omits it,
                 // and stops nothing else: `""` is a perfectly good `String` and

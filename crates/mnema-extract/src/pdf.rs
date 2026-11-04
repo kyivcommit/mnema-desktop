@@ -69,6 +69,22 @@ pub const TEXT_SOURCE_NATIVE: &str = "native:pdf";
 /// `PdfPage::text_source` of a page Vision read from its rendering.
 pub const TEXT_SOURCE_OCR: &str = "ocr:vision";
 
+/// Set to a number, this **lowers** the most pages a document may declare
+/// below [`mnema_core::wire::MAX_PAGES`] — never raises it — so a test can
+/// show the refusal on a three-page fixture instead of a 100,001-page one.
+/// Costs one environment lookup per document.
+pub const MAX_PAGES_ENV: &str = "MNEMA_MAX_PAGES";
+
+/// The most pages one document may declare here: D1's ceiling, or lower under
+/// [`MAX_PAGES_ENV`].
+pub fn page_cap() -> u32 {
+    let cap = mnema_core::wire::MAX_PAGES;
+    std::env::var(MAX_PAGES_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map_or(cap, |lower| lower.min(cap))
+}
+
 /// The resolution a textless page is rendered at for recognition.
 const OCR_DPI: f32 = 300.0;
 /// The longest side of that rendering, in pixels. A page large enough to
@@ -257,6 +273,16 @@ pub fn extract_pdf_pages(
         return Err(PdfError::Malformed(
             "this PDF declares no pages, so there is nothing in it to read".to_string(),
         ));
+    }
+
+    // Before any page is handed over, so before the worker writes a header:
+    // the count is the file's own claim, and the pool bounds a document's time
+    // by it. A statement about these bytes, like "declares no pages" above.
+    let cap = page_cap();
+    if count as i64 > i64::from(cap) {
+        return Err(PdfError::Malformed(format!(
+            "this PDF declares {count} pages, over the {cap} one document may have (D1)"
+        )));
     }
 
     let declared = count as u32;

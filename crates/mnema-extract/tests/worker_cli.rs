@@ -2341,3 +2341,80 @@ fn every_pdf_header_counts_the_pages_that_arrive_and_the_ones_skipped() {
         "every fixture but a scan without an engine is read"
     );
 }
+
+// ------------------------------------------------- the page ceiling (D1)
+
+/// The frames a request answers with under a lowered page ceiling. The seam
+/// (`MAX_PAGES_ENV`) lowers D1's 100,000 so a three-page fixture can stand
+/// for a 100,001-page document; it cannot raise it.
+fn frames_under_cap(path: &str, cap: u32) -> Vec<Frame> {
+    let request = serde_json::json!({ "path": path, "max_bytes": 1_048_576 });
+    frames_of(&run_worker_with_env(
+        &[&request.to_string()],
+        &[(mnema_extract::MAX_PAGES_ENV, &cap.to_string())],
+    ))
+}
+
+/// A PDF declaring more pages than one document may have is refused for that
+/// file, as `malformed`, before any header: the count is the file's own claim
+/// (`FPDF_GetPageCount`) and the pool bounds a document's time by it. Exactly
+/// at the ceiling it is read.
+#[test]
+fn a_pdf_declaring_more_pages_than_the_ceiling_is_refused_as_malformed() {
+    let pdf = "tests/fixtures/text-stamp-text.pdf"; // 3 pages
+
+    match frames_under_cap(pdf, 2).as_slice() {
+        [
+            Frame::Refused {
+                rule,
+                reason,
+                reader,
+                ..
+            },
+        ] => {
+            assert_eq!(rule, "malformed");
+            assert_eq!(reader.as_deref(), Some("pdf"));
+            assert!(
+                reason.contains("declares 3 pages") && reason.contains("2"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected one refusal, got {other:?}"),
+    }
+    let at_cap = frames_under_cap(pdf, 3);
+    assert!(
+        matches!(at_cap.first(), Some(Frame::Header { pages: 3, .. })),
+        "{at_cap:?}"
+    );
+}
+
+/// The same ceiling for a reader that counts its pages from the file's
+/// content: markdown sections (as EPUB chapters, DOCX sections, XLSX sheets).
+#[test]
+fn a_document_with_more_sections_than_the_ceiling_is_refused_under_its_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many.md");
+    std::fs::write(&path, "вступ\n\n# один\n\nа\n\n# два\n\nб\n").unwrap();
+    let path = path.display().to_string();
+
+    match frames_under_cap(&path, 2).as_slice() {
+        [
+            Frame::Refused {
+                rule,
+                reason,
+                reader,
+                ..
+            },
+        ] => {
+            assert_eq!(rule, "malformed");
+            assert_eq!(reader.as_deref(), Some("markdown"));
+            assert!(reason.contains("declares 3 pages"), "{reason}");
+        }
+        other => panic!("expected one refusal, got {other:?}"),
+    }
+    let at_cap = frames_under_cap(&path, 3);
+    assert!(
+        matches!(at_cap.first(), Some(Frame::Header { pages: 3, .. })),
+        "{at_cap:?}"
+    );
+}

@@ -21,7 +21,7 @@ use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
     DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, TEXT_SOURCE_NATIVE, XlsxError,
     extract_docx, extract_epub, extract_html, extract_markdown, extract_pdf_pages, extract_text,
-    extract_xlsx,
+    extract_xlsx, page_cap,
 };
 use sha2::{Digest, Sha256};
 
@@ -104,7 +104,9 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let rest = handle_request(&line, &mut |frame| write_frame(&mut stdout, &frame));
+        let rest = capped(handle_request(&line, &mut |frame| {
+            write_frame(&mut stdout, &frame)
+        }));
         for frame in rest {
             write_frame(&mut stdout, &frame);
         }
@@ -863,6 +865,34 @@ fn refused_before_a_reader(rule: &str, reason: String, sha256: Option<String>) -
         sha256,
         reader: None,
         reader_version: None,
+    }
+}
+
+/// The page ceiling (D1) for the readers that build a whole document before
+/// writing it: markdown and HTML sections, EPUB chapters, DOCX sections and
+/// XLSX sheets are counted from the file, and a 64 MiB file can hold far more
+/// than 100,000 of them. Such a document is refused, for that file only, as
+/// `malformed` under the reader that read it. A PDF never reaches here with a
+/// header — it streams, and `extract_pdf_pages` refuses before its first page.
+fn capped(frames: Vec<Frame>) -> Vec<Frame> {
+    let cap = page_cap();
+    match frames.first() {
+        Some(Frame::Header {
+            pages,
+            sha256,
+            reader,
+            reader_version,
+            ..
+        }) if *pages > cap => vec![reader_refused(
+            reader,
+            *reader_version,
+            "malformed",
+            format!(
+                "this document declares {pages} pages, over the {cap} one document may have (D1)"
+            ),
+            Some(sha256.clone()),
+        )],
+        _ => frames,
     }
 }
 

@@ -84,7 +84,33 @@ case_ "pool: a header may promise at most MAX_PAGES" \
   crates/mnema-pool/src/lib.rs \
   's#                if pages > MAX_PAGES \{#                if false && pages > MAX_PAGES {#' \
   '                if false && pages > MAX_PAGES {' \
-  mnema-pool 'a_header_promising_more_than_max_pages_is_a_protocol_error' --test supervision
+  mnema-pool 'a_header_promising_more_than_max_pages_costs_that_file_not_the_job' --test supervision
+
+# P7. The cap answered as `PoolError::Protocol` again. The count is the file's
+# own (`FPDF_GetPageCount`), so one crafted PDF would stop the whole job; the
+# test reads the file after it in the same pool.
+case_ "pool: a header over the cap costs that file, not the job" \
+  crates/mnema-pool/src/lib.rs \
+  's#                if pages > MAX_PAGES \{\n                    return Ok\(Answer::Ended \{\n                        ending: worker\.stop\(false\)\?,\n                        note: Some\(format!\(\n[^\n]*\n[^\n]*\n                        \)\),\n                    \}\);#                if pages > MAX_PAGES {\n                    return Err(protocol(&line, "a header over the page cap"));#' \
+  '                    return Err(protocol(&line, "a header over the page cap"));' \
+  mnema-pool 'a_header_promising_more_than_max_pages_costs_that_file_not_the_job' --test supervision
+
+# W1. The worker writes a header for a PDF declaring more pages than D1 allows,
+# leaving the pool's defence as the only one — and the file journalled as a
+# crashed worker rather than as these bytes being malformed.
+case_ "worker: a PDF over the page ceiling is refused as malformed" \
+  crates/mnema-extract/src/pdf.rs \
+  's#    if count as i64 > i64::from\(cap\) \{#    if false && count as i64 > i64::from(cap) {#' \
+  '    if false && count as i64 > i64::from(cap) {' \
+  mnema-extract 'a_pdf_declaring_more_pages_than_the_ceiling_is_refused_as_malformed' --test worker_cli
+
+# W2. The same ceiling skipped for the readers that count pages from content:
+# a markdown file of 64 MiB can hold sixteen million sections.
+case_ "worker: a buffered document over the page ceiling is refused" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's#        \}\) if \*pages > cap => vec!\[reader_refused\(#        }) if false && *pages > cap => vec![reader_refused(#' \
+  '        }) if false && *pages > cap => vec![reader_refused(' \
+  mnema-extract 'a_document_with_more_sections_than_the_ceiling_is_refused_under_its_reader' --test worker_cli
 
 # P6. The cancel flag never read while a document is in flight. Stop then waits
 # out the whole document — minutes for an OCR'd volume — which is what the

@@ -1006,9 +1006,11 @@ fn a_raised_cancel_kills_the_worker_in_the_middle_of_a_document() {
 }
 
 /// A header may promise at most `MAX_PAGES` (D1's corpus ceiling): exactly
-/// that is a document, one more is a worker that does not speak the protocol.
+/// that is a document, one more costs **that file**, never the job. The count
+/// comes from the file itself (`FPDF_GetPageCount`), so a `PoolError` here
+/// would let one crafted PDF stop a walk; the file after it is still read.
 #[test]
-fn a_header_promising_more_than_max_pages_is_a_protocol_error() {
+fn a_header_promising_more_than_max_pages_costs_that_file_not_the_job() {
     let _watchdog = Watchdog::new("page cap", Duration::from_secs(30));
     let pool = Pool::new(config()).unwrap();
     let cap = mnema_pool::MAX_PAGES;
@@ -1019,11 +1021,14 @@ fn a_header_promising_more_than_max_pages_is_a_protocol_error() {
         "{at_cap:?}"
     );
 
-    let error = extract(&pool, &format!("promise:{}", cap + 1)).unwrap_err();
-    let PoolError::Protocol { detail, .. } = &error else {
-        panic!("expected a protocol error, got {error:?}");
-    };
-    assert!(detail.contains("promising"), "{detail}");
+    let over = skip(
+        extract(&pool, &format!("promise:{}", cap + 1))
+            .expect("a header over the cap is one file's answer, not a broken pool"),
+    );
+    assert_eq!(over.failure, Failure::Crash, "{over:?}");
+    assert!(over.reason.contains("promised"), "{over:?}");
+
+    document(extract(&pool, "ok:next.txt").expect("the job goes on"));
 }
 
 /// Silence after a page still kills the worker: the deadline is renewed by a
