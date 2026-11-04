@@ -762,9 +762,10 @@ mod tests {
         // gives for its page counts: a number derived from the reader moves with
         // the reader. 1 + 2 + 3 + 3 + 3 + 1 + 3 + 3 over the eight fixtures that
         // load, with `broken-utf16.pdf` contributing page 1 only — its pages 2 and
-        // 3 are the two the doc comment above excludes.
+        // 3 are the two the doc comment above excludes — plus 1 for page 1 of
+        // `mixed-native-scan.pdf`; the other scan fixtures have no text to compare.
         assert_eq!(
-            compared, 19,
+            compared, 20,
             "the comparison must run on the pages it says it ran on: {names:?}"
         );
     }

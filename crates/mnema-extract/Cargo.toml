@@ -113,5 +113,43 @@ quick-xml = "0.41"
 # `picture` is for embedded images, which this crate does not read.
 calamine = "0.36"
 
+# Apple Vision for the pages of a PDF that carry no text layer (D189, `src/ocr.rs`).
+# macOS only: elsewhere `ocr::recognise` is a stub and none of this is linked.
+# Default features off on every one of them — the defaults of these generated
+# crates are the whole framework (every Vision request, every Foundation class),
+# and nothing here asks for more than one text request and the image that feeds it.
+# `objc2-core-foundation` is named for `CFData`: the bitmap is copied into one
+# rather than lent to CoreGraphics, see `ocr.rs` for why.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSString",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFData",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGImage",
+    "CGDataProvider",
+    "CGColorSpace",
+] }
+objc2-vision = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "objc2-core-foundation",
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "VNTypes",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

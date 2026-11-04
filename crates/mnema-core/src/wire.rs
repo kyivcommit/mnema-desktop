@@ -11,6 +11,12 @@
 //! finally one `Summary`; a file it declines or cannot read produces exactly
 //! one `Refused` or `Failed` frame and nothing else.
 //!
+//! A third shape since D189, and only from a reader that streams (PDF): a
+//! `Header` and some pages, then one `Refused` or `Failed` in place of the
+//! `Summary` — a page that would not load or not be recognised after earlier
+//! pages went out. It is the file's answer, and the pages before it are not a
+//! document: the parent builds nothing from them.
+//!
 //! **Why this module lives in `mnema-core` and not in `mnema-extract`, where
 //! task 7 first wrote it.** D40 requires that `mnema-extract` be linked *only*
 //! into the worker binary and never into the application: that is what makes
@@ -27,6 +33,14 @@
 use crate::{Block, SourceKind};
 use serde::{Deserialize, Serialize};
 
+/// The most pages one document may declare. D1 documents ~100,000 pages as
+/// the ceiling of the whole *corpus*, so a single document beyond it is not one
+/// this product supports. The worker refuses such a file (`malformed`) before
+/// it writes a header; the pool, which bounds a document's time by
+/// `Header.pages`, treats a header over it as that one file's worker
+/// misbehaving. On this side of the boundary because both sides read it.
+pub const MAX_PAGES: u32 = 100_000;
+
 /// One line of the wire protocol.
 ///
 /// Internally tagged on a field named `frame` rather than `type`, so it does
@@ -40,9 +54,15 @@ pub enum Frame {
     /// always 1 (D37: one page per file); it lets the application size its
     /// per-page bookkeeping before the blocks start arriving.
     ///
+    /// It counts **every page the document declares**: the ones that arrive as
+    /// [`Frame::Page`] plus the ones the summary names in `skipped_pages`
+    /// (D189 — a streaming reader writes the header before it knows which
+    /// pages carry text, so only the sum is known up front).
+    ///
     /// It is also the one cheap integrity check on this stream: `mnema-pool`
-    /// requires it to equal the number of [`Frame::Page`] frames that actually
-    /// arrive.
+    /// requires that sum to equal it, and stops a document the moment more
+    /// `Page` frames arrive than it promised — the bound that lets the pool's
+    /// deadline be per page.
     ///
     /// What that catches is a **worker binary that does not agree with the
     /// parent about the protocol** — a half-finished install, a sidecar from
@@ -52,7 +72,7 @@ pub enum Frame {
     /// mid-document loses its `Summary` too and is classified by how it died,
     /// and a pipe does not drop interior bytes while still delivering later
     /// ones. For a correct reader the check is structurally unable to fire,
-    /// because the worker takes both numbers from the same vector — which is
+    /// because the worker takes both numbers from the same vectors — which is
     /// the point, and is worth knowing before being clever with the count.
     Header {
         sha256: String,
@@ -92,9 +112,28 @@ pub enum Frame {
     /// `page_no` is the reader's own numbering, not a counter of these frames:
     /// a reader that skips a page (`Summary::skipped_pages` names it) leaves a
     /// gap here, and the gap is the honest record of it.
+    ///
+    /// `text_source` is the page's own source when it differs from the
+    /// document's: `None` means `Summary::text_source` applies (every native
+    /// page, and every page before OCR existed), `Some("ocr:vision")` marks a
+    /// page read by OCR. `ocr_confidence` is the mean top-candidate confidence
+    /// of such a page, kept for a future gold set and **not** a threshold
+    /// (D189: Vision confidences are quantised). `width_px`, `height_px` and `dpi`
+    /// are the bitmap OCR read, for the `page` row. All are skipped on the wire
+    /// when `None`, so a native page frame is byte-for-byte what it was.
     Page {
         page_no: u32,
         section_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ocr_confidence: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width_px: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height_px: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
     },
     /// One source block, in reading order within its page.
     Block(Block),
@@ -230,9 +269,38 @@ pub enum Frame {
 /// what constructs these lines, the same split `Frame` has between the two
 /// sides of the boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RequestWire")]
 pub struct Request {
     pub path: String,
+    /// Ceiling for every file that is not a PDF.
     pub max_bytes: u64,
+    /// Ceiling for a PDF. Separate because the worker's memory per input byte
+    /// differs by format (D189, measured: a PDF costs about 2x its size, a
+    /// non-PDF about 4x plus the application's per-char offsets).
+    ///
+    /// A line without this field deserialises with `pdf_max_bytes ==
+    /// max_bytes` (not 0, which would refuse every PDF), so a request from an
+    /// old parent means what it meant before the field existed.
+    pub pdf_max_bytes: u64,
+}
+
+/// The shape `Request` is read from. serde's `default` cannot see a sibling
+/// field, so the absent-means-`max_bytes` rule lives in the `From` below.
+#[derive(Deserialize)]
+struct RequestWire {
+    path: String,
+    max_bytes: u64,
+    pdf_max_bytes: Option<u64>,
+}
+
+impl From<RequestWire> for Request {
+    fn from(wire: RequestWire) -> Self {
+        Request {
+            pdf_max_bytes: wire.pdf_max_bytes.unwrap_or(wire.max_bytes),
+            path: wire.path,
+            max_bytes: wire.max_bytes,
+        }
+    }
 }
 
 /// Serialises `frame` as a single NDJSON line: compact JSON followed by
@@ -292,6 +360,11 @@ mod tests {
         Frame::Page {
             page_no: 4,
             section_title: Some("Розділ другий".to_string()),
+            text_source: None,
+            ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         }
     }
 
@@ -299,6 +372,11 @@ mod tests {
         Frame::Page {
             page_no: 1,
             section_title: None,
+            text_source: None,
+            ocr_confidence: None,
+            width_px: None,
+            height_px: None,
+            dpi: None,
         }
     }
 
@@ -573,6 +651,7 @@ mod tests {
         let request = Request {
             path: "документи/звіт.txt".to_string(),
             max_bytes: 1 << 26,
+            pdf_max_bytes: 1 << 29,
         };
         let line = to_request_line(&request).unwrap();
         assert_eq!(line.matches('\n').count(), 1);
@@ -582,5 +661,55 @@ mod tests {
         // — mirrored here rather than trimming first.
         let back: Request = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(back, request);
+    }
+
+    #[test]
+    fn a_request_without_pdf_max_bytes_means_max_bytes() {
+        let old = r#"{"path":"a.pdf","max_bytes":1234}"#;
+        let request: Request = serde_json::from_str(old).unwrap();
+        assert_eq!(request.max_bytes, 1234);
+        assert_eq!(request.pdf_max_bytes, 1234);
+    }
+
+    #[test]
+    fn a_request_carries_its_own_pdf_ceiling_through_the_line() {
+        let request = Request {
+            path: "a.pdf".to_string(),
+            max_bytes: 10,
+            pdf_max_bytes: 99,
+        };
+        let line = to_request_line(&request).unwrap();
+        assert!(line.contains(r#""pdf_max_bytes":99"#), "{line}");
+        let back: Request = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(back, request);
+    }
+
+    #[test]
+    fn a_native_page_frame_is_the_line_it_always_was() {
+        let line = to_line(&sample_untitled_page()).unwrap();
+        assert_eq!(
+            line,
+            "{\"frame\":\"page\",\"page_no\":1,\"section_title\":null}\n"
+        );
+        // And the old line still reads, with both new fields absent.
+        assert_eq!(from_line(&line).unwrap(), sample_untitled_page());
+    }
+
+    #[test]
+    fn an_ocr_page_frame_round_trips_its_source_and_confidence() {
+        let page = Frame::Page {
+            page_no: 2,
+            section_title: None,
+            text_source: Some("ocr:vision".to_string()),
+            ocr_confidence: Some(0.5),
+            width_px: Some(2480),
+            height_px: Some(3508),
+            dpi: Some(300),
+        };
+        let line = to_line(&page).unwrap();
+        assert!(line.contains(r#""text_source":"ocr:vision""#), "{line}");
+        assert!(line.contains(r#""ocr_confidence":0.5"#), "{line}");
+        assert!(line.contains(r#""dpi":300"#), "{line}");
+        assert_eq!(from_line(&line).unwrap(), page);
     }
 }

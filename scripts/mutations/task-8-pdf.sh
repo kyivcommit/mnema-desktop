@@ -53,7 +53,7 @@ case_ "worker: the header carries the pdf reader's version" \
 # `page.text_source` is where that survives.
 case_ "worker: the summary names the pdf text source" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{text_source: "native:pdf"\.to_string\(\),}{text_source: "native:txt".to_string(),}' \
+  's{text_source: TEXT_SOURCE_NATIVE\.to_string\(\),}{text_source: "native:txt".to_string(),}' \
   'text_source: "native:txt".to_string(),' \
   mnema-extract 'a_pdf_is_read_and_its_header_names_the_pdf_reader' --test worker_cli
 
@@ -66,9 +66,9 @@ case_ "worker: the summary names the pdf text source" \
 # by a green walk and a fixed install returns nothing.
 case_ "worker: a library that will not load is not a damaged file" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                message: format!\("pdfium could not be loaded: \{e\}"\),\n            \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                rule: "malformed".to_string(),\n                reason: format!("pdfium could not be loaded: \{e\}"),\n                sha256: Some(sha256),\n                reader: None,\n                reader_version: None,\n            \}],}' \
+  's{Err\(PdfError::Library\(e\)\) => vec!\[Frame::Failed \{\n                    message: format!\("pdfium could not be loaded: \{e\}"\),\n                \}\],}{Err(PdfError::Library(e)) => vec![Frame::Refused \{\n                    rule: "malformed".to_string(),\n                    reason: format!("pdfium could not be loaded: \{e\}"),\n                    sha256: Some(sha256),\n                    reader: None,\n                    reader_version: None,\n                \}],}' \
   'rule: "malformed".to_string(),
-                reason: format!("pdfium could not be loaded: {e}"),' \
+                    reason: format!("pdfium could not be loaded: {e}"),' \
   mnema-extract 'a_damaged_pdf_is_the_files_fault_and_an_unloadable_library_is_not' --test pdf
 
 # C5. The other direction of the same split, and it needs its own case: an
@@ -95,12 +95,12 @@ case_ "reader: a locked document is not a damaged one" \
 # document per file with the bytes never having moved.
 case_ "worker: the no_text_layer refusal carries the digest it read" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~                     \{TEXT_LAYER_MIN_CHARS\} characters"\n                \),\n                Some\(sha256\),~                     {TEXT_LAYER_MIN_CHARS} characters"
-                ),
-                None,~' \
+  's~                         \{TEXT_LAYER_MIN_CHARS\} characters"\n                    \),\n                    Some\(sha256\),~                         {TEXT_LAYER_MIN_CHARS} characters"
+                    ),
+                    None,~' \
   '{TEXT_LAYER_MIN_CHARS} characters"
-                ),
-                None,' \
+                    ),
+                    None,' \
   mnema-extract 'every_refusal_that_read_the_file_carries_the_digest_it_read' --test worker_cli
 
 # C8. `unsupported` promises a reader that is coming. The reader came; the file
@@ -108,11 +108,11 @@ case_ "worker: the no_text_layer refusal carries the digest it read" \
 # skip list, and — through `SkipRule` — two different `displaces` decisions.
 case_ "worker: a scan is refused under its own rule, not unsupported" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~manifest::PDF_READER_VERSION,\n                "no_text_layer",~manifest::PDF_READER_VERSION,\n                "unsupported",~' \
+  's~manifest::PDF_READER_VERSION,\n                    "no_text_layer",~manifest::PDF_READER_VERSION,\n                    "unsupported",~' \
   'reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "unsupported",' \
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "unsupported",' \
   mnema-extract 'a_pdf_with_no_text_layer_on_any_page_is_refused_under_its_own_rule' --test worker_cli
 
 # C9. The threshold is a product decision someone may want to argue with, so the
@@ -167,8 +167,8 @@ case_ "probe: characters are counted after NFC, not before" \
 # non-empty and of the right type either way.
 case_ "reader: a survivor keeps its own page number, gap and all" \
   crates/mnema-extract/src/pdf.rs \
-  's{        pages\.push\(PdfPage \{\n            page_no,}{        pages.push(PdfPage \{\n            page_no: pages.len() as u32 + 1,}' \
-  'page_no: pages.len() as u32 + 1,' \
+  's{            PdfPage \{\n                page_no,}{            PdfPage \{\n                page_no: page_no - skipped.len() as u32,}' \
+  'page_no: page_no - skipped.len() as u32,' \
   mnema-extract 'a_page_under_the_threshold_is_skipped_by_number_and_its_neighbours_are_not' --test pdf
 
 # C14. A page dropped without being named. `Summary::skipped_pages` would name
@@ -178,20 +178,24 @@ case_ "reader: a survivor keeps its own page number, gap and all" \
 # is what the wording follows.)
 case_ "reader: a skipped page is named, not silently dropped" \
   crates/mnema-extract/src/pdf.rs \
-  's{            skipped\.push\(page_no\);\n            continue;}{            continue;}' \
-  'if !has_text_layer(text_layer_chars(&raw)) {
-            continue;
-        }' \
+  's{                    skipped\.push\(page_no\);\n                    continue;}{                    continue;}' \
+  '                _ => {
+                    continue;
+                }' \
   mnema-extract 'every_page_of_a_document_is_either_read_or_named' --test pdf
 
-# C15. The header's count taken a second way. The pool requires it to equal the
-# number of `Page` frames that arrive and deliberately does not look at the
-# largest `page_no`; announcing the document's page count would stop the job on
-# every PDF with a scanned page in it.
-case_ "worker: the header counts the pages sent, not the document's" \
+# C15. The header's count taken a second way. Since D189 the pool requires it to
+# equal the `Page` frames that arrive plus the skipped numbers (a streaming
+# reader writes the header before it knows which pages carry text), and
+# deliberately does not look at the largest `page_no`. Counting only the pages
+# sent — the meaning before D189 — would stop the job on every PDF with a
+# scanned page in it. Since the reader streams, the count is taken from the
+# document before any page is known; the mutant counts what is known at the
+# first page instead, which is the streaming shape of "only the pages sent".
+case_ "worker: the header counts every page the document declares" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                    pages: doc\.pages\.len\(\) as u32,}{                    pages: (doc.pages.len() + doc.skipped.len()) as u32,}' \
-  'pages: (doc.pages.len() + doc.skipped.len()) as u32,' \
+  's{                        pages: declared,}{                        pages: page.page_no,}' \
+  'pages: page.page_no,' \
   mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 
 # C16. The other half of the same pair: the summary's account of what was
@@ -199,9 +203,9 @@ case_ "worker: the header counts the pages sent, not the document's" \
 # mutates and the test it reddens both moved; the case is the same one.
 case_ "worker: the summary names the pages that were skipped" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                    skipped_pages: doc\.skipped,}{                    skipped_pages: Vec::new(),}' \
+  's{                    skipped_pages: skipped,}{                    skipped_pages: Vec::new(),}' \
   'skipped_pages: Vec::new(),
-                    text_source: "native:pdf"' \
+                    text_source: TEXT_SOURCE_NATIVE' \
   mnema-extract 'a_skipped_pdf_page_leaves_a_gap_and_is_named_rather_than_announced' --test worker_cli
 
 # C17. A line number invented for a format that has none. `pages_of` gives a PDF
@@ -209,9 +213,9 @@ case_ "worker: the summary names the pages that were skipped" \
 # a number here is a citation to rows of a page that does not have any.
 case_ "reader: a pdf block carries no line numbers" \
   crates/mnema-extract/src/pdf.rs \
-  's{                line_start: None,\n                line_end: None,}{                line_start: Some(1),\n                line_end: Some(1),}' \
+  's{                    line_start: None,\n                    line_end: None,}{                    line_start: Some(1),\n                    line_end: Some(1),}' \
   'line_start: Some(1),
-                line_end: Some(1),' \
+                    line_end: Some(1),' \
   mnema-extract 'a_page_with_a_text_layer_becomes_a_block_of_that_page' --test pdf
 
 # ------------------------------------------- every page the document declares

@@ -24,6 +24,7 @@ pub fn document(outcome: mnema_pool::Outcome) -> Document {
     match outcome {
         mnema_pool::Outcome::Extracted(document) => document,
         mnema_pool::Outcome::Skipped(skip) => panic!("expected a document, got {skip:?}"),
+        mnema_pool::Outcome::Cancelled => panic!("expected a document, got a cancellation"),
     }
 }
 

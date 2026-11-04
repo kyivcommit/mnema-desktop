@@ -364,8 +364,8 @@ fn extract(bytes: &[u8], budget: usize) -> Result<XlsxWorkbook, XlsxError> {
 /// 4 194 304 bytes reached the sink. Skipping the charge on that arm made a
 /// 417 KB archive of 100 members inflate **400 MiB** and answer `Ok`, a third
 /// again over a budget that never fired. It never leaked — `take` and the
-/// counter bound each member — but the pool's 120 s deadline
-/// (`crates/mnema-pool/src/lib.rs:552`) turns that into a worker slot eaten
+/// counter bound each member — but the pool's per-page deadline
+/// (`PoolConfig::timeout`) turns that into a worker slot eaten
 /// whole and a journal row saying `Timeout`, with nothing naming the cause.
 /// So the bytes are counted **on the way past** and charged whichever way the
 /// copy ends.

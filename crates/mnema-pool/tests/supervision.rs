@@ -46,6 +46,7 @@ fn skip(outcome: mnema_pool::Outcome) -> Skip {
         mnema_pool::Outcome::Extracted(document) => {
             panic!("expected a skip, got {} pages", document.pages.len())
         }
+        mnema_pool::Outcome::Cancelled => panic!("expected a skip, got a cancellation"),
     }
 }
 
@@ -936,4 +937,203 @@ fn a_refusal_under_an_unknown_rule_stops_the_job() {
     // The worker that spoke it is retired, and the pool is still usable — a
     // mismatch is the job's problem, not this pool's permanent state.
     document(extract(&pool, "ok:after.txt").unwrap());
+}
+
+// --- The deadline is per page, and bounded by the header (D189) -------------
+
+/// A pool whose deadline is short enough that a whole document cannot fit in
+/// it, while every gap between pages does — with room: each gap is 40% of it.
+fn per_page_pool() -> Pool {
+    Pool::new(PoolConfig {
+        workers: 1,
+        batch: 100,
+        timeout: Duration::from_millis(1000),
+        ..config()
+    })
+    .unwrap()
+}
+
+/// Four pages 400 ms apart take 1.6 s against a 1 s deadline. Slow in total
+/// and never stuck — an OCR'd volume — so the document arrives whole.
+#[test]
+fn a_document_slower_than_the_deadline_but_never_silent_for_it_arrives_whole() {
+    let _watchdog = Watchdog::new("slow pages", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let document = document(extract(&pool, "slow-pages:4:400").unwrap());
+    assert_eq!(
+        document
+            .pages
+            .iter()
+            .map(|page| page.page_no)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+/// Stop reaches the document in flight (review of D189): with the deadline
+/// renewed per page, a 20-page document 400 ms apart would take 8 s, and a
+/// Stop checked only between files would wait all of it. Raised after the
+/// first page, the flag kills the worker within `CANCEL_POLL` and the file
+/// is neither a document nor a skip.
+#[test]
+fn a_raised_cancel_kills_the_worker_in_the_middle_of_a_document() {
+    let _watchdog = Watchdog::new("cancel mid-document", Duration::from_secs(30));
+    let pool = per_page_pool();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+
+    let started = Instant::now();
+    let outcome = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(600));
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        pool.extract_cancellable(Path::new("slow-pages:20:400"), &cancel)
+            .unwrap()
+    });
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome, mnema_pool::Outcome::Cancelled);
+    assert!(elapsed < Duration::from_secs(2), "Stop waited {elapsed:?}");
+    assert_eq!(pool.live_workers(), 0, "the cancelled worker is gone");
+    // And the file is not poisoned: asked again without a cancel, it is read.
+    assert_eq!(
+        document(extract(&pool, "slow-pages:2:10").unwrap())
+            .pages
+            .len(),
+        2
+    );
+}
+
+/// A header may promise at most `MAX_PAGES` (D1's corpus ceiling): exactly
+/// that is a document, one more costs **that file**, never the job. The count
+/// comes from the file itself (`FPDF_GetPageCount`), so a `PoolError` here
+/// would let one crafted PDF stop a walk; the file after it is still read.
+#[test]
+fn a_header_promising_more_than_max_pages_costs_that_file_not_the_job() {
+    let _watchdog = Watchdog::new("page cap", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+    let cap = mnema_pool::MAX_PAGES;
+
+    let at_cap = extract(&pool, &format!("promise:{cap}")).expect("the cap itself is accepted");
+    assert!(
+        matches!(at_cap, mnema_pool::Outcome::Extracted(_)),
+        "{at_cap:?}"
+    );
+
+    let over = skip(
+        extract(&pool, &format!("promise:{}", cap + 1))
+            .expect("a header over the cap is one file's answer, not a broken pool"),
+    );
+    assert_eq!(over.failure, Failure::Crash, "{over:?}");
+    assert!(over.reason.contains("promised"), "{over:?}");
+
+    document(extract(&pool, "ok:next.txt").expect("the job goes on"));
+}
+
+/// Silence after a page still kills the worker: the deadline is renewed by a
+/// page, not removed by one. 1.5 s of silence against 1 s.
+#[test]
+fn a_worker_silent_for_the_deadline_after_a_page_is_killed() {
+    let _watchdog = Watchdog::new("stall after a page", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let skipped = skip(extract(&pool, "stall-after-page:1500").unwrap());
+    assert_eq!(skipped.failure, Failure::Timeout);
+}
+
+/// A PDF streams its pages (D189), so a document can end in `Failed` or
+/// `Refused` after its header and some pages: page 40 would not be recognised,
+/// or would not load, after 39 went out. That is one file's answer — the pages
+/// that arrived are not a document and none is returned — and not a protocol
+/// mismatch, which would stop the whole job. The file after them is read
+/// normally: the job went on.
+#[test]
+fn a_document_that_ends_in_failure_after_its_pages_began_is_skipped_whole() {
+    let _watchdog = Watchdog::new("failure after a page", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let failed = skip(
+        extract(&pool, "fail-after-page:scan.pdf")
+            .expect("an ending after pages is one file's answer, not a protocol error"),
+    );
+    assert_eq!(failed.failure, Failure::Unreadable, "{failed:?}");
+    assert!(
+        failed.reason.contains("OCR engine unavailable"),
+        "{failed:?}"
+    );
+
+    let refused = skip(
+        extract(&pool, "refuse-after-page:scan.pdf")
+            .expect("an ending after pages is one file's answer, not a protocol error"),
+    );
+    assert_eq!(refused.failure, Failure::Malformed, "{refused:?}");
+
+    let after = document(extract(&pool, "after.txt").unwrap());
+    assert_eq!(after.pages.len(), 1);
+}
+
+/// More Page frames than the header promised stop the job **as they arrive**,
+/// not at the summary: this is the bound that keeps a per-page deadline from
+/// letting a worker run for ever.
+#[test]
+fn more_pages_than_the_header_promised_stop_the_job() {
+    let _watchdog = Watchdog::new("extra pages", Duration::from_secs(30));
+    let pool = per_page_pool();
+
+    let error = extract(&pool, "extra-pages:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("more pages than the header promised"),
+        "caught on the page frame, not at the summary: {detail}"
+    );
+}
+
+/// `Header.pages` counts the skipped pages too. The `skipped-page` worker
+/// promises 3 for two pages and one skip and goes through (above, in
+/// `a_page_that_arrived_and_was_reported_skipped_stops_the_job`); one that
+/// promises only the 2 pages that arrive is the old meaning and stops the job.
+#[test]
+fn a_header_that_does_not_count_its_skipped_pages_stops_the_job() {
+    let _watchdog = Watchdog::new("uncounted skip", Duration::from_secs(30));
+    let pool = Pool::new(config()).unwrap();
+
+    let error = extract(&pool, "uncounted-skip:x").unwrap_err();
+    let PoolError::Protocol { detail, .. } = &error else {
+        panic!("expected a protocol error, got {error:?}");
+    };
+    assert!(
+        detail.contains("promised 2") && detail.contains("1 skipped"),
+        "the detail must name the promise and the skip: {detail}"
+    );
+
+    let document = document(extract(&pool, "skipped-page:x").unwrap());
+    assert_eq!(document.skipped_pages, vec![2]);
+}
+
+/// The PDF ceiling the request carries is the config's own, not `max_bytes`
+/// under another name.
+#[test]
+fn the_pdf_ceiling_crosses_the_wire_from_the_config() {
+    let _watchdog = Watchdog::new("pdf ceiling", Duration::from_secs(30));
+    let pool = Pool::new(PoolConfig {
+        max_bytes: 1000,
+        pdf_max_bytes: 7000,
+        ..config()
+    })
+    .unwrap();
+
+    let skipped = skip(extract(&pool, "echo-ceiling:x").unwrap());
+    assert_eq!(skipped.reason, "max_bytes=1000 pdf_max_bytes=7000");
+}
+
+/// The default PDF ceiling is the measured one (D189), and above the non-PDF
+/// one: the reason it exists is that scans are larger than text.
+#[test]
+fn the_default_pdf_ceiling_is_the_measured_one() {
+    let config = config();
+    assert_eq!(config.pdf_max_bytes, 512 << 20);
+    assert_eq!(config.max_bytes, 64 << 20);
 }

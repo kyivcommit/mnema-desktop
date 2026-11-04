@@ -240,12 +240,19 @@ while read -r line; do
     # reason that looks like a reader defect.
     text=$(printf '%s' "$raw" | sed 's/\\/\\\\/g; s/"/\\"/g')
     n=$((n+1))
-    printf '{{"frame":"page","page_no":%s,"section_title":null}}
+    # Every even page as OCR read it (D189), every odd one native: one
+    # document of two families, which is what a scanned PDF is now.
+    if [ $((n % 2)) -eq 0 ]; then
+      printf '{{"frame":"page","page_no":%s,"section_title":null,"text_source":"ocr:harness","ocr_confidence":0.5,"width_px":1240,"height_px":1754,"dpi":150}}
 ' "$n"
+    else
+      printf '{{"frame":"page","page_no":%s,"section_title":null}}
+' "$n"
+    fi
     printf '{{"frame":"block","block_type":"paragraph","reading_order":0,"language":null,"text":"%s","line_start":%s,"line_end":%s}}
 ' "$text" "$n" "$n"
   done < "$file"
-  printf '{{"frame":"summary","skipped_pages":[],"text_source":"native:txt"}}
+  printf '{{"frame":"summary","skipped_pages":[],"text_source":"native:harness"}}
 '
 done
 "#
@@ -2131,6 +2138,7 @@ impl World {
         self.check_ord_is_dense();
         self.check_checkpoints_agree(&documents);
         self.check_citations_locate();
+        self.check_a_page_keeps_its_own_source();
     }
 
     /// The call in flight was refused by a newer release of the reader that
@@ -3180,6 +3188,68 @@ impl World {
                      {low}..={high}: the sequence has a hole in it, so part of the \
                      document is gone while the rest still answers"
                 ));
+            }
+        }
+    }
+
+    /// **7. A page keeps the source its frame named (D189).**
+    ///
+    /// `better_reader_worker` sends every even page as `ocr:harness` with a
+    /// confidence and a bitmap, and every odd one with no source of its own
+    /// under a summary of `native:harness` — so for any document it wrote, the
+    /// page row is a function of the page number alone. Found by the summary's
+    /// family, not by the OCR pages, so a writer that dropped every page's own
+    /// source still leaves the documents this judges.
+    fn check_a_page_keeps_its_own_source(&self) {
+        type Row = (
+            String,
+            i64,
+            String,
+            Option<f64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = self
+            .db
+            .conn()
+            .prepare(
+                "SELECT document_id, page_no, text_source, ocr_confidence, width_px, height_px, dpi
+                   FROM page
+                  WHERE document_id IN
+                        (SELECT document_id FROM page WHERE text_source GLOB '*:harness')",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (document, page_no, source, confidence, width, height, dpi) in rows {
+            let stored = (source.as_str(), confidence, width, height, dpi);
+            let framed = if page_no % 2 == 0 {
+                ("ocr:harness", Some(0.5), Some(1240), Some(1754), Some(150))
+            } else {
+                ("native:harness", None, None, None, None)
+            };
+            if stored != framed {
+                self.fail(format!(
+                    "invariant 7 — page {page_no} of document {document} is stored as \
+                     {stored:?} where its frame said {framed:?}: a page read by OCR \
+                     is indistinguishable from one with a text layer, or the reverse"
+                ));
+            }
+            if page_no % 2 == 0 {
+                self.count_once("7: an OCR page kept its own source");
             }
         }
     }
@@ -5349,6 +5419,7 @@ fn random_sequences_do_not_lose_data() {
         "3c keep: identical bytes, malformed",
         "3f re-ask: journal row older than today's reader",
         "3f answer: journal row at today's reader",
+        "7: an OCR page kept its own source",
     ]
     .into_iter()
     .chain(NO_TEXT_CASES)

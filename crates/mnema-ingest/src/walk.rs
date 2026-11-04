@@ -22,7 +22,7 @@ use mnema_index::{Db, SkipRule};
 use mnema_pool::Pool;
 use mnema_walk::{Found, PreSkipRule, WalkRules, enumerate};
 
-use crate::{IngestError, Ingested, ingest_file};
+use crate::{IngestError, Ingested, ingest_file_cancellable};
 
 /// How many times [`ingest_with_busy_retry`] asks `ingest_file` again after a
 /// `Busy` answer, before it gives up on the file for this pass and journals a
@@ -927,7 +927,8 @@ enum Retried {
     /// caller counting consecutive environmental skips must not treat this
     /// one as evidence about the worker — see the call site in `walk_root`.
     StillBusy,
-    /// Cancelled while waiting out a retry, rather than between files.
+    /// Cancelled while waiting out a retry, or while the file's worker was
+    /// reading it, rather than between files.
     Cancelled,
 }
 
@@ -978,7 +979,7 @@ fn ingest_with_busy_retry(
 ) -> Result<Retried, IngestError> {
     let mut last_busy = None;
     for attempt in 1..=BUSY_RETRIES {
-        match ingest_file(
+        match ingest_file_cancellable(
             pool,
             db,
             root_id,
@@ -986,8 +987,10 @@ fn ingest_with_busy_retry(
             &found.relative,
             Some(found.on_disk),
             manifest,
+            cancel,
         ) {
             Ok(ingested) => return Ok(Retried::Settled(ingested)),
+            Err(IngestError::Cancelled) => return Ok(Retried::Cancelled),
             Err(IngestError::Busy(err)) => {
                 last_busy = Some(err);
                 if attempt == BUSY_RETRIES {

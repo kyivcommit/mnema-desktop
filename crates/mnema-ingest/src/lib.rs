@@ -27,13 +27,16 @@
 //!   recomputes one.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use mnema_chunk::{Chunk, PageContext, chunk_blocks};
 use mnema_core::manifest::{
     Manifest, READER_DOCX, READER_EPUB, READER_HTML, READER_PDF, READER_XLSX,
 };
 use mnema_core::{Block, BlockType, Coordinate, OnDisk, SourceKind};
-use mnema_index::{Db, DocumentStatus, INDEX_FORMAT_VERSION, PathEntry, SkipEntry, SkipRule};
+use mnema_index::{
+    Db, DocumentStatus, INDEX_FORMAT_VERSION, PageOcr, PathEntry, SkipEntry, SkipRule,
+};
 use mnema_pool::{Document, Outcome, Pool, PoolError};
 
 mod walk;
@@ -130,6 +133,11 @@ pub enum IngestError {
     /// make that decision expressible.
     #[error("the index is busy: {0}")]
     Busy(mnema_index::Error),
+    /// The walk's cancel flag was raised while this file's worker was reading
+    /// it. Nothing was written, journalled or displaced for the file; the walk
+    /// turns this into `StopReason::Cancelled` and never lets it out.
+    #[error("cancelled while the file was being read")]
+    Cancelled,
 }
 
 /// Sorts a database error into "stop" and "come back to this file".
@@ -203,6 +211,25 @@ pub fn ingest_file(
     relative: &str,
     on_disk: Option<OnDisk>,
     manifest: &Manifest,
+) -> Result<Ingested, IngestError> {
+    let never = AtomicBool::new(false);
+    ingest_file_cancellable(
+        pool, db, root_id, absolute, relative, on_disk, manifest, &never,
+    )
+}
+
+/// [`ingest_file`], but a raised `cancel` stops the worker in the middle of
+/// the file and answers [`IngestError::Cancelled`] having written nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingest_file_cancellable(
+    pool: &Pool,
+    db: &Db,
+    root_id: i64,
+    absolute: &Path,
+    relative: &str,
+    on_disk: Option<OnDisk>,
+    manifest: &Manifest,
+    cancel: &AtomicBool,
 ) -> Result<Ingested, IngestError> {
     // 1. The cheap arm. A failure to stat is not decided here: the pool names
     //    an unreadable file properly, with the rule and the reason the journal
@@ -385,7 +412,11 @@ pub fn ingest_file(
     };
 
     // 2. The pool.
-    let document = match pool.extract(absolute)? {
+    let document = match pool.extract_cancellable(absolute, cancel)? {
+        // Nothing is known about the file, so nothing is recorded: no skip
+        // row, no displacement, the previous document and `path` row as they
+        // were. Steps 1 above only read.
+        Outcome::Cancelled => return Err(IngestError::Cancelled),
         Outcome::Skipped(skip) => {
             let rule = SkipRule::from(skip.failure);
             record_skip(
@@ -558,8 +589,13 @@ pub fn ingest_file(
             }
             let mut written = 0usize;
             for page in slice {
-                let page_id =
-                    db.insert_page(&id, page.page_no, &document.text_source, page.section_title)?;
+                let page_id = db.insert_page_read(
+                    &id,
+                    page.page_no,
+                    page.text_source,
+                    page.section_title,
+                    page.ocr,
+                )?;
                 // The rowids the chunker cannot invent: `Block` carries no id
                 // by design, so the caller that wrote the rows passes them in.
                 let mut placed: Vec<(i64, &Block)> = Vec::with_capacity(page.blocks.len());
@@ -1429,6 +1465,10 @@ fn extension_of(relative: &str) -> Option<&str> {
 /// chunker cannot see about it.
 struct PageOf<'a> {
     page_no: i64,
+    /// The page's own source when the frame named one (`ocr:vision`), else the
+    /// document's: since D189 one PDF can hold pages of both families.
+    text_source: &'a str,
+    ocr: PageOcr,
     section_title: Option<&'a str>,
     blocks: &'a [Block],
     context: PageContext,
@@ -1487,6 +1527,13 @@ fn pages_of(document: &Document) -> Vec<PageOf<'_>> {
         .iter()
         .map(|page| PageOf {
             page_no: i64::from(page.page_no),
+            text_source: page.text_source.as_deref().unwrap_or(&document.text_source),
+            ocr: PageOcr {
+                confidence: page.ocr_confidence,
+                width_px: page.width_px,
+                height_px: page.height_px,
+                dpi: page.dpi,
+            },
             section_title: page.section_title.as_deref(),
             blocks: &page.blocks,
             context: match document.reader.as_str() {

@@ -12,15 +12,16 @@
 //! stream the parent parses line by line.
 
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
 
 use mnema_extract::manifest;
-use mnema_extract::typing::{Reader, identify};
+use mnema_extract::typing::{PDF_MAGIC, Reader, identify};
 use mnema_extract::wire::{Frame, Request, to_line};
 use mnema_extract::{
-    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, XlsxError, extract_docx, extract_epub,
-    extract_html, extract_markdown, extract_pdf, extract_text, extract_xlsx,
+    DocxError, EpubError, PdfError, TEXT_LAYER_MIN_CHARS, TEXT_SOURCE_NATIVE, XlsxError,
+    extract_docx, extract_epub, extract_html, extract_markdown, extract_pdf_pages, extract_text,
+    extract_xlsx, page_cap,
 };
 use sha2::{Digest, Sha256};
 
@@ -103,7 +104,10 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        for frame in handle_request(&line) {
+        let rest = capped(handle_request(&line, &mut |frame| {
+            write_frame(&mut stdout, &frame)
+        }));
+        for frame in rest {
             write_frame(&mut stdout, &frame);
         }
     }
@@ -123,11 +127,32 @@ fn write_frame(stdout: &mut io::Stdout, frame: &Frame) {
     }
 }
 
+/// The `too_large` refusal. The one refusal with no digest, and it cannot have
+/// one: it decides on a configured number, and hashing the file to fill the
+/// field in would read exactly the bytes the ceiling exists to avoid reading.
+fn too_large(path: &str, size: u64, ceiling: u64, non_pdf: bool) -> Frame {
+    let scope = if non_pdf { " for non-PDF files" } else { "" };
+    refused_before_a_reader(
+        "too_large",
+        format!("{path} is {size} bytes, over the {ceiling}-byte ceiling{scope}"),
+        None,
+    )
+}
+
 /// Handles one request line, returning the frames it produces: `[Header,
 /// Page, Block..., Summary]` for a file this crate can read — one `Page` per
 /// page, each followed by its own blocks — or exactly one `Refused`/`Failed`
 /// frame for a file it declines or cannot read.
-fn handle_request(line: &str) -> Vec<Frame> {
+///
+/// **A PDF streams.** Its `Header`, `Page` and `Block` frames go to `emit` as
+/// each page is read — an OCR'd volume is minutes of work, and the pool's
+/// deadline is renewed per `Page` (D189) — and only what ends the document is
+/// returned. That ending may therefore follow a header: a page 40 that will
+/// not load (`Refused`) or will not recognise (`Failed`) after 39 pages went
+/// out. The pool discards the pages it has collected in that case; nothing
+/// is indexed from a partial stream. Every other reader returns all of its
+/// frames and emits none.
+fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
     let request: Request = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(e) => {
@@ -166,33 +191,75 @@ fn handle_request(line: &str) -> Vec<Frame> {
     // under a path when a worker read a file and would not have its content;
     // this branch never opened the file and decided on a configured number, so
     // lowering `max_bytes` must not delete anything. See `SkipRule::TooLarge`.
+    //
+    // There are two ceilings (D189): `pdf_max_bytes` for a PDF, `max_bytes`
+    // for everything else. `stat` cannot tell them apart, so it refuses only
+    // what is over the larger one; the rest is decided by the file's magic.
     let size = metadata.len();
-    if size > request.max_bytes {
+    let widest = request.max_bytes.max(request.pdf_max_bytes);
+    if size > widest {
+        // Over the larger ceiling is over both, and the file's type is not
+        // known yet, so the reason names both rather than one that may not
+        // be the one that applies to this file.
         return vec![refused_before_a_reader(
             "too_large",
             format!(
-                "{} is {size} bytes, over the {}-byte ceiling",
-                request.path, request.max_bytes
+                "{} is {size} bytes, over both ceilings ({} bytes for a PDF, {} for any other file)",
+                request.path, request.pdf_max_bytes, request.max_bytes
             ),
-            // The one refusal with no digest, and it cannot have one: this
-            // branch decided from `stat` and never opened the file. Hashing it
-            // here to fill the field in would read exactly the bytes the
-            // ceiling exists to avoid reading.
             None,
         )];
     }
 
-    // Read once: this same `Vec<u8>` is hashed and handed to the reader, so
-    // there is no window between "the bytes we hashed" and "the bytes we
-    // read" for the file to change in.
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    // Past `stat` the file is opened, but only five bytes are read to learn
+    // which ceiling applies; a non-PDF over `max_bytes` is refused after those
+    // five and its remaining bytes are never loaded. The type is decided by
+    // magic here for the same reason `identify` does: an extension names what
+    // the file is called, not what it is.
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(e) => {
             return vec![Frame::Failed {
                 message: format!("{}: {e}", request.path),
             }];
         }
     };
+    let mut bytes = Vec::with_capacity(PDF_MAGIC.len());
+    if let Err(e) = (&mut file)
+        .take(PDF_MAGIC.len() as u64)
+        .read_to_end(&mut bytes)
+    {
+        return vec![Frame::Failed {
+            message: format!("{}: {e}", request.path),
+        }];
+    }
+    // A file shorter than the magic is simply not a PDF.
+    let is_pdf = bytes.starts_with(PDF_MAGIC);
+    let ceiling = if is_pdf {
+        request.pdf_max_bytes
+    } else {
+        request.max_bytes
+    };
+    if size > ceiling {
+        return vec![too_large(&request.path, size, ceiling, !is_pdf)];
+    }
+
+    // Read once: this same `Vec<u8>` is hashed and handed to the reader, so
+    // there is no window between "the bytes we hashed" and "the bytes we
+    // read" for the file to change in. The five bytes already read are the
+    // start of it.
+    if let Err(e) = file.read_to_end(&mut bytes) {
+        return vec![Frame::Failed {
+            message: format!("{}: {e}", request.path),
+        }];
+    }
+    // The file can change between `stat` and the read, so the ceiling is
+    // checked again on what was actually loaded. This refusal does have the
+    // bytes in hand but still carries no digest: it is a fact about settings.
+    let loaded = bytes.len() as u64;
+    if loaded > ceiling {
+        return vec![too_large(&request.path, loaded, ceiling, !is_pdf)];
+    }
 
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
@@ -224,6 +291,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
             frames.push(Frame::Page {
                 page_no: 1,
                 section_title: None,
+                text_source: None,
+                ocr_confidence: None,
+                width_px: None,
+                height_px: None,
+                dpi: None,
             });
             frames.extend(blocks.into_iter().map(Frame::Block));
             frames.push(Frame::Summary {
@@ -253,6 +325,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 frames.push(Frame::Page {
                     page_no: page.page_no,
                     section_title: page.section_title,
+                    text_source: None,
+                    ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -300,6 +377,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // Unlike a PDF's, an HTML page *is* a section, and this is
                     // the whole of what a citation into it points at.
                     section_title: page.section_title,
+                    text_source: None,
+                    ocr_confidence: None,
+                    width_px: None,
+                    height_px: None,
+                    dpi: None,
                 });
                 frames.extend(page.blocks.into_iter().map(Frame::Block));
             }
@@ -342,93 +424,131 @@ fn handle_request(line: &str) -> Vec<Frame> {
                 Some(sha256),
             )]
         }
-        Reader::Pdf => match extract_pdf(&bytes) {
-            // Every page was below the text-layer threshold, so there is no
-            // document to build — but the file *was* read, and this says so
-            // under a rule about content rather than under `unsupported`,
-            // which promises a reader that is coming. `SkipRule::NoTextLayer`
-            // is what the parent records.
-            Ok(doc) if doc.pages.is_empty() => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "no_text_layer",
-                format!(
-                    "no page of this PDF carries a text layer of at least \
-                     {TEXT_LAYER_MIN_CHARS} characters"
-                ),
-                Some(sha256),
-            )],
-            Ok(doc) => {
-                let blocks: usize = doc.pages.iter().map(|p| p.blocks.len()).sum();
-                let mut frames = Vec::with_capacity(blocks + doc.pages.len() + 2);
-                frames.push(Frame::Header {
+        Reader::Pdf => {
+            let mut header = Some(Frame::Header {
+                sha256: sha256.clone(),
+                mime: file_type.mime.to_string(),
+                source_kind: file_type.source_kind,
+                // The constant, not the literal `"pdf"`. `pages_of` on the
+                // other side of the wire picks a PDF chunk's coordinate by
+                // this exact string and may not link this crate (D40), so
+                // a typo here would cost every PDF citation its page
+                // number and nothing would go red.
+                reader: manifest::READER_PDF.to_string(),
+                reader_version: manifest::PDF_READER_VERSION,
+                // Filled in from the document below.
+                pages: 0,
+            });
+            let read = extract_pdf_pages(&bytes, |declared, page| {
+                // Written before the first page and not before: a document
+                // none of whose pages has text answers `no_text_layer`
+                // *instead of* a header, and that is only known at the end.
+                if let Some(Frame::Header {
                     sha256,
-                    mime: file_type.mime.to_string(),
-                    source_kind: file_type.source_kind,
-                    // The constant, not the literal `"pdf"`. `pages_of` on the
-                    // other side of the wire picks a PDF chunk's coordinate by
-                    // this exact string and may not link this crate (D40), so
-                    // a typo here would cost every PDF citation its page
-                    // number and nothing would go red.
-                    reader: manifest::READER_PDF.to_string(),
-                    reader_version: manifest::PDF_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // pages are NOT in this number: they produce no Page frame
-                    // and are named by `skipped_pages` instead.
-                    pages: doc.pages.len() as u32,
-                });
-                for page in doc.pages {
-                    frames.push(Frame::Page {
-                        page_no: page.page_no,
-                        // A PDF page is not a section. `pages_of` gives this
-                        // reader `Coordinate::Page`, which is what a citation
-                        // into a PDF points at.
-                        section_title: None,
+                    mime,
+                    source_kind,
+                    reader,
+                    reader_version,
+                    ..
+                }) = header.take()
+                {
+                    emit(Frame::Header {
+                        sha256,
+                        mime,
+                        source_kind,
+                        reader,
+                        reader_version,
+                        // Every page the document declares: the ones that
+                        // arrive as Page frames plus the ones named by
+                        // `skipped_pages`. The pool checks exactly that sum,
+                        // and bounds the Page frames by it as they arrive.
+                        pages: declared,
                     });
-                    frames.extend(page.blocks.into_iter().map(Frame::Block));
                 }
-                frames.push(Frame::Summary {
+                emit(Frame::Page {
+                    page_no: page.page_no,
+                    // A PDF page is not a section. `pages_of` gives this
+                    // reader `Coordinate::Page`, which is what a citation
+                    // into a PDF points at.
+                    section_title: None,
+                    // `None` for a native page: the Summary's `native:pdf`
+                    // stands for it, and a native page's frame stays the
+                    // bytes it was before OCR existed.
+                    text_source: page.ocr.map(|_| page.text_source.to_string()),
+                    ocr_confidence: page.ocr.map(|o| o.confidence),
+                    width_px: page.ocr.map(|o| o.width_px),
+                    height_px: page.ocr.map(|o| o.height_px),
+                    dpi: page.ocr.map(|o| o.dpi),
+                });
+                for block in page.blocks {
+                    emit(Frame::Block(block));
+                }
+            });
+            match read {
+                // Every page was below the text-layer threshold, so there is no
+                // document to build — but the file *was* read, and this says so
+                // under a rule about content rather than under `unsupported`,
+                // which promises a reader that is coming. `SkipRule::NoTextLayer`
+                // is what the parent records. Since D189 "below the threshold"
+                // includes what OCR read, where there is an engine.
+                Ok(_) if header.is_some() => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "no_text_layer",
+                    format!(
+                        "no page of this PDF carries a text layer of at least \
+                         {TEXT_LAYER_MIN_CHARS} characters"
+                    ),
+                    Some(sha256),
+                )],
+                Ok(skipped) => vec![Frame::Summary {
                     // The numbers, not their count. This reader is the only
                     // thing in the product that ever knows *which* page of a
                     // contract the scanner missed, and the parent owes a
                     // journal row per page — which a count cannot fill in.
-                    skipped_pages: doc.skipped,
-                    text_source: "native:pdf".to_string(),
-                });
-                frames
+                    skipped_pages: skipped,
+                    text_source: TEXT_SOURCE_NATIVE.to_string(),
+                }],
+                Err(PdfError::Encrypted) => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "encrypted",
+                    "this PDF is password-protected".to_string(),
+                    Some(sha256),
+                )],
+                // A reader that could not load its own library is NOT a damaged
+                // file, and this arm must not swallow it. Under `malformed` the
+                // walk would not stop (`suggests_broken_environment() == false`)
+                // and the verdict would outlive the repair
+                // (`is_about_content() == true`): every PDF in a folder journalled
+                // as damaged by a green walk, and a fixed install returning
+                // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
+                // that outcome, and a quarantined `libpdfium.dylib` has already
+                // happened on this machine.
+                Err(PdfError::Library(e)) => vec![Frame::Failed {
+                    message: format!("pdfium could not be loaded: {e}"),
+                }],
+                // Bound to the one remaining variant rather than written as a
+                // catch-all `Err(e)`. A catch-all is how a later variant — a
+                // timeout, a page limit — would arrive silently as "this file is
+                // damaged", which is the mistake the arm above exists to undo.
+                Err(e @ PdfError::Malformed(_)) => vec![reader_refused(
+                    manifest::READER_PDF,
+                    manifest::PDF_READER_VERSION,
+                    "malformed",
+                    e.to_string(),
+                    Some(sha256),
+                )],
+                // The engine that reads a textless page did not run — the same
+                // kind as `Library`, and for the same reason never a refusal:
+                // `no_text_layer` or a skipped page would be journalled as content
+                // and outlive the engine's repair (D57). May follow a header and
+                // pages; the pool keeps none of them.
+                Err(PdfError::Ocr(e)) => vec![Frame::Failed {
+                    message: format!("a page without a text layer could not be recognised: {e}"),
+                }],
             }
-            Err(PdfError::Encrypted) => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "encrypted",
-                "this PDF is password-protected".to_string(),
-                Some(sha256),
-            )],
-            // A reader that could not load its own library is NOT a damaged
-            // file, and this arm must not swallow it. Under `malformed` the
-            // walk would not stop (`suggests_broken_environment() == false`)
-            // and the verdict would outlive the repair
-            // (`is_about_content() == true`): every PDF in a folder journalled
-            // as damaged by a green walk, and a fixed install returning
-            // nothing. `crates/mnema-pool/src/lib.rs:300-303` names exactly
-            // that outcome, and a quarantined `libpdfium.dylib` has already
-            // happened on this machine.
-            Err(PdfError::Library(e)) => vec![Frame::Failed {
-                message: format!("pdfium could not be loaded: {e}"),
-            }],
-            // Bound to the one remaining variant rather than written as a
-            // catch-all `Err(e)`. A catch-all is how a later variant — a
-            // timeout, a page limit — would arrive silently as "this file is
-            // damaged", which is the mistake the arm above exists to undo.
-            Err(e @ PdfError::Malformed(_)) => vec![reader_refused(
-                manifest::READER_PDF,
-                manifest::PDF_READER_VERSION,
-                "malformed",
-                e.to_string(),
-                Some(sha256),
-            )],
-        },
+        }
         // **The first reader that opens an archive, so the mapping from zip
         // failures to refusal rules is declared here and repeated by docx and
         // xlsx.** Three errors, three rules, and every one of them reachable —
@@ -452,11 +572,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // nothing goes red.
                     reader: manifest::READER_EPUB.to_string(),
                     reader_version: manifest::EPUB_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // chapters are NOT in this number: they produce no Page
-                    // frame and are named by `skipped_pages` instead.
-                    pages: book.chapters.len() as u32,
+                    // Every chapter the spine declares: the ones that arrive
+                    // as Page frames plus the ones named by `skipped_pages`.
+                    // The pool checks exactly that sum, and bounds the Page
+                    // frames by it as they arrive.
+                    pages: (book.chapters.len() + book.skipped.len()) as u32,
                 });
                 for chapter in book.chapters {
                     frames.push(Frame::Page {
@@ -465,6 +585,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // is the whole of what a citation into a book points
                         // at.
                         section_title: chapter.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(chapter.blocks.into_iter().map(Frame::Block));
                 }
@@ -548,6 +673,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // EPUB chapter are, and it is the whole of what a
                         // citation into a document points at.
                         section_title: section.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(section.blocks.into_iter().map(Frame::Block));
                 }
@@ -615,11 +745,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                     // no sheet named on it and nothing saying which.
                     reader: manifest::READER_XLSX.to_string(),
                     reader_version: manifest::XLSX_READER_VERSION,
-                    // From the same vector the Page frames come from, so the
-                    // pool's count check cannot disagree with itself. Skipped
-                    // sheets are NOT in this number: they produce no Page frame
-                    // and are named by `skipped_pages` instead.
-                    pages: workbook.sheets.len() as u32,
+                    // Every sheet the workbook declares: the ones that arrive
+                    // as Page frames plus the ones named by `skipped_pages`.
+                    // The pool checks exactly that sum, and bounds the Page
+                    // frames by it as they arrive.
+                    pages: (workbook.sheets.len() + workbook.skipped.len()) as u32,
                 });
                 for sheet in workbook.sheets {
                     frames.push(Frame::Page {
@@ -632,6 +762,11 @@ fn handle_request(line: &str) -> Vec<Frame> {
                         // here would give the citation and the coordinate two
                         // different names.
                         section_title: sheet.section_title,
+                        text_source: None,
+                        ocr_confidence: None,
+                        width_px: None,
+                        height_px: None,
+                        dpi: None,
                     });
                     frames.extend(sheet.blocks.into_iter().map(Frame::Block));
                 }
@@ -730,6 +865,34 @@ fn refused_before_a_reader(rule: &str, reason: String, sha256: Option<String>) -
         sha256,
         reader: None,
         reader_version: None,
+    }
+}
+
+/// The page ceiling (D1) for the readers that build a whole document before
+/// writing it: markdown and HTML sections, EPUB chapters, DOCX sections and
+/// XLSX sheets are counted from the file, and a 64 MiB file can hold far more
+/// than 100,000 of them. Such a document is refused, for that file only, as
+/// `malformed` under the reader that read it. A PDF never reaches here with a
+/// header — it streams, and `extract_pdf_pages` refuses before its first page.
+fn capped(frames: Vec<Frame>) -> Vec<Frame> {
+    let cap = page_cap();
+    match frames.first() {
+        Some(Frame::Header {
+            pages,
+            sha256,
+            reader,
+            reader_version,
+            ..
+        }) if *pages > cap => vec![reader_refused(
+            reader,
+            *reader_version,
+            "malformed",
+            format!(
+                "this document declares {pages} pages, over the {cap} one document may have (D1)"
+            ),
+            Some(sha256.clone()),
+        )],
+        _ => frames,
     }
 }
 

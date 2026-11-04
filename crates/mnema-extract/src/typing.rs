@@ -82,7 +82,9 @@ pub struct FileType {
     pub reader: Reader,
 }
 
-const PDF_MAGIC: &[u8] = b"%PDF-";
+/// Public because the worker reads this many bytes to pick a size ceiling
+/// before it decides to read the rest (D189).
+pub const PDF_MAGIC: &[u8] = b"%PDF-";
 
 /// Local file header signature, present at the start of every non-empty zip.
 const ZIP_LOCAL_FILE_MAGIC: &[u8] = b"PK\x03\x04";

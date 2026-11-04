@@ -255,13 +255,14 @@ case_ "reader: a skipped sheet is not also sent" \
         sheets.push(XlsxSheet {' \
   mnema-extract 'an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped' --test worker_cli
 
-# C23. `pages` is counted off the same vector the page frames come from, so the
-# pool's count check cannot disagree with itself. Adding the skipped sheets back
-# in announces pages that never arrive.
-case_ "worker: the header counts the sheets it sends" \
+# C23. `pages` counts every sheet the workbook declares: the ones sent plus the
+# skipped ones, which is the sum the pool checks since D189. Leaving the skipped
+# sheets out — the meaning before D189 — stops the job on every workbook with a
+# chartsheet in it.
+case_ "worker: the header counts every sheet the workbook declares" \
   crates/mnema-extract/src/bin/worker.rs \
-  's{                    pages: workbook\.sheets\.len\(\) as u32,}{                    pages: (workbook.sheets.len() + workbook.skipped.len()) as u32,}' \
-  'pages: (workbook.sheets.len() + workbook.skipped.len()) as u32,' \
+  's{                    pages: \(workbook\.sheets\.len\(\) \+ workbook\.skipped\.len\(\)\) as u32,}{                    pages: workbook.sheets.len() as u32,}' \
+  'pages: workbook.sheets.len() as u32,' \
   mnema-extract 'an_xlsx_is_read_sheet_by_sheet_and_its_summary_names_what_it_skipped' --test worker_cli
 
 # C24. A hidden sheet is read, and this is the plausible alternative rule put in
