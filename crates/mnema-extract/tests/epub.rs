@@ -135,29 +135,6 @@ fn zip_with(members: &[(String, Vec<u8>)]) -> Vec<u8> {
     buf.into_inner()
 }
 
-/// Overwrites the *declared* uncompressed size of one member, in both the local
-/// file header and the central directory, leaving the compressed bytes and the
-/// compressed-size field that delimits them untouched.
-///
-/// The same forgery `tests/zip_part.rs` applies to a docx part, aimed at a
-/// chapter instead — and aimed by name rather than at offset 0, because an
-/// EPUB's first entry is always `mimetype`.
-fn forge_declared_size(bytes: &mut [u8], member: &str, forged: u32) {
-    let forged = forged.to_le_bytes();
-    let name = member.as_bytes();
-
-    // Local file header: uncompressed size at offset 22, name length at 26,
-    // extra length at 28, the name itself at 30 (PKWARE APPNOTE 4.3.7).
-    let local = find_header(bytes, b"PK\x03\x04", 26, 30, name).expect("a local file header");
-    bytes[local + 22..local + 26].copy_from_slice(&forged);
-
-    // Central directory header: uncompressed size at 24, name length at 28,
-    // the name at 46 (APPNOTE 4.3.12).
-    let central =
-        find_header(bytes, b"PK\x01\x02", 28, 46, name).expect("a central directory entry");
-    bytes[central + 24..central + 28].copy_from_slice(&forged);
-}
-
 /// The offset of the header with `signature` whose filename is `name`.
 ///
 /// Matched on the name rather than on the signature alone: compressed data can
@@ -243,19 +220,19 @@ fn chapters_come_back_in_spine_order() {
 /// stream. That asymmetry is not ported: spec §9.
 #[test]
 fn a_chapter_is_read_under_the_same_cap_as_a_docx_part() {
-    let bomb = epub_with_forged_chapter_size();
+    let bomb = epub_with_oversized_chapter();
     assert!(matches!(extract_epub(&bomb), Err(EpubError::TooLarge)));
 }
 
-/// A book holding one chapter that inflates past the cap on a member while
-/// declaring itself ten bytes long.
+/// A book holding one chapter that inflates past the cap on a member.
 ///
 /// 32 MiB of one repeated byte: past `zip_part::MEMBER_MAX_BYTES`, and Deflate
-/// turns it into a few kilobytes, so the archive on disk is small. That is the
-/// whole shape of the attack — the number in the central directory is the
-/// author's to write, and `read_member` decides on what came out of the stream.
-fn epub_with_forged_chapter_size() -> Vec<u8> {
-    let mut bytes = epub(
+/// turns it into a few kilobytes, so the archive on disk is small. Its declared
+/// size is left true on purpose: forged small, `zip` 9 refuses the stream at
+/// the declared size before the cap is reached (`tests/zip_part.rs`), and the
+/// cap would go untested here.
+fn epub_with_oversized_chapter() -> Vec<u8> {
+    epub(
         "content.opf",
         &[Item {
             id: "c1".to_string(),
@@ -264,9 +241,7 @@ fn epub_with_forged_chapter_size() -> Vec<u8> {
             member: Some(("ch1.xhtml".to_string(), vec![b'A'; 32 << 20])),
         }],
         &["c1"],
-    );
-    forge_declared_size(&mut bytes, "ch1.xhtml", 10);
-    bytes
+    )
 }
 
 // ------------------------------------- a chapter that is not there, and the book

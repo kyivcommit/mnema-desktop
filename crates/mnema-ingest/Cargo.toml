@@ -47,4 +47,4 @@ sha2 = { workspace = true }
 # `default-features = false` + `deflate` for the reason the probe states, though
 # every archive this harness writes is STORED: see `zip_of`, where the reason is
 # an invariant rather than a preference.
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.3", default-features = false, features = ["deflate"] }

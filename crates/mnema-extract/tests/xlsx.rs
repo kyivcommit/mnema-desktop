@@ -388,7 +388,7 @@ fn a_sheet_name_reaches_the_page_bounded_and_bounded_only_here() {
 /// run against calamine rather than out of the specification. The convenience
 /// API this reader does *not* use — `worksheets()`, which is
 /// `filter_map(|n| self.worksheet_range(&n).ok()?)`
-/// (`calamine-0.36.0/src/xlsx/mod.rs:2628`) — answers `[]` for the truncated
+/// (`calamine-0.38.0/src/xlsx/mod.rs:2888`) — answers `[]` for the truncated
 /// sheet below and drops the other four without a word.
 ///
 /// Every number is asserted on both sides: which sheets came back **and** which
@@ -462,7 +462,7 @@ fn a_sheet_that_cannot_be_read_is_skipped_by_number_and_the_rest_is_not() {
 /// is that the first arrives twice.**
 ///
 /// Measured: `worksheet_cells_reader` resolves a name with `find`
-/// (`calamine-0.36.0/src/xlsx/mod.rs:2521`), so asking for `Дані` twice reads
+/// (`calamine-0.38.0/src/xlsx/mod.rs:2735`), so asking for `Дані` twice reads
 /// the *first* sheet both times. Reading by name once each loses the second
 /// sheet and says so; not doing it would store one sheet's rows under two page
 /// numbers and lose the other silently, which is worse in both directions at
@@ -498,7 +498,7 @@ fn a_repeated_sheet_name_is_skipped_rather_than_read_a_second_time() {
 /// This is the measurement that decided how this reader talks to calamine, and
 /// the only one whose failure is not a wrong answer but a dead worker. The
 /// convenience API, `worksheet_range`, builds a dense `rows × columns` vector
-/// (`calamine-0.36.0/src/lib.rs:958-961`): on this fixture — under two kilobytes
+/// (`calamine-0.38.0/src/lib.rs:1048-1051`): on this fixture — under two kilobytes
 /// on disk, two cells in it — that is 16 384 × 1 048 576 cells, and the run went
 /// to 6.99 GB resident and a 200 GB peak footprint before the process was killed
 /// at 50 s. A crafted spreadsheet in a watched folder would take the extraction

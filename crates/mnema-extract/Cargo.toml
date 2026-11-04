@@ -61,7 +61,7 @@ encoding_rs = "0.8"
 # same pin rather than asking for a second one. `default-features = false` +
 # `deflate` only, for the same reason the probe states it: the defaults drag
 # in six compressors that no OOXML or EPUB file uses.
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.3", default-features = false, features = ["deflate"] }
 # The markdown parser. Only its parse tree and `sourcepos` are used — nothing
 # here renders anything, and `src/markdown.rs`'s module doc says why that is
 # not a stylistic preference.
@@ -107,11 +107,11 @@ quick-xml = "0.41"
 #
 # **Default features on purpose.** `dates` would add `chrono`, and it would not
 # even settle the date question: `impl Display for ExcelDateTime` prints the
-# serial number in every configuration (`calamine-0.36.0/src/datatype.rs:986`),
+# serial number in every configuration (`calamine-0.38.0/src/datatype.rs:1007`),
 # so rendering a date needs a display policy as well as the dependency. See
 # `src/xlsx.rs`'s module doc, which records that gap rather than closing it here.
 # `picture` is for embedded images, which this crate does not read.
-calamine = "0.36"
+calamine = "0.38"
 
 # Apple Vision for the pages of a PDF that carry no text layer (D189, `src/ocr.rs`).
 # macOS only: elsewhere `ocr::recognise` is a stub and none of this is linked.
