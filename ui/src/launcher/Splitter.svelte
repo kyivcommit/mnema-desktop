@@ -18,8 +18,15 @@
   let dragging = false;
   let last = 0;
 
+  // A drag across the panes would otherwise select every file name and line
+  // of text it passes over. Refusing `selectstart` restyles nothing: a class
+  // on the root made WebKit hold the panes still until the pointer let go.
+  const noSelect = (event: Event) => event.preventDefault();
+  $effect(() => () => document.removeEventListener('selectstart', noSelect));
+
   function down(event: PointerEvent) {
     dragging = true;
+    document.addEventListener('selectstart', noSelect);
     last = event.clientX;
     // jsdom has none; a real webview keeps the drag while the pointer leaves
     // the 1px line.
@@ -36,6 +43,7 @@
   function up(event: PointerEvent) {
     if (!dragging) return;
     dragging = false;
+    document.removeEventListener('selectstart', noSelect);
     (event.currentTarget as HTMLElement).releasePointerCapture?.(event.pointerId);
   }
 

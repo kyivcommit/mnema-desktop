@@ -122,6 +122,8 @@ main select:focus-visible {
  * own popup below. */
 .job-disclosure {
   position: relative;
+  /* above `.mtabs` (z-index 1): the report it pops up covers the model tabs */
+  z-index: 2;
   flex: none;
   margin: 12px 24px;
 }
