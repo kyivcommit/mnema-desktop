@@ -10,10 +10,14 @@
   // The page is drawn as tall as the pane, less the page line above it, and
   // scrolls sideways (owner, 2026-11-04: fitted to the width, a dictionary
   // page was unreadable). Never shorter than this, on a very low window.
-  const CHROME_PX = 56;
+  // `above` is how far down the pane the page strip starts — the page line,
+  // and a note when there is one (a scan's note is two lines). Until the strip
+  // has been laid out it is guessed as the page line alone.
+  const ABOVE_GUESS_PX = 44;
+  const BELOW_PX = 12; // `.pane-body`'s own bottom padding
   const MIN_HEIGHT_PX = 240;
-  export function heightFor(paneHeight: number): number {
-    return Math.max(MIN_HEIGHT_PX, paneHeight - CHROME_PX);
+  export function heightFor(paneHeight: number, above: number = ABOVE_GUESS_PX): number {
+    return Math.max(MIN_HEIGHT_PX, paneHeight - above - BELOW_PX);
   }
 </script>
 
@@ -57,7 +61,8 @@
   // Width over height of the last page drawn; a book's pages share it, so the
   // first page's guess (portrait A4/letter) is usually the answer already.
   let aspect = $state(0.75);
-  const tall = $derived(heightFor(paneHeight));
+  let above = $state<number | null>(null);
+  const tall = $derived(heightFor(paneHeight, above ?? undefined));
   // Rounded, so an equal value does not re-run the request.
   const width = $derived(widthFor(tall * aspect, ratio));
   onMount(() => {
@@ -113,6 +118,23 @@
       if (strip === null) return;
       const w = strip.scrollWidth;
       strip.scrollLeft = Math.max(0, r.x * w - (strip.clientWidth - r.w * w) / 2);
+    });
+  });
+
+  // Where the strip starts, measured once the lines above it are laid out: a
+  // scan's note pushed a page fitted to a guess below the pane's bottom. A
+  // layout-less DOM reports 0, which keeps the guess.
+  $effect(() => {
+    void shown;
+    void note;
+    void tick().then(() => {
+      if (strip === null || box === null) return;
+      const scroller = box.closest<HTMLElement>('.pane-body');
+      const origin = scroller === null
+        ? -window.scrollY
+        : scroller.getBoundingClientRect().top - scroller.scrollTop;
+      const at = strip.getBoundingClientRect().top - origin;
+      if (at > 0) above = at;
     });
   });
 

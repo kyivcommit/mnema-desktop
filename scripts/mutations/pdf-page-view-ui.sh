@@ -309,3 +309,11 @@ case_ "fit: a new page does not scroll to its citation" \
   's~strip\.scrollLeft = Math\.max~void Math.max~' \
   'void Math.max' \
   $PT "a new page opens scrolled sideways to its citation, and a redraw keeps the person's scroll" runner=vitest
+
+# H5. The strip's real top is never measured: a note above it pushes the page
+# below the pane's bottom (seen live on a scan, 2026-11-04).
+case_ "fit: the lines above the page are not taken from its height" \
+  $PP \
+  's~      if \(at > 0\) above = at;~      void at;~' \
+  '      void at;' \
+  $PT 'a note above the page takes its height from the page, not from below the pane' runner=vitest

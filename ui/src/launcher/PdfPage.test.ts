@@ -363,3 +363,21 @@ test('a new page opens scrolled sideways to its citation, and a redraw keeps the
     delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
   }
 });
+
+test('a note above the page takes its height from the page, not from below the pane', async () => {
+  const real = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    const top = this.dataset.testid === 'page-strip' ? 150 : 0;
+    return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON() {} } as DOMRect;
+  };
+  renderReply = () => Promise.resolve(page({ highlight: 'scan' }));
+  try {
+    paneHeight(856);
+    mount();
+    await screen.findByTestId('page-note');
+    // 856 - 150 (the strip's top, under the note and the page line) - 12 = 694.
+    await waitFor(() => expect(screen.getByTestId('page-image').style.height).toBe('694px'));
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = real;
+  }
+});
