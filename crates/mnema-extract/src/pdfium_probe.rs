@@ -226,8 +226,6 @@ pub(crate) fn page_text(page: &PdfPage) -> Result<String, PdfiumError> {
 
 /// A page's stored text with, for each of its characters, the pdfium character
 /// it came from. See [`mapped_page_text`].
-// No caller until the page view lands; the tests below are the first.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MappedPage {
     /// What the reader stores for the page: replacement runs folded, NFC.
@@ -258,7 +256,6 @@ pub(crate) struct MappedPage {
 /// as in the reader's fallback ([`text_from_code_points`]), and the fold then
 /// turns it into a space or nothing, so the word on either side stays apart as
 /// it does in the stored text (`broken-utf16.pdf` holds it).
-#[allow(dead_code)]
 pub(crate) fn mapped_page_text(page: &PdfPage) -> Result<MappedPage, PdfiumError> {
     let text = page.text()?;
     let chars = chars_within(&text, page_bound(page))

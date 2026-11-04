@@ -42,6 +42,10 @@ thiserror = { workspace = true }
 mnema-core = { path = "../mnema-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The page view's PNG and its base64 (`src/page_view.rs`). Both were already in
+# the lockfile; nothing new is resolved.
+png = "0.18.1"
+base64 = "0.22.1"
 # The worker's own hash of a file's bytes, computed while reading it once
 # (`src/bin/worker.rs`). Same idiom as `crates/mnema-index/src/write.rs`'s
 # chunk content hash, not a shared dependency between the two crates.

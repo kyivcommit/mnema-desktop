@@ -2898,6 +2898,7 @@ dependencies = [
 name = "mnema-extract"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "chardetng",
  "comrak",
@@ -2911,6 +2912,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-vision",
  "pdfium-render",
+ "png 0.18.1",
  "quick-xml 0.41.0",
  "scraper",
  "serde",
