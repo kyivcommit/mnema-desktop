@@ -435,20 +435,34 @@ fn replacement_runs_to_spaces(text: &str) -> Cow<'_, str> {
     if !text.contains('\u{FFFD}') {
         return Cow::Borrowed(text);
     }
-    let mut out = String::with_capacity(text.len());
+    let chars = text.chars().map(|c| (c, ())).collect();
+    Cow::Owned(
+        replacement_runs(chars)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect(),
+    )
+}
+
+/// [`replacement_runs_to_spaces`] over characters that carry a tag (the pdfium
+/// char index, for the page view): the one implementation, so the reader and
+/// the highlight cannot disagree about where the spaces go. The space it
+/// inserts has no source character and gets `T::default()`.
+pub(crate) fn replacement_runs<T: Default>(chars: Vec<(char, T)>) -> Vec<(char, T)> {
+    let mut out: Vec<(char, T)> = Vec::with_capacity(chars.len());
     let mut after_run = false;
-    for c in text.chars() {
+    for (c, tag) in chars {
         if c == '\u{FFFD}' {
             after_run = true;
             continue;
         }
-        if after_run && !c.is_whitespace() && out.ends_with(|p: char| !p.is_whitespace()) {
-            out.push(' ');
+        if after_run && !c.is_whitespace() && out.last().is_some_and(|(p, _)| !p.is_whitespace()) {
+            out.push((' ', T::default()));
         }
         after_run = false;
-        out.push(c);
+        out.push((c, tag));
     }
-    Cow::Owned(out)
+    out
 }
 
 /// Which of the three a failed `load_pdf_from_byte_slice` is.

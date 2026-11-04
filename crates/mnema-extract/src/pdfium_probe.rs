@@ -217,7 +217,62 @@ pub(crate) fn page_text(page: &PdfPage) -> Result<String, PdfiumError> {
         return Ok(bounded);
     }
 
-    Ok(text_from_code_points(chars_within(&text, bound)))
+    Ok(text_from_code_points(
+        chars_within(&text, bound)
+            .into_iter()
+            .map(|(value, _)| value),
+    ))
+}
+
+/// A page's stored text with, for each of its characters, the pdfium character
+/// it came from. See [`mapped_page_text`].
+// No caller until the page view lands; the tests below are the first.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MappedPage {
+    /// What the reader stores for the page: replacement runs folded, NFC.
+    pub text: String,
+    /// One entry per char of the text read before NFC: the pdfium char index it
+    /// came from, `None` for a char pdfium did not write (the `\r\n` of a line
+    /// break, the space standing for a run of U+FFFD).
+    ///
+    /// **Usable only when `nfc_ok`**: then `map.len() == text.chars().count()`
+    /// and `map[i]` belongs to the `i`-th char of `text`. Otherwise NFC has
+    /// recomposed `text` and the positions no longer line up.
+    pub map: Vec<Option<usize>>,
+    /// The text was already NFC, so `map` lines up with it.
+    pub nfc_ok: bool,
+}
+
+/// The text of a page as the reader stores it, with the pdfium character each
+/// char came from.
+///
+/// **Always the character walk, never `inside_rect`**: the walk is the only one
+/// that knows which character each code point is. Measured on a library of
+/// 31,027 real pages, its text equals the reader's, including the pages where
+/// the reader takes the fast path. Not a second reader: the walk is
+/// [`chars_within`], the folding is [`replacement_runs`] and the normalisation
+/// is `nfc::normalise`, each the reader's own function.
+///
+/// A code point that is not a `char` (a lone surrogate) becomes U+FFFD exactly
+/// as in the reader's fallback ([`text_from_code_points`]), and the fold then
+/// turns it into a space or nothing, so the word on either side stays apart as
+/// it does in the stored text (`broken-utf16.pdf` holds it).
+#[allow(dead_code)]
+pub(crate) fn mapped_page_text(page: &PdfPage) -> Result<MappedPage, PdfiumError> {
+    let text = page.text()?;
+    let chars = chars_within(&text, page_bound(page))
+        .into_iter()
+        .map(|(value, index)| (char::from_u32(value).unwrap_or('\u{FFFD}'), index))
+        .collect();
+    let chars = crate::pdf::replacement_runs(chars);
+    let raw: String = chars.iter().map(|(c, _)| *c).collect();
+    let normalised = nfc::normalise(&raw);
+    Ok(MappedPage {
+        nfc_ok: matches!(normalised, std::borrow::Cow::Borrowed(_)),
+        text: normalised.into_owned(),
+        map: chars.into_iter().map(|(_, index)| index).collect(),
+    })
 }
 
 /// The code points `inside_rect` of `bound` would have written, in its order.
@@ -241,12 +296,17 @@ pub(crate) fn page_text(page: &PdfPage) -> Result<String, PdfiumError> {
 /// Measured, not ported from memory: `broken-utf16.pdf`'s cut line comes back
 /// with exactly the string pdfium returns for the same geometry with the broken
 /// glyph removed — the `\r\n` included — and `tests/pdf.rs` holds it.
-fn chars_within(text: &PdfPageText, bound: PdfRect) -> Vec<u32> {
+///
+/// Each code point comes with the index of the pdfium character it was read
+/// from — what a page image needs to place a highlight over text — and `None`
+/// for the `\r\n` this function writes itself. The space written for an
+/// out-of-box character *is* that character's, so it keeps its index.
+pub(crate) fn chars_within(text: &PdfPageText, bound: PdfRect) -> Vec<(u32, Option<usize>)> {
     let mut values = Vec::new();
     let mut pos_y = 0.0_f32;
     let mut after_text = false;
     let mut line_feed_due = false;
-    for character in text.chars().iter() {
+    for (index, character) in text.chars().iter().enumerate() {
         let value = character.unicode_value();
         if is_within(&character, bound) {
             // pdfium keeps the y of the last break it wrote, not of the last
@@ -257,7 +317,7 @@ fn chars_within(text: &PdfPageText, bound: PdfRect) -> Vec<u32> {
             if y != pos_y && !after_text && line_feed_due {
                 pos_y = y;
                 if !values.is_empty() {
-                    values.extend([u32::from(b'\r'), u32::from(b'\n')]);
+                    values.extend([(u32::from(b'\r'), None), (u32::from(b'\n'), None)]);
                 }
             }
             after_text = true;
@@ -266,11 +326,11 @@ fn chars_within(text: &PdfPageText, bound: PdfRect) -> Vec<u32> {
             // at all (`GetTextByPredicate` appends only `if (charinfo.unicode())`),
             // and `char::from_u32(0)` would otherwise store a NUL in the index.
             if value != 0 {
-                values.push(value);
+                values.push((value, Some(index)));
             }
         } else if value == u32::from(b' ') {
             if after_text {
-                values.push(u32::from(b' '));
+                values.push((u32::from(b' '), Some(index)));
                 after_text = false;
                 line_feed_due = false;
             }
@@ -749,7 +809,7 @@ mod tests {
                 }
                 compared += 1;
                 assert_eq!(
-                    text_from_code_points(chars_within(&text, bound)),
+                    text_from_code_points(chars_within(&text, bound).into_iter().map(|(v, _)| v)),
                     bounded,
                     "{name} page {}: the fallback must be this predicate, not an \
                      approximation of it",
@@ -992,6 +1052,131 @@ mod tests {
         assert!(
             err.to_string().contains("no VERSION manifest"),
             "the message must still say what verify_build() itself found: {err}"
+        );
+    }
+
+    /// Native pages of one fixture as the reader stores them, `(page_no, text)`.
+    /// A file the reader refuses, and a page it OCRs, are not what the map is
+    /// about and come back empty or absent.
+    fn stored_pages(name: &str) -> Vec<(u32, String)> {
+        let bytes = std::fs::read(fixture(name)).expect("the fixture exists");
+        let mut pages = Vec::new();
+        let _ = crate::extract_pdf_pages(&bytes, |_, page| {
+            if page.text_source == crate::TEXT_SOURCE_NATIVE {
+                pages.push((page.page_no, page.blocks[0].text.clone()));
+            }
+        });
+        pages
+    }
+
+    fn fixtures_with_native_text() -> Vec<(String, Vec<(u32, String)>)> {
+        let mut names: Vec<String> = std::fs::read_dir(fixture(""))
+            .expect("the fixtures directory exists")
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".pdf"))
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|n| {
+                let pages = stored_pages(&n);
+                (n, pages)
+            })
+            .filter(|(_, pages)| !pages.is_empty())
+            .collect()
+    }
+
+    /// Runs `check(fixture, page_no, mapped, pdfium page)` for every page of
+    /// `name` that has an entry in `wanted`.
+    fn with_mapped(name: &str, wanted: &[u32], mut check: impl FnMut(u32, MappedPage, &PdfPage)) {
+        let bytes = std::fs::read(fixture(name)).unwrap();
+        let pdfium = pdfium().unwrap();
+        let _serialised = lock_pdfium();
+        let document = pdfium.load_pdf_from_byte_slice(&bytes, None).unwrap();
+        for &page_no in wanted {
+            let page = document.pages().get((page_no - 1) as i32).unwrap();
+            check(page_no, mapped_page_text(&page).unwrap(), &page);
+        }
+    }
+
+    #[test]
+    fn the_mapped_text_is_the_text_the_reader_stores_on_every_native_page() {
+        let all = fixtures_with_native_text();
+        assert!(
+            all.len() >= 5,
+            "too few fixtures read: {:?}",
+            all.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        for (name, stored) in &all {
+            let wanted: Vec<u32> = stored.iter().map(|(n, _)| *n).collect();
+            with_mapped(name, &wanted, |page_no, mapped, _| {
+                let (_, expected) = stored.iter().find(|(n, _)| *n == page_no).unwrap();
+                assert_eq!(&mapped.text, expected, "{name} page {page_no}");
+            });
+        }
+
+        // The positive control: the same comparison against another page's text
+        // must fail, or the loop above could not have told pages apart.
+        let (_, stamp) = all
+            .iter()
+            .find(|(n, _)| n == "text-stamp-text.pdf")
+            .expect("text-stamp-text.pdf has native pages");
+        assert!(stamp.len() >= 2 && stamp[0].1 != stamp[1].1);
+        with_mapped("text-stamp-text.pdf", &[stamp[0].0], |_, mapped, _| {
+            assert_ne!(mapped.text, stamp[1].1);
+        });
+    }
+
+    #[test]
+    fn every_mapped_index_names_the_pdfium_char_the_text_char_came_from() {
+        let mut checked = 0;
+        for (name, stored) in fixtures_with_native_text() {
+            let wanted: Vec<u32> = stored.iter().map(|(n, _)| *n).collect();
+            with_mapped(&name, &wanted, |page_no, mapped, page| {
+                let text = page.text().unwrap();
+                let chars = text.chars();
+                if !mapped.nfc_ok {
+                    return;
+                }
+                let at = |i| chars.get(i).unwrap().unicode_value();
+                assert_eq!(
+                    mapped.map.len(),
+                    mapped.text.chars().count(),
+                    "{name} page {page_no}"
+                );
+                for (pos, (c, index)) in mapped.text.chars().zip(&mapped.map).enumerate() {
+                    if let Some(i) = index {
+                        assert_eq!(Some(c), char::from_u32(at(*i)), "{name} p{page_no} @{pos}");
+                        checked += 1;
+                    }
+                }
+            });
+        }
+        assert!(checked > 200, "only {checked} mapped chars were compared");
+    }
+
+    #[test]
+    fn a_synthesised_line_break_has_no_source_char() {
+        let mut seen = false;
+        with_mapped("one-page-text.pdf", &[1], |_, mapped, _| {
+            let at = mapped.text.find("\r\n").expect("the fixture has a break");
+            let pos = mapped.text[..at].chars().count();
+            assert_eq!(&mapped.map[pos..pos + 2], &[None, None]);
+            seen = true;
+        });
+        assert!(seen);
+    }
+
+    #[test]
+    fn the_tagged_replacement_fold_tags_what_it_keeps_and_leaves_the_new_space_untagged() {
+        let tagged: Vec<(char, Option<usize>)> = "a\u{FFFD}\u{FFFD}b"
+            .chars()
+            .enumerate()
+            .map(|(i, c)| (c, Some(i)))
+            .collect();
+        assert_eq!(
+            crate::pdf::replacement_runs(tagged),
+            vec![('a', Some(0)), (' ', None), ('b', Some(3))]
         );
     }
 }
