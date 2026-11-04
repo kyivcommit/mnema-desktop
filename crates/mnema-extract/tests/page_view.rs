@@ -336,11 +336,34 @@ fn the_png_is_exactly_the_size_reported_and_a_wide_request_is_capped() {
     assert_eq!(w, 3000);
 }
 
+/// The width cap alone bounds nothing on a page that is a narrow strip: drawn
+/// 3000 px wide, a 10 x 20000 pt page would be six million rows tall.
+#[test]
+fn a_page_far_taller_than_wide_is_drawn_within_the_height_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("strip.pdf");
+    std::fs::write(&path, decomposed_pdf("[0 0 10 20000]")).unwrap();
+    let r = rendered(&RenderRequest {
+        path: path.display().to_string(),
+        page_no: 1,
+        width_px: 3000,
+        text_sha256: None,
+        ranges: vec![],
+    });
+    let (_, w, h) = decode(&r.png);
+    assert_eq!((w, h), (r.width_px, r.height_px));
+    assert!(
+        h <= mnema_extract::page_view::MAX_HEIGHT_PX && h >= 4000,
+        "{w}x{h}"
+    );
+    assert!(w <= 3, "the page keeps its shape: {w}x{h}");
+}
+
 /// A one-page PDF whose font maps code `A` to U+0438 and `B` to U+0306: the
 /// page's text reads "и" + a combining breve, which NFC then recomposes into
 /// one "й". Written here rather than as a fixture file because it is a handful
 /// of lines and nothing else wants it.
-fn decomposed_pdf() -> Vec<u8> {
+fn decomposed_pdf(media_box: &str) -> Vec<u8> {
     let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
         /CMapName /D def /CMapType 2 def \
         1 begincodespacerange <00> <FF> endcodespacerange \
@@ -352,9 +375,10 @@ fn decomposed_pdf() -> Vec<u8> {
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-         /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
-            .to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox {media_box} \
+             /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+        ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>".to_string(),
         format!(
             "<< /Length {} >>\nstream\n{content}\nendstream",
@@ -387,7 +411,7 @@ fn decomposed_pdf() -> Vec<u8> {
 fn a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line_up() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("decomposed.pdf");
-    std::fs::write(&path, decomposed_pdf()).unwrap();
+    std::fs::write(&path, decomposed_pdf("[0 0 612 792]")).unwrap();
     let doc = extract_pdf(&std::fs::read(&path).unwrap()).unwrap();
     let text = doc.pages[0].blocks[0].text.clone();
     assert!(text.starts_with("x\u{0439} "), "the reader stored {text:?}");

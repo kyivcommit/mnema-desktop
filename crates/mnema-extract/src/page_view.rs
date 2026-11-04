@@ -22,6 +22,12 @@ use crate::typing::PDF_MAGIC;
 /// hundred points wide; past this the PNG only costs encode time and memory.
 pub const MAX_WIDTH_PX: u32 = 3000;
 
+/// The tallest bitmap drawn. The width cap alone does not bound memory: a page
+/// a few points wide and metres tall, drawn at a capped width, is still
+/// millions of rows. pdfium scales the page down to fit, keeping its shape.
+/// 4500 leaves an A4 page at the full 3000 width (3882 px) untouched.
+pub const MAX_HEIGHT_PX: u32 = 4500;
+
 fn refused(error: RenderError, message: impl Into<String>) -> RenderReply {
     RenderReply::Refused {
         error,
@@ -65,6 +71,7 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
     let width = req.width_px.clamp(1, MAX_WIDTH_PX);
     let config = PdfRenderConfig::new()
         .set_target_width(width as _)
+        .set_maximum_height(MAX_HEIGHT_PX as _)
         .set_format(PdfBitmapFormat::BGRA);
     let bitmap = match page.render_with_config(&config) {
         Ok(bitmap) => bitmap,
@@ -73,6 +80,16 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
     let (w, h) = (bitmap.width() as u32, bitmap.height() as u32);
     let bgra = bitmap.as_raw_bytes();
     let stride = bgra.len() / h.max(1) as usize;
+    // A buffer shorter than the rows it claims would slice past its end below.
+    if w == 0 || h == 0 || stride < w as usize * 4 {
+        return refused(
+            RenderError::Unreadable,
+            format!(
+                "pdfium drew an empty or short bitmap ({w}x{h}, {} bytes)",
+                bgra.len()
+            ),
+        );
+    }
     let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
     for row in bgra.chunks_exact(stride).take(h as usize) {
         for px in row[..w as usize * 4].chunks_exact(4) {
