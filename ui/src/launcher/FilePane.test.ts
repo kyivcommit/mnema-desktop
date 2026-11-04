@@ -459,6 +459,36 @@ test('a focus the backend rejected says the passage is gone', async () => {
   expect(blocks()).toEqual(['Текст без того уривка.']);
 });
 
+// The page mode answers a gone passage with page 1, which looks like an
+// answer; the line has to be there too.
+test('a focus the backend rejected says the passage is gone in the page mode too', async () => {
+  const view: DocumentView = {
+    kind: 'file',
+    mime: 'application/pdf',
+    blocks: [{ blockId: 1, kind: 'paragraph', text: 'Текст без того уривка.', pageNo: 1, sectionTitle: null }],
+    focusBlockIds: [],
+    spans: [],
+    relativePath: 'books/a.pdf',
+    rootName: null,
+    freshness: { kind: 'current' },
+  };
+  invoke.mockImplementation((cmd: string) =>
+    Promise.resolve(cmd === 'open_document'
+      ? view
+      : { kind: 'unavailable', reason: 'failed' }),
+  );
+  render(FilePane, {
+    location,
+    focus: { chunkId: 9, ord: 0, text: 'зниклий уривок' },
+    onFocusHandled: () => {},
+    mode: 'page',
+  });
+
+  expect((await screen.findByTestId('file-focus-gone')).textContent).toBe(
+    'The passage this citation pointed at is no longer in this file.',
+  );
+});
+
 // The other branch: a focus that was accepted says nothing at all.
 test('an accepted focus draws no gone-passage line', async () => {
   mockView({

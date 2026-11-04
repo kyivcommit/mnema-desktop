@@ -270,6 +270,11 @@
   {:else if view.kind === 'unavailable'}
     <p role="status" data-testid="file-unavailable">{unavailableText(view.reason)}</p>
   {:else if mode === 'page' && view.mime === 'application/pdf'}
+    <!-- The page mode opens page 1 when the cited passage is gone; without
+         this line a person would take page 1 for the citation. -->
+    {#if focusGone}
+      <p role="status" data-testid="file-focus-gone">{focusGoneLabel}</p>
+    {/if}
     <PdfPage {location} {view} onShowText={() => onShowText?.()} />
   {:else}
     {#if badge !== ''}
