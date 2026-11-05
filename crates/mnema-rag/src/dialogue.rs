@@ -59,12 +59,7 @@ pub fn profile(model: &str) -> Profile {
 }
 
 fn message(role: MessageRole, content: String) -> Message {
-    Message {
-        role,
-        content,
-        tool_calls: None,
-        tool_call_id: None,
-    }
+    Message { role, content }
 }
 
 fn with_sources(passages: &[Passage], question: &str) -> String {
@@ -320,10 +315,6 @@ mod tests {
         assert_eq!(
             m.last().unwrap().content,
             searched_first.last().unwrap().content
-        );
-        assert!(
-            m.iter()
-                .all(|x| x.tool_calls.is_none() && x.tool_call_id.is_none())
         );
         let mut e = build_dialogue(&[], "Why?", None, &p, UK);
         with_search_result(&mut e, &asked, &[], &["sky".to_string()]);

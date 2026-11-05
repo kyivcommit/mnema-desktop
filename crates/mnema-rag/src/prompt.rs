@@ -127,14 +127,10 @@ pub fn build_messages(question: &str, passages: &[Passage], voice: Voice) -> Vec
         Message {
             role: MessageRole::System,
             content: system,
-            tool_calls: None,
-            tool_call_id: None,
         },
         Message {
             role: MessageRole::User,
             content: user,
-            tool_calls: None,
-            tool_call_id: None,
         },
     ]
 }

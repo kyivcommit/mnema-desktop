@@ -19,43 +19,16 @@ use crate::{Error, KeySent, error_for_status, http};
 pub struct Message {
     pub role: MessageRole,
     pub content: String,
-    /// The `search` call an assistant message made; `None` is not sent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    /// On a `Tool` message: the call it answers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-/// The one tool this product offers: `search`, with the query the model chose.
-/// On the wire it is OpenAI's `{"id","type":"function","function":{…}}` with
-/// `arguments` as a JSON *string*.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCall {
-    pub id: String,
-    pub query: String,
-}
-
-impl Serialize for ToolCall {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let arguments = serde_json::json!({ "query": self.query }).to_string();
-        serde_json::json!({
-            "id": self.id,
-            "type": "function",
-            "function": { "name": "search", "arguments": arguments },
-        })
-        .serialize(serializer)
-    }
 }
 
 /// What one chat turn produced: prose, or a request to search the library —
-/// every usable `search` call of the reply, in order, never none. A model may
+/// the query of every usable `search` call of the reply, in order, never none. A model may
 /// send several at once (DeepSeek: its own question again, and the same in
 /// other words), so the caller picks which to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Text(String),
-    Search(Vec<ToolCall>),
+    Search(Vec<String>),
 }
 
 /// Who a message is from. An enum, not a `String`, for the reason the crate
@@ -68,7 +41,6 @@ pub enum MessageRole {
     System,
     User,
     Assistant,
-    Tool,
 }
 
 /// The provider's answer, read only as far as the one field this call needs.
@@ -92,7 +64,6 @@ struct CompletionMessage {
 
 #[derive(Deserialize)]
 struct WireCall {
-    id: String,
     function: WireFunction,
 }
 
@@ -150,7 +121,7 @@ pub fn complete_turn(
     timeout: std::time::Duration,
 ) -> Result<Reply, Error> {
     let message = round_trip(base, key, model, messages, offer_search, timeout)?;
-    let searches: Vec<ToolCall> = message
+    let searches: Vec<String> = message
         .tool_calls
         .unwrap_or_default()
         .into_iter()
@@ -160,10 +131,7 @@ pub fn complete_turn(
             }
             let args: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
             let query = args.get("query")?.as_str()?.trim();
-            (!query.is_empty()).then(|| ToolCall {
-                id: call.id,
-                query: query.to_string(),
-            })
+            (!query.is_empty()).then(|| query.to_string())
         })
         .collect();
     Ok(if searches.is_empty() {
@@ -268,8 +236,6 @@ mod tests {
             vec![Message {
                 role: MessageRole::User,
                 content: "q".into(),
-                tool_calls: None,
-                tool_call_id: None,
             }]
         };
 
@@ -293,8 +259,6 @@ mod tests {
         let message = Message {
             role: MessageRole::System,
             content: "you answer with citations".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
         };
         let value = serde_json::to_value(&message).expect("serialises");
         assert_eq!(
@@ -302,9 +266,10 @@ mod tests {
             "the role is a lowercase wire string: {value}"
         );
         assert_eq!(value["content"], "you answer with citations");
-        assert!(
-            value.get("tool_calls").is_none() && value.get("tool_call_id").is_none(),
-            "None must not reach the wire: {value}"
+        assert_eq!(
+            value.as_object().map(|o| o.len()),
+            Some(2),
+            "role and content only: {value}"
         );
 
         let user = serde_json::to_value(MessageRole::User).expect("serialises");
@@ -323,8 +288,6 @@ mod tests {
         Message {
             role: MessageRole::User,
             content: text.into(),
-            tool_calls: None,
-            tool_call_id: None,
         }
     }
 
@@ -343,13 +306,7 @@ mod tests {
     fn a_tool_call_answer_reads_as_search_with_its_query() {
         let server = MockServer::new(vec![Mock::ok(TOOL_CALL)]);
         let got = turn(&server, true).expect("a reply");
-        assert_eq!(
-            got,
-            Reply::Search(vec![ToolCall {
-                id: "c1".into(),
-                query: "ext4 journal".into()
-            }])
-        );
+        assert_eq!(got, Reply::Search(vec!["ext4 journal".into()]));
     }
 
     /// DeepSeek's measured reply (launcher dump, 2026-11-05): two calls at
@@ -365,16 +322,7 @@ mod tests {
         let server = MockServer::new(vec![Mock::ok(body)]);
         assert_eq!(
             turn(&server, true).unwrap(),
-            Reply::Search(vec![
-                ToolCall {
-                    id: "a".into(),
-                    query: "солпадеїн".into()
-                },
-                ToolCall {
-                    id: "c".into(),
-                    query: "Solpadeine paracetamol".into()
-                },
-            ])
+            Reply::Search(vec!["солпадеїн".into(), "Solpadeine paracetamol".into()])
         );
     }
 
@@ -447,39 +395,6 @@ mod tests {
             turn(&other, true),
             Err(Error::Provider { status: 404, .. })
         ));
-    }
-
-    #[test]
-    fn assistant_and_tool_messages_serialise_to_the_openai_shape() {
-        let assistant = Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_calls: Some(vec![ToolCall {
-                id: "c1".into(),
-                query: "ext4 journal".into(),
-            }]),
-            tool_call_id: None,
-        };
-        let v = serde_json::to_value(&assistant).unwrap();
-        assert_eq!(v["role"], "assistant");
-        let call = &v["tool_calls"][0];
-        assert_eq!(call["id"], "c1");
-        assert_eq!(call["type"], "function");
-        assert_eq!(call["function"]["name"], "search");
-        assert_eq!(
-            call["function"]["arguments"], "{\"query\":\"ext4 journal\"}",
-            "arguments is a JSON string, not an object: {v}"
-        );
-
-        let tool = Message {
-            role: MessageRole::Tool,
-            content: "passages".into(),
-            tool_calls: None,
-            tool_call_id: Some("c1".into()),
-        };
-        let v = serde_json::to_value(&tool).unwrap();
-        assert_eq!(v["role"], "tool");
-        assert_eq!(v["tool_call_id"], "c1");
     }
 
     #[test]

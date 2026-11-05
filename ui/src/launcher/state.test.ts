@@ -31,8 +31,8 @@ test('the length limit counts an astral character as one code point, not two UTF
 test('AskAnswer maps to the right launcher state', () => {
   expect(stateFromAnswer('q', generated)).toMatchObject({ kind: 'generated' });
   expect(stateFromAnswer('q', citationsOnly)).toMatchObject({ kind: 'citationsOnly' });
-  expect(stateFromAnswer('q', refusedNoCandidates)).toMatchObject({ kind: 'refused', reason: { kind: 'noCandidates' } });
-  expect(stateFromAnswer('q', refusedEmptyCompletion)).toMatchObject({ kind: 'refused', reason: { kind: 'emptyCompletion' } });
+  expect(stateFromAnswer('q', refusedNoCandidates)).toMatchObject({ kind: 'refused', query: 'q', reason: { kind: 'noCandidates' } });
+  expect(stateFromAnswer('q', refusedEmptyCompletion)).toMatchObject({ kind: 'refused', query: 'q', reason: { kind: 'emptyCompletion' } });
 });
 
 // §9.1 / owner ruling 2026-08-24: content search needs a provider key AND a

@@ -1956,18 +1956,18 @@ fn answer_with_searches(
         // Several calls at once are the question again and the same in other
         // words (DeepSeek, 2026-11-05): the first one not yet searched is run,
         // since a repeat finds what the model already has.
-        let fresh = |c: &&mnema_provider::ToolCall| {
+        let fresh = |c: &&String| {
             !searched
                 .iter()
-                .any(|q| q.trim().to_lowercase() == c.query.trim().to_lowercase())
+                .any(|q| q.trim().to_lowercase() == c.trim().to_lowercase())
         };
-        let call = calls.iter().find(fresh).unwrap_or(&calls[0]);
-        searched.push(call.query.clone());
+        let query = calls.iter().find(fresh).unwrap_or(&calls[0]);
+        searched.push(query.clone());
         // The model's query is held to the limit a typed one is: a blank or
         // oversized one is a search that found nothing, and costs no embedding.
-        let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
+        let usable = !query.trim().is_empty() && query.chars().count() <= MAX_ASK_QUERY;
         let (new_hits, new_text, new_content, unreachable) = if usable {
-            retrieve(state, &call.query, arms, ASK_TOP_K, roles.embed)?
+            retrieve(state, query, arms, ASK_TOP_K, roles.embed)?
         } else {
             (Vec::new(), text.clone(), content.clone(), None)
         };
@@ -1982,7 +1982,7 @@ fn answer_with_searches(
         }
         // An empty search leaves the earlier one the latest.
         if new_hits.is_empty() {
-            misses.push(call.query.chars().take(MAX_ASK_QUERY).collect());
+            misses.push(query.chars().take(MAX_ASK_QUERY).collect());
         } else {
             shown = new_hits.iter().map(passage_from_hit).collect();
             hits = new_hits.clone();
