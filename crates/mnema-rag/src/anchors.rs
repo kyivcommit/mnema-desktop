@@ -21,6 +21,15 @@ static ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<c>\s*(\d+)\s*
 /// requires (`app/rag/anchors.py:14-20`).
 static SHORTHAND_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<c>?\s*(\d+)\s*>").unwrap());
 
+/// A range of anchors, `<c>1</c>–<c>8</c>` (any dash, spaces allowed). Not in
+/// the server: E2B writes it to mean "none of 1 to 8" (owner's ask log,
+/// 2026-11-05), and read as two anchors it showed sources 1 and 8 as support
+/// for a claim they deny. A range names a span, never what supports a
+/// sentence, so it is dropped whole, both ends, and the answer cites only
+/// what it cites one by one.
+static RANGE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<c>\s*\d+\s*</c>\s*[-‐‑‒–—―]\s*<c>\s*\d+\s*</c>").unwrap());
+
 /// Two or more spaces, collapsed to one after an anchor is dropped
 /// (`app/rag/anchors.py:63`).
 static MULTISPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" {2,}").unwrap());
@@ -141,8 +150,11 @@ fn parse_ordinal(digits: &str) -> Option<usize> {
 
 /// Rewrite the two drift forms to canonical `<c>N</c>` so the strict logic below
 /// resolves them (`app/rag/anchors.py:23-24`).
+/// A range of anchors is dropped here too, so every reader of anchors agrees
+/// it cites nothing ([`RANGE_RE`]).
 fn canonicalize(text: &str) -> String {
-    SHORTHAND_RE.replace_all(text, "<c>${1}</c>").into_owned()
+    let text = SHORTHAND_RE.replace_all(text, "<c>${1}</c>");
+    RANGE_RE.replace_all(&text, "").into_owned()
 }
 
 /// Distinct anchor ordinals in first-occurrence order, no range filtering
@@ -238,6 +250,22 @@ mod tests {
         let (clean, ids) = resolve_anchors("A fact<c>9</c> stands.", 3);
         assert_eq!(clean, "A fact stands.");
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn a_range_of_anchors_cites_nothing() {
+        // E2B's reply for «солпадеїн», from the owner's ask log.
+        let (clean, ids) = resolve_anchors("Solpadeine не згаданий <c>1</c>–<c>8</c>.", 8);
+        assert_eq!(clean, "Solpadeine не згаданий .");
+        assert!(ids.is_empty());
+        assert!(extract_anchor_ids("x <c>2</c> - <c>4</c> y").is_empty());
+        // Drift forms make a range too; a single anchor beside it stays.
+        let (clean, ids) = resolve_anchors("A <c>3</c>. B <c1>—<c5>.", 8);
+        assert_eq!(clean, "A <c>3</c>. B .");
+        assert_eq!(ids, vec![3]);
+        // Two anchors side by side, or a dash with words between, are not a range.
+        let (_, ids) = resolve_anchors("A<c>1</c><c>2</c>, B<c>3</c> — then C<c>4</c>.", 8);
+        assert_eq!(ids, vec![1, 2, 3, 4]);
     }
 
     #[test]

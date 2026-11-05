@@ -124,3 +124,9 @@ case_ "terms: the prompt asks for a term in every language" \
   's~a term in every language, even~a term, even~' \
   'a term, even' \
   mnema-rag 'translate::tests::the_prompt_asks_for_a_term_in_every_language' --lib
+
+case_ "anchors: a range of anchors cites nothing" \
+  crates/mnema-rag/src/anchors.rs \
+  's~    RANGE_RE.replace_all\(&text, ""\).into_owned\(\)~    text.into_owned() // mutant: ranges kept~' \
+  'text.into_owned() // mutant: ranges kept' \
+  mnema-rag 'anchors::tests::a_range_of_anchors_cites_nothing' --lib
