@@ -182,3 +182,25 @@ test('the transcript draws no refusal for another state, nor the every-folder-of
   await rerender({ turns: [], state: { kind: 'refused', query: 'q', reason: { kind: 'noCandidates' } } });
   expect(screen.getByTestId('refused-turn')).toBeTruthy();
 });
+
+test('a refusal turn stays when the next question is asked, and is drawn once', async () => {
+  setLocale('en');
+  const reason = { kind: 'emptyCompletion' } as const;
+  const refusedTurn = { query: 'солпадеїн', refusal: reason };
+  // The answer arrives: the turn and the state are the same refusal.
+  const { rerender } = render(Transcript, {
+    turns: [refusedTurn],
+    state: { kind: 'refused', query: 'солпадеїн', reason },
+  });
+  expect(screen.getAllByTestId('refused-turn')).toHaveLength(1);
+  // The next question is in flight, then answered: the refused one is still there.
+  await rerender({ turns: [refusedTurn], state: { kind: 'inFlight', query: 'і ще?' } });
+  expect(screen.getByTestId('refused-turn').querySelector('.umsg')!.textContent).toBe('солпадеїн');
+  const answer = generated as Extract<AskAnswer, { kind: 'generated' }>;
+  await rerender({ turns: [refusedTurn, { query: 'і ще?', answer }], state: { kind: 'generated', query: 'і ще?', answer } });
+  const refused = screen.getByTestId('refused-turn');
+  expect(refused.querySelector('.refusal')!.textContent).toBe('The model returned no answer.');
+  expect(screen.getAllByTestId('turn')).toHaveLength(1);
+  // in conversation order: the refused question first
+  expect(refused.compareDocumentPosition(screen.getByTestId('turn')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

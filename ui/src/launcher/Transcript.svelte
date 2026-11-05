@@ -3,7 +3,8 @@
   import { locale, t } from '../i18n';
   import { refusalText } from '../i18n/refusal';
   import type { AskCitation, Hit } from '../lib/ipc';
-  import type { LauncherState, Turn } from './state';
+  import type { CardAnswer, LauncherState, Turn } from './state';
+  import type { Refusal } from '../lib/ipc';
 
   // §5: the transcript is the conversation — a turn is its question, pushed to
   // the right edge, and its answer, left in the text column with no bubble.
@@ -20,14 +21,20 @@
 
   // The answer on screen that is not a turn — a failed one — is drawn last with
   // its own question. A turn is drawn once, and identity is how it is
-  // recognised (the launcher keeps these as `$state.raw`).
+  // recognised (the launcher keeps these as `$state.raw`). A refusal is a turn
+  // too (owner, 2026-11-05): the question a person typed stays in the
+  // conversation. Not the every-folder-off one: the composer's live line says
+  // that, and says it only while it is true.
+  type Item = { query: string; key: object; answer: CardAnswer | null; refusal: Refusal | null };
   const items = $derived.by(() => {
-    const drawn = turns.map((t) => ({ answer: t.answer, query: t.query }));
-    if (
-      (state.kind === 'generated' || state.kind === 'citationsOnly')
-      && !drawn.some((d) => d.answer === state.answer)
-    ) {
-      drawn.push({ answer: state.answer, query: state.query });
+    const drawn: Item[] = turns.map((t) => 'answer' in t
+      ? { query: t.query, key: t.answer, answer: t.answer, refusal: null }
+      : { query: t.query, key: t.refusal, answer: null, refusal: t.refusal });
+    const isDrawn = (key: object) => drawn.some((d) => d.key === key);
+    if ((state.kind === 'generated' || state.kind === 'citationsOnly') && !isDrawn(state.answer)) {
+      drawn.push({ query: state.query, key: state.answer, answer: state.answer, refusal: null });
+    } else if (state.kind === 'refused' && state.reason.kind !== 'noFoldersSearched' && !isDrawn(state.reason)) {
+      drawn.push({ query: state.query, key: state.reason, answer: null, refusal: state.reason });
     }
     return drawn;
   });
@@ -38,14 +45,7 @@
   // in the page so its text changing is announced (a busy field is not).
   const pending = $derived(state.kind === 'inFlight' ? state.query : null);
 
-  // A refusal is the answer to its question, drawn last like a failed one. Not
-  // the every-folder-off one: the composer's live line says that, and says it
-  // only while it is true.
-  const refused = $derived.by(() => {
-    void $locale;
-    if (state.kind !== 'refused' || state.reason.kind === 'noFoldersSearched') return null;
-    return { query: state.query, text: refusalText(state.reason.kind) };
-  });
+  const refusalLine = (r: Refusal) => { void $locale; return refusalText(r.kind); };
   const waiting = $derived.by(() => { void $locale; return pending === null ? '' : t('answer_pending'); });
   let scroller: HTMLDivElement | null = null; // plain: `$state` clashes with the `state` prop
   // When the answer arrives, its question goes to the top of the view, so it
@@ -53,7 +53,7 @@
   // exchange moves the view; one that drew nothing new leaves it be.
   let drawnBefore: number | null = null;
   $effect(() => {
-    const count = items.length + (refused === null ? 0 : 1);
+    const count = items.length;
     if (!scroller) return;
     if (pending !== null) {
       drawnBefore ??= count;
@@ -70,16 +70,18 @@
 </script>
 
 <div class="transcript" data-testid="transcript" bind:this={scroller}>
-  <p class="transcript-live" aria-live="polite" data-testid="answer-pending">{waiting}</p>{#each items as item (item.answer)}
-    <div class="exchange" data-testid="turn">
-      <Selection answer={item.answer} query={item.query} {onSelected} />
-    </div>
-  {/each}{#if refused !== null}
-    <div class="exchange" data-testid="refused-turn">
-      <div class="umsg">{refused.query}</div>
-      <p class="refusal" role="status">{refused.text}</p>
-    </div>
-  {/if}{#if pending !== null}
+  <p class="transcript-live" aria-live="polite" data-testid="answer-pending">{waiting}</p>{#each items as item (item.key)}
+    {#if item.answer !== null}
+      <div class="exchange" data-testid="turn">
+        <Selection answer={item.answer} query={item.query} {onSelected} />
+      </div>
+    {:else if item.refusal !== null}
+      <div class="exchange" data-testid="refused-turn">
+        <div class="umsg">{item.query}</div>
+        <p class="refusal" role="status">{refusalLine(item.refusal)}</p>
+      </div>
+    {/if}
+  {/each}{#if pending !== null}
     <div class="exchange" data-testid="pending-turn">
       <div class="umsg">{pending}</div>
       <div class="typing" aria-hidden="true"><span></span><span></span><span></span></div>

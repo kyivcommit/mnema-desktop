@@ -59,15 +59,21 @@ export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
 export type CardAnswer = Extract<AskAnswer, { kind: 'generated' | 'citationsOnly' }>;
 
 // One question with the answer it got. A conversation is a list of these.
-export type Turn = { query: string; answer: CardAnswer };
+export type Turn = { query: string; answer: CardAnswer } | { query: string; refusal: Refusal };
 
-// A turn joins the conversation when the model answered it, or when it was
-// never asked (`notAsked`: the cause-free citations-only answer). A refusal or a
-// provider failure is not a turn: it is drawn as the current answer and the next
-// good one replaces it, so `turns` comes back unchanged.
+// A turn joins the conversation when the model answered it, when it was never
+// asked (`notAsked`: the cause-free citations-only answer), or when it was
+// refused (owner, 2026-11-05: the question a person typed stays) — except the
+// every-folder-off refusal, which the composer's live line says while it is
+// true. A provider failure is not a turn: it is drawn as the current answer and
+// the next good one replaces it, so `turns` comes back unchanged. The backend
+// keeps no refusal, so a conversation opened from Recents has none.
 export function turnsAfter(turns: Turn[], query: string, a: AskAnswer): Turn[] {
   if (a.kind === 'generated' || (a.kind === 'citationsOnly' && a.why.kind === 'notAsked')) {
     return [...turns, { query, answer: a }];
+  }
+  if (a.kind === 'refused' && a.reason.kind !== 'noFoldersSearched') {
+    return [...turns, { query, refusal: a.reason }];
   }
   return turns;
 }

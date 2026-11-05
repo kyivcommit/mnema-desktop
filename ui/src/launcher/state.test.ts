@@ -112,9 +112,16 @@ test('turnsAfter adds a generated answer and a not-asked citations-only one', ()
   expect(t2.map((t) => t.query)).toEqual(['q1', 'q2']);
 });
 
-test('turnsAfter leaves the turns alone for a refusal and for a failed citations-only answer', () => {
+test('turnsAfter keeps a refusal as a turn, but not the every-folder-off one', () => {
   const t1 = turnsAfter([], 'q1', generated);
-  expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toBe(t1);
+  if (refusedNoCandidates.kind !== 'refused') throw new Error('fixture');
+  expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toEqual([...t1, { query: 'q2', refusal: refusedNoCandidates.reason }]);
+  const off = { ...refusedNoCandidates, reason: { kind: 'noFoldersSearched' } } as AskAnswer;
+  expect(turnsAfter(t1, 'q2', off)).toBe(t1);
+});
+
+test('turnsAfter leaves the turns alone for a failed citations-only answer', () => {
+  const t1 = turnsAfter([], 'q1', generated);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'offline' } } as AskAnswer)).toBe(t1);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'noToolUse' } } as AskAnswer)).toBe(t1);
 });
