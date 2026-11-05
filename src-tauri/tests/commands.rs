@@ -13407,8 +13407,8 @@ fn a_follow_up_does_not_search_by_itself() {
     assert_eq!(second["via"], json!("conversation"), "{second}");
 
     assert!(
-        !server.request().contains("\"tools\""),
-        "the first turn offers no tool"
+        server.request().contains("\"tools\""),
+        "the first question may search once more"
     );
     let follow_up = server.request();
     assert!(follow_up.contains("/chat/completions") && follow_up.contains("\"tools\""));
@@ -13466,6 +13466,43 @@ fn a_follow_up_without_a_search_cites_the_previous_sources() {
     let second = ask_q(&webview, "which one is better?");
     assert_eq!(second["via"], json!("conversation"), "{second}");
     assert_eq!(second["citations"][0]["chunkId"], json!(ids[1]), "{second}");
+}
+
+/// The first question's own search finds the wrong passages; the model asks
+/// for another, and the call after it is offered no tool and no hint. Before,
+/// that first call had no tool but a hint, and the model wrote the call out
+/// as text (owner's launcher, 2026-11-05).
+#[test]
+fn a_first_question_may_search_once_more_and_then_must_answer() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_search(r#"{"query":"ext4"}"#, Value::Null)),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+        Reply::ok(&chat_text("Still the journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    let first = ask_q(&webview, FIRST_Q);
+    assert_eq!(first["kind"], json!("generated"), "{first}");
+    assert_eq!(first["via"], json!("search"), "{first}");
+    assert_eq!(first["citations"][0]["chunkId"], json!(ids[2]), "{first}");
+
+    let asked = server.request();
+    assert!(asked.contains("\"tools\""), "{asked}");
+    assert!(asked.contains("You have a tool"), "{asked}");
+    assert!(asked.contains("quantum entanglement resonance"), "{asked}");
+    let last = server.request();
+    assert!(!last.contains("\"tools\""), "{last}");
+    assert!(!last.contains("You have a tool"), "{last}");
+    assert!(last.contains("ext4 journal filesystem"), "{last}");
+    assert!(!last.contains("quantum entanglement resonance"), "{last}");
+    assert_eq!(last.matches("Question: ").count(), 1, "{last}");
+
+    // The session holds the second search's sources: a follow-up cites them.
+    let next = ask_q(&webview, "and then?");
+    assert_eq!(next["via"], json!("conversation"), "{next}");
+    assert_eq!(next["citations"][0]["chunkId"], json!(ids[2]), "{next}");
 }
 
 /// The first search finds nothing; the model tries other words, and the call
@@ -13649,10 +13686,7 @@ fn turning_the_switch_off_mid_session_drops_the_session() {
     server.request();
     server.request(); // the catalogue read
     let r = server.request();
-    assert!(
-        !r.contains("\"tools\""),
-        "the third question is a first one"
-    );
+    assert!(r.contains("\"tools\""), "the third question is a first one");
     assert!(!r.contains("It resonates"), "and carries no earlier turn");
 }
 
@@ -13697,7 +13731,7 @@ fn new_chat_brings_back_search_first() {
     let second = ask_q(&webview, "ext4");
     assert_eq!(second["citations"][0]["chunkId"], json!(ids[2]), "{second}");
     server.request();
-    assert!(!server.request().contains("\"tools\""));
+    assert!(server.request().contains("\"tools\""));
 }
 
 #[test]
@@ -14024,7 +14058,7 @@ fn a_session_without_a_generated_turn_still_searches_first() {
     assert_eq!(second["kind"], json!("generated"), "{second}");
     assert_eq!(second["via"], json!("search"), "{second}");
     let request = server.request();
-    assert!(!request.contains("\"tools\""), "{request}");
+    assert!(request.contains("\"tools\""), "{request}");
     assert!(
         request.contains("quantum entanglement resonance"),
         "sources: {request}"
