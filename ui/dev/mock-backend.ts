@@ -419,7 +419,14 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       // because that is what a `StoredTurn` holds.
       // A model takes a while: the dots under the question are seen (owner, 2026-10-22).
       // A fresh object per reply, as off the wire: the transcript keys turns by answer identity.
-      const reply = { answer: structuredClone(generated), historyId: s.history[0].id };
+      const answer = structuredClone(generated);
+      // Bench-only: a query ending in `!nocite` or `!weak` draws the grounding
+      // marks (spec 2026-11-05 §4.2) the demo answer never earns by itself.
+      if (answer.kind === 'generated') {
+        if (query.endsWith('!nocite')) answer.grounding = { kind: 'noCitations' };
+        if (query.endsWith('!weak')) answer.grounding = { kind: 'unsupported', anchors: [answer.citations.at(-1)!.anchor] };
+      }
+      const reply = { answer, historyId: s.history[0].id };
       return new Promise((resolve) => setTimeout(() => resolve(reply), 1500));
     },
     // The backend matches the question and the WHOLE stored answer, caselessly;
