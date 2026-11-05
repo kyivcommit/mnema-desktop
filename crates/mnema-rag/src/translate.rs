@@ -40,7 +40,7 @@ pub fn library_languages(samples: &[&str]) -> Vec<whatlang::Lang> {
         }
     }
     // Stable on ties: the language met first in the samples stays first.
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    counts.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
     counts
         .into_iter()
         .filter(|&(_, n)| n as f64 / detected.len() as f64 >= MIN_SHARE)
