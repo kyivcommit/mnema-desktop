@@ -6,6 +6,7 @@
 mod corpus;
 mod dense;
 mod embed;
+mod generated;
 mod gold;
 mod indexed;
 mod preflight;
@@ -19,6 +20,7 @@ mod translated;
 pub use corpus::{Corpus, Document, EvalError, Language, corpus_dir};
 pub use dense::DenseAnswers;
 pub use embed::{EVAL_MODEL, Embedded, embed_corpus};
+pub use generated::{Answered, answer_all, render as render_answered};
 pub use gold::{Gold, resolve_gold};
 pub use indexed::IndexedCorpus;
 pub use preflight::{Problem, preflight};
