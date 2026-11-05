@@ -34,16 +34,32 @@ pub enum Merge {
     /// term's content search adds another thirty candidates of noise that
     /// RRF sums across lists (D191's lesson, spec §5.1).
     LexicalTerms,
+    /// The product's rule (D192): the question's own list keeps its first
+    /// places, and the terms' text-arm hits take the last [`RESERVED`] of the
+    /// [`SHOWN`] the model sees; the rest of the question's list follows.
+    TailSlots,
 }
 
+/// The passages the application shows the model (`ASK_TOP_K`,
+/// `src-tauri/src/bridge.rs`), copied as `SEARCH_LIMIT` is.
+pub const SHOWN: usize = 8;
+/// Of those, the places the translated terms may take.
+pub const RESERVED: usize = 2;
+
 impl Merge {
-    pub const ALL: [Merge; 3] = [Merge::Equal, Merge::OriginalHalf, Merge::LexicalTerms];
+    pub const ALL: [Merge; 4] = [
+        Merge::Equal,
+        Merge::OriginalHalf,
+        Merge::LexicalTerms,
+        Merge::TailSlots,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Merge::Equal => "кожен пошук нарівно",
             Merge::OriginalHalf => "питання проти термінів 1:1",
             Merge::LexicalTerms => "терміни лише текстом, 1:1",
+            Merge::TailSlots => "терміни текстом у хвості показаних",
         }
     }
 }
@@ -163,7 +179,7 @@ pub fn run_translated(
         let mut terms: Vec<Vec<i64>> = Vec::new();
         for term in translated.of(&q.id) {
             terms.push(match merge {
-                Merge::LexicalTerms => {
+                Merge::LexicalTerms | Merge::TailSlots => {
                     db.search_lexical_with(&term.text, QueryRule::AllTerms, CANDIDATES)?
                 }
                 Merge::Equal | Merge::OriginalHalf => two_arms(&term.text, &term.content)?,
@@ -182,6 +198,16 @@ fn merged(merge: Merge, own: Vec<i64>, terms: &[Vec<i64>], limit: usize) -> Vec<
             let mut all: Vec<&[i64]> = vec![&own];
             all.extend(terms.iter().map(Vec::as_slice));
             rrf_lists(&all)
+        }
+        Merge::TailSlots => {
+            let refs: Vec<&[i64]> = terms.iter().map(Vec::as_slice).collect();
+            let head = mnema_search::reserve_tail(&own, &rrf_lists(&refs), SHOWN, RESERVED);
+            let rest: Vec<i64> = own
+                .iter()
+                .filter(|id| !head.contains(id))
+                .copied()
+                .collect();
+            head.into_iter().chain(rest).collect()
         }
         Merge::OriginalHalf | Merge::LexicalTerms => {
             let refs: Vec<&[i64]> = terms.iter().map(Vec::as_slice).collect();
@@ -206,6 +232,17 @@ mod tests {
             merged(Merge::OriginalHalf, vec![1, 2], &terms, 9),
             vec![2, 1, 3]
         );
+    }
+
+    #[test]
+    fn tail_slots_leave_the_head_alone_and_lose_nothing_of_the_question() {
+        let own: Vec<i64> = (1..=10).collect();
+        let got = merged(Merge::TailSlots, own.clone(), &[vec![42, 3]], 20);
+        assert_eq!(&got[..SHOWN - RESERVED], &own[..SHOWN - RESERVED]);
+        assert!(got[SHOWN - RESERVED..SHOWN].contains(&42), "{got:?}");
+        for id in &own {
+            assert!(got.contains(id), "{id} lost: {got:?}");
+        }
     }
 
     #[test]

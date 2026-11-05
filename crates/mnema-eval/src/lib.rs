@@ -31,4 +31,4 @@ pub use run::{
 };
 pub use sweep::{Row, Sweep};
 pub use terms::{ClassVerdict, check_class, universal_terms};
-pub use translated::{Merge, Term, Translated, run_translated};
+pub use translated::{Merge, RESERVED, SHOWN, Term, Translated, run_translated};

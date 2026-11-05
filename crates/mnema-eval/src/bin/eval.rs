@@ -145,7 +145,19 @@ fn evaluate(worker: &Path, provider: Provider, model: &str) -> ExitCode {
             let outcomes = run_translated(&indexed, &questions, &dense, &translated, merge)
                 .expect("the translated row runs");
             println!("--- all-terms / rrf + переклад, {} ---", merge.label());
-            println!("{}", Report::of(&outcomes, chunk_count).render());
+            let report = Report::of(&outcomes, chunk_count);
+            println!("{}", report.render());
+            // The model sees the first eight: the figure the tail rule is for.
+            for class in mnema_eval::Class::ALL {
+                if let Some(r) = report.recall_at(class, mnema_eval::SHOWN) {
+                    println!(
+                        "  recall@{} {}: {:.1}%",
+                        mnema_eval::SHOWN,
+                        class.as_str(),
+                        r * 100.0
+                    );
+                }
+            }
         }
     }
     ExitCode::SUCCESS
