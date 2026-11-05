@@ -634,7 +634,7 @@ jobs:
           - pr8-masks task-d64 task-6
           - pr9b-scan task-13-xlsx task-1
           - pr10b-theme pr8-ui-masks pr10d-launcher
-          - task-8 task-14
+          - task-8 task-14 grounding
           - agent-access
           - agent-connect
     runs-on: ubuntu-24.04
