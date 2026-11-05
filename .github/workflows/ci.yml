@@ -45,7 +45,11 @@ jobs:
       # happened to finish first.
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
+        # macos-15, not macos-14: GitHub retired the macos-14 image on
+        # 2026-11-02 ("The configuration 'macos-14-arm64-us-default' is not
+        # supported", PR #90). The app's macOS 14 floor is a runtime claim a real
+        # macOS 14 machine proves, as the `bundle` header says.
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     # Measured, not guessed: across the last three green runs this job took
     # 1.5–3.2 minutes end to end, and its longest single step — installing the

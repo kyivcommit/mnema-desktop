@@ -271,7 +271,7 @@ fn the_check_job_keeps_the_lines_whose_loss_would_not_show() {
     let check = check_job();
 
     assert!(
-        declares(&check, "os: [macos-14, ubuntu-24.04]"),
+        declares(&check, "os: [macos-15, ubuntu-24.04]"),
         "the `check` job no longer builds on both platforms. Dropping an arm of \
          this matrix reddens nothing: the run goes green having compiled the \
          crate list on one target, which is what `ci.yml` argues at length is \

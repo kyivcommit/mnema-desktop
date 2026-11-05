@@ -117,6 +117,6 @@ case_ "slice: the check job must not run on into bundle" \
 # the settings inside the job.
 case_ "workflow: the check matrix must keep both platforms" \
   .github/workflows/ci.yml \
-  's{os: \[macos-14, ubuntu-24\.04\]}{os: [macos-14]}' \
-  'os: [macos-14]' \
+  's{os: \[macos-15, ubuntu-24\.04\]}{os: [macos-15]}' \
+  'os: [macos-15]' \
   mnema-desktop 'the_check_job_keeps_the_lines_whose_loss_would_not_show' --test packaging_workflow
