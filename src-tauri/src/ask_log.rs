@@ -99,7 +99,11 @@ fn write_line(dir: &Path, line: &str) -> std::io::Result<()> {
     if fresh {
         prune(dir, SystemTime::now());
     }
-    if fresh || WRITES.fetch_add(1, Ordering::Relaxed) % CHECK_EVERY == 0 {
+    if fresh
+        || WRITES
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(CHECK_EVERY)
+    {
         cap(dir, CAP_BYTES, &file_name(SystemTime::now()));
     }
     Ok(())
