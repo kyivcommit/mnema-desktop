@@ -91,8 +91,8 @@ case_ "terms: the head of a cut is never touched" \
 
 case_ "terms: a word mixing scripts is not a term" \
   crates/mnema-rag/src/translate.rs \
-  's~            \|\| mixes_scripts\(&term\)~            || false /* mutant */~' \
-  '|| false /* mutant */' \
+  's~        if mixes_scripts\(&line\) \{~        if false { // mutant: mixed words kept~' \
+  'if false { // mutant: mixed words kept' \
   mnema-rag 'translate::tests::a_word_mixing_scripts_is_not_a_term_and_a_line_of_two_scripts_is_split' --lib
 
 case_ "terms: a model's search that found by its own words is not translated" \
