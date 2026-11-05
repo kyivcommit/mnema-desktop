@@ -740,6 +740,14 @@ impl Db {
             .ok_or(Error::NoSuchSpace(space_id))
     }
 
+    /// The highest chunk id, 0 for an empty index: an O(log n) stamp that moves
+    /// whenever a scan adds chunks, for caching what is derived from them.
+    pub fn max_chunk_id(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT coalesce(max(id), 0) FROM chunk", [], |r| r.get(0))?)
+    }
+
     /// How many chunks the index holds at all — the denominator the settings
     /// screen shows [`Db::embedded_chunk_count`] against.
     ///
@@ -754,13 +762,6 @@ impl Db {
     /// [`Db::insert_vector`]/[`Db::upsert_vector`] writing a `chunk_id` no
     /// `chunk` row backs: still public, still unchecked, held by a test
     /// (`every_vector_names_an_eligible_chunk`) and not by a type.
-    /// The highest chunk id, 0 for an empty index: an O(log n) stamp that moves
-    /// whenever a scan adds chunks, for caching what is derived from them.
-    pub fn max_chunk_id(&self) -> Result<i64, Error> {
-        Ok(self
-            .conn()
-            .query_row("SELECT coalesce(max(id), 0) FROM chunk", [], |r| r.get(0))?)
-    }
 
     /// Up to `n` chunk texts spread across the searchable index, for telling
     /// which languages the library is written in. Spread by id rather than

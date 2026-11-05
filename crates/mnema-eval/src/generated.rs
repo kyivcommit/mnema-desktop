@@ -4,19 +4,13 @@ use std::time::Duration;
 use mnema_index::QueryRule;
 use mnema_search::{FusionRule, Provider};
 
-use crate::{Class, DenseAnswers, EvalError, IndexedCorpus, QuestionSet, run_row};
-
-/// How many passages the model is shown: the application's own
-/// `ASK_TOP_K` (`src-tauri/src/bridge.rs`), copied as `SEARCH_LIMIT` is.
-const SHOWN: usize = 8;
+use crate::{Class, DenseAnswers, EvalError, IndexedCorpus, QuestionSet, SHOWN, run_row};
 
 /// One question answered by one chat model over the product row's passages.
 #[derive(Debug, Clone)]
 pub struct Answered {
     pub question: String,
     pub class: Class,
-    /// The gold chunk was among the passages shown.
-    pub shown_gold: bool,
     /// The answer cites a gold chunk.
     pub cited_gold: bool,
     /// The model answered with text at all.
@@ -86,7 +80,6 @@ pub fn answer_all(
         out.push(Answered {
             question: o.question,
             class: o.class,
-            shown_gold: shown.iter().any(|id| o.gold.contains(id)),
             cited_gold,
             answered,
             grounding,
@@ -150,7 +143,6 @@ mod tests {
         Answered {
             question: "q".into(),
             class,
-            shown_gold: true,
             cited_gold,
             answered: true,
             grounding,

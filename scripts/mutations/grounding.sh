@@ -93,10 +93,22 @@ case_ "terms: a word mixing scripts is not a term" \
   crates/mnema-rag/src/translate.rs \
   's~            \|\| mixes_scripts\(&term\)~            || false /* mutant */~' \
   '|| false /* mutant */' \
-  mnema-rag 'translate::tests::a_word_mixing_scripts_is_not_a_term_but_a_term_of_two_scripts_is' --lib
+  mnema-rag 'translate::tests::a_word_mixing_scripts_is_not_a_term_and_a_line_of_two_scripts_is_split' --lib
 
 case_ "terms: a model's search that found by its own words is not translated" \
   src-tauri/src/bridge.rs \
   's~let found = if arms.text && unreachable.is_none\(\) && missed \{~let found = if arms.text \&\& unreachable.is_none() { // mutant~' \
   'let found = if arms.text && unreachable.is_none() { // mutant' \
   mnema-desktop 'a_models_search_that_finds_by_its_own_words_is_not_translated' --test commands
+
+case_ "terms: a line in two scripts is split into one term per script" \
+  crates/mnema-rag/src/translate.rs \
+  's~    if runs.len\(\) < 2 \{~    if true { // mutant: never split~' \
+  'if true { // mutant: never split' \
+  mnema-rag 'translate::tests::a_word_mixing_scripts_is_not_a_term_and_a_line_of_two_scripts_is_split' --lib
+
+case_ "grounding: a sentence of short words only is not checked" \
+  crates/mnema-rag/src/grounding.rs \
+  's~        if ours.is_empty\(\) \{~        if false { // mutant: short sentences checked~' \
+  'if false { // mutant: short sentences checked' \
+  mnema-rag 'grounding::tests::a_sentence_of_short_words_only_is_not_checked' --lib

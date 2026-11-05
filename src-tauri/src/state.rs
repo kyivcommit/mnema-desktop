@@ -648,22 +648,6 @@ impl AppState {
         ))?)
     }
 
-    /// Runs `f` against the open index.
-    ///
-    /// A closure rather than a getter because the connection is behind a lock:
-    /// handing out a guard would let a caller hold it across an await point or a
-    /// whole command, and the indexing job is on the other side of that lock.
-    ///
-    /// ⚠️ **Three ways out, and something downstream classifies them.**
-    /// `StatePoisoned`, `IndexNotOpen`, and whatever `f` returns as
-    /// `Error::Index(_)`. `models::UnreadableCause::of` sorts those three into
-    /// what a settings window draws — "no index is open" against "a read
-    /// failed, which is a bug report" — and it cannot be made to fail
-    /// compilation when this list grows, because no `match` can express "the
-    /// errors `with_index` produces". So the obligation sits here, on the
-    /// function that can break it: **a fourth way out of this function owes
-    /// that classification a decision.** Left unmade, a new failure is drawn to
-    /// the user as a defect report whatever it actually is.
     /// The library's languages, read from a sample of its text and kept until
     /// the index grows. Empty when they cannot be told, or the index cannot be
     /// read: the caller then does not translate.
@@ -691,6 +675,23 @@ impl AppState {
         *cache = Some((stamp, langs.clone()));
         langs
     }
+
+    /// Runs `f` against the open index.
+    ///
+    /// A closure rather than a getter because the connection is behind a lock:
+    /// handing out a guard would let a caller hold it across an await point or a
+    /// whole command, and the indexing job is on the other side of that lock.
+    ///
+    /// ⚠️ **Three ways out, and something downstream classifies them.**
+    /// `StatePoisoned`, `IndexNotOpen`, and whatever `f` returns as
+    /// `Error::Index(_)`. `models::UnreadableCause::of` sorts those three into
+    /// what a settings window draws — "no index is open" against "a read
+    /// failed, which is a bug report" — and it cannot be made to fail
+    /// compilation when this list grows, because no `match` can express "the
+    /// errors `with_index` produces". So the obligation sits here, on the
+    /// function that can break it: **a fourth way out of this function owes
+    /// that classification a decision.** Left unmade, a new failure is drawn to
+    /// the user as a defect report whatever it actually is.
 
     pub fn with_index<T>(
         &self,

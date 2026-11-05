@@ -88,8 +88,9 @@ pub fn translation_messages(question: &str, languages: &[whatlang::Lang]) -> Vec
 }
 
 /// The terms in a translator's reply: one per line, list markers and quotes
-/// removed, a heading line (ending in a colon) dropped, blanks, repeats and
-/// terms longer than `max_chars` refused, at most [`MAX_TERMS`].
+/// removed, a heading line (ending in a colon) dropped, a line in two scripts
+/// split into one term per script, blanks, repeats and terms longer than
+/// `max_chars` refused, at most [`MAX_TERMS`].
 pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -97,23 +98,62 @@ pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
         if line.ends_with(':') {
             continue;
         }
-        let term = strip_marker(line)
+        let line = strip_marker(line)
             .trim_matches(|c: char| QUOTES.contains(c) || c.is_whitespace())
             .to_string();
-        let key = term.to_lowercase();
-        if term.is_empty()
-            || term.chars().count() > max_chars
-            || mixes_scripts(&term)
-            || terms.iter().any(|t| t.to_lowercase() == key)
-        {
+        if mixes_scripts(&line) {
             continue;
         }
-        terms.push(term);
-        if terms.len() == MAX_TERMS {
-            break;
+        for term in script_runs(&line) {
+            let key = term.to_lowercase();
+            if term.is_empty()
+                || term.chars().count() > max_chars
+                || terms.iter().any(|t| t.to_lowercase() == key)
+            {
+                continue;
+            }
+            terms.push(term);
+            if terms.len() == MAX_TERMS {
+                return terms;
+            }
         }
     }
     terms
+}
+
+/// «Solpadeine (Солпадеїн)» → «Solpadeine», «Солпадеїн»: a term is searched
+/// with all its words required in one chunk, and a library holding both
+/// spellings holds them in different chunks, so the pair would find nothing.
+/// A line in one script is returned whole, punctuation and all (`.NET`).
+fn script_runs(line: &str) -> Vec<String> {
+    let script = |w: &str| {
+        w.chars()
+            .find(|c| c.is_alphabetic())
+            .and_then(|c| whatlang::detect_script(c.encode_utf8(&mut [0; 4])))
+    };
+    let mut runs: Vec<(Option<whatlang::Script>, Vec<&str>)> = Vec::new();
+    for word in line.split_whitespace() {
+        let s = script(word);
+        // A word with no letters (`500`) joins the run it follows.
+        match runs.last_mut() {
+            Some((last, words)) if s.is_none() || last.is_none() || *last == s => {
+                *last = last.or(s);
+                words.push(word);
+            }
+            _ => runs.push((s, vec![word])),
+        }
+    }
+    if runs.len() < 2 {
+        return vec![line.to_string()];
+    }
+    runs.into_iter()
+        .map(|(_, words)| {
+            words
+                .join(" ")
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
+        .collect()
 }
 
 /// A word whose letters come from more than one script (`солpadein`): no
@@ -231,16 +271,22 @@ mod tests {
     }
 
     #[test]
-    fn a_word_mixing_scripts_is_not_a_term_but_a_term_of_two_scripts_is() {
+    fn a_word_mixing_scripts_is_not_a_term_and_a_line_of_two_scripts_is_split() {
         // E2B's reply for «солпадеїн», verbatim from the owner's ask log.
         assert_eq!(
             parse_terms("солpadein\npainkiller\nanalgesic", 100),
             vec!["painkiller", "analgesic"]
         );
-        // Two words, each in one script; and accented Latin is still Latin.
+        // Two words, each in one script, become two terms: searched as one,
+        // a library with both spellings in different chunks finds neither.
+        // Accented Latin is still Latin, and one script stays one term.
         assert_eq!(
-            parse_terms("Solpadeine (Солпадеїн)\ncafé", 100),
-            vec!["Solpadeine (Солпадеїн)", "café"]
+            parse_terms("Solpadeine (Солпадеїн)\ncafé crème", 100),
+            vec!["Solpadeine", "Солпадеїн", "café crème"]
+        );
+        assert_eq!(
+            parse_terms("Solpadeine 500 мг таблетки", 100),
+            vec!["Solpadeine 500", "мг таблетки"]
         );
     }
 

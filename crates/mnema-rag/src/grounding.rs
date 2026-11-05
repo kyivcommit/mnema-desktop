@@ -46,13 +46,18 @@ pub fn grounding<'a>(answer: &str, passage: impl Fn(usize) -> Option<&'a str>) -
     let mut checked = false;
     let mut unsupported: Vec<usize> = Vec::new();
     for (sentence, anchors) in cited_sentences(answer) {
+        let ours = stems(&sentence);
+        // A sentence of short words only («Так, це так.») has nothing to
+        // compare: it is not checked, not unsupported.
+        if ours.is_empty() {
+            continue;
+        }
         for n in anchors {
             let Some(text) = passage(n) else { continue };
             if self::language(text) != Some(language) {
                 continue;
             }
             checked = true;
-            let ours = stems(&sentence);
             if !stems(text).iter().any(|s| ours.contains(s)) && !unsupported.contains(&n) {
                 unsupported.push(n);
             }
@@ -216,6 +221,16 @@ mod tests {
         let p = |_: usize| Some("Договір складено у двох примірниках для кожної сторони.");
         let a = "Примірників договору виготовили лише пару, кожен окремо <c>1</c>.";
         assert_eq!(grounding(a, p), Grounding::Supported);
+    }
+
+    #[test]
+    fn a_sentence_of_short_words_only_is_not_checked() {
+        let p = |_: usize| Some(UK);
+        let a = "Так, це так <c>1</c>.";
+        assert_eq!(grounding(a, p), Grounding::Unchecked);
+        // Beside a checkable sentence the short one changes nothing.
+        let a = format!("Так, це так <c>1</c>. {UK} <c>1</c>");
+        assert_eq!(grounding(&a, p), Grounding::Supported);
     }
 
     #[test]
