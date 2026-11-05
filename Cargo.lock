@@ -2886,6 +2886,7 @@ dependencies = [
  "mnema-mock-provider",
  "mnema-pool",
  "mnema-provider",
+ "mnema-rag",
  "mnema-search",
  "mnema-walk",
  "rusqlite",

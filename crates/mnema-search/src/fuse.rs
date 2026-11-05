@@ -85,11 +85,21 @@ fn interleave(text: &[i64], content: &[i64]) -> Vec<i64> {
 /// `rrf_lifts_the_chunk_that_stands_high_in_both_arms` and by
 /// `equal_scores_are_broken_by_chunk_id_so_two_runs_agree`.
 fn rrf(text: &[i64], content: &[i64]) -> Vec<i64> {
+    rrf_lists(&[text, content])
+}
+
+/// Reciprocal-rank fusion of any number of ranked lists, each weighted alike:
+/// how the several searches of one question (its own words, then each
+/// translated term) become one list before the result is cut. Pinned through
+/// `rrf` by every two-arm test, and on its own by
+/// `rrf_lists_of_one_list_keeps_its_order` and
+/// `a_chunk_in_several_lists_rises_above_one_in_a_single_list`.
+pub fn rrf_lists(lists: &[&[i64]]) -> Vec<i64> {
     use std::collections::BTreeMap;
 
     let mut score: BTreeMap<i64, f64> = BTreeMap::new();
-    for arm in [text, content] {
-        for (i, &id) in arm.iter().enumerate() {
+    for list in lists {
+        for (i, &id) in list.iter().enumerate() {
             let position = (i + 1) as i64;
             *score.entry(id).or_insert(0.0) += 1.0 / (RRF_K + position) as f64;
         }

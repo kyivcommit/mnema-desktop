@@ -14,6 +14,7 @@ mod report;
 mod run;
 mod sweep;
 mod terms;
+mod translated;
 
 pub use corpus::{Corpus, Document, EvalError, Language, corpus_dir};
 pub use dense::DenseAnswers;
@@ -23,6 +24,9 @@ pub use indexed::IndexedCorpus;
 pub use preflight::{Problem, preflight};
 pub use questions::{Class, Question, QuestionSet, questions_path};
 pub use report::Report;
-pub use run::{Location, Outcome, SEARCH_LIMIT, run_lexical, run_lexical_with, run_row};
+pub use run::{
+    Location, Outcome, SEARCH_LIMIT, run_lexical, run_lexical_with, run_row, run_row_scored,
+};
 pub use sweep::{Row, Sweep};
 pub use terms::{ClassVerdict, check_class, universal_terms};
+pub use translated::{Merge, Term, Translated, run_translated};
