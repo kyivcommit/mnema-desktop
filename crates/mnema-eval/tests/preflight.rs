@@ -246,3 +246,46 @@ fn two_missing_sentences_come_back_in_the_order_the_question_lists_them() {
         ]
     );
 }
+
+#[test]
+fn a_cross_lingual_question_about_a_document_in_its_own_language_is_a_problem() {
+    // Both directions: the question is Ukrainian and so is `uk/one.md`. A
+    // cross-lingual class there is mislabelled, and so is a paraphrase asked
+    // in English of the same document.
+    for class in [Class::CrossLingual, Class::Name] {
+        let questions = set(vec![question(
+            class,
+            "Що вирішили?",
+            "uk/one.md",
+            &[ANSWER],
+        )]);
+        match run(&corpus(), &questions).as_slice() {
+            [Problem::LanguageAgainstClass { question, .. }] => assert_eq!(question, "q-1"),
+            other => panic!("{class:?}: expected one LanguageAgainstClass, got {other:?}"),
+        }
+    }
+
+    let mut english = question(
+        Class::Paraphrase,
+        "What was decided?",
+        "uk/one.md",
+        &[ANSWER],
+    );
+    english.language = Language::En;
+    match run(&corpus(), &set(vec![english])).as_slice() {
+        [Problem::LanguageAgainstClass { question, .. }] => assert_eq!(question, "q-1"),
+        other => panic!("expected one LanguageAgainstClass, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_cross_lingual_question_about_a_document_in_the_other_language_passes() {
+    let mut q = question(
+        Class::CrossLingual,
+        "What was decided?",
+        "uk/one.md",
+        &[ANSWER],
+    );
+    q.language = Language::En;
+    assert_eq!(run(&corpus(), &set(vec![q])), vec![]);
+}

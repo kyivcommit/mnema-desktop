@@ -128,8 +128,8 @@ fn a_class_that_was_never_asked_says_so_where_its_numbers_would_be() {
         .collect();
     assert_eq!(
         unmeasured.len(),
-        2,
-        "two classes were never asked, so two rows should say so:\n{text}"
+        Class::ALL.len() - 1,
+        "every class but literal was never asked, so each of those rows should say so:\n{text}"
     );
     for row in unmeasured {
         assert!(

@@ -175,6 +175,8 @@ fn label(class: Class) -> &'static str {
         Class::Literal => "дослівні",
         Class::Paraphrase => "перефразовані",
         Class::Topical => "про зміст",
+        Class::CrossLingual => "міжмовні",
+        Class::Name => "про назви",
     }
 }
 

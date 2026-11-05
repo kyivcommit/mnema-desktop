@@ -11,6 +11,14 @@ pub enum Class {
     Literal,
     Paraphrase,
     Topical,
+    /// Asked in one language about a document written in the other: no word
+    /// of the question can match lexically, so only meaning or a translation
+    /// reaches the answer.
+    CrossLingual,
+    /// The question's key is a name spelled in the other script than the
+    /// document's (`Девон Марш` for `Devon Marsh`): the case a transliterated
+    /// brand or person in a real query is.
+    Name,
 }
 
 impl Class {
@@ -19,10 +27,24 @@ impl Class {
             Class::Literal => "literal",
             Class::Paraphrase => "paraphrase",
             Class::Topical => "topical",
+            Class::CrossLingual => "crosslingual",
+            Class::Name => "name",
         }
     }
 
-    pub const ALL: [Class; 3] = [Class::Literal, Class::Paraphrase, Class::Topical];
+    pub const ALL: [Class; 5] = [
+        Class::Literal,
+        Class::Paraphrase,
+        Class::Topical,
+        Class::CrossLingual,
+        Class::Name,
+    ];
+
+    /// Whether the question is put in another language than its document's.
+    /// Preflight holds every class to its answer, both ways.
+    pub fn crosses_language(self) -> bool {
+        matches!(self, Class::CrossLingual | Class::Name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,16 +103,11 @@ impl QuestionSet {
                     row.id, row.language
                 )));
             };
-            let class = match row.class.as_str() {
-                "literal" => Class::Literal,
-                "paraphrase" => Class::Paraphrase,
-                "topical" => Class::Topical,
-                other => {
-                    return Err(EvalError::Questions(format!(
-                        "{}: {other} is not a class",
-                        row.id
-                    )));
-                }
+            let Some(class) = Class::ALL.into_iter().find(|c| c.as_str() == row.class) else {
+                return Err(EvalError::Questions(format!(
+                    "{}: {} is not a class",
+                    row.id, row.class
+                )));
             };
             if !seen.insert(row.id.clone()) {
                 return Err(refuse("this id is already used"));
@@ -110,14 +127,15 @@ impl QuestionSet {
             if unique.len() != row.answers.len() {
                 return Err(refuse("two answer sentences are the same"));
             }
-            // Literal and paraphrase carry exactly one answer sentence;
+            // Literal, paraphrase, cross-lingual and name carry exactly one
+            // answer sentence;
             // topical carries up to three. Pinned by
             // `a_literal_question_carries_exactly_one_answer`,
             // `a_paraphrase_question_carries_exactly_one_answer`,
             // `a_topical_question_carries_one_to_three_answers`.
             let allowed = match class {
                 Class::Topical => 1..=3,
-                Class::Literal | Class::Paraphrase => 1..=1,
+                Class::Literal | Class::Paraphrase | Class::CrossLingual | Class::Name => 1..=1,
             };
             if !allowed.contains(&row.answers.len()) {
                 return Err(refuse(
