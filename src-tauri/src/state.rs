@@ -170,6 +170,10 @@ pub struct AppState {
     /// The language of the last question asked under Mnema, for the next
     /// question that does not show its own (`mnema_rag::detect`'s `previous`).
     last_lang: Mutex<Option<mnema_rag::Lang>>,
+    /// The library's languages (D192), with the chunk-id stamp they were
+    /// read at: a scan that adds chunks moves the stamp and they are read
+    /// again on the next question.
+    library_langs: Mutex<Option<(i64, Vec<mnema_rag::LibraryLang>)>>,
     /// Substitutions a busy job slot refused; [`crate::provider::on_slot_change`]
     /// applies them once the slot is free.
     pending_fills: Mutex<Vec<crate::provider::Fill>>,
@@ -236,6 +240,7 @@ impl AppState {
                 PathBuf::new(),
             ))),
             last_lang: Mutex::new(None),
+            library_langs: Mutex::new(None),
             pending_fills: Mutex::new(Vec::new()),
             dialogue: crate::dialogue::Session::default(),
         }
@@ -659,6 +664,34 @@ impl AppState {
     /// function that can break it: **a fourth way out of this function owes
     /// that classification a decision.** Left unmade, a new failure is drawn to
     /// the user as a defect report whatever it actually is.
+    /// The library's languages, read from a sample of its text and kept until
+    /// the index grows. Empty when they cannot be told, or the index cannot be
+    /// read: the caller then does not translate.
+    pub fn library_languages(&self) -> Vec<mnema_rag::LibraryLang> {
+        /// Enough text to tell two languages apart with whatlang's reliable
+        /// flag, few enough to read in a few milliseconds.
+        const SAMPLE: i64 = 200;
+        let Ok(stamp) = self.with_index(|db| db.max_chunk_id()) else {
+            return Vec::new();
+        };
+        let mut cache = self
+            .library_langs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, langs)) = cache.as_ref()
+            && *at == stamp
+        {
+            return langs.clone();
+        }
+        let Ok(texts) = self.with_index(|db| db.sample_chunk_texts(SAMPLE)) else {
+            return Vec::new();
+        };
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let langs = mnema_rag::library_languages(&refs);
+        *cache = Some((stamp, langs.clone()));
+        langs
+    }
+
     pub fn with_index<T>(
         &self,
         f: impl FnOnce(&Db) -> Result<T, mnema_index::Error>,

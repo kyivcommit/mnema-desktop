@@ -16,9 +16,12 @@
 #   the library languages — the share floor, and no translation for a
 #                           one-language library asked in that language
 #
+# The translated terms (D192): the first question and the model's own search
+# each get them, and their hits take the last places of what the model sees.
+#
 # Not here, and why: the translated eval rows are a measurement instrument whose
 # merges `crates/mnema-eval/src/translated.rs` pins with unit tests; the
-# product does not translate (spec §8).
+# merge rules are not the product's (only the tail rule is, through reserve_tail).
 
 case_ "grounding: a passage in another language is not checked" \
   crates/mnema-rag/src/grounding.rs \
@@ -61,3 +64,27 @@ case_ "translate: a one-language library asked in that language is not translate
   's~\.is_none_or\(\|i\| i\.lang\(\) != \*only\)~.is_some_and(|i| i.lang() != *only) /* mutant */~' \
   '.is_some_and(|i| i.lang() != *only) /* mutant */' \
   mnema-rag 'translate::tests::translation_is_needed_only_where_it_can_find_something' --lib
+
+case_ "terms: the first question's translated terms reach its passages" \
+  src-tauri/src/bridge.rs \
+  's~with_term_hits\(state, hits, &name_terms\(state, query, &endpoint, &model\)\)~with_term_hits(state, hits, \&[]) /* mutant */~' \
+  'with_term_hits(state, hits, &[]) /* mutant */' \
+  mnema-desktop 'a_name_in_another_script_is_found_through_its_translated_term' --test commands
+
+case_ "terms: a translated term's hit gets a reserved place" \
+  src-tauri/src/bridge.rs \
+  's~const TERM_PLACES: usize = 2;~const TERM_PLACES: usize = 0; // mutant~' \
+  'const TERM_PLACES: usize = 0; // mutant' \
+  mnema-desktop 'a_name_in_another_script_is_found_through_its_translated_term' --test commands
+
+case_ "terms: the model's own search is translated too" \
+  src-tauri/src/bridge.rs \
+  's~with_term_hits\(state, found, &terms_of\(query\)\)~with_term_hits(state, found, \&[]) /* mutant */~' \
+  'with_term_hits(state, found, &[]) /* mutant */' \
+  mnema-desktop 'a_models_search_in_mixed_words_is_rescued_by_its_translated_term' --test commands
+
+case_ "terms: the head of a cut is never touched" \
+  crates/mnema-search/src/fuse.rs \
+  's~let keep = limit.saturating_sub\(reserved\);~let keep = limit; // mutant~' \
+  'let keep = limit; // mutant' \
+  mnema-search 'the_head_is_never_touched_and_the_tail_takes_only_new_chunks' --test fuse

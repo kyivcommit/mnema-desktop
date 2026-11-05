@@ -18,6 +18,8 @@ pub use dialogue::{Profile, Turn, build_dialogue, drop_search_hint, profile, wit
 pub use grounding::{Grounding, grounding};
 pub use lang::{EN, Lang, UK, detect};
 pub use prompt::{Passage, Voice, build_messages};
+/// A library language as [`library_languages`] tells it.
+pub use whatlang::Lang as LibraryLang;
 pub use translate::{
     MAX_TERMS, library_languages, needs_translation, parse_terms, translation_messages,
 };

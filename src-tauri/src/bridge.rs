@@ -1717,6 +1717,15 @@ fn answer_question(
         });
     }
 
+    // The question's key terms in the library's languages take the last places
+    // (D192): «солпадеїн» finds nothing, «Solpadeine» finds the article. Before
+    // the no-candidates refusal, so a question its own words missed entirely
+    // can still be answered from what the terms found.
+    let hits = if arms.text {
+        with_term_hits(state, hits, &name_terms(state, query, &endpoint, &model))
+    } else {
+        hits
+    };
     if hits.is_empty() {
         return Ok(AskAnswer::Refused {
             kind: RefusalKind::NoCandidates,
@@ -1766,6 +1775,7 @@ fn answer_question(
             query,
             (arms, roles),
             &ask_chat,
+            &|q: &str| name_terms(state, q, &endpoint, &model),
             (messages, asked, passages, vec![query.to_string()]),
             sources,
             remember,
@@ -1921,6 +1931,7 @@ fn follow_up(
         query,
         (arms, roles),
         &chat,
+        &|q: &str| name_terms(state, q, &endpoint, &model),
         (messages, asked, Vec::new(), Vec::new()),
         sources,
         Some(generation),
@@ -1942,6 +1953,86 @@ struct TurnSources {
     found: Option<Vec<Hit>>,
 }
 
+/// How long the translation call may take: a few words back, so a reply
+/// slower than this is a provider in trouble, and the question is searched
+/// by its own words instead (D192).
+const TERMS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Of the [`ASK_TOP_K`] passages shown, the last places a translated term's
+/// exact hit may take (D192): the first ones stay the question's own.
+const TERM_PLACES: usize = 2;
+
+/// The question's key terms in the library's languages, from one chat call
+/// without tools (D192). None — and no call — when the library's languages
+/// cannot be told, or the library has one and the question is in it; none
+/// when the call fails, which only costs the question its translation.
+fn name_terms(
+    state: &AppState,
+    query: &str,
+    endpoint: &crate::provider::Endpoint,
+    model: &str,
+) -> Vec<String> {
+    let languages = state.library_languages();
+    if !mnema_rag::needs_translation(query, &languages) {
+        return Vec::new();
+    }
+    let messages = mnema_rag::translation_messages(query, &languages);
+    match mnema_provider::complete_within(
+        &endpoint.base,
+        &endpoint.token,
+        model,
+        &messages,
+        TERMS_TIMEOUT,
+    ) {
+        Ok(raw) => mnema_rag::parse_terms(&raw, MAX_ASK_QUERY),
+        Err(e) => {
+            eprintln!("mnema: the question was not translated: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// `hits` with their last [`TERM_PLACES`] given to what `terms` find by the
+/// text arm alone — exact words, not a second meaning search, whose thirty
+/// candidates per term buried the exact hit in measurement (D192). A term
+/// whose search fails is skipped: the question keeps what it found.
+fn with_term_hits(state: &AppState, hits: Vec<Hit>, terms: &[String]) -> Vec<Hit> {
+    let text_only = Arms {
+        text: true,
+        content: false,
+    };
+    let mut found: Vec<Hit> = Vec::new();
+    let mut lists: Vec<Vec<i64>> = Vec::new();
+    for term in terms {
+        match retrieve(state, term, text_only, ASK_TOP_K, None) {
+            Ok((term_hits, ..)) => {
+                lists.push(term_hits.iter().map(|h| h.chunk_id).collect());
+                found.extend(term_hits);
+            }
+            Err(e) => eprintln!("mnema: a translated term was not searched: {e}"),
+        }
+    }
+    if lists.iter().all(Vec::is_empty) {
+        return hits;
+    }
+    let own: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+    let refs: Vec<&[i64]> = lists.iter().map(Vec::as_slice).collect();
+    let order = mnema_search::reserve_tail(
+        &own,
+        &mnema_search::rrf_lists(&refs),
+        ASK_TOP_K as usize,
+        TERM_PLACES,
+    );
+    order
+        .into_iter()
+        .filter_map(|id| {
+            hits.iter()
+                .chain(found.iter())
+                .find(|h| h.chunk_id == id)
+                .cloned()
+        })
+        .collect()
+}
+
 /// The model's turn: it may search up to [`MAX_TOOL_SEARCHES`] times in all
 /// (the queries `searched` already, their passages `shown` in front of `asked`, the
 /// question as [`mnema_rag::build_dialogue`] wrote it), and the call after the
@@ -1955,6 +2046,7 @@ fn answer_with_searches(
     query: &str,
     (arms, roles): (Arms, crate::provider::Roles),
     chat: &ChatCall<'_>,
+    terms_of: &dyn Fn(&str) -> Vec<String>,
     (mut messages, asked, mut shown, mut searched): (
         Vec<mnema_provider::Message>,
         String,
@@ -1998,7 +2090,17 @@ fn answer_with_searches(
         // oversized one is a search that found nothing, and costs no embedding.
         let usable = !query.trim().is_empty() && query.chars().count() <= MAX_ASK_QUERY;
         let (new_hits, new_text, new_content, unreachable) = if usable {
-            retrieve(state, query, arms, ASK_TOP_K, roles.embed)?
+            let (found, text, content, unreachable) =
+                retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
+            // The model's own query in other words — DeepSeek wrote
+            // «Solpadeine» with Ukrainian words around it, which the text arm
+            // cannot match (D191) — gets the same last places (D192).
+            let found = if arms.text && unreachable.is_none() {
+                with_term_hits(state, found, &terms_of(query))
+            } else {
+                found
+            };
+            (found, text, content, unreachable)
         } else {
             (Vec::new(), text.clone(), content.clone(), None)
         };
