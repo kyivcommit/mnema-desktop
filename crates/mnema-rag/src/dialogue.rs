@@ -125,25 +125,22 @@ pub fn build_dialogue(
     out
 }
 
-/// Append the model's `search` call and the passages it returned.
-pub fn with_search_result(messages: &mut Vec<Message>, call: &ToolCall, passages: &[Passage]) {
-    messages.push(Message {
-        role: MessageRole::Assistant,
-        content: String::new(),
-        tool_calls: Some(vec![call.clone()]),
-        tool_call_id: None,
-    });
-    let content = if passages.is_empty() {
-        "No passages found.".to_string()
-    } else {
-        sources_block(passages)
+/// Put the passages the model's `search` returned in front of the current
+/// question, the shape a search made before the call has. Not an assistant
+/// tool call plus a tool message: the answering call offers no `tools`, and
+/// with a tool exchange in its history DeepSeek asks to search again — Novita,
+/// Ionstream, Parasail, Together and AtlasCloud then hand back raw `<｜DSML｜`
+/// markup as the answer (measured 2026-11-05: 6/30 bad replies, 0/30 inline).
+pub fn with_search_result(messages: &mut [Message], call: &ToolCall, passages: &[Passage]) {
+    let Some(current) = messages.last_mut() else {
+        return;
     };
-    messages.push(Message {
-        role: MessageRole::Tool,
-        content,
-        tool_calls: None,
-        tool_call_id: Some(call.id.clone()),
-    });
+    let found = if passages.is_empty() {
+        format!("No passages found for the search «{}».", call.query)
+    } else {
+        format!("Sources:\n\n{}", sources_block(passages))
+    };
+    current.content = format!("{found}\n\nQuestion: {}", current.content);
 }
 
 #[cfg(test)]
@@ -286,20 +283,33 @@ mod tests {
     }
 
     #[test]
-    fn a_search_result_follows_its_call() {
+    fn a_search_result_joins_the_question_without_a_tool_exchange() {
         let call = ToolCall {
             id: "c1".into(),
             query: "sky".into(),
         };
-        let mut m = Vec::new();
+        let p = profile("m");
+        let mut m = build_dialogue(&[], "Why?", None, &p, UK);
         with_search_result(&mut m, &call, &ps("Blue."));
-        assert_eq!(m[0].role, MessageRole::Assistant);
-        assert_eq!(m[0].tool_calls.as_ref().unwrap()[0].id, "c1");
-        assert_eq!(m[1].role, MessageRole::Tool);
-        assert_eq!(m[1].tool_call_id.as_deref(), Some("c1"));
-        assert_eq!(m[1].content, "[1] (m.txt)\nBlue.");
-        let mut e = Vec::new();
+        let searched_first = build_dialogue(&[], "Why?", Some(&ps("Blue.")), &p, UK);
+        assert_eq!(m.len(), searched_first.len());
+        assert_eq!(
+            m.last().unwrap().content,
+            searched_first.last().unwrap().content
+        );
+        assert!(
+            m.iter()
+                .all(|x| x.tool_calls.is_none() && x.tool_call_id.is_none())
+        );
+        let mut e = build_dialogue(&[], "Why?", None, &p, UK);
         with_search_result(&mut e, &call, &[]);
-        assert_eq!(e[1].content, "No passages found.");
+        assert!(
+            e.last()
+                .unwrap()
+                .content
+                .starts_with("No passages found for the search «sky».\n\nQuestion: Why?\n\n"),
+            "{}",
+            e.last().unwrap().content
+        );
     }
 }

@@ -13485,7 +13485,13 @@ fn an_empty_tool_search_keeps_the_previous_sources() {
     assert_eq!(second["citations"][0]["chunkId"], json!(ids[0]), "{second}");
     server.request();
     server.request();
-    assert!(server.request().contains("No passages found."));
+    let answering = server.request();
+    assert!(
+        answering.contains("No passages found for the search «zzzznothing»."),
+        "{answering}"
+    );
+    // The answering call offers no tools, so its history carries no tool exchange.
+    assert!(!answering.contains("tool_call"), "{answering}");
 }
 
 #[test]
