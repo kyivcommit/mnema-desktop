@@ -102,8 +102,12 @@ struct WireFunction {
     arguments: String,
 }
 
-/// The measured tool schema: one `search` function taking one query.
-const TOOLS: &str = r#"[{"type":"function","function":{"name":"search","description":"Search the user's document library. Returns up to 8 numbered passages with their file names.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"A self-contained search query"}},"required":["query"]}}}]"#;
+/// The measured tool schema: one `search` function taking one query. The
+/// text arm matches a passage only when it has every query word the index
+/// knows (D108), and without saying so DeepSeek padded a drug's name with
+/// Ukrainian words no English entry has: "Solpadeine" found its entry 0/10
+/// times as written by the model, 8/10 with this description (2026-11-05).
+const TOOLS: &str = r#"[{"type":"function","function":{"name":"search","description":"Search the user's document library. Returns up to 8 numbered passages with their file names. A passage matches only if it contains every word of the query, so search for the key term alone (a name, a title, one concept), in the language the documents are likely written in; make another search for another term.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"A self-contained search query"}},"required":["query"]}}}]"#;
 
 /// Sends `messages` to the chat model and returns its answer verbatim.
 ///
