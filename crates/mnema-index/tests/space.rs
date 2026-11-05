@@ -2139,7 +2139,7 @@ fn a_sample_is_spread_across_the_index_and_bounded() {
             .unwrap();
         db.insert_chunk(
             &doc,
-            i as i64,
+            i,
             &text,
             &Locator {
                 spans: vec![Segment {
