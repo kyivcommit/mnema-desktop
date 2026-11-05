@@ -1,6 +1,7 @@
 <script lang="ts">
   import Selection from './Selection.svelte';
   import { locale, t } from '../i18n';
+  import { refusalText } from '../i18n/refusal';
   import type { AskCitation, Hit } from '../lib/ipc';
   import type { LauncherState, Turn } from './state';
 
@@ -36,6 +37,15 @@
   // are decoration; a screen reader hears the live line below, which is always
   // in the page so its text changing is announced (a busy field is not).
   const pending = $derived(state.kind === 'inFlight' ? state.query : null);
+
+  // A refusal is the answer to its question, drawn last like a failed one. Not
+  // the every-folder-off one: the composer's live line says that, and says it
+  // only while it is true.
+  const refused = $derived.by(() => {
+    void $locale;
+    if (state.kind !== 'refused' || state.reason.kind === 'noFoldersSearched') return null;
+    return { query: state.query, text: refusalText(state.reason.kind) };
+  });
   const waiting = $derived.by(() => { void $locale; return pending === null ? '' : t('answer_pending'); });
   let scroller: HTMLDivElement | null = null; // plain: `$state` clashes with the `state` prop
   // When the answer arrives, its question goes to the top of the view, so it
@@ -43,7 +53,7 @@
   // exchange moves the view; one that drew nothing new leaves it be.
   let drawnBefore: number | null = null;
   $effect(() => {
-    const count = items.length;
+    const count = items.length + (refused === null ? 0 : 1);
     if (!scroller) return;
     if (pending !== null) {
       drawnBefore ??= count;
@@ -64,7 +74,12 @@
     <div class="exchange" data-testid="turn">
       <Selection answer={item.answer} query={item.query} {onSelected} />
     </div>
-  {/each}{#if pending !== null}
+  {/each}{#if refused !== null}
+    <div class="exchange" data-testid="refused-turn">
+      <div class="umsg">{refused.query}</div>
+      <p class="refusal" role="status">{refused.text}</p>
+    </div>
+  {/if}{#if pending !== null}
     <div class="exchange" data-testid="pending-turn">
       <div class="umsg">{pending}</div>
       <div class="typing" aria-hidden="true"><span></span><span></span><span></span></div>

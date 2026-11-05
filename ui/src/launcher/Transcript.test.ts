@@ -157,3 +157,28 @@ test('a_question_in_flight_is_announced_by_a_live_line_that_was_already_there', 
   expect(screen.getByTestId('answer-pending')).toBe(live);
   expect(live.textContent).toBe('');
 });
+
+test('a refusal is drawn in the transcript under its question, as a status', () => {
+  setLocale('en');
+  const { container } = render(Transcript, {
+    turns: [],
+    state: { kind: 'refused', query: 'солпадеїн', reason: { kind: 'emptyCompletion' } },
+  });
+  const turn = screen.getByTestId('refused-turn');
+  expect(turn.querySelector('.umsg')!.textContent).toBe('солпадеїн');
+  const line = turn.querySelector('.refusal')!;
+  expect(line.getAttribute('role')).toBe('status');
+  expect(line.textContent).toBe('The model returned no answer.');
+  expect(container.querySelectorAll('[data-testid="refused-turn"]')).toHaveLength(1);
+});
+
+test('the transcript draws no refusal for another state, nor the every-folder-off one', async () => {
+  setLocale('en');
+  const { rerender } = render(Transcript, { turns: [], state: { kind: 'idle' } });
+  expect(screen.queryByTestId('refused-turn')).toBeNull();
+  await rerender({ turns: [], state: { kind: 'refused', query: 'q', reason: { kind: 'noFoldersSearched' } } });
+  expect(screen.queryByTestId('refused-turn')).toBeNull();
+  // positive control: the same render draws another refusal
+  await rerender({ turns: [], state: { kind: 'refused', query: 'q', reason: { kind: 'noCandidates' } } });
+  expect(screen.getByTestId('refused-turn')).toBeTruthy();
+});

@@ -23,7 +23,7 @@ export type LauncherState =
   | { kind: 'inFlight'; query: string } // D
   | { kind: 'generated'; query: string; answer: Extract<AskAnswer, { kind: 'generated' }> } // B (PR 6)
   | { kind: 'citationsOnly'; query: string; answer: Extract<AskAnswer, { kind: 'citationsOnly' }> } // E (PR 6)
-  | { kind: 'refused'; reason: Refusal } // F
+  | { kind: 'refused'; query: string; reason: Refusal } // F: drawn in the transcript, under its question
   | { kind: 'error'; reason: 'tooLong' | 'askFailed' | 'historyUnreadable' | 'historyFailed' }; // the query guard, a rejected ask, and a Recents open that failed: every non-idle state goes through the machine, so `error` is live
 
 // §9.1 / owner ruling 2026-08-24: content (network/dense) search is offered only when the embed
@@ -50,7 +50,7 @@ export function stateFromAnswer(query: string, a: AskAnswer): LauncherState {
   switch (a.kind) {
     case 'generated': return { kind: 'generated', query, answer: a };
     case 'citationsOnly': return { kind: 'citationsOnly', query, answer: a };
-    case 'refused': return { kind: 'refused', reason: a.reason };
+    case 'refused': return { kind: 'refused', query, reason: a.reason };
   }
 }
 

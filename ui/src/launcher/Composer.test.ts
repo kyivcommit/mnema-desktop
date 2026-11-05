@@ -101,12 +101,11 @@ test('state error(askFailed) shows the failure message (a rejected ask is visibl
   expect(screen.getByRole('alert').textContent).toMatch(/could not|не вдалося/i);
 });
 
-test('state F shows the refusal message, not an alert', () => {
-  const { container } = render(Composer, { state: { kind: 'refused', reason: { kind: 'noCandidates' } } as LauncherState, onSubmit: vi.fn() });
-  // Reached by class, asserted as a role: the refusal is a status, not an error.
-  expect(container.querySelector('.refusal')!.getAttribute('role')).toBe('status');
-  expect(screen.getByRole('status').textContent).toMatch(/found|знайдено/i);
-  expect(screen.queryByRole('alert')).toBeNull();
+test('state F draws no refusal under the field: the transcript has it', () => {
+  const { container } = render(Composer, { state: { kind: 'refused', query: 'q', reason: { kind: 'noCandidates' } } as LauncherState, onSubmit: vi.fn() });
+  expect(container.querySelector('.refusal')).toBeNull();
+  expect(screen.queryByText(t('refusal_no_candidates'))).toBeNull();
+  expect(screen.queryByRole('status')).toBeNull();
 });
 
 test('state D draws no alert and no progress bar; the field is the only busy signal', () => {
@@ -139,16 +138,10 @@ test('with a folder on there is no line and the question leaves', async () => {
   expect(onSubmit).toHaveBeenCalledWith('question');
 });
 
-test('a no-folders refusal of the last answer is hidden once a folder is on, other refusals stay', async () => {
-  const noFolders: LauncherState = { kind: 'refused', reason: { kind: 'noFoldersSearched' } };
+test('a no-folders refusal is said by the live line alone, and only while every folder is off', async () => {
+  const noFolders: LauncherState = { kind: 'refused', query: 'q', reason: { kind: 'noFoldersSearched' } };
   const { rerender } = render(Composer, { value: '', state: noFolders, scopeOff: true, onSubmit: vi.fn() });
-  // positive control: while everything is off the text is there (once)
   expect(screen.getAllByText(t('refusal_no_folders_searched'))).toHaveLength(1);
-
   await rerender({ value: '', state: noFolders, scopeOff: false, onSubmit: vi.fn() });
   expect(screen.queryByText(t('refusal_no_folders_searched'))).toBeNull();
-
-  cleanup();
-  render(Composer, { value: '', state: { kind: 'refused', reason: { kind: 'noCandidates' } }, scopeOff: false, onSubmit: vi.fn() });
-  expect(screen.getByText(t('refusal_no_candidates'))).toBeTruthy();
 });

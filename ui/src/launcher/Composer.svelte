@@ -1,10 +1,10 @@
 <script lang="ts">
   import { locale, t } from '../i18n';
-  import { refusalText } from '../i18n/refusal';
   import { MAX_ASK_QUERY, type LauncherState } from './state';
 
   // §5: the field that asks. Enter sends, Shift+Enter is a newline, and the
-  // guard and refusal messages have their one place here.
+  // guard messages have their one place here; a refusal answers a question, so
+  // it is drawn in the transcript under it (owner, 2026-11-05).
   // The prop is `state`; the LOCAL binding is renamed. Svelte reads `$state` as
   // a subscription to a local called `state` when one exists, so a component
   // that takes a `state` prop cannot declare reactive state of its own until
@@ -38,14 +38,6 @@
     }
     return t('query_failed'); // askFailed
   });
-  const refusalMessage = $derived.by(() => {
-    void $locale;
-    if (launcherState.kind !== 'refused') return '';
-    // Stale once any folder is ticked again; the live line covers the off case.
-    if (launcherState.reason.kind === 'noFoldersSearched' && !scopeOff) return '';
-    return refusalText(launcherState.reason.kind);
-  });
-
   const noFolders = $derived.by(() => { void $locale; return t('refusal_no_folders_searched'); });
 
   let box = $state<HTMLTextAreaElement | null>(null);
@@ -104,7 +96,5 @@
     <p class="guard" role="alert">{errorText}</p>
   {:else if scopeOff}
     <p class="guard" role="status">{noFolders}</p>
-  {:else if refusalMessage}
-    <p class="refusal" role="status">{refusalMessage}</p>
   {/if}
 </div>
