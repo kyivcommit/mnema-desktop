@@ -1735,7 +1735,7 @@ fn answer_question(
             query,
             (arms, roles),
             &ask_chat,
-            (messages, asked, passages, 1),
+            (messages, asked, passages, vec![query.to_string()]),
             sources,
             remember,
             taken,
@@ -1890,7 +1890,7 @@ fn follow_up(
         query,
         (arms, roles),
         &chat,
-        (messages, asked, Vec::new(), 0),
+        (messages, asked, Vec::new(), Vec::new()),
         sources,
         Some(generation),
         taken,
@@ -1912,7 +1912,7 @@ struct TurnSources {
 }
 
 /// The model's turn: it may search up to [`MAX_TOOL_SEARCHES`] times in all
-/// (`searches` already made, their passages `shown` in front of `asked`, the
+/// (the queries `searched` already, their passages `shown` in front of `asked`, the
 /// question as [`mnema_rag::build_dialogue`] wrote it), and the call after the
 /// last search is offered no tool and no hint that there is one. The first
 /// question of a conversation comes here with its own search as the first;
@@ -1924,11 +1924,11 @@ fn answer_with_searches(
     query: &str,
     (arms, roles): (Arms, crate::provider::Roles),
     chat: &ChatCall<'_>,
-    (mut messages, asked, mut shown, mut searches): (
+    (mut messages, asked, mut shown, mut searched): (
         Vec<mnema_provider::Message>,
         String,
         Vec<mnema_rag::Passage>,
-        usize,
+        Vec<String>,
     ),
     sources: TurnSources,
     remember: Option<u64>,
@@ -1949,11 +1949,20 @@ fn answer_with_searches(
     };
     // A search that finds the wrong passages is often followed by one in other
     // words ("солпадеїн" → "Solpadeine").
-    while let mnema_provider::Reply::Search(call) = &reply {
-        if searches == MAX_TOOL_SEARCHES {
+    while let mnema_provider::Reply::Search(calls) = &reply {
+        if searched.len() == MAX_TOOL_SEARCHES {
             break;
         }
-        searches += 1;
+        // Several calls at once are the question again and the same in other
+        // words (DeepSeek, 2026-11-05): the first one not yet searched is run,
+        // since a repeat finds what the model already has.
+        let fresh = |c: &&mnema_provider::ToolCall| {
+            !searched
+                .iter()
+                .any(|q| q.trim().to_lowercase() == c.query.trim().to_lowercase())
+        };
+        let call = calls.iter().find(fresh).unwrap_or(&calls[0]);
+        searched.push(call.query.clone());
         // The model's query is held to the limit a typed one is: a blank or
         // oversized one is a search that found nothing, and costs no embedding.
         let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
@@ -1983,7 +1992,7 @@ fn answer_with_searches(
             found = Some(new_hits);
         }
         mnema_rag::with_search_result(&mut messages, &asked, &shown, &misses);
-        let more = searches < MAX_TOOL_SEARCHES;
+        let more = searched.len() < MAX_TOOL_SEARCHES;
         if !more {
             mnema_rag::drop_search_hint(&mut messages);
         }

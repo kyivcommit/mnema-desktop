@@ -48,11 +48,14 @@ impl Serialize for ToolCall {
     }
 }
 
-/// What one chat turn produced: prose, or a request to search the library.
+/// What one chat turn produced: prose, or a request to search the library —
+/// every usable `search` call of the reply, in order, never none. A model may
+/// send several at once (DeepSeek: its own question again, and the same in
+/// other words), so the caller picks which to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     Text(String),
-    Search(ToolCall),
+    Search(Vec<ToolCall>),
 }
 
 /// Who a message is from. An enum, not a `String`, for the reason the crate
@@ -143,11 +146,11 @@ pub fn complete_turn(
     timeout: std::time::Duration,
 ) -> Result<Reply, Error> {
     let message = round_trip(base, key, model, messages, offer_search, timeout)?;
-    let search = message
+    let searches: Vec<ToolCall> = message
         .tool_calls
         .unwrap_or_default()
         .into_iter()
-        .find_map(|call| {
+        .filter_map(|call| {
             if call.function.name != "search" {
                 return None;
             }
@@ -157,10 +160,12 @@ pub fn complete_turn(
                 id: call.id,
                 query: query.to_string(),
             })
-        });
-    Ok(match search {
-        Some(call) => Reply::Search(call),
-        None => Reply::Text(message.content.unwrap_or_default()),
+        })
+        .collect();
+    Ok(if searches.is_empty() {
+        Reply::Text(message.content.unwrap_or_default())
+    } else {
+        Reply::Search(searches)
     })
 }
 
@@ -336,10 +341,36 @@ mod tests {
         let got = turn(&server, true).expect("a reply");
         assert_eq!(
             got,
-            Reply::Search(ToolCall {
+            Reply::Search(vec![ToolCall {
                 id: "c1".into(),
                 query: "ext4 journal".into()
-            })
+            }])
+        );
+    }
+
+    /// DeepSeek's measured reply (launcher dump, 2026-11-05): two calls at
+    /// once, the question again and the same in other words. Both are kept, in
+    /// order; an unusable one between them is dropped.
+    #[test]
+    fn every_usable_search_call_of_a_reply_is_kept_in_order() {
+        let body = r#"{"choices":[{"message":{"content":"","tool_calls":[
+            {"id":"a","type":"function","function":{"name":"search","arguments":"{\"query\": \"солпадеїн\"}"}},
+            {"id":"b","type":"function","function":{"name":"search","arguments":"{\"query\": \"  \"}"}},
+            {"id":"c","type":"function","function":{"name":"search","arguments":"{\"query\": \"Solpadeine paracetamol\"}"}}
+        ]}}]}"#;
+        let server = MockServer::new(vec![Mock::ok(body)]);
+        assert_eq!(
+            turn(&server, true).unwrap(),
+            Reply::Search(vec![
+                ToolCall {
+                    id: "a".into(),
+                    query: "солпадеїн".into()
+                },
+                ToolCall {
+                    id: "c".into(),
+                    query: "Solpadeine paracetamol".into()
+                },
+            ])
         );
     }
 

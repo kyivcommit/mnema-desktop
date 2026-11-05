@@ -13468,6 +13468,38 @@ fn a_follow_up_without_a_search_cites_the_previous_sources() {
     assert_eq!(second["citations"][0]["chunkId"], json!(ids[1]), "{second}");
 }
 
+/// DeepSeek's measured first reply (launcher dump, 2026-11-05): two calls at
+/// once, the question again and the same in other words. The repeat would
+/// find what the model already has, so the other one is run.
+#[test]
+fn of_several_calls_the_first_not_yet_searched_is_run() {
+    let two = json!({ "choices": [{ "message": {
+        "content": "",
+        "tool_calls": [
+            { "id": "a", "type": "function",
+              "function": { "name": "search", "arguments": json!({ "query": "Quantum Entanglement " }).to_string() } },
+            { "id": "b", "type": "function",
+              "function": { "name": "search", "arguments": r#"{"query":"ext4"}"# } },
+        ],
+    } }] })
+    .to_string();
+    let server = MockServer::new(vec![
+        Reply::ok(&two),
+        Reply::ok(&chat_text("A journal <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, ids) = dialogue_ready(&app);
+
+    let first = ask_q(&webview, FIRST_Q);
+    assert_eq!(first["kind"], json!("generated"), "{first}");
+    assert_eq!(first["citations"][0]["chunkId"], json!(ids[2]), "{first}");
+    server.request();
+    let last = server.request();
+    assert!(last.contains("ext4 journal filesystem"), "{last}");
+    assert!(!last.contains("\"tools\""), "{last}");
+}
+
 /// The first question's own search finds the wrong passages; the model asks
 /// for another, and the call after it is offered no tool and no hint. Before,
 /// that first call had no tool but a hint, and the model wrote the call out
