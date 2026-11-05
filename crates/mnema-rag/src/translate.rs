@@ -103,6 +103,7 @@ pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
         let key = term.to_lowercase();
         if term.is_empty()
             || term.chars().count() > max_chars
+            || mixes_scripts(&term)
             || terms.iter().any(|t| t.to_lowercase() == key)
         {
             continue;
@@ -113,6 +114,21 @@ pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
         }
     }
     terms
+}
+
+/// A word whose letters come from more than one script (`солpadein`): no
+/// document spells a word that way in any language, so it can only miss, and
+/// a reserved place spent on it is lost (E2B, owner's log 2026-11-05). Words
+/// are judged one at a time: «Solpadeine (Солпадеїн)» is two words, each fine.
+fn mixes_scripts(term: &str) -> bool {
+    term.split(|c: char| !c.is_alphabetic()).any(|word| {
+        let mut scripts = word
+            .chars()
+            .filter_map(|c| whatlang::detect_script(c.encode_utf8(&mut [0; 4])));
+        scripts
+            .next()
+            .is_some_and(|first| scripts.any(|s| s != first))
+    })
 }
 
 const QUOTES: &str = "\"'`«»“”„‘’";
@@ -212,6 +228,20 @@ mod tests {
         // A line that only looks like a marker is kept whole.
         assert_eq!(parse_terms("2024 report", 100), vec!["2024 report"]);
         assert_eq!(parse_terms(".NET", 100), vec![".NET"]);
+    }
+
+    #[test]
+    fn a_word_mixing_scripts_is_not_a_term_but_a_term_of_two_scripts_is() {
+        // E2B's reply for «солпадеїн», verbatim from the owner's ask log.
+        assert_eq!(
+            parse_terms("солpadein\npainkiller\nanalgesic", 100),
+            vec!["painkiller", "analgesic"]
+        );
+        // Two words, each in one script; and accented Latin is still Latin.
+        assert_eq!(
+            parse_terms("Solpadeine (Солпадеїн)\ncafé", 100),
+            vec!["Solpadeine (Солпадеїн)", "café"]
+        );
     }
 
     #[test]

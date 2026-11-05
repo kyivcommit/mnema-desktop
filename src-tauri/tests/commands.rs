@@ -13641,6 +13641,54 @@ fn a_first_question_may_search_once_more_and_then_must_answer() {
     assert_eq!(next["citations"][0]["chunkId"], json!(ids[2]), "{next}");
 }
 
+/// A model's search whose own words already find something is not
+/// translated: the second chat call would only repeat what was found (the
+/// owner's log, DeepSeek searching «Solpadeine» itself).
+#[test]
+fn a_models_search_that_finds_by_its_own_words_is_not_translated() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("quantum entanglement")),
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_search(r#"{"query":"Solpadeine"}"#, Value::Null)),
+        // No translation call here: the next reply is the answer.
+        Reply::ok(&chat_text("Знеболювальний препарат <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _ids) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+    let article = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"d".repeat(64),
+                "Solpadeine is a brand-name analgesic drug, a painkiller containing \
+                 paracetamol, caffeine and codeine. It is taken for headache, toothache \
+                 and period pain, and should not be combined with other medicines that \
+                 also contain paracetamol.",
+            ))
+        })
+        .unwrap();
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "а що там про препарат?");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(
+        second["citations"][0]["chunkId"],
+        json!(article),
+        "{second}"
+    );
+    for _ in 0..3 {
+        server.request();
+    }
+    let last = server.request();
+    assert!(
+        !last.contains("search terms"),
+        "the fourth request is the answer: {last}"
+    );
+    assert!(server.request_if_any().is_none(), "no further request");
+}
+
 /// D192: the model's own search in mixed words («Solpadeine» with Ukrainian
 /// around it, D191) matches nothing by every word; its translated term does,
 /// and the article takes a reserved place among what the model is shown.
@@ -13673,6 +13721,19 @@ fn a_models_search_in_mixed_words_is_rescued_by_its_translated_term() {
                  paracetamol, caffeine and codeine. It is taken for headache, toothache \
                  and period pain, and should not be combined with other medicines that \
                  also contain paracetamol.",
+            ))
+        })
+        .unwrap();
+    // The Ukrainian words are known to the index, as in a real bilingual
+    // library: the text arm then needs them all and the mixed query matches
+    // nothing (D108). Without this document they are unknown, dropped, and
+    // «Solpadeine» alone would match.
+    state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"e".repeat(64),
+                "препарат знеболювальний",
             ))
         })
         .unwrap();

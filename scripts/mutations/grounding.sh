@@ -88,3 +88,15 @@ case_ "terms: the head of a cut is never touched" \
   's~let keep = limit.saturating_sub\(reserved\);~let keep = limit; // mutant~' \
   'let keep = limit; // mutant' \
   mnema-search 'the_head_is_never_touched_and_the_tail_takes_only_new_chunks' --test fuse
+
+case_ "terms: a word mixing scripts is not a term" \
+  crates/mnema-rag/src/translate.rs \
+  's~            \|\| mixes_scripts\(&term\)~            || false /* mutant */~' \
+  '|| false /* mutant */' \
+  mnema-rag 'translate::tests::a_word_mixing_scripts_is_not_a_term_but_a_term_of_two_scripts_is' --lib
+
+case_ "terms: a model's search that found by its own words is not translated" \
+  src-tauri/src/bridge.rs \
+  's~let found = if arms.text && unreachable.is_none\(\) && missed \{~let found = if arms.text \&\& unreachable.is_none() { // mutant~' \
+  'let found = if arms.text && unreachable.is_none() { // mutant' \
+  mnema-desktop 'a_models_search_that_finds_by_its_own_words_is_not_translated' --test commands

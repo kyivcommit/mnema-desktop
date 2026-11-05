@@ -2214,7 +2214,11 @@ fn answer_with_searches(
             // The model's own query in other words — DeepSeek wrote
             // «Solpadeine» with Ukrainian words around it, which the text arm
             // cannot match (D191) — gets the same last places (D192).
-            let found = if arms.text && unreachable.is_none() {
+            // Only when its own words matched nothing: a model that already
+            // searched «Solpadeine» found the article, and translating it
+            // again cost a second chat call for nothing (owner's log).
+            let missed = matches!(text, TextArmReport::Answered { matched: 0 });
+            let found = if arms.text && unreachable.is_none() && missed {
                 with_term_hits(state, found, &terms_of(query))
             } else {
                 found
