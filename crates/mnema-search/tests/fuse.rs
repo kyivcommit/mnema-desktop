@@ -170,3 +170,31 @@ fn a_chunk_in_several_lists_rises_above_one_in_a_single_list() {
     assert_eq!(fused[0], 7, "{fused:?}");
     assert_eq!(fused.len(), 4);
 }
+
+#[test]
+fn the_head_is_never_touched_and_the_tail_takes_only_new_chunks() {
+    use mnema_search::reserve_tail;
+    let own = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    // 3 is already in the cut, so it is not taken twice; 20 and 21 are new.
+    assert_eq!(
+        reserve_tail(&own, &[3, 20, 21, 22], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 21]
+    );
+    // 7 is own's, inside the cut: it keeps its own place rather than taking
+    // a reserved one, and 20 gets the reserved place.
+    assert_eq!(
+        reserve_tail(&own, &[7, 20], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 7]
+    );
+    // No extra: own as it was, cut.
+    assert_eq!(reserve_tail(&own, &[], 8, 2), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    // One new extra: one reserved place, the other goes back to own.
+    assert_eq!(
+        reserve_tail(&own, &[20], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 7]
+    );
+    // A short own list: extras fill in, nothing is invented.
+    assert_eq!(reserve_tail(&[1], &[20, 21, 22], 8, 2), vec![1, 20, 21]);
+    // An own list that found nothing: the extras are the answer.
+    assert_eq!(reserve_tail(&[], &[20, 21], 8, 2), vec![20, 21]);
+}
