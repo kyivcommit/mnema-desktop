@@ -692,7 +692,6 @@ impl AppState {
     /// function that can break it: **a fourth way out of this function owes
     /// that classification a decision.** Left unmade, a new failure is drawn to
     /// the user as a defect report whatever it actually is.
-
     pub fn with_index<T>(
         &self,
         f: impl FnOnce(&Db) -> Result<T, mnema_index::Error>,

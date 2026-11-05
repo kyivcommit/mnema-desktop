@@ -748,21 +748,6 @@ impl Db {
             .query_row("SELECT coalesce(max(id), 0) FROM chunk", [], |r| r.get(0))?)
     }
 
-    /// How many chunks the index holds at all — the denominator the settings
-    /// screen shows [`Db::embedded_chunk_count`] against.
-    ///
-    /// ⚠️ **The two are not counted over the same population, and a caller
-    /// rendering the pair has to allow the numerator above the
-    /// denominator rather than clamp it away.** A `vec_emb_<id>` row takes
-    /// no foreign key, so nothing forces it to go when its chunk does.
-    /// [`Db::clear_document_content`] (D88) and [`Db::delete_document`]
-    /// both sweep a document's vectors before its rows go, closing every
-    /// *product* path to that split — pinned by
-    /// `delete_document_sweeps_its_own_vectors`. What is left is
-    /// [`Db::insert_vector`]/[`Db::upsert_vector`] writing a `chunk_id` no
-    /// `chunk` row backs: still public, still unchecked, held by a test
-    /// (`every_vector_names_an_eligible_chunk`) and not by a type.
-
     /// Up to `n` chunk texts spread across the searchable index, for telling
     /// which languages the library is written in. Spread by id rather than
     /// the first `n`: a library is scanned document by document, and the
@@ -781,6 +766,20 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// How many chunks the index holds at all — the denominator the settings
+    /// screen shows [`Db::embedded_chunk_count`] against.
+    ///
+    /// ⚠️ **The two are not counted over the same population, and a caller
+    /// rendering the pair has to allow the numerator above the
+    /// denominator rather than clamp it away.** A `vec_emb_<id>` row takes
+    /// no foreign key, so nothing forces it to go when its chunk does.
+    /// [`Db::clear_document_content`] (D88) and [`Db::delete_document`]
+    /// both sweep a document's vectors before its rows go, closing every
+    /// *product* path to that split — pinned by
+    /// `delete_document_sweeps_its_own_vectors`. What is left is
+    /// [`Db::insert_vector`]/[`Db::upsert_vector`] writing a `chunk_id` no
+    /// `chunk` row backs: still public, still unchecked, held by a test
+    /// (`every_vector_names_an_eligible_chunk`) and not by a type.
     pub fn chunk_count(&self) -> Result<i64, Error> {
         Ok(self
             .conn()
