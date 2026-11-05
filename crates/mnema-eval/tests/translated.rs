@@ -82,3 +82,33 @@ fn a_term_that_finds_the_gold_chunk_lifts_it() {
         assert_eq!(with[0].rank, Some(1), "{merge:?}");
     }
 }
+
+#[test]
+fn under_lexical_terms_a_terms_content_search_is_not_asked() {
+    let indexed = IndexedCorpus::build(&corpus(), support::worker()).unwrap();
+    let gold = run_row(
+        &indexed,
+        &questions("договір"),
+        QueryRule::AllTerms,
+        FusionRule::Rrf,
+        &DenseAnswers::empty(),
+    )
+    .unwrap()[0]
+        .gold
+        .clone();
+    // The term's words match nothing; only its canned content list holds the
+    // gold chunk.
+    let t = Translated::canned(BTreeMap::from([(
+        "q-1".to_string(),
+        vec![Term {
+            text: "nothing".to_string(),
+            content: gold,
+        }],
+    )]));
+    let qs = questions("contract copies");
+    let dense = DenseAnswers::empty();
+    let both = run_translated(&indexed, &qs, &dense, &t, Merge::OriginalHalf).unwrap();
+    assert_eq!(both[0].rank, Some(1));
+    let lexical = run_translated(&indexed, &qs, &dense, &t, Merge::LexicalTerms).unwrap();
+    assert_eq!(lexical[0].rank, None);
+}

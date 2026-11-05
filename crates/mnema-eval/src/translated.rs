@@ -29,15 +29,21 @@ pub enum Merge {
     /// The question's own search against all its terms together, half and
     /// half: three terms cannot outvote the question's own words.
     OriginalHalf,
+    /// As `OriginalHalf`, but each term is searched by the text arm alone:
+    /// the question's own content search already carries its meaning, and a
+    /// term's content search adds another thirty candidates of noise that
+    /// RRF sums across lists (D191's lesson, spec §5.1).
+    LexicalTerms,
 }
 
 impl Merge {
-    pub const ALL: [Merge; 2] = [Merge::Equal, Merge::OriginalHalf];
+    pub const ALL: [Merge; 3] = [Merge::Equal, Merge::OriginalHalf, Merge::LexicalTerms];
 
     pub fn label(self) -> &'static str {
         match self {
             Merge::Equal => "кожен пошук нарівно",
             Merge::OriginalHalf => "питання проти термінів 1:1",
+            Merge::LexicalTerms => "терміни лише текстом, 1:1",
         }
     }
 }
@@ -156,7 +162,12 @@ pub fn run_translated(
         let own = two_arms(&q.text, dense.of(&q.id))?;
         let mut terms: Vec<Vec<i64>> = Vec::new();
         for term in translated.of(&q.id) {
-            terms.push(two_arms(&term.text, &term.content)?);
+            terms.push(match merge {
+                Merge::LexicalTerms => {
+                    db.search_lexical_with(&term.text, QueryRule::AllTerms, CANDIDATES)?
+                }
+                Merge::Equal | Merge::OriginalHalf => two_arms(&term.text, &term.content)?,
+            });
         }
         Ok(merged(merge, own, &terms, SEARCH_LIMIT as usize))
     })
@@ -172,7 +183,7 @@ fn merged(merge: Merge, own: Vec<i64>, terms: &[Vec<i64>], limit: usize) -> Vec<
             all.extend(terms.iter().map(Vec::as_slice));
             rrf_lists(&all)
         }
-        Merge::OriginalHalf => {
+        Merge::OriginalHalf | Merge::LexicalTerms => {
             let refs: Vec<&[i64]> = terms.iter().map(Vec::as_slice).collect();
             fuse(FusionRule::Rrf, &own, &rrf_lists(&refs), usize::MAX)
         }
