@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod agent_clients;
+pub mod ask_log;
 pub mod bridge;
 pub mod dialogue;
 pub mod embed_job;

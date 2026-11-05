@@ -2014,6 +2014,53 @@ fn a_name_in_another_script_is_found_through_its_translated_term() {
         asked.contains("search terms") && asked.contains("English"),
         "the second request is the translation, naming the library's language: {asked}"
     );
+
+    // The ask log has the turn step by step, under one turn id (spec
+    // 2026-11-05-ask-event-log).
+    let logs = state.data_dir().join("logs");
+    let file = std::fs::read_dir(&logs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let events: Vec<Value> = std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<String> = events
+        .iter()
+        .map(|e| {
+            let by = e["by"]
+                .as_str()
+                .map(|b| format!("({b})"))
+                .unwrap_or_default();
+            format!("{}{by}", e["event"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "question",
+            "search(app)",
+            "translation",
+            "search(term)",
+            "model_call",
+            "answer"
+        ],
+        "{events:?}"
+    );
+    assert!(
+        events.iter().all(|e| e["turn"] == events[0]["turn"]),
+        "{events:?}"
+    );
+    assert_eq!(events[2]["terms"], json!(["Solpadeine"]), "{events:?}");
+    assert_eq!(events[5]["cited"], json!([chunk]), "{events:?}");
+    assert!(
+        !events.iter().any(|e| e.to_string().contains("paracetamol")),
+        "no passage text is logged: {events:?}"
+    );
 }
 
 /// The anchor→citation mapping, and the off-by-one silent lie it exists to

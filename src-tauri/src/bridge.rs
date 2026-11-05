@@ -1576,8 +1576,16 @@ const MAX_TOOL_SEARCHES: usize = 2;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskReply, Error> {
+    let _turn = crate::ask_log::begin(state.data_dir());
     let mut taken = None;
-    let answer = answer_question(&state, &query, &mut taken)?;
+    let answer = match answer_question(&state, &query, &mut taken) {
+        Ok(answer) => answer,
+        Err(e) => {
+            crate::ask_log::event("error", serde_json::json!({ "error": e.to_string() }));
+            return Err(e);
+        }
+    };
+    log_answer(&answer);
     let history_id = record_answer(&state, &query, &answer, taken);
     Ok(AskReply { answer, history_id })
 }
@@ -1626,6 +1634,16 @@ fn answer_question(
     // and with the switch off; either way each question stands alone, and a
     // session left from before is dropped.
     let dialogue = dialogue_enabled(state, roles.chat);
+    crate::ask_log::event(
+        "question",
+        serde_json::json!({
+            "query": query,
+            "conversation": dialogue,
+            "chat": format!("{:?}", roles.chat),
+            "chatModel": state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL)).ok().flatten(),
+            "arms": { "text": arms.text, "content": arms.content },
+        }),
+    );
     if !dialogue {
         state.dialogue.clear();
     }
@@ -1650,6 +1668,7 @@ fn answer_question(
     }
     let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
+    log_search("app", query, &hits, &text, &content);
 
     // Before readiness: "search is off for every folder" is true whether or
     // not a chat model is usable, and the citations-only "no passages matched"
@@ -1782,6 +1801,7 @@ fn answer_question(
             taken,
         );
     }
+    let started = std::time::Instant::now();
     let generated = mnema_rag::answer(
         &endpoint.base,
         &endpoint.token,
@@ -1790,6 +1810,16 @@ fn answer_question(
         &passages,
         state.voice_as(chat, query),
         chat.chat_timeout(),
+    );
+    log_model_call(
+        false,
+        &generated
+            .as_ref()
+            .map(|a| {
+                mnema_provider::Reply::Text(a.as_ref().map(|a| a.text.clone()).unwrap_or_default())
+            })
+            .map_err(ToString::to_string),
+        started.elapsed(),
     );
     let generated = match generated {
         Ok(generated) => generated,
@@ -1953,6 +1983,60 @@ struct TurnSources {
     found: Option<Vec<Hit>>,
 }
 
+/// One search of the turn in the ask log: who made it, and what came back by
+/// chunk id, path and place — not the passages' text.
+fn log_search(
+    by: &str,
+    query: &str,
+    hits: &[Hit],
+    text: &TextArmReport,
+    content: &ContentArmReport,
+) {
+    let hits: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| serde_json::json!([h.chunk_id, h.relative_path, h.coordinate]))
+        .collect();
+    crate::ask_log::event(
+        "search",
+        serde_json::json!({ "by": by, "query": query, "text": text, "content": content, "hits": hits }),
+    );
+}
+
+/// One model call in the ask log: whether a tool was offered, what came back
+/// (its raw text cut to `RAW_LIMIT`), and how long it took.
+fn log_model_call<E: std::fmt::Display>(
+    tools: bool,
+    reply: &Result<mnema_provider::Reply, E>,
+    took: std::time::Duration,
+) {
+    let (kind, raw) = match reply {
+        Ok(mnema_provider::Reply::Text(t)) => ("text", serde_json::json!(crate::ask_log::raw(t))),
+        Ok(mnema_provider::Reply::Search(q)) => ("search", serde_json::json!(q)),
+        Err(e) => ("error", serde_json::json!(e.to_string())),
+    };
+    crate::ask_log::event(
+        "model_call",
+        serde_json::json!({ "tools": tools, "reply": kind, "raw": raw, "ms": took.as_millis() }),
+    );
+}
+
+/// The turn's answer in the ask log: its kind and reason, the grounding mark,
+/// and the cited chunks — not the text, which the history row already keeps.
+fn log_answer(answer: &AskAnswer) {
+    let v = serde_json::to_value(answer).unwrap_or_default();
+    let cited: Vec<serde_json::Value> = v["citations"]
+        .as_array()
+        .map(|c| c.iter().map(|c| c["chunkId"].clone()).collect())
+        .unwrap_or_default();
+    crate::ask_log::event(
+        "answer",
+        serde_json::json!({
+            "kind": v["kind"], "why": v["why"], "reason": v["reason"],
+            "grounding": v["grounding"], "via": v["via"], "cited": cited,
+        }),
+    );
+}
+
 /// How long the translation call may take: a few words back, so a reply
 /// slower than this is a provider in trouble, and the question is searched
 /// by its own words instead (D192).
@@ -1972,20 +2056,47 @@ fn name_terms(
     model: &str,
 ) -> Vec<String> {
     let languages = state.library_languages();
+    let langs: Vec<&str> = languages.iter().map(|l| l.eng_name()).collect();
     if !mnema_rag::needs_translation(query, &languages) {
+        let why = if languages.is_empty() {
+            "noLanguages"
+        } else {
+            "sameLanguage"
+        };
+        crate::ask_log::event(
+            "translation",
+            serde_json::json!({ "query": query, "langs": langs, "skipped": why }),
+        );
         return Vec::new();
     }
     let messages = mnema_rag::translation_messages(query, &languages);
-    match mnema_provider::complete_within(
+    let started = std::time::Instant::now();
+    let reply = mnema_provider::complete_within(
         &endpoint.base,
         &endpoint.token,
         model,
         &messages,
         TERMS_TIMEOUT,
-    ) {
-        Ok(raw) => mnema_rag::parse_terms(&raw, MAX_ASK_QUERY),
+    );
+    let ms = started.elapsed().as_millis();
+    match reply {
+        Ok(raw) => {
+            let terms = mnema_rag::parse_terms(&raw, MAX_ASK_QUERY);
+            crate::ask_log::event(
+                "translation",
+                serde_json::json!({
+                    "query": query, "langs": langs, "terms": terms,
+                    "raw": crate::ask_log::raw(&raw), "ms": ms,
+                }),
+            );
+            terms
+        }
         Err(e) => {
             eprintln!("mnema: the question was not translated: {e}");
+            crate::ask_log::event(
+                "translation",
+                serde_json::json!({ "query": query, "langs": langs, "failed": e.to_string(), "ms": ms }),
+            );
             Vec::new()
         }
     }
@@ -2004,7 +2115,8 @@ fn with_term_hits(state: &AppState, hits: Vec<Hit>, terms: &[String]) -> Vec<Hit
     let mut lists: Vec<Vec<i64>> = Vec::new();
     for term in terms {
         match retrieve(state, term, text_only, ASK_TOP_K, None) {
-            Ok((term_hits, ..)) => {
+            Ok((term_hits, text, content, _)) => {
+                log_search("term", term, &term_hits, &text, &content);
                 lists.push(term_hits.iter().map(|h| h.chunk_id).collect());
                 found.extend(term_hits);
             }
@@ -2065,6 +2177,12 @@ fn answer_with_searches(
         mut found,
     } = sources;
     let mut misses: Vec<String> = Vec::new();
+    let chat = |messages: &[mnema_provider::Message], offer_search: bool| {
+        let started = std::time::Instant::now();
+        let reply = chat(messages, offer_search);
+        log_model_call(offer_search, &reply, started.elapsed());
+        reply
+    };
     // No caller comes here with every search made.
     let mut reply = match chat(&messages, true) {
         Ok(reply) => reply,
@@ -2092,6 +2210,7 @@ fn answer_with_searches(
         let (new_hits, new_text, new_content, unreachable) = if usable {
             let (found, text, content, unreachable) =
                 retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
+            log_search("model", query, &found, &text, &content);
             // The model's own query in other words — DeepSeek wrote
             // «Solpadeine» with Ukrainian words around it, which the text arm
             // cannot match (D191) — gets the same last places (D192).
