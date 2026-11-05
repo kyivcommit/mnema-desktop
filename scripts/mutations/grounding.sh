@@ -112,3 +112,15 @@ case_ "grounding: a sentence of short words only is not checked" \
   's~        if ours.is_empty\(\) \{~        if false { // mutant: short sentences checked~' \
   'if false { // mutant: short sentences checked' \
   mnema-rag 'grounding::tests::a_sentence_of_short_words_only_is_not_checked' --lib
+
+case_ "terms: a term that is the question itself is dropped" \
+  crates/mnema-rag/src/translate.rs \
+  's~                \|\| key == asked~                || false /* mutant: question kept */~' \
+  '|| false /* mutant: question kept */' \
+  mnema-rag 'translate::tests::a_term_that_is_the_question_itself_is_dropped' --lib
+
+case_ "terms: the prompt asks for a term in every language" \
+  crates/mnema-rag/src/translate.rs \
+  's~a term in every language, even~a term, even~' \
+  'a term, even' \
+  mnema-rag 'translate::tests::the_prompt_asks_for_a_term_in_every_language' --lib

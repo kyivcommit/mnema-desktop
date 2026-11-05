@@ -429,7 +429,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader cannot see the contradiction and correct for it.
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
-    grounding_no_citations: 'Відповідь не посилається на жоден знайдений уривок — це не знахідка в документах.',
+    grounding_no_citations: 'Відповідь не посилається на жоден знайдений уривок — звір її з документами.',
     grounding_unsupported: 'Деякі цитати не підтверджують речення, біля яких стоять.',
     grounding_citation_unsupported: 'не підтверджує речення',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.', tree_add_folder: 'Додати теку',
@@ -1363,7 +1363,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
-    grounding_no_citations: 'This answer cites none of the passages found — it is not something found in your documents.',
+    grounding_no_citations: 'This answer cites none of the passages found — check it against your documents.',
     grounding_unsupported: 'Some citations do not support the sentences they stand beside.',
     grounding_citation_unsupported: 'does not support its sentence',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.', tree_add_folder: 'Add folder',

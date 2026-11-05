@@ -69,8 +69,9 @@ pub fn translation_messages(question: &str, languages: &[whatlang::Lang]) -> Vec
     let names: Vec<&str> = languages.iter().map(|l| l.eng_name()).collect();
     let system = format!(
         "You turn a question into search terms for a document library. \
-         The documents are written in: {}. Reply with 1 to {MAX_TERMS} short search terms, \
-         one per line, each in a language of the documents, and nothing else. \
+         The documents are written in: {}. Reply with the term in each of these \
+         languages, one per line, and nothing else — a term in every language, even \
+         when the question is already in one of them. \
          A term is the key word or name the question is about, not a sentence. \
          Spell names of people, products and places as a document in that language would.",
         names.join(", ")
@@ -89,9 +90,15 @@ pub fn translation_messages(question: &str, languages: &[whatlang::Lang]) -> Vec
 
 /// The terms in a translator's reply: one per line, list markers and quotes
 /// removed, a heading line (ending in a colon) dropped, a line in two scripts
-/// split into one term per script, blanks, repeats and terms longer than
-/// `max_chars` refused, at most [`MAX_TERMS`].
-pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
+/// split into one term per script, blanks, repeats, terms longer than
+/// `max_chars` and the `question` itself refused, at most [`MAX_TERMS`]. The
+/// question's own words were already searched: the same words again would
+/// spend a reserved place on hits the model already has (luna, owner's ask
+/// log 2026-11-05).
+pub fn parse_terms(raw: &str, question: &str, max_chars: usize) -> Vec<String> {
+    let asked = question
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
     let mut terms: Vec<String> = Vec::new();
     for line in raw.lines() {
         let line = line.trim();
@@ -108,6 +115,7 @@ pub fn parse_terms(raw: &str, max_chars: usize) -> Vec<String> {
             let key = term.to_lowercase();
             if term.is_empty()
                 || term.chars().count() > max_chars
+                || key == asked
                 || terms.iter().any(|t| t.to_lowercase() == key)
             {
                 continue;
@@ -262,39 +270,71 @@ mod tests {
     fn terms_lose_markers_quotes_and_headings() {
         let raw = "Search terms:\n- «Solpadeine»\n2) \"paracetamol\"\n• codeine";
         assert_eq!(
-            parse_terms(raw, 100),
+            parse_terms(raw, "", 100),
             vec!["Solpadeine", "paracetamol", "codeine"]
         );
         // A line that only looks like a marker is kept whole.
-        assert_eq!(parse_terms("2024 report", 100), vec!["2024 report"]);
-        assert_eq!(parse_terms(".NET", 100), vec![".NET"]);
+        assert_eq!(parse_terms("2024 report", "", 100), vec!["2024 report"]);
+        assert_eq!(parse_terms(".NET", "", 100), vec![".NET"]);
     }
 
     #[test]
     fn a_word_mixing_scripts_is_not_a_term_and_a_line_of_two_scripts_is_split() {
         // E2B's reply for «солпадеїн», verbatim from the owner's ask log.
         assert_eq!(
-            parse_terms("солpadein\npainkiller\nanalgesic", 100),
+            parse_terms("солpadein\npainkiller\nanalgesic", "", 100),
             vec!["painkiller", "analgesic"]
         );
         // Two words, each in one script, become two terms: searched as one,
         // a library with both spellings in different chunks finds neither.
         // Accented Latin is still Latin, and one script stays one term.
         assert_eq!(
-            parse_terms("Solpadeine (Солпадеїн)\ncafé crème", 100),
+            parse_terms("Solpadeine (Солпадеїн)\ncafé crème", "", 100),
             vec!["Solpadeine", "Солпадеїн", "café crème"]
         );
         assert_eq!(
-            parse_terms("Solpadeine 500 мг таблетки", 100),
+            parse_terms("Solpadeine 500 мг таблетки", "", 100),
             vec!["Solpadeine 500", "мг таблетки"]
+        );
+    }
+
+    #[test]
+    fn a_term_that_is_the_question_itself_is_dropped() {
+        // luna's reply for «солпадеїн»: the same word back, which searches
+        // nothing the question did not.
+        assert_eq!(
+            parse_terms("Солпадеїн", "солпадеїн?", 100),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_terms("Солпадеїн\nSolpadeine", "солпадеїн", 100),
+            vec!["Solpadeine"]
+        );
+        // A term that only contains the question is a different search.
+        assert_eq!(
+            parse_terms("Солпадеїн таблетки", "солпадеїн", 100),
+            vec!["Солпадеїн таблетки"]
+        );
+    }
+
+    #[test]
+    fn the_prompt_asks_for_a_term_in_every_language() {
+        let m = translation_messages("солпадеїн", &[Lang::Eng, Lang::Ukr]);
+        assert!(
+            m[0].content.contains("a term in every language"),
+            "{}",
+            m[0].content
         );
     }
 
     #[test]
     fn terms_drop_blanks_repeats_and_overlong_and_stop_at_three() {
         let raw = "\n  \nSolpadeine\nsolpadeine \n- \nfour\nfive\nsix";
-        assert_eq!(parse_terms(raw, 100), vec!["Solpadeine", "four", "five"]);
-        assert_eq!(parse_terms("abcdef\nabc", 5), vec!["abc"]);
-        assert_eq!(parse_terms("abcde", 5), vec!["abcde"]);
+        assert_eq!(
+            parse_terms(raw, "", 100),
+            vec!["Solpadeine", "four", "five"]
+        );
+        assert_eq!(parse_terms("abcdef\nabc", "", 5), vec!["abc"]);
+        assert_eq!(parse_terms("abcde", "", 5), vec!["abcde"]);
     }
 }

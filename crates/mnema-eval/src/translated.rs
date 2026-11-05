@@ -111,7 +111,7 @@ impl Translated {
                 }
             };
             let mut terms = Vec::new();
-            for text in mnema_rag::parse_terms(&raw, MAX_TERM_CHARS) {
+            for text in mnema_rag::parse_terms(&raw, &q.text, MAX_TERM_CHARS) {
                 match mnema_search::content_arm(
                     indexed.db(),
                     Some(embed.clone()),

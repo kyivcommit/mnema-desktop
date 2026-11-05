@@ -2081,7 +2081,7 @@ fn name_terms(
     let ms = started.elapsed().as_millis();
     match reply {
         Ok(raw) => {
-            let terms = mnema_rag::parse_terms(&raw, MAX_ASK_QUERY);
+            let terms = mnema_rag::parse_terms(&raw, query, MAX_ASK_QUERY);
             crate::ask_log::event(
                 "translation",
                 serde_json::json!({
