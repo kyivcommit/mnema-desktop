@@ -1,7 +1,7 @@
 //! The chat messages of a multi-turn launcher conversation: earlier turns as
 //! plain user/assistant pairs, only the latest search's sources in context.
 
-use mnema_provider::{Message, MessageRole, ToolCall};
+use mnema_provider::{Message, MessageRole};
 
 use crate::anchors::strip_anchors;
 use crate::lang::Lang;
@@ -125,22 +125,49 @@ pub fn build_dialogue(
     out
 }
 
-/// Put the passages the model's `search` returned in front of the current
-/// question, the shape a search made before the call has. Not an assistant
-/// tool call plus a tool message: the answering call offers no `tools`, and
-/// with a tool exchange in its history DeepSeek asks to search again — Novita,
-/// Ionstream, Parasail, Together and AtlasCloud then hand back raw `<｜DSML｜`
-/// markup as the answer (measured 2026-11-05: 6/30 bad replies, 0/30 inline).
-pub fn with_search_result(messages: &mut [Message], call: &ToolCall, passages: &[Passage]) {
+/// Rewrite the current question (`asked`, as [`build_dialogue`] wrote it) with
+/// what the model's searches returned so far: the latest search that found
+/// passages, then one line per search that found none. The shape a search made
+/// before the call has, not an assistant tool call plus a tool message: with a
+/// tool exchange in a history sent without `tools`, DeepSeek asks to search
+/// again — Novita, Ionstream, Parasail, Together and AtlasCloud then hand back
+/// raw `<｜DSML｜` markup as the answer (measured 2026-11-05: 6/30 bad replies,
+/// 0/30 inline).
+pub fn with_search_result(
+    messages: &mut [Message],
+    asked: &str,
+    shown: &[Passage],
+    misses: &[String],
+) {
     let Some(current) = messages.last_mut() else {
         return;
     };
-    let found = if passages.is_empty() {
-        format!("No passages found for the search «{}».", call.query)
-    } else {
-        format!("Sources:\n\n{}", sources_block(passages))
-    };
-    current.content = format!("{found}\n\nQuestion: {}", current.content);
+    let mut found: Vec<String> = Vec::new();
+    if !shown.is_empty() {
+        found.push(format!("Sources:\n\n{}", sources_block(shown)));
+    }
+    found.extend(
+        misses
+            .iter()
+            .map(|q| format!("No passages found for the search «{q}».")),
+    );
+    current.content = format!("{}\n\nQuestion: {asked}", found.join("\n\n"));
+}
+
+/// Take the `search` hint out of the system prompt, for the call that is
+/// offered no tool: told it has one, the model writes the call out as text
+/// (`<tool_call>search{…}`, owner's launcher, 2026-11-05).
+pub fn drop_search_hint(messages: &mut [Message]) {
+    if let Some(system) = messages
+        .first_mut()
+        .filter(|m| m.role == MessageRole::System)
+    {
+        // The longer hint first: it begins with the shorter one.
+        system.content = system
+            .content
+            .replace(HINT_SEARCH_INSTEAD, "")
+            .replace(HINT, "");
+    }
 }
 
 #[cfg(test)]
@@ -284,13 +311,10 @@ mod tests {
 
     #[test]
     fn a_search_result_joins_the_question_without_a_tool_exchange() {
-        let call = ToolCall {
-            id: "c1".into(),
-            query: "sky".into(),
-        };
         let p = profile("m");
         let mut m = build_dialogue(&[], "Why?", None, &p, UK);
-        with_search_result(&mut m, &call, &ps("Blue."));
+        let asked = m.last().unwrap().content.clone();
+        with_search_result(&mut m, &asked, &ps("Blue."), &[]);
         let searched_first = build_dialogue(&[], "Why?", Some(&ps("Blue.")), &p, UK);
         assert_eq!(m.len(), searched_first.len());
         assert_eq!(
@@ -302,7 +326,7 @@ mod tests {
                 .all(|x| x.tool_calls.is_none() && x.tool_call_id.is_none())
         );
         let mut e = build_dialogue(&[], "Why?", None, &p, UK);
-        with_search_result(&mut e, &call, &[]);
+        with_search_result(&mut e, &asked, &[], &["sky".to_string()]);
         assert!(
             e.last()
                 .unwrap()
@@ -311,5 +335,36 @@ mod tests {
             "{}",
             e.last().unwrap().content
         );
+    }
+
+    #[test]
+    fn a_second_search_replaces_the_first_and_keeps_its_misses() {
+        let p = profile("m");
+        let mut m = build_dialogue(&[], "Why?", None, &p, UK);
+        let asked = m.last().unwrap().content.clone();
+        with_search_result(&mut m, &asked, &ps("Red."), &[]);
+        with_search_result(&mut m, &asked, &ps("Blue."), &["sky".to_string()]);
+        let last = &m.last().unwrap().content;
+        assert!(
+            last.starts_with(
+                "Sources:\n\n[1] (m.txt)\nBlue.\n\nNo passages found for the search «sky».\n\nQuestion: Why?\n\n"
+            ),
+            "{last}"
+        );
+        assert!(!last.contains("Red."), "{last}");
+        assert_eq!(last.matches("Question:").count(), 1, "{last}");
+    }
+
+    #[test]
+    fn the_search_hint_leaves_the_system_prompt_and_nothing_else() {
+        for model in ["m", LOCAL_E4B] {
+            let mut m = build_dialogue(&[], "Why?", None, &profile(model), UK);
+            let before = m[0].content.clone();
+            drop_search_hint(&mut m);
+            assert!(before.contains("You have a tool, search"), "{model}");
+            assert!(!m[0].content.contains("tool"), "{model}: {}", m[0].content);
+            assert!(before.starts_with(&m[0].content), "{model}");
+            assert!(!m[0].content.is_empty());
+        }
     }
 }

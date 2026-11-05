@@ -1516,6 +1516,11 @@ const ASK_TOP_K: i64 = 8;
 /// counts code points, and so does `query.chars().count()` below.
 const MAX_ASK_QUERY: usize = 2048;
 
+/// How many `search` calls one conversation turn may make (owner, 2026-11-05):
+/// a second one lets the model try other words; the call after the last search
+/// is offered no tool.
+const MAX_TOOL_SEARCHES: usize = 2;
+
 /// Answer a question over the index with cited sources (spec §4). Retrieval is
 /// the shared [`retrieve`]; generation runs iff [`ChatReadiness::Ready`] (the
 /// private gate, spec §7.2). Off the main thread for the reason [`search`]
@@ -1847,11 +1852,26 @@ fn follow_up(
     };
     let mut via = Via::Conversation;
     let mut found = None;
+    let asked = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut shown: Vec<mnema_rag::Passage> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+    let mut searches = 0;
     let mut reply = match chat(&messages, true) {
         Ok(reply) => reply,
         Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
     };
-    if let mnema_provider::Reply::Search(call) = &reply {
+    // A search that finds the wrong passages is often followed by one in other
+    // words ("солпадеїн" → "Solpadeine"); the last call offers no tool, so it
+    // must answer. Without the second search the model, still told it has a
+    // tool, wrote the call out as text (2026-11-05).
+    while let mnema_provider::Reply::Search(call) = &reply {
+        if searches == MAX_TOOL_SEARCHES {
+            break;
+        }
+        searches += 1;
         // The model's query is held to the limit a typed one is: a blank or
         // oversized one is a search that found nothing, and costs no embedding.
         let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
@@ -1869,17 +1889,23 @@ fn follow_up(
                 content,
             });
         }
-        let passages: Vec<mnema_rag::Passage> = new_hits.iter().map(passage_from_hit).collect();
-        mnema_rag::with_search_result(&mut messages, call, &passages);
         // An empty search leaves the earlier one the latest.
-        if !new_hits.is_empty() {
+        if new_hits.is_empty() {
+            misses.push(call.query.chars().take(MAX_ASK_QUERY).collect());
+        } else {
+            shown = new_hits.iter().map(passage_from_hit).collect();
             hits = new_hits.clone();
             text = new_text;
             content = new_content;
             via = Via::Search;
             found = Some(new_hits);
         }
-        reply = match chat(&messages, false) {
+        mnema_rag::with_search_result(&mut messages, &asked, &shown, &misses);
+        let more = searches < MAX_TOOL_SEARCHES;
+        if !more {
+            mnema_rag::drop_search_hint(&mut messages);
+        }
+        reply = match chat(&messages, more) {
             Ok(reply) => reply,
             Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
         };
