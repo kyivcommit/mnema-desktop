@@ -68,8 +68,15 @@ export type NoAnswer =
   | { kind: 'localLoading' }
   | { kind: 'noToolUse' };
 
+// Whether an answer's citations stand behind its text (`bridge.rs` `Grounding`).
+export type Grounding =
+  | { kind: 'unchecked' }
+  | { kind: 'supported' }
+  | { kind: 'noCitations' }
+  | { kind: 'unsupported'; anchors: number[] };
+
 export type AskAnswer =
-  | { kind: 'generated'; answer: string; citations: AskCitation[]; via: 'search' | 'conversation'; text: TextArmReport; content: ContentArmReport }
+  | { kind: 'generated'; answer: string; citations: AskCitation[]; via: 'search' | 'conversation'; grounding: Grounding; text: TextArmReport; content: ContentArmReport }
   | { kind: 'citationsOnly'; citations: Hit[]; why: NoAnswer; text: TextArmReport; content: ContentArmReport }
   | { kind: 'refused'; reason: Refusal; text: TextArmReport; content: ContentArmReport };
 

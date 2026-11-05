@@ -1377,6 +1377,31 @@ pub enum Via {
     Conversation,
 }
 
+/// [`mnema_rag::Grounding`] on the wire: the launcher marks an answer that
+/// cites nothing, and a citation whose sentence shares no word with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum Grounding {
+    #[default]
+    Unchecked,
+    Supported,
+    NoCitations,
+    Unsupported {
+        anchors: Vec<usize>,
+    },
+}
+
+impl From<mnema_rag::Grounding> for Grounding {
+    fn from(g: mnema_rag::Grounding) -> Self {
+        match g {
+            mnema_rag::Grounding::Unchecked => Grounding::Unchecked,
+            mnema_rag::Grounding::Supported => Grounding::Supported,
+            mnema_rag::Grounding::NoCitations => Grounding::NoCitations,
+            mnema_rag::Grounding::Unsupported { anchors } => Grounding::Unsupported { anchors },
+        }
+    }
+}
+
 /// One answer to one question, as the window draws it and as `query_history`
 /// stores it. Different states are different variants, never a `null` (the
 /// shape [`TextArmReport`]/[`ContentArmReport`] share). Every variant carries
@@ -1392,6 +1417,12 @@ pub enum AskAnswer {
         citations: Vec<AskCitation>,
         #[serde(default)]
         via: Via,
+        /// Whether the citations stand behind the text (spec
+        /// 2026-11-05-model-independent-search §4). `Unchecked` for rows
+        /// stored before the check existed: nobody checked them, and that is
+        /// the honest value.
+        #[serde(default)]
+        grounding: Grounding,
         text: TextArmReport,
         content: ContentArmReport,
     },
@@ -2086,6 +2117,10 @@ fn generated_answer(
     text: TextArmReport,
     content: ContentArmReport,
 ) -> AskAnswer {
+    let grounding = mnema_rag::grounding(&a.text, |n| {
+        hits.get(n.wrapping_sub(1)).map(|h| h.text.as_str())
+    })
+    .into();
     let citations = a
         .cited
         .iter()
@@ -2109,6 +2144,7 @@ fn generated_answer(
         answer: a.text,
         citations,
         via,
+        grounding,
         text,
         content,
     }
@@ -2217,6 +2253,21 @@ enum Stored {
     Single(AskAnswer),
 }
 
+/// The grounding verdict with its anchors renumbered as the answer's are
+/// (`order[i]` becomes `i + 1`): a mark left on the old number would sit on
+/// another citation.
+fn renumber_grounding(grounding: &Grounding, order: &[usize]) -> Grounding {
+    match grounding {
+        Grounding::Unsupported { anchors } => Grounding::Unsupported {
+            anchors: anchors
+                .iter()
+                .filter_map(|a| order.iter().position(|o| o == a).map(|p| p + 1))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// The session an opened conversation continues from. Only the last generated
 /// turn carries sources — the passages it cited, renumbered 1..n with its
 /// answer — which are all a later turn can cite.
@@ -2234,6 +2285,7 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
                         answer,
                         citations,
                         via,
+                        grounding,
                         text,
                         content,
                     },
@@ -2283,6 +2335,7 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
                             answer: mnema_rag::renumber_anchors(answer, &order),
                             citations: renumbered,
                             via: *via,
+                            grounding: renumber_grounding(grounding, &order),
                             text: text.clone(),
                             content: content.clone(),
                         },
@@ -2799,6 +2852,7 @@ mod tests {
                 answer: "a".into(),
                 citations: vec![],
                 via,
+                grounding: Grounding::Unchecked,
                 text: TextArmReport::Off,
                 content: ContentArmReport::Off,
             })
@@ -2812,6 +2866,133 @@ mod tests {
             AskAnswer::Generated { via, .. } => assert_eq!(via, Via::Search),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn grounding_has_wire_names_and_an_old_record_was_never_checked() {
+        use serde_json::json;
+        let generated = |grounding: Grounding| {
+            serde_json::to_value(AskAnswer::Generated {
+                answer: "a".into(),
+                citations: vec![],
+                via: Via::Search,
+                grounding,
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            generated(Grounding::NoCitations)["grounding"],
+            json!({ "kind": "noCitations" })
+        );
+        assert_eq!(
+            generated(Grounding::Unsupported { anchors: vec![2] })["grounding"],
+            json!({ "kind": "unsupported", "anchors": [2] })
+        );
+        let mut old = generated(Grounding::Supported);
+        assert_eq!(old["grounding"], json!({ "kind": "supported" }));
+        old.as_object_mut().unwrap().remove("grounding");
+        match serde_json::from_value::<AskAnswer>(old).unwrap() {
+            AskAnswer::Generated { grounding, .. } => assert_eq!(grounding, Grounding::Unchecked),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unsupported_anchor_is_renumbered_with_the_answer_or_dropped() {
+        // Answer cited 3 and 7; renumbered they are 1 and 2. A mark on 7 must
+        // move to 2, and a mark on an anchor no longer cited must go.
+        let g = Grounding::Unsupported {
+            anchors: vec![7, 5],
+        };
+        assert_eq!(
+            renumber_grounding(&g, &[3, 7]),
+            Grounding::Unsupported { anchors: vec![2] }
+        );
+        assert_eq!(
+            renumber_grounding(&Grounding::Supported, &[3]),
+            Grounding::Supported
+        );
+    }
+
+    #[test]
+    fn an_opened_conversation_keeps_the_mark_on_the_citation_it_was_on() {
+        let citation = |anchor: usize| AskCitation {
+            anchor,
+            chunk_id: anchor as i64,
+            text: format!("passage {anchor}"),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::None,
+            document_id: "d".into(),
+            ord: 0,
+            root_id: None,
+        };
+        let turns = [StoredTurn {
+            query: "q".into(),
+            answer: AskAnswer::Generated {
+                answer: "x <c>3</c> y <c>7</c>".into(),
+                citations: vec![citation(3), citation(7)],
+                via: Via::Search,
+                grounding: Grounding::Unsupported { anchors: vec![7] },
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            },
+        }];
+        match &session_from(&turns)[0].answer {
+            AskAnswer::Generated {
+                answer, grounding, ..
+            } => {
+                assert_eq!(answer, "x <c>1</c> y <c>2</c>");
+                assert_eq!(grounding, &Grounding::Unsupported { anchors: vec![2] });
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_generated_answer_carries_the_check_of_its_citations() {
+        let hit = |text: &str| Hit {
+            chunk_id: 1,
+            text: text.into(),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::None,
+            document_id: "d".into(),
+            ord: 0,
+            root_id: None,
+        };
+        let hits = [hit(
+            "The readiness probe waits ninety seconds before reporting healthy.",
+        )];
+        let answer = |text: &str, cited: Vec<usize>| match generated_answer(
+            mnema_rag::Answer {
+                text: text.into(),
+                cited,
+            },
+            &hits,
+            Via::Search,
+            TextArmReport::Off,
+            ContentArmReport::Off,
+        ) {
+            AskAnswer::Generated { grounding, .. } => grounding,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            answer(
+                "The probe waits ninety seconds before reporting a node healthy.",
+                vec![]
+            ),
+            Grounding::NoCitations
+        );
+        assert_eq!(
+            answer(
+                "The readiness probe waits ninety seconds before reporting <c>1</c>.",
+                vec![1]
+            ),
+            Grounding::Supported
+        );
     }
 
     #[test]
@@ -2979,6 +3160,7 @@ mod tests {
             answer: "a".into(),
             citations: vec![],
             via: Via::Search,
+            grounding: Grounding::Unchecked,
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };

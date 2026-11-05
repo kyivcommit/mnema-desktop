@@ -20,6 +20,19 @@
   const answerHeading = $derived.by(() => { void $locale; return t('answer_heading'); });
   const citationsHeading = $derived.by(() => { void $locale; return t('citations_heading'); });
 
+  // The application's own check of the citations (spec 2026-11-05 §4.2, owner:
+  // mark, never replace). `unchecked` and `supported` draw nothing.
+  const unsupported = $derived(
+    new Set(answer.grounding.kind === 'unsupported' ? answer.grounding.anchors : []),
+  );
+  const groundingNote = $derived.by(() => {
+    void $locale;
+    if (answer.grounding.kind === 'noCitations') return t('grounding_no_citations');
+    if (answer.grounding.kind === 'unsupported') return t('grounding_unsupported');
+    return null;
+  });
+  const citationUnsupported = $derived.by(() => { void $locale; return t('grounding_citation_unsupported'); });
+
   // `known` must come from the citations' own anchor values (Decision 5) —
   // an anchor number that has no matching citation stays literal text.
 
@@ -52,6 +65,7 @@
   <div class="umsg" data-testid="query-echo">{query}</div>
 
   <h3 class="sr-only">{answerHeading}</h3>
+  {#if groundingNote}<p class="grounding-note" role="note" data-testid="grounding-note">{groundingNote}</p>{/if}
   <div class="answer-body" data-testid="answer-body">
     {#each blocks as block}
       {#if block.kind === 'code'}<pre>{@render anchors(block.text)}</pre>
@@ -94,6 +108,7 @@
             <span class="tag" data-testid="citation-anchor">[{citation.anchor}]</span>
             <span class="q" data-testid="citation-text">{citation.text}</span>
             <span class="path" data-testid="citation-label">{label}</span>
+            {#if unsupported.has(citation.anchor)}<span class="unsupported" data-testid="citation-unsupported">{citationUnsupported}</span>{/if}
           </button>
         </li>
       {/each}
