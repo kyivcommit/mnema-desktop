@@ -330,9 +330,9 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
   background: var(--accent-soft); color: var(--accent); font-size: 15px;
 }
 .composer-send:disabled { background: transparent; color: var(--ink-soft); }
-.composer :is(.guard, .refusal) { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.composer .guard { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
 .composer .guard { padding: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
-.composer .refusal { color: var(--ink-soft); }
+.transcript .refusal { margin: 13px 0 0; overflow-wrap: anywhere; color: var(--ink-soft); }
 /* New conversation: the sidebar has the same pencil, so the header's shows only
    while the sidebar is shut (owner, 2026-10-22). */
 main.shell[data-left="true"] .new-chat { display: none; }

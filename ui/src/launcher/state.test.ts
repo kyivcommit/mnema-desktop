@@ -31,8 +31,8 @@ test('the length limit counts an astral character as one code point, not two UTF
 test('AskAnswer maps to the right launcher state', () => {
   expect(stateFromAnswer('q', generated)).toMatchObject({ kind: 'generated' });
   expect(stateFromAnswer('q', citationsOnly)).toMatchObject({ kind: 'citationsOnly' });
-  expect(stateFromAnswer('q', refusedNoCandidates)).toMatchObject({ kind: 'refused', reason: { kind: 'noCandidates' } });
-  expect(stateFromAnswer('q', refusedEmptyCompletion)).toMatchObject({ kind: 'refused', reason: { kind: 'emptyCompletion' } });
+  expect(stateFromAnswer('q', refusedNoCandidates)).toMatchObject({ kind: 'refused', query: 'q', reason: { kind: 'noCandidates' } });
+  expect(stateFromAnswer('q', refusedEmptyCompletion)).toMatchObject({ kind: 'refused', query: 'q', reason: { kind: 'emptyCompletion' } });
 });
 
 // §9.1 / owner ruling 2026-08-24: content search needs a provider key AND a
@@ -112,9 +112,16 @@ test('turnsAfter adds a generated answer and a not-asked citations-only one', ()
   expect(t2.map((t) => t.query)).toEqual(['q1', 'q2']);
 });
 
-test('turnsAfter leaves the turns alone for a refusal and for a failed citations-only answer', () => {
+test('turnsAfter keeps a refusal as a turn, but not the every-folder-off one', () => {
   const t1 = turnsAfter([], 'q1', generated);
-  expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toBe(t1);
+  if (refusedNoCandidates.kind !== 'refused') throw new Error('fixture');
+  expect(turnsAfter(t1, 'q2', refusedNoCandidates)).toEqual([...t1, { query: 'q2', refusal: refusedNoCandidates.reason }]);
+  const off = { ...refusedNoCandidates, reason: { kind: 'noFoldersSearched' } } as AskAnswer;
+  expect(turnsAfter(t1, 'q2', off)).toBe(t1);
+});
+
+test('turnsAfter leaves the turns alone for a failed citations-only answer', () => {
+  const t1 = turnsAfter([], 'q1', generated);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'offline' } } as AskAnswer)).toBe(t1);
   expect(turnsAfter(t1, 'q2', { ...citationsOnly, why: { kind: 'noToolUse' } } as AskAnswer)).toBe(t1);
 });

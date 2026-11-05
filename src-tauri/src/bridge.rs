@@ -1516,6 +1516,11 @@ const ASK_TOP_K: i64 = 8;
 /// counts code points, and so does `query.chars().count()` below.
 const MAX_ASK_QUERY: usize = 2048;
 
+/// How many `search` calls one conversation turn may make (owner, 2026-11-05):
+/// a second one lets the model try other words; the call after the last search
+/// is offered no tool.
+const MAX_TOOL_SEARCHES: usize = 2;
+
 /// Answer a question over the index with cited sources (spec §4). Retrieval is
 /// the shared [`retrieve`]; generation runs iff [`ChatReadiness::Ready`] (the
 /// private gate, spec §7.2). Off the main thread for the reason [`search`]
@@ -1693,34 +1698,58 @@ fn answer_question(
     // A chat call that fails keeps what retrieval found: the passages are on
     // this machine, and only the prose was the provider's to give (D171,
     // owner's ruling 2026-10-02).
-    let generated = if remember.is_some() {
-        let messages = mnema_rag::build_dialogue(
+    if remember.is_some() {
+        // The first question of a conversation: its own search is the first
+        // of the turn's searches, and the model may make one more.
+        let mut messages = mnema_rag::build_dialogue(
             &[],
             query,
-            Some(&passages),
+            None,
             &mnema_rag::profile(&model),
             question_lang(query),
         );
-        mnema_provider::complete_turn(
-            &endpoint.base,
-            &endpoint.token,
-            &model,
-            &messages,
-            false,
-            chat.chat_timeout(),
-        )
-        .map(|reply| text_answer(reply, passages.len()))
-    } else {
-        mnema_rag::answer(
-            &endpoint.base,
-            &endpoint.token,
-            &model,
+        let asked = messages
+            .last()
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        mnema_rag::with_search_result(&mut messages, &asked, &passages, &[]);
+        let ask_chat = |messages: &[mnema_provider::Message], offer_search| {
+            mnema_provider::complete_turn(
+                &endpoint.base,
+                &endpoint.token,
+                &model,
+                messages,
+                offer_search,
+                chat.chat_timeout(),
+            )
+        };
+        let sources = TurnSources {
+            found: Some(hits.clone()),
+            hits,
+            text,
+            content,
+            via: Via::Search,
+        };
+        return answer_with_searches(
+            state,
             query,
-            &passages,
-            state.voice_as(chat, query),
-            chat.chat_timeout(),
-        )
-    };
+            (arms, roles),
+            &ask_chat,
+            (messages, asked, passages, vec![query.to_string()]),
+            sources,
+            remember,
+            taken,
+        );
+    }
+    let generated = mnema_rag::answer(
+        &endpoint.base,
+        &endpoint.token,
+        &model,
+        query,
+        &passages,
+        state.voice_as(chat, query),
+        chat.chat_timeout(),
+    );
     let generated = match generated {
         Ok(generated) => generated,
         Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
@@ -1768,7 +1797,7 @@ fn follow_up(
     turns: &[crate::dialogue::SessionTurn],
     taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
 ) -> Result<AskAnswer, Error> {
-    let (mut hits, mut text, mut content) = match turns.iter().rfind(|t| t.hits.is_some()) {
+    let (hits, text, content) = match turns.iter().rfind(|t| t.hits.is_some()) {
         Some(t) => {
             let (text, content) = match &t.answer {
                 AskAnswer::Generated { text, content, .. }
@@ -1828,13 +1857,17 @@ fn follow_up(
                 .map(|h| h.iter().map(passage_from_hit).collect()),
         })
         .collect();
-    let mut messages = mnema_rag::build_dialogue(
+    let messages = mnema_rag::build_dialogue(
         &past,
         query,
         None,
         &mnema_rag::profile(&model),
         question_lang(query),
     );
+    let asked = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
     let chat = |messages: &[mnema_provider::Message], offer_search| {
         mnema_provider::complete_turn(
             &endpoint.base,
@@ -1845,18 +1878,96 @@ fn follow_up(
             chat.chat_timeout(),
         )
     };
-    let mut via = Via::Conversation;
-    let mut found = None;
+    let sources = TurnSources {
+        hits,
+        text,
+        content,
+        via: Via::Conversation,
+        found: None,
+    };
+    answer_with_searches(
+        state,
+        query,
+        (arms, roles),
+        &chat,
+        (messages, asked, Vec::new(), Vec::new()),
+        sources,
+        Some(generation),
+        taken,
+    )
+}
+
+/// One chat call of a turn: the messages, and whether `search` is offered.
+type ChatCall<'a> = dyn Fn(&[mnema_provider::Message], bool) -> Result<mnema_provider::Reply, mnema_provider::Error>
+    + 'a;
+
+/// What a turn's latest search found, and how its answer came to it.
+struct TurnSources {
+    hits: Vec<Hit>,
+    text: TextArmReport,
+    content: ContentArmReport,
+    via: Via,
+    /// The hits a search of this turn found, for the session.
+    found: Option<Vec<Hit>>,
+}
+
+/// The model's turn: it may search up to [`MAX_TOOL_SEARCHES`] times in all
+/// (the queries `searched` already, their passages `shown` in front of `asked`, the
+/// question as [`mnema_rag::build_dialogue`] wrote it), and the call after the
+/// last search is offered no tool and no hint that there is one. The first
+/// question of a conversation comes here with its own search as the first;
+/// asked without a tool but told it had one, the model wrote the call out as
+/// text (`<｜DSML｜`, `<tool_call>`; owner's launcher, 2026-11-05).
+#[allow(clippy::too_many_arguments)]
+fn answer_with_searches(
+    state: &State<'_, AppState>,
+    query: &str,
+    (arms, roles): (Arms, crate::provider::Roles),
+    chat: &ChatCall<'_>,
+    (mut messages, asked, mut shown, mut searched): (
+        Vec<mnema_provider::Message>,
+        String,
+        Vec<mnema_rag::Passage>,
+        Vec<String>,
+    ),
+    sources: TurnSources,
+    remember: Option<u64>,
+    taken: &mut Option<Vec<crate::dialogue::SessionTurn>>,
+) -> Result<AskAnswer, Error> {
+    let TurnSources {
+        mut hits,
+        mut text,
+        mut content,
+        mut via,
+        mut found,
+    } = sources;
+    let mut misses: Vec<String> = Vec::new();
+    // No caller comes here with every search made.
     let mut reply = match chat(&messages, true) {
         Ok(reply) => reply,
         Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
     };
-    if let mnema_provider::Reply::Search(call) = &reply {
+    // A search that finds the wrong passages is often followed by one in other
+    // words ("солпадеїн" → "Solpadeine").
+    while let mnema_provider::Reply::Search(calls) = &reply {
+        if searched.len() == MAX_TOOL_SEARCHES {
+            break;
+        }
+        // Several calls at once are the question again and the same in other
+        // words (DeepSeek, 2026-11-05): the first one not yet searched is run,
+        // since a repeat finds what the model already has.
+        let fresh = |c: &&String| {
+            !searched
+                .iter()
+                .any(|q| q.trim().to_lowercase() == c.trim().to_lowercase())
+        };
+        let query = calls.iter().find(fresh).unwrap_or(&calls[0]);
+        searched.push(query.clone());
         // The model's query is held to the limit a typed one is: a blank or
         // oversized one is a search that found nothing, and costs no embedding.
-        let usable = !call.query.trim().is_empty() && call.query.chars().count() <= MAX_ASK_QUERY;
+        let usable = !query.trim().is_empty() && query.chars().count() <= MAX_ASK_QUERY;
         let (new_hits, new_text, new_content, unreachable) = if usable {
-            retrieve(state, &call.query, arms, ASK_TOP_K, roles.embed)?
+            retrieve(state, query, arms, ASK_TOP_K, roles.embed)?
         } else {
             (Vec::new(), text.clone(), content.clone(), None)
         };
@@ -1869,17 +1980,23 @@ fn follow_up(
                 content,
             });
         }
-        let passages: Vec<mnema_rag::Passage> = new_hits.iter().map(passage_from_hit).collect();
-        mnema_rag::with_search_result(&mut messages, call, &passages);
         // An empty search leaves the earlier one the latest.
-        if !new_hits.is_empty() {
+        if new_hits.is_empty() {
+            misses.push(query.chars().take(MAX_ASK_QUERY).collect());
+        } else {
+            shown = new_hits.iter().map(passage_from_hit).collect();
             hits = new_hits.clone();
             text = new_text;
             content = new_content;
             via = Via::Search;
             found = Some(new_hits);
         }
-        reply = match chat(&messages, false) {
+        mnema_rag::with_search_result(&mut messages, &asked, &shown, &misses);
+        let more = searched.len() < MAX_TOOL_SEARCHES;
+        if !more {
+            mnema_rag::drop_search_hint(&mut messages);
+        }
+        reply = match chat(&messages, more) {
             Ok(reply) => reply,
             Err(e) => return Ok(chat_failed(state, &e, hits, text, content)),
         };
@@ -1892,7 +2009,7 @@ fn follow_up(
         },
         Some(a) => {
             let answer = generated_answer(a, &hits, via, text, content);
-            *taken = remember_turn(state, Some(generation), query, &answer, found);
+            *taken = remember_turn(state, remember, query, &answer, found);
             answer
         }
     })
