@@ -107,6 +107,16 @@ fn evaluate(worker: &Path, provider: Provider, model: &str) -> ExitCode {
         .map(str::trim)
         .filter(|m| !m.is_empty())
     {
+        let answered = mnema_eval::answer_all(
+            &indexed,
+            &questions,
+            &dense,
+            &dense_provider,
+            chat_model,
+            TRANSLATION_TIMEOUT,
+        )
+        .expect("the generation pass runs");
+        println!("{}", mnema_eval::render_answered(chat_model, &answered));
         let translated = Translated::ask(
             &corpus,
             &indexed,
@@ -131,16 +141,6 @@ fn evaluate(worker: &Path, provider: Provider, model: &str) -> ExitCode {
                 .collect();
             println!("  {}  {}", q.id, terms.join(" | "));
         }
-        let answered = mnema_eval::answer_all(
-            &indexed,
-            &questions,
-            &dense,
-            &dense_provider,
-            chat_model,
-            TRANSLATION_TIMEOUT,
-        )
-        .expect("the generation pass runs");
-        println!("{}", mnema_eval::render_answered(chat_model, &answered));
         for merge in Merge::ALL {
             let outcomes = run_translated(&indexed, &questions, &dense, &translated, merge)
                 .expect("the translated row runs");
