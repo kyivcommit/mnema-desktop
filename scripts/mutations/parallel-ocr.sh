@@ -205,3 +205,28 @@ case_ "answers already in are collected before the queue drains" \
   's~        order\.collect\(backend\)\?;\n~~' \
   '        // next textless page' \
   mnema-extract 'answers_already_in_let_the_pages_behind_them_stream_on' --test pdf_pipeline
+
+# R1. An orphaned helper exits on its own. Without the watchdog it waits for
+# EOF — which, inside a 46 s cold start, it does not read — and outlives the
+# worker the pool just killed (found by the kill test, 2026-11-06).
+case_ "an orphaned helper exits without waiting for EOF" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~                if std::os::unix::process::parent_id\(\) != parent \{~                if std::os::unix::process::parent_id() == u32::MAX {~' \
+  'parent_id() == u32::MAX {' \
+  mnema-extract 'a_helper_whose_parent_dies_exits_without_waiting_for_eof' --test ocr_helper
+
+# R2. The page a failed helper held is read in the worker, not dropped: as
+# "nothing recognised" it would be journalled as a blank page of the scan.
+case_ "a failed helper's page is read in the worker" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~                \(page_no, crate::recognise\(&image\.as_image\(\)\)\)~                (page_no, Ok(None))~' \
+  '                (page_no, Ok(None))' \
+  mnema-extract 'a_helper_that_crashes_loses_no_page' --test parallel_ocr
+
+# R3. The worker does start helpers for a scan (macOS): with the condition
+# never true the frames still match — only the slower path ran.
+case_ "the worker starts helpers when it may" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~if cfg!\(target_os = "macos"\) && helpers > 1 =>~if cfg!(target_os = "macos") \&\& helpers > 100 =>~' \
+  'helpers > 100 =>' \
+  mnema-extract 'helpers_do_not_outlive_a_killed_worker' --test parallel_ocr

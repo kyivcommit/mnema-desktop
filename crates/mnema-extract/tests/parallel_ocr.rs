@@ -1,0 +1,140 @@
+//! The worker reading a scanned PDF with `--ocr` helpers (D196): the same
+//! frames as reading it alone, whatever a helper does.
+//!
+//! macOS only: elsewhere there is no engine and the worker starts no helper.
+#![cfg(target_os = "macos")]
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use mnema_extract::OCR_UNAVAILABLE_ENV;
+use mnema_extract::ocr_parallel::OCR_PROCESSES_ENV;
+use mnema_extract::ocr_wire::OCR_CRASH_AFTER_ENV;
+
+const WORKER: &str = env!("CARGO_BIN_EXE_mnema-extract-worker");
+
+fn request(fixture: &str) -> String {
+    serde_json::json!({
+        "path": format!("tests/fixtures/{fixture}"),
+        "max_bytes": 4_194_304,
+    })
+    .to_string()
+}
+
+/// Everything the worker writes for `fixture`, with `env` set for it (and so
+/// for its helpers).
+fn frames(fixture: &str, env: &[(&str, &str)]) -> String {
+    let mut child = Command::new(WORKER)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the worker starts");
+    writeln!(child.stdin.as_mut().unwrap(), "{}", request(fixture)).unwrap();
+    let out = child.wait_with_output().expect("the worker exits");
+    assert!(
+        out.status.success(),
+        "{:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn three_helpers_give_the_frames_one_process_gives() {
+    for fixture in [
+        "scan-six-pages.pdf",
+        "mixed-native-scan.pdf",
+        "interleaved-native-scan.pdf",
+    ] {
+        let alone = frames(fixture, &[(OCR_PROCESSES_ENV, "1")]);
+        let three = frames(fixture, &[(OCR_PROCESSES_ENV, "3")]);
+        assert_eq!(three, alone, "{fixture}");
+    }
+    // And the frames are a document whose scanned pages were read: each page
+    // of the six carries its own number.
+    let six = frames("scan-six-pages.pdf", &[(OCR_PROCESSES_ENV, "3")]);
+    for n in 1..=6 {
+        assert!(six.contains(&format!("Page {n} of six")), "page {n}: {six}");
+    }
+}
+
+/// A helper that dies after one reply loses no page: the one it held is read
+/// by the worker, and the rest by the helpers left.
+#[test]
+fn a_helper_that_crashes_loses_no_page() {
+    let alone = frames("scan-six-pages.pdf", &[(OCR_PROCESSES_ENV, "1")]);
+    let crashing = frames(
+        "scan-six-pages.pdf",
+        &[(OCR_PROCESSES_ENV, "3"), (OCR_CRASH_AFTER_ENV, "1")],
+    );
+    assert_eq!(crashing, alone);
+}
+
+#[test]
+fn an_unavailable_engine_refuses_the_same_way_with_helpers() {
+    let env = [(OCR_UNAVAILABLE_ENV, "1")];
+    let alone = frames("scan-six-pages.pdf", &[env[0], (OCR_PROCESSES_ENV, "1")]);
+    let three = frames("scan-six-pages.pdf", &[env[0], (OCR_PROCESSES_ENV, "3")]);
+    assert_eq!(three, alone);
+    // One `Failed` frame and nothing else: not a document whose scanned
+    // pages are journalled as textless.
+    assert_eq!(alone.lines().count(), 1, "{alone}");
+    assert!(alone.starts_with(r#"{"frame":"failed""#), "{alone}");
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn children_of(pid: u32) -> Vec<u32> {
+    let out = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .expect("pgrep runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
+/// The pool kills a worker that overruns its deadline with SIGKILL, so no
+/// `Drop` runs: the helpers must go on their own, when their stdin closes.
+#[test]
+fn helpers_do_not_outlive_a_killed_worker() {
+    let mut child = Command::new(WORKER)
+        .env(OCR_PROCESSES_ENV, "3")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{}", request("scan-six-pages.pdf")).unwrap();
+    // The header is written before the first page: by then the helpers that
+    // read the first pages have been started.
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let helpers = children_of(pid);
+    assert!(!helpers.is_empty(), "helpers were started");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while helpers.iter().any(|&h| alive(h)) {
+        assert!(
+            Instant::now() < until,
+            "helpers {helpers:?} outlived the worker"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

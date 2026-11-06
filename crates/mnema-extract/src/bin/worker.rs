@@ -169,6 +169,28 @@ fn main() {
 fn serve_ocr() -> i32 {
     use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, read_request, write_reply};
 
+    // A helper inside Vision does not see its stdin close until the page is
+    // done — and a cold start is ~46 s of one page. The worker it serves may
+    // be killed meanwhile (SIGKILL from the pool's deadline runs no cleanup),
+    // so the helper watches its parent instead: reparented means orphaned,
+    // and an orphan has no one to answer.
+    // Unix only: helpers are started only where there is an engine (macOS).
+    #[cfg(unix)]
+    {
+        let parent = std::os::unix::process::parent_id();
+        if parent == 1 {
+            return 3;
+        }
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if std::os::unix::process::parent_id() != parent {
+                    std::process::exit(3);
+                }
+            }
+        });
+    }
+
     let crash_after: Option<usize> = std::env::var(OCR_CRASH_AFTER_ENV)
         .ok()
         .and_then(|v| v.parse().ok());
@@ -521,7 +543,7 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 // Filled in from the document below.
                 pages: 0,
             });
-            let read = extract_pdf_pages(&bytes, |declared, page| {
+            let on_page = |declared, page: mnema_extract::PdfPage| {
                 // Written before the first page and not before: a document
                 // none of whose pages has text answers `no_text_layer`
                 // *instead of* a header, and that is only known at the end.
@@ -565,7 +587,18 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 for block in page.blocks {
                     emit(Frame::Block(block));
                 }
-            });
+            };
+            // Pages without a text layer go to `--ocr` helpers of this same
+            // binary when there is an engine to run and more than one core to
+            // run it on (D196); otherwise they are read on this thread.
+            let helpers = mnema_extract::ocr_parallel::configured();
+            let read = match std::env::current_exe() {
+                Ok(exe) if cfg!(target_os = "macos") && helpers > 1 => {
+                    let mut backend = mnema_extract::ocr_parallel::Helpers::new(exe, helpers);
+                    mnema_extract::extract_pdf_pages_with(&bytes, &mut backend, on_page)
+                }
+                _ => extract_pdf_pages(&bytes, on_page),
+            };
             match read {
                 // Every page was below the text-layer threshold, so there is no
                 // document to build — but the file *was* read, and this says so

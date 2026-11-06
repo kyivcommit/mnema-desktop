@@ -4,8 +4,12 @@
 //
 //     swift make_scan_fixtures.swift
 //
-// Writes scan-uk.pdf, scan-two-columns.pdf and mixed-native-scan.pdf next to
-// the script. All text is synthetic.
+// Writes scan-uk.pdf, scan-two-columns.pdf, mixed-native-scan.pdf and
+// scan-six-pages.pdf next to the script — or only the ones named:
+//
+//     swift make_scan_fixtures.swift scan-six-pages.pdf
+//
+// All text is synthetic.
 //
 // A scan page is a bitmap drawn at 300 dpi (white background, black text) and
 // then placed in the PDF as a picture: the page has no text objects and no
@@ -57,7 +61,11 @@ func scan(_ draws: (CGContext) -> Void) -> CGImage {
     return ctx.makeImage()!
 }
 
+/// The fixtures named on the command line, or all of them.
+let only = Set(CommandLine.arguments.dropFirst())
+
 func writePDF(_ name: String, pages: [(CGContext) -> Void]) {
+    if !only.isEmpty && !only.contains(name) { return }
     var box = CGRect(x: 0, y: 0, width: pageW, height: pageH)
     let ctx = CGContext(URL(fileURLWithPath: name) as CFURL, mediaBox: &box, nil)!
     for page in pages {
@@ -127,3 +135,15 @@ writePDF("mixed-native-scan.pdf", pages: [
     { draw(nativeLines, x: 60, top: 90, in: $0) },
     scanPage { draw(ukLines, x: 60, top: 90, in: $0) },
 ])
+
+// Six scanned pages, each saying which page it is, for the parallel OCR tests
+// (D196): with several helpers the pages are recognised out of order, and
+// each one's own number on it is what shows its text came back to its place.
+let sixPages: [[String]] = (1...6).map { n in [
+    "Сторінка \(n) з шести: перевірка порядку сторінок.",
+    "Номер \(n) стоїть тут, щоб текст мав своє місце.",
+    "Page \(n) of six, a synthetic scan for the reader.",
+] }
+writePDF("scan-six-pages.pdf", pages: sixPages.map { lines in
+    scanPage { draw(lines, x: 60, top: 90, in: $0) }
+})
