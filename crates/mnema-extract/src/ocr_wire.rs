@@ -32,6 +32,11 @@ pub const MAX_IMAGE_BYTES: u64 = (MAX_IMAGE_SIDE as u64 * 4 + 256) * MAX_IMAGE_S
 /// helper.
 pub const OCR_CRASH_AFTER_ENV: &str = "MNEMA_OCR_CRASH_AFTER";
 
+/// Set to a number of milliseconds, an `--ocr` helper waits that long before
+/// recognising each page — a page that takes as long as a cold start does. For
+/// the test that a helper does not outlive a killed worker only.
+pub const OCR_STALL_MS_ENV: &str = "MNEMA_OCR_STALL_MS";
+
 /// A header line longer than this is not a header.
 const MAX_LINE: u64 = 64 * 1024;
 

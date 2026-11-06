@@ -4,13 +4,13 @@
 //! macOS only: elsewhere there is no engine and the worker starts no helper.
 #![cfg(target_os = "macos")]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use mnema_extract::OCR_UNAVAILABLE_ENV;
 use mnema_extract::ocr_parallel::OCR_PROCESSES_ENV;
-use mnema_extract::ocr_wire::OCR_CRASH_AFTER_ENV;
+use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, OCR_STALL_MS_ENV};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_mnema-extract-worker");
 
@@ -106,11 +106,14 @@ fn children_of(pid: u32) -> Vec<u32> {
 }
 
 /// The pool kills a worker that overruns its deadline with SIGKILL, so no
-/// `Drop` runs: the helpers must go on their own, when their stdin closes.
+/// `Drop` runs and the helpers must go on their own. Each page here takes a
+/// helper 30 s — a cold start's worth — so EOF on stdin, which a helper reads
+/// only between pages, cannot be what ends them.
 #[test]
 fn helpers_do_not_outlive_a_killed_worker() {
     let mut child = Command::new(WORKER)
         .env(OCR_PROCESSES_ENV, "3")
+        .env(OCR_STALL_MS_ENV, "30000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -119,17 +122,20 @@ fn helpers_do_not_outlive_a_killed_worker() {
     let pid = child.id();
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "{}", request("scan-six-pages.pdf")).unwrap();
-    // The header is written before the first page: by then the helpers that
-    // read the first pages have been started.
-    let mut out = BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    out.read_line(&mut line).unwrap();
-    let helpers = children_of(pid);
-    assert!(!helpers.is_empty(), "helpers were started");
+    // No frame comes while every helper stalls, so wait for them to appear.
+    let started = Instant::now() + Duration::from_secs(10);
+    let helpers = loop {
+        let helpers = children_of(pid);
+        if helpers.len() == 3 {
+            break helpers;
+        }
+        assert!(Instant::now() < started, "three helpers start: {helpers:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
 
     child.kill().unwrap();
     child.wait().unwrap();
-    let until = Instant::now() + Duration::from_secs(3);
+    let until = Instant::now() + Duration::from_secs(2);
     while helpers.iter().any(|&h| alive(h)) {
         assert!(
             Instant::now() < until,

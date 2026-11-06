@@ -167,7 +167,9 @@ fn main() {
 /// The `--ocr` loop: one reply per request, in order, flushed each time; 0 on
 /// EOF where the next request would start, 2 on anything else.
 fn serve_ocr() -> i32 {
-    use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, read_request, write_reply};
+    use mnema_extract::ocr_wire::{
+        OCR_CRASH_AFTER_ENV, OCR_STALL_MS_ENV, read_request, write_reply,
+    };
 
     // A helper inside Vision does not see its stdin close until the page is
     // done — and a cold start is ~46 s of one page. The worker it serves may
@@ -194,6 +196,10 @@ fn serve_ocr() -> i32 {
     let crash_after: Option<usize> = std::env::var(OCR_CRASH_AFTER_ENV)
         .ok()
         .and_then(|v| v.parse().ok());
+    let stall = std::env::var(OCR_STALL_MS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis);
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut served = 0usize;
@@ -208,6 +214,9 @@ fn serve_ocr() -> i32 {
         };
         if crash_after == Some(served) {
             std::process::abort();
+        }
+        if let Some(stall) = stall {
+            std::thread::sleep(stall);
         }
         let reply = mnema_extract::recognise(&image.as_image());
         // A worker that has gone away closed this pipe: nothing left to do.

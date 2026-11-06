@@ -213,7 +213,7 @@ case_ "an orphaned helper exits without waiting for EOF" \
   crates/mnema-extract/src/bin/worker.rs \
   's~                if std::os::unix::process::parent_id\(\) != parent \{~                if std::os::unix::process::parent_id() == u32::MAX {~' \
   'parent_id() == u32::MAX {' \
-  mnema-extract 'a_helper_whose_parent_dies_exits_without_waiting_for_eof' --test ocr_helper
+  mnema-extract 'helpers_do_not_outlive_a_killed_worker' --test parallel_ocr
 
 # R2. The page a failed helper held is read in the worker, not dropped: as
 # "nothing recognised" it would be journalled as a blank page of the scan.
