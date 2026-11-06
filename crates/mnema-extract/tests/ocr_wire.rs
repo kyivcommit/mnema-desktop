@@ -64,8 +64,13 @@ fn only_the_rows_the_geometry_names_are_sent() {
     sent.bgra.extend_from_slice(&[9; 5]);
     let mut bytes = Vec::new();
     write_request(&mut bytes, 7, &sent.as_image()).unwrap();
-    let (_, got) = read_request(&mut reader(bytes)).unwrap().unwrap();
+    let next = image(2, 2, 0);
+    write_request(&mut bytes, 8, &next.as_image()).unwrap();
+    let mut r = reader(bytes);
+    let (_, got) = read_request(&mut r).unwrap().unwrap();
     assert_eq!(got.bgra, rows);
+    // A tail sent after the rows would be where the next header is read from.
+    assert_eq!(read_request(&mut r).unwrap(), Some((8, next)));
 }
 
 #[test]
