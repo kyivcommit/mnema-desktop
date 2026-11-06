@@ -137,10 +137,13 @@ fn helpers_do_not_outlive_a_killed_worker() {
     child.wait().unwrap();
     let until = Instant::now() + Duration::from_secs(2);
     while helpers.iter().any(|&h| alive(h)) {
-        assert!(
-            Instant::now() < until,
-            "helpers {helpers:?} outlived the worker"
-        );
+        if Instant::now() > until {
+            // Not left behind for the next run to trip over.
+            for h in &helpers {
+                let _ = Command::new("kill").args(["-9", &h.to_string()]).status();
+            }
+            panic!("helpers {helpers:?} outlived the worker");
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
