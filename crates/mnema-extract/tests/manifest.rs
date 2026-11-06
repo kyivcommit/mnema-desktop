@@ -255,19 +255,16 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
 /// The three facts are asserted together because separately each looks fine.
 /// `identify` gives real PDF bytes to the pdf reader whatever the file is
 /// called; the manifest predicts by extension and has no `pdf` entry, so it
-/// predicts the *text* reader for `report.pdf`; and the parent's cheap arm
-/// compares the two (`crates/mnema-ingest/src/lib.rs:293-298`). Every real PDF
-/// therefore misses that arm on every walk and is handed to a worker again —
-/// which for this format is a full pdfium parse, serialised process-wide,
-/// rather than a text read.
+/// predicts the *text* reader for `report.pdf`. Until 2026-11-06 the parent's
+/// cheap arm compared the two, so every real PDF was handed to a worker on
+/// every walk — after D189, a full OCR of its scanned pages. The arm now reads
+/// a missing entry as "no claim" and trusts the row's own reader
+/// (`a_pdf_indexed_once_is_not_read_again_until_its_reader_moves_on` in
+/// `mnema-ingest/tests/slice.rs`).
 ///
-/// It is not a defect to fix here. An entry `pdf → pdf@1` would be a false
-/// claim about `identify` — the loop above proves prose named `notes.pdf` is
-/// read as text — and would cost that file the same re-read in the other
-/// direction. What closes it is a stored prediction per path or a manifest that
-/// can say "chosen by content", both of them decisions of their own. This test
-/// exists so the cost is written down where someone changing the map will meet
-/// it, rather than measured a third time.
+/// An entry `pdf → pdf@1` would still be wrong: a false claim about `identify`
+/// — the loop below proves prose named `notes.pdf` is read as text — and it
+/// would make the arm re-read that file on every walk in the other direction.
 #[test]
 fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
     let pdf = std::fs::read("tests/fixtures/one-page-text.pdf").expect("the fixture is on disk");
@@ -289,7 +286,7 @@ fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
     assert_ne!(
         manifest.for_extension(Some("pdf")).reader,
         mnema_core::manifest::READER_PDF,
-        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        "if this ever agrees, the map makes a claim about a reader `identify` picks by content"
     );
 }
 
@@ -304,11 +301,9 @@ fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
 /// read by the epub one. Either entry in the map would be a false claim about
 /// `identify` in one of those two directions.
 ///
-/// What the absence costs is what it costs for PDF: every real `.epub` records
-/// `epub@1`, is predicted `text@1` by the cheap arm
-/// (`crates/mnema-ingest/src/lib.rs:293-298`), and is handed to a worker on
-/// every walk. For this format that is a zip open and one HTML parse per
-/// chapter, not a text read.
+/// The absence is read the way it is for PDF: no claim, so the cheap arm trusts
+/// the `epub@1` a path row records rather than re-reading every book on every
+/// walk, as it did until 2026-11-06.
 #[test]
 fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
     let epub = minimal_epub();
@@ -330,7 +325,7 @@ fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it()
     assert_ne!(
         manifest.for_extension(Some("epub")).reader,
         mnema_core::manifest::READER_EPUB,
-        "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+        "if this ever agrees, the map makes a claim about a reader `identify` picks by content"
     );
 }
 
@@ -347,8 +342,8 @@ fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it()
 /// **`.docm` is the sharper half.** This build reads a macro-enabled document
 /// with the same reader — the macro is a member of the archive nothing here
 /// opens, and `word/document.xml` inside a `.docm` is the same part. An entry
-/// for it would be as wrong as one for `.docx`, and its absence costs the same
-/// re-read per walk.
+/// for it would be as wrong as one for `.docx`; its absence is the same "no
+/// claim", and the cheap arm trusts the row.
 #[test]
 fn a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
     let docx = minimal_docx();
@@ -371,7 +366,7 @@ fn a_docx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() 
         assert_ne!(
             manifest.for_extension(Some(ext)).reader,
             mnema_core::manifest::READER_DOCX,
-            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+            "if this ever agrees, the map makes a claim about a reader `identify` picks by content"
         );
     }
 }
@@ -403,7 +398,7 @@ fn an_xlsx_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it()
         assert_ne!(
             manifest.for_extension(Some(ext)).reader,
             mnema_core::manifest::READER_XLSX,
-            "if this ever agrees, the arm above stopped costing a re-read — say so in the ledger"
+            "if this ever agrees, the map makes a claim about a reader `identify` picks by content"
         );
     }
 }

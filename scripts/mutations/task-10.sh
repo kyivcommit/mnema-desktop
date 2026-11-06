@@ -322,9 +322,8 @@ case_ "ingest: a reader at a new version changed the reading too" \
 # citation into it, on every single walk.
 case_ "ingest: the comparison is against the reader that ran, not the predicted one" \
   crates/mnema-ingest/src/lib.rs \
-  's{            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{            entry.reader != expected.reader\n                || entry.reader_version != i64::from(expected.version)}' \
-  'entry.reader != expected.reader
-                || entry.reader_version != i64::from(expected.version)' \
+  's{            entry\.reader != document\.reader\n                \|\| entry\.reader_version != i64::from\(document\.reader_version\)}{            entry.reader != manifest.for_extension(extension_of(relative)).reader\n                || entry.reader_version != i64::from(manifest.for_extension(extension_of(relative)).version)}' \
+  'entry.reader != manifest.for_extension(extension_of(relative)).reader' \
   mnema-ingest 'a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that' --test slice
 
 # --------------------------- fix round 1: what the rebuild itself opened up
