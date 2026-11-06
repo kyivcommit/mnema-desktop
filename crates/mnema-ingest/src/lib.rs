@@ -290,39 +290,44 @@ pub(crate) fn ingest_file_cancellable(
     //    the truth, and the prediction it should be compared against was never
     //    stored.
     //
-    //    Unreachable in this build, and not by luck: every reader `identify`
-    //    picks by magic bytes is refused by the worker today (`Unsupported`,
-    //    `NotText`, `BinaryTail`), and a refusal writes no `path` row at all —
-    //    so every row that exists was made by the extension-deciding branch,
-    //    which is exactly what the manifest predicts. The two branches of the
-    //    worker are held to agreeing by
-    //    `the_manifest_names_the_reader_that_identify_actually_picks`
-    //    (`crates/mnema-extract/tests/manifest.rs`), and a sidecar that is not
-    //    this worker answers `--manifest` for its own readers, so even a
-    //    mismatched binary agrees with itself.
+    //    **So the prediction is asked only where it is a claim.** An extension
+    //    with an entry of its own (`md`, `html`, `htm`) is one `identify`
+    //    decides by name, and there the row must match the entry — that is the
+    //    `.html` case above. An extension with no entry falls to the default,
+    //    and for those the default is not a claim about this file: `pdf` and
+    //    `epub` are absent on purpose because `identify` picks them by magic
+    //    bytes (`crates/mnema-extract/src/manifest.rs`). There the row's own
+    //    reader is the truth, and the question left is only whether this
+    //    build still ships that reader at that version (`by_reader`).
     //
-    //    It becomes reachable with the first reader chosen by content — a PDF
-    //    under the name `report.md` is then indexed by the pdf reader while the
-    //    manifest predicts markdown for it. What that costs is one worker
-    //    process and one path-row rewrite per walk, and nothing else: the
-    //    document is content-addressed, so the re-read lands on `AlreadyIndexed`
-    //    with no rebuild, no chunk id moved and nothing journalled
+    //    Comparing every row against the prediction instead missed on every
+    //    real PDF and EPUB on every walk — a `.pdf` predicted `text`, recorded
+    //    `pdf` — and since D189 that miss is not a parse but a full OCR of
+    //    every textless page: measured 2026-11-05 on the owner's library,
+    //    ~4,850 scanned pages recognised again on every scan, half an hour of
+    //    Neural Engine for a folder where one text PDF was added.
+    //
+    //    The residual that stays is a file whose content contradicts an
+    //    extension that *does* have an entry — a PDF named `report.md`: read by
+    //    the pdf reader, predicted markdown, handed to a worker on every walk.
+    //    The re-read lands on `AlreadyIndexed` with nothing rebuilt
     //    (`a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that`
-    //    in `tests/slice.rs` is that bill, measured). It is not silent either —
-    //    such a file counts as `indexed` in every `WalkReport`, on a folder
-    //    where nothing changed. What would close it is a fact stored per path
-    //    saying what the prediction was when the row was written, or a manifest
-    //    that can say "this reader is chosen by content, not by extension":
-    //    a column or a wire field, and a decision of its own rather than a line
-    //    in this arm.
+    //    in `tests/slice.rs` is that bill, measured).
     let recorded = db.path_entry(root_id, relative)?;
-    let expected = manifest.for_extension(extension_of(relative));
+    let extension = extension_of(relative);
     if let Some(disk) = on_disk
         && let Some(recorded) = &recorded
         && recorded.size_bytes == disk.size_bytes
         && recorded.mtime == disk.mtime
-        && recorded.reader == expected.reader
-        && recorded.reader_version == i64::from(expected.version)
+        && match extension.and_then(|ext| manifest.by_extension.get(ext)) {
+            Some(expected) => {
+                recorded.reader == expected.reader
+                    && recorded.reader_version == i64::from(expected.version)
+            }
+            None => manifest
+                .version_of(&recorded.reader)
+                .is_some_and(|today| recorded.reader_version == i64::from(today)),
+        }
         && db
             .stage_status(&recorded.document_id, STAGE_CHUNK)?
             .as_deref()

@@ -23,8 +23,9 @@
 # manifest exists to prevent.
 case_ "the cheap arm compares which reader made the row" \
   crates/mnema-ingest/src/lib.rs \
-  's~        && recorded\.reader == expected\.reader\n~~' \
-  '        && recorded.reader_version == i64::from(expected.version)' \
+  's~                recorded\.reader == expected\.reader\n                    && ~                ~' \
+  '                recorded.reader_version == i64::from(expected.version)
+            }' \
   mnema-ingest 'a_file_is_reread_when_its_extension_changed_hands' --test slice
 
 # C2. And its version. Dropped, a reader that changes what it produces from the
@@ -33,9 +34,9 @@ case_ "the cheap arm compares which reader made the row" \
 # comparison passes C1 with.
 case_ "the cheap arm compares the reader's version too" \
   crates/mnema-ingest/src/lib.rs \
-  's~        && recorded\.reader_version == i64::from\(expected\.version\)\n~~' \
-  '        && recorded.reader == expected.reader
-        && db' \
+  's~\n                    && recorded\.reader_version == i64::from\(expected\.version\)~~' \
+  '                recorded.reader == expected.reader
+            }' \
   mnema-ingest 'a_bumped_reader_version_is_a_reader_that_changed_too' --test slice
 
 # C3. The other direction, and the one a condition written to always fire
@@ -45,19 +46,19 @@ case_ "the cheap arm compares the reader's version too" \
 # the half of the html test that asserts the file IS read again.
 case_ "the fourth condition compares the row against the manifest, not against itself" \
   crates/mnema-ingest/src/lib.rs \
-  's~        && recorded\.reader == expected\.reader\n        && recorded\.reader_version == i64::from\(expected\.version\)~        \&\& recorded.reader == recorded.reader\n        \&\& recorded.reader_version == recorded.reader_version~' \
-  '        && recorded.reader == recorded.reader' \
+  's~                recorded\.reader == expected\.reader\n                    && recorded\.reader_version == i64::from\(expected\.version\)~                recorded.reader == recorded.reader\n                    \&\& recorded.reader_version == recorded.reader_version~' \
+  '                recorded.reader == recorded.reader' \
   mnema-ingest 'a_file_is_reread_when_its_extension_changed_hands' --test slice
 
 # C4. And the opposite excess: an arm that never answers `Unchanged` re-reads
 # every file on every walk, which no assertion about a file being read again can
-# see. The unchanged-file test is the one that can, and it is why the html test
-# asserts both directions rather than only the interesting one.
+# see. Since 2026-11-06 a `.txt` takes the no-claim branch, so the file that
+# can see it is a `.md`: the unchanged half of the bumped-version test.
 case_ "an unchanged file under an unchanged manifest still costs nothing" \
   crates/mnema-ingest/src/lib.rs \
-  's~        && recorded\.reader == expected\.reader~        \&\& recorded.reader != expected.reader~' \
-  '        && recorded.reader != expected.reader' \
-  mnema-ingest 'an_unchanged_file_is_not_read_a_second_time' --test slice
+  's~                recorded\.reader == expected\.reader~                recorded.reader != expected.reader~' \
+  '                recorded.reader != expected.reader' \
+  mnema-ingest 'a_bumped_reader_version_is_a_reader_that_changed_too' --test slice
 
 # C5. The lookup is keyed on the extension, and `None` is a real answer rather
 # than a safe one: it sends every file to the default reader, so every `.md`
@@ -166,3 +167,22 @@ case_ "a re-read lands on the document it already has, and does not rebuild it" 
 # the two needs a worker that prints a VALID manifest and then exits non-zero,
 # which is a stand-in written to make one line red rather than to model anything
 # this product meets. The check stays, uncased.
+
+# C12. An extension the manifest makes no claim about — `.pdf`, `.epub`, picked
+# by magic bytes — trusts the row's own reader. Answered `false`, every real PDF
+# is handed to a worker on every walk, which since D189 is a full OCR of its
+# scanned pages: measured 2026-11-05, half an hour per scan of the owner's
+# library for one added file.
+case_ "an extension with no manifest entry trusts the reader on the row" \
+  crates/mnema-ingest/src/lib.rs \
+  's~            None => manifest\n                \.version_of\(&recorded\.reader\)\n                \.is_some_and\(\|today\| recorded\.reader_version == i64::from\(today\)\),~            None => false,~' \
+  '            None => false,' \
+  mnema-ingest 'a_pdf_indexed_once_is_not_read_again_until_its_reader_moves_on' --test slice
+
+# C13. And only at the version this build ships: a newer pdf reader must still
+# reach every PDF it would read differently.
+case_ "the trusted row's reader must still be at today's version" \
+  crates/mnema-ingest/src/lib.rs \
+  's~\.is_some_and\(\|today\| recorded\.reader_version == i64::from\(today\)\)~.is_some()~' \
+  '                .is_some(),' \
+  mnema-ingest 'a_pdf_indexed_once_is_not_read_again_until_its_reader_moves_on' --test slice

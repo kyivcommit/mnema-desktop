@@ -1508,6 +1508,57 @@ fn a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that() {
     );
 }
 
+/// A PDF indexed once is not handed to a worker again while nothing moved —
+/// and is, the day the pdf reader's version moves on.
+///
+/// `pdf` has no entry in `by_extension`, because `identify` picks it by magic
+/// bytes rather than by name, so the extension predicts the *default* reader
+/// for every `.pdf`. A cheap arm that compared the row against that prediction
+/// missed on every real PDF on every walk, and since D189 a miss is not a
+/// pdfium parse but a full OCR of every textless page: measured on the owner's
+/// library on 2026-11-05, ~4,850 scanned pages recognised again on every scan,
+/// half an hour, for one new text PDF.
+///
+/// Both directions: the same manifest leaves the file alone, a manifest one
+/// pdf version on does not.
+#[cfg(unix)]
+#[test]
+fn a_pdf_indexed_once_is_not_read_again_until_its_reader_moves_on() {
+    let fx = Fixture::new();
+    assert!(
+        !fx.manifest.by_extension.contains_key("pdf"),
+        "the premise is a reader the extension map makes no claim about"
+    );
+    let today = fx
+        .manifest
+        .version_of(READER_PDF)
+        .expect("this build ships a pdf reader");
+    // Never parsed: the first worker is a script, and the real one behind the
+    // fixture's pool would refuse these bytes — so a second pass that reached
+    // it could not answer `Unchanged`.
+    let bytes = b"%PDF-1.7\ninvented: a scanned report, one page a photograph\n".as_slice();
+    let frames = pdf_frames_from(bytes, &[1, 2], vec![3], "Звіт комісії", today);
+    fx.place_at("звіти/звіт.pdf", bytes, mtime());
+    let first = fx.ingest_with_worker("звіти/звіт.pdf", &worker_answering(&fx, &frames));
+    assert!(matches!(first, Ingested::Indexed { .. }), "{first:?}");
+
+    let again = fx.ingest("звіти/звіт.pdf");
+    assert!(
+        matches!(again, Ingested::Unchanged { .. }),
+        "nothing moved, so the file must not cost a worker: {again:?}"
+    );
+
+    // A real bumped build: its manifest and its worker both at `today + 1`.
+    let bumped = with_reader_at(&fx.manifest, READER_PDF, today + 1);
+    let newer = pdf_frames_from(bytes, &[1, 2], vec![3], "Звіт комісії", today + 1);
+    let outcome =
+        fx.ingest_with_worker_against("звіти/звіт.pdf", &worker_answering(&fx, &newer), &bumped);
+    assert!(
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a newer pdf reader must re-read the file and rebuild what the old one made: {outcome:?}"
+    );
+}
+
 /// The one-off this condition costs the first index it meets, and the proof
 /// that it is a one-off.
 ///

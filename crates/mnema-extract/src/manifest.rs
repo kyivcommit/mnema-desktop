@@ -81,26 +81,21 @@ pub fn reader_version(reader: &str) -> Option<u32> {
 /// files again. What the parent has to be able to see is that the extension
 /// changed hands, and this is where it sees it.
 ///
-/// **`pdf` is deliberately absent, and it is the first reader for which that
-/// absence costs something.** This map is a claim about `typing::identify`, and
+/// **`pdf` is deliberately absent, and the absence is a statement, not a
+/// gap: this map makes no claim about a reader picked by content.** This map is a claim about `typing::identify`, and
 /// `identify` decides a PDF by its magic bytes, not by its name — so an entry
 /// `pdf → pdf@1` would be a claim that a *text* file called `notes.pdf` is read
 /// by the pdf reader, which it is not
 /// (`the_manifest_names_the_reader_that_identify_actually_picks` is what holds
 /// this map to that).
 ///
-/// What the absence costs is measured and is not zero: the parent's cheap arm
-/// compares the reader recorded on a path against this prediction
-/// (`crates/mnema-ingest/src/lib.rs:293-298`), so every real `.pdf` records the
-/// `pdf` reader, is predicted `text`, and is handed to a worker on **every** walk.
-/// The re-read is content-addressed and rebuilds nothing — that bill is
-/// itemised at `mnema-ingest`'s own comment on the arm and measured by
-/// `a_reader_no_build_agrees_on_is_re_read_every_pass_and_costs_only_that` —
-/// but for this format the work per pass is a full pdfium parse, serialised
-/// process-wide, rather than a text read. Closing it needs what that comment
-/// names: a stored prediction per path, or a manifest that can say "this reader
-/// is chosen by content". Both are decisions of their own; neither is a line
-/// in this function.
+/// The absence is read as "no claim", not as "the default": for an extension
+/// with no entry the parent's cheap arm trusts the reader recorded on the path
+/// and asks only whether `by_reader` still ships it at that version
+/// (`ingest_file_cancellable` in `mnema-ingest`). Until 2026-11-06 it compared
+/// every row against this map instead, so every real `.pdf` was predicted
+/// `text` and handed to a worker on every walk — after D189, a full OCR of
+/// every scanned page on every scan.
 pub fn manifest() -> Manifest {
     let mut by_extension = std::collections::BTreeMap::new();
     by_extension.insert(

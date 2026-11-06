@@ -1765,7 +1765,11 @@ impl World {
                 self.reached.rules.insert(rule.as_str());
             }
             Verdict::Settled => {
-                if !self.standing_in {
+                // Only a call the real worker answered: `Unchanged` asked no
+                // worker, and the row it leaves standing may be a stand-in's
+                // (`pdf` on a `.txt`, kept since the cheap arm trusts a row
+                // whose extension the manifest makes no claim about).
+                if !self.standing_in && !matches!(outcome, Ok(Ingested::Unchanged { .. })) {
                     self.record_reader_of(relative);
                 }
                 // Scoped to this run's root, which the first version was not:
