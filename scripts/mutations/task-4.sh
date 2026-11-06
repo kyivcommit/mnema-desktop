@@ -52,9 +52,8 @@ case_ "the fourth condition compares the row against the manifest, not against i
 
 # C4. And the opposite excess: an arm that never answers `Unchanged` re-reads
 # every file on every walk, which no assertion about a file being read again can
-# see. Since 2026-11-06 a `.txt` takes the no-claim branch, so the
-# file that can see it is a `.md` — the bumped-version test's unchanged half. The unchanged-file test is the one that can, and it is why the html test
-# asserts both directions rather than only the interesting one.
+# see. Since 2026-11-06 a `.txt` takes the no-claim branch, so the file that
+# can see it is a `.md`: the unchanged half of the bumped-version test.
 case_ "an unchanged file under an unchanged manifest still costs nothing" \
   crates/mnema-ingest/src/lib.rs \
   's~                recorded\.reader == expected\.reader~                recorded.reader != expected.reader~' \

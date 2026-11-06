@@ -81,8 +81,8 @@ pub fn reader_version(reader: &str) -> Option<u32> {
 /// files again. What the parent has to be able to see is that the extension
 /// changed hands, and this is where it sees it.
 ///
-/// **`pdf` is deliberately absent, and it is the first reader for which that
-/// absence costs something.** This map is a claim about `typing::identify`, and
+/// **`pdf` is deliberately absent, and the absence is a statement, not a
+/// gap: this map makes no claim about a reader picked by content.** This map is a claim about `typing::identify`, and
 /// `identify` decides a PDF by its magic bytes, not by its name — so an entry
 /// `pdf → pdf@1` would be a claim that a *text* file called `notes.pdf` is read
 /// by the pdf reader, which it is not

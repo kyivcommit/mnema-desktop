@@ -1548,12 +1548,14 @@ fn a_pdf_indexed_once_is_not_read_again_until_its_reader_moves_on() {
         "nothing moved, so the file must not cost a worker: {again:?}"
     );
 
+    // A real bumped build: its manifest and its worker both at `today + 1`.
     let bumped = with_reader_at(&fx.manifest, READER_PDF, today + 1);
+    let newer = pdf_frames_from(bytes, &[1, 2], vec![3], "Звіт комісії", today + 1);
     let outcome =
-        fx.ingest_with_worker_against("звіти/звіт.pdf", &worker_answering(&fx, &frames), &bumped);
+        fx.ingest_with_worker_against("звіти/звіт.pdf", &worker_answering(&fx, &newer), &bumped);
     assert!(
-        !matches!(outcome, Ingested::Unchanged { .. }),
-        "a newer pdf reader must make the file worth re-reading: {outcome:?}"
+        matches!(outcome, Ingested::Indexed { .. }),
+        "a newer pdf reader must re-read the file and rebuild what the old one made: {outcome:?}"
     );
 }
 

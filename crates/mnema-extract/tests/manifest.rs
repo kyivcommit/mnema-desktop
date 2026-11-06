@@ -249,8 +249,8 @@ fn reader_name(reader: mnema_extract::typing::Reader) -> &'static str {
     }
 }
 
-/// **A PDF is decided by content, so it is absent from the manifest — and that
-/// absence has a bill.**
+/// **A PDF is decided by content, so it is absent from the manifest — and the
+/// absence is a statement that the map makes no claim, not a defect.**
 ///
 /// The three facts are asserted together because separately each looks fine.
 /// `identify` gives real PDF bytes to the pdf reader whatever the file is
@@ -290,8 +290,8 @@ fn a_pdf_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it() {
     );
 }
 
-/// **An EPUB is decided by content too, so it carries the same bill as a PDF —
-/// and unlike a PDF, it looks as though it should not.**
+/// **An EPUB is decided by content too, so it is absent like a PDF — and unlike
+/// a PDF, it looks as though it should not be.**
 ///
 /// `.epub` is an extension nothing else uses, so an entry `epub → epub@1` reads
 /// as obviously correct and is not: `identify` reaches the epub reader through
@@ -329,8 +329,8 @@ fn an_epub_is_read_by_content_so_the_manifest_predicts_the_wrong_reader_for_it()
     );
 }
 
-/// **A DOCX carries the same bill, and it is the entry that looks most obviously
-/// right of the three.**
+/// **A DOCX is absent for the same reason, and it is the entry that looks most
+/// obviously right of the three.**
 ///
 /// `.docx` names one format and nothing else uses it, so `docx → docx@1` reads
 /// as a fact rather than a claim. It is a claim, and a false one in both
