@@ -35,3 +35,13 @@ case_ "the worker starts helpers when it may" \
   's~if cfg!\(target_os = "macos"\) && helpers > 1 =>~if cfg!(target_os = "macos") \&\& helpers > 100 =>~' \
   'helpers > 100 =>' \
   mnema-extract 'helpers_do_not_outlive_a_killed_worker' --test parallel_ocr
+
+# R4. More helpers start only after the first has answered. Started together,
+# they pay Vision's cold start one after another: eight gave the first page
+# after 295 s against the pool's 300 s per page (2026-11-06); gated, 46.6 s.
+case_ "helpers after the first wait for its answer" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~        self\.remaining > 0 && \(self\.warm \|\| self\.helpers\.is_empty\(\)\)~        self.remaining > 0~' \
+  '        self.remaining > 0
+    }' \
+  mnema-extract 'more_helpers_start_only_after_the_first_has_answered' --test parallel_ocr
