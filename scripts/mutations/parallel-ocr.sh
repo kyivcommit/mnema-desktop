@@ -67,3 +67,34 @@ case_ "a reply of no engine is not sent as unavailable" \
   's~        Ok\(None\) => Answer::None\(true\),~        Ok(None) => Answer::Unavailable(String::new()),~' \
   'Ok(None) => Answer::Unavailable(String::new()),' \
   mnema-extract 'every_reply_comes_back_as_itself' --test ocr_wire
+
+# H1. A helper whose worker closed stdin has finished, not failed. Exiting 2
+# there, every helper of every file would read to the worker as a crash.
+case_ "a helper exits 0 on EOF between frames" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~            Ok\(None\) => return 0,~            Ok(None) => return 2,~' \
+  '            Ok(None) => return 2,' \
+  mnema-extract 'a_helper_whose_stdin_closes_before_any_frame_exits_cleanly_and_says_nothing' --test ocr_helper
+
+# H2. Garbage is a failure the worker can see, not a quiet end.
+case_ "a helper given garbage does not exit 0" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~                eprintln!\("mnema-extract-worker --ocr: \{e\}"\);\n                return 2;~                eprintln!("mnema-extract-worker --ocr: {e}");\n                return 0;~' \
+  '                return 0;' \
+  mnema-extract 'a_helper_given_garbage_exits_with_failure_instead_of_waiting' --test ocr_helper
+
+# H3. The reply carries the seq it answers; a constant one would put every
+# page's text under the first page's number.
+case_ "a helper echoes the seq it was sent" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~write_reply\(&mut stdout, seq, &reply\)~write_reply(\&mut stdout, 0, \&reply)~' \
+  'write_reply(&mut stdout, 0, &reply)' \
+  mnema-extract 'each_frame_gets_one_reply_under_its_own_seq_in_order' --test ocr_helper
+
+# H4. The crash hook counts replies; off by one, the fallback test in task 6
+# would be testing a helper that never answered at all.
+case_ "the crash hook fires after k replies, not before" \
+  crates/mnema-extract/src/bin/worker.rs \
+  's~        if crash_after == Some\(served\) \{~        if crash_after == Some(served + 1) {~' \
+  '        if crash_after == Some(served + 1) {' \
+  mnema-extract 'the_crash_hook_kills_the_helper_after_k_replies' --test ocr_helper

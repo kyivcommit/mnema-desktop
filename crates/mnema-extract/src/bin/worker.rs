@@ -126,6 +126,15 @@ fn main() {
         return;
     }
 
+    // The fourth branch, and a long-lived one: an OCR helper (D196). The
+    // worker reading a scanned PDF starts several of these from its own
+    // binary and hands each rendered pages over `ocr_wire`; this process never
+    // opens a file and never loads Pdfium. Its exit code is the only thing the
+    // worker reads about how it ended.
+    if args.len() == 2 && args[1] == "--ocr" {
+        std::process::exit(serve_ocr());
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -155,6 +164,41 @@ fn main() {
 /// parent may be reading these as they arrive, or may kill this process on a
 /// timeout, and either way a frame sitting in an unflushed buffer is a frame
 /// the parent never sees.
+/// The `--ocr` loop: one reply per request, in order, flushed each time; 0 on
+/// EOF where the next request would start, 2 on anything else.
+fn serve_ocr() -> i32 {
+    use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, read_request, write_reply};
+
+    let crash_after: Option<usize> = std::env::var(OCR_CRASH_AFTER_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
+    let mut served = 0usize;
+    loop {
+        let (seq, image) = match read_request(&mut stdin) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return 0,
+            Err(e) => {
+                eprintln!("mnema-extract-worker --ocr: {e}");
+                return 2;
+            }
+        };
+        if crash_after == Some(served) {
+            std::process::abort();
+        }
+        let reply = mnema_extract::recognise(&image.as_image());
+        // A worker that has gone away closed this pipe: nothing left to do.
+        if write_reply(&mut stdout, seq, &reply)
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            return 2;
+        }
+        served += 1;
+    }
+}
+
 fn write_frame(stdout: &mut io::Stdout, frame: &Frame) {
     let line = to_line(frame).expect("a Frame always serialises to JSON");
     if let Err(e) = stdout

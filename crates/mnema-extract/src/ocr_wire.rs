@@ -27,6 +27,11 @@ pub const MAX_IMAGE_SIDE: u32 = 4096;
 /// with room for pdfium's row padding.
 pub const MAX_IMAGE_BYTES: u64 = (MAX_IMAGE_SIDE as u64 * 4 + 256) * MAX_IMAGE_SIDE as u64;
 
+/// Set to `k`, an `--ocr` helper aborts after its `k`-th reply, the way a
+/// crashed process dies. For tests of the worker's fallback only; read once per
+/// helper.
+pub const OCR_CRASH_AFTER_ENV: &str = "MNEMA_OCR_CRASH_AFTER";
+
 /// A header line longer than this is not a header.
 const MAX_LINE: u64 = 64 * 1024;
 
