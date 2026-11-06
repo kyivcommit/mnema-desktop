@@ -167,8 +167,8 @@ case_ "probe: characters are counted after NFC, not before" \
 # non-empty and of the right type either way.
 case_ "reader: a survivor keeps its own page number, gap and all" \
   crates/mnema-extract/src/pdf.rs \
-  's{            PdfPage \{\n                page_no,}{            PdfPage \{\n                page_no: page_no - skipped.len() as u32,}' \
-  'page_no: page_no - skipped.len() as u32,' \
+  's{                Slot::Ready\(page\) => on_page\(declared, page\),}{                Slot::Ready(mut page) => {\n                    page.page_no -= self.skipped.len() as u32;\n                    on_page(declared, page)\n                }}' \
+  'page.page_no -= self.skipped.len() as u32;' \
   mnema-extract 'a_page_under_the_threshold_is_skipped_by_number_and_its_neighbours_are_not' --test pdf
 
 # C14. A page dropped without being named. `Summary::skipped_pages` would name
@@ -178,10 +178,8 @@ case_ "reader: a survivor keeps its own page number, gap and all" \
 # is what the wording follows.)
 case_ "reader: a skipped page is named, not silently dropped" \
   crates/mnema-extract/src/pdf.rs \
-  's{                    skipped\.push\(page_no\);\n                    continue;}{                    continue;}' \
-  '                _ => {
-                    continue;
-                }' \
+  's{                Slot::Answered\(page_no, Ok\(_\)\) => self\.skipped\.push\(page_no\),}{                Slot::Answered(_, Ok(_)) => {}}' \
+  '                Slot::Answered(_, Ok(_)) => {}' \
   mnema-extract 'every_page_of_a_document_is_either_read_or_named' --test pdf
 
 # C15. The header's count taken a second way. Since D189 the pool requires it to
@@ -213,9 +211,9 @@ case_ "worker: the summary names the pages that were skipped" \
 # a number here is a citation to rows of a page that does not have any.
 case_ "reader: a pdf block carries no line numbers" \
   crates/mnema-extract/src/pdf.rs \
-  's{                    line_start: None,\n                    line_end: None,}{                    line_start: Some(1),\n                    line_end: Some(1),}' \
+  's{            line_start: None,\n            line_end: None,}{            line_start: Some(1),\n            line_end: Some(1),}' \
   'line_start: Some(1),
-                    line_end: Some(1),' \
+            line_end: Some(1),' \
   mnema-extract 'a_page_with_a_text_layer_becomes_a_block_of_that_page' --test pdf
 
 # ------------------------------------------- every page the document declares

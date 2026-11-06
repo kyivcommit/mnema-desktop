@@ -635,7 +635,7 @@ jobs:
           - pr7-boot-index ui-scale pr10f-settings task-9-notextlayer scan-ocr
           - watcher source debt-rust-mutants pdf-broken-utf16
           - pr9-shell pr10c-fonts task-13
-          - pr8-masks task-d64 task-6
+          - pr8-masks task-d64 task-6 parallel-ocr
           - pr9b-scan task-13-xlsx task-1
           - pr10b-theme pr8-ui-masks pr10d-launcher
           - task-8 task-14 grounding

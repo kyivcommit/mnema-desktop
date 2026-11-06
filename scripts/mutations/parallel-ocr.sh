@@ -3,6 +3,10 @@
 #
 #   scripts/mutation-check.sh scripts/mutations/parallel-ocr.sh
 #
+# Only cases whose tests run on the Linux leg are here; the ones that need
+# Vision or the worker's helpers (macOS only) are in `parallel-ocr-macos.sh`,
+# which nothing runs automatically — run it by hand before a PR.
+#
 # The wire is a trust boundary inside one machine: a helper reads a header and
 # allocates what it names. Every geometry check below is broken on its own,
 # because a reader that skips one still refuses the others' cases.
@@ -143,13 +147,6 @@ case_ "the environment overrides the P-core count" \
   '    let chosen = p_cores' \
   mnema-extract 'the_environment_overrides_and_a_bad_value_is_ignored' --test ocr_parallel
 
-# P7. The sysctl is actually asked (macOS only: elsewhere the stub is None).
-case_ "this Mac's P-cores are read from sysctl" \
-  crates/mnema-extract/src/ocr_parallel.rs \
-  's~    \(rc == 0 && len == std::mem::size_of::<i32>\(\) && value > 0\)\.then_some\(value as usize\)~    (rc == 0 \&\& len == 0).then_some(value as usize)~' \
-  '(rc == 0 && len == 0)' \
-  mnema-extract 'this_mac_names_its_performance_cores' --test ocr_parallel
-
 # Q1. A native page waits behind the scans before it. Handed over at once, it
 # overtakes pages still being recognised and the caller sees 1, 4, 7, 2, …
 case_ "a native page queues behind pages in flight" \
@@ -205,28 +202,3 @@ case_ "answers already in are collected before the queue drains" \
   's~        order\.collect\(backend\)\?;\n~~' \
   '        // next textless page' \
   mnema-extract 'answers_already_in_let_the_pages_behind_them_stream_on' --test pdf_pipeline
-
-# R1. An orphaned helper exits on its own. Without the watchdog it waits for
-# EOF — which, inside a 46 s cold start, it does not read — and outlives the
-# worker the pool just killed (found by the kill test, 2026-11-06).
-case_ "an orphaned helper exits without waiting for EOF" \
-  crates/mnema-extract/src/bin/worker.rs \
-  's~                if std::os::unix::process::parent_id\(\) != parent \{~                if std::os::unix::process::parent_id() == u32::MAX {~' \
-  'parent_id() == u32::MAX {' \
-  mnema-extract 'helpers_do_not_outlive_a_killed_worker' --test parallel_ocr
-
-# R2. The page a failed helper held is read in the worker, not dropped: as
-# "nothing recognised" it would be journalled as a blank page of the scan.
-case_ "a failed helper's page is read in the worker" \
-  crates/mnema-extract/src/ocr_parallel.rs \
-  's~                \(page_no, crate::recognise\(&image\.as_image\(\)\)\)~                (page_no, Ok(None))~' \
-  '                (page_no, Ok(None))' \
-  mnema-extract 'a_helper_that_crashes_loses_no_page' --test parallel_ocr
-
-# R3. The worker does start helpers for a scan (macOS): with the condition
-# never true the frames still match — only the slower path ran.
-case_ "the worker starts helpers when it may" \
-  crates/mnema-extract/src/bin/worker.rs \
-  's~if cfg!\(target_os = "macos"\) && helpers > 1 =>~if cfg!(target_os = "macos") \&\& helpers > 100 =>~' \
-  'helpers > 100 =>' \
-  mnema-extract 'helpers_do_not_outlive_a_killed_worker' --test parallel_ocr
