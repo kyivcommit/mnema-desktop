@@ -122,14 +122,15 @@ fn helpers_do_not_outlive_a_killed_worker() {
     let pid = child.id();
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "{}", request("scan-six-pages.pdf")).unwrap();
-    // No frame comes while every helper stalls, so wait for them to appear.
+    // No frame comes while the first helper stalls (and the rest start only
+    // after it answers), so wait for it to appear.
     let started = Instant::now() + Duration::from_secs(10);
     let helpers = loop {
         let helpers = children_of(pid);
-        if helpers.len() == 3 {
+        if !helpers.is_empty() {
             break helpers;
         }
-        assert!(Instant::now() < started, "three helpers start: {helpers:?}");
+        assert!(Instant::now() < started, "a helper starts: {helpers:?}");
         std::thread::sleep(Duration::from_millis(50));
     };
 
@@ -146,4 +147,45 @@ fn helpers_do_not_outlive_a_killed_worker() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The second helper starts only after the first has answered: helpers
+/// starting cold together pay Vision's cold start one after another (eight
+/// together: the first page after 295 s, against the pool's 300 s).
+#[test]
+fn more_helpers_start_only_after_the_first_has_answered() {
+    let mut child = Command::new(WORKER)
+        .env(OCR_PROCESSES_ENV, "3")
+        .env(OCR_STALL_MS_ENV, "1500")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    writeln!(
+        child.stdin.as_mut().unwrap(),
+        "{}",
+        request("scan-six-pages.pdf")
+    )
+    .unwrap();
+
+    // Inside the first page's 1.5 s: one helper and no more.
+    std::thread::sleep(Duration::from_millis(1000));
+    let early = children_of(pid);
+    // After it: the rest have started. Generous, because the first answer
+    // can wait for a cold start, and that is not what is under test.
+    let until = Instant::now() + Duration::from_secs(240);
+    let later = loop {
+        let now = children_of(pid);
+        if now.len() == 3 || Instant::now() > until {
+            break now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(child.stdin.take());
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(early.len(), 1, "before any answer: {early:?}");
+    assert_eq!(later.len(), 3, "after the first answer: {later:?}");
 }

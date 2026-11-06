@@ -90,7 +90,11 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// An [`OcrBackend`] of up to `n` `--ocr` helper processes of `exe` (D196).
 ///
 /// Helpers start lazily, one per page that finds none idle, so a PDF with one
-/// scanned page starts one. Each has a thread that writes its requests and
+/// scanned page starts one — and **the second only after the first has
+/// answered.** Vision's cold start (~46 s) is paid one process after another:
+/// eight helpers starting cold together gave the first page after 295 s
+/// (2026-11-06, `Tom_05`, M2 Max), against the pool's 300 s per page. One
+/// helper pays it alone and warms the cache the rest then find. Each has a thread that writes its requests and
 /// reads its replies; every reply comes back over one channel.
 ///
 /// **A helper that fails is not trusted again for this file.** Its page — the
@@ -108,6 +112,8 @@ pub struct Helpers {
     events_tx: Sender<Event>,
     /// Pages recognised in this process, waiting to be taken by `next`.
     answered_here: VecDeque<(u32, Reply)>,
+    /// A helper has answered a page, so Vision is warm and the rest may start.
+    warm: bool,
 }
 
 struct Helper {
@@ -141,7 +147,14 @@ impl Helpers {
             events,
             events_tx,
             answered_here: VecDeque::new(),
+            warm: false,
         }
+    }
+
+    /// Whether another helper may start now: the first always, the rest once
+    /// one has answered.
+    fn may_spawn(&self) -> bool {
+        self.remaining > 0 && (self.warm || self.helpers.is_empty())
     }
 
     /// Starts one more helper, or `None` if the process would not start —
@@ -232,6 +245,7 @@ impl Helpers {
                 reply,
             } => {
                 self.idle.push(helper);
+                self.warm = true;
                 (page_no, reply)
             }
             Event::Failed {
@@ -256,13 +270,18 @@ impl Helpers {
 
 impl OcrBackend for Helpers {
     fn capacity(&self) -> usize {
-        (self.live() + self.remaining).max(1)
+        let startable = if self.warm || self.helpers.is_empty() {
+            self.remaining
+        } else {
+            0
+        };
+        (self.live() + startable).max(1)
     }
 
     fn submit(&mut self, page_no: u32, image: OwnedPageImage) {
         let helper = match self.idle.pop() {
             Some(index) => Some(index),
-            None if self.remaining > 0 => self.spawn(),
+            None if self.may_spawn() => self.spawn(),
             None => None,
         };
         let Some(index) = helper else {
