@@ -151,12 +151,6 @@ impl Helpers {
         }
     }
 
-    /// Whether another helper may start now: the first always, the rest once
-    /// one has answered.
-    fn may_spawn(&self) -> bool {
-        self.remaining > 0 && (self.warm || self.helpers.is_empty())
-    }
-
     /// Starts one more helper, or `None` if the process would not start —
     /// after which no more are tried for this file.
     fn spawn(&mut self) -> Option<usize> {
@@ -269,6 +263,8 @@ impl Helpers {
 }
 
 impl OcrBackend for Helpers {
+    /// The gate on starting helpers is here: the pipeline never has more pages
+    /// in flight than this, so before the first answer it holds one.
     fn capacity(&self) -> usize {
         let startable = if self.warm || self.helpers.is_empty() {
             self.remaining
@@ -281,7 +277,7 @@ impl OcrBackend for Helpers {
     fn submit(&mut self, page_no: u32, image: OwnedPageImage) {
         let helper = match self.idle.pop() {
             Some(index) => Some(index),
-            None if self.may_spawn() => self.spawn(),
+            None if self.remaining > 0 => self.spawn(),
             None => None,
         };
         let Some(index) = helper else {

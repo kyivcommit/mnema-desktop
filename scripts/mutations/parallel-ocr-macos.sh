@@ -41,7 +41,6 @@ case_ "the worker starts helpers when it may" \
 # after 295 s against the pool's 300 s per page (2026-11-06); gated, 46.6 s.
 case_ "helpers after the first wait for its answer" \
   crates/mnema-extract/src/ocr_parallel.rs \
-  's~        self\.remaining > 0 && \(self\.warm \|\| self\.helpers\.is_empty\(\)\)~        self.remaining > 0~' \
-  '        self.remaining > 0
-    }' \
+  's~        let startable = if self\.warm \|\| self\.helpers\.is_empty\(\) \{~        let startable = if true {~' \
+  '        let startable = if true {' \
   mnema-extract 'more_helpers_start_only_after_the_first_has_answered' --test parallel_ocr
