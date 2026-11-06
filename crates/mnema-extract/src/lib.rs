@@ -58,8 +58,9 @@ pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
 pub use ocr::{OCR_UNAVAILABLE_ENV, OcrError, OwnedPageImage, PageImage, Recognised, recognise};
 pub use page_view::render_page;
 pub use pdf::{
-    MAX_PAGES_ENV, OCR_MAX_SIDE_PX, OcrPage, PdfDocument, PdfError, PdfPage, TEXT_SOURCE_NATIVE,
-    TEXT_SOURCE_OCR, extract_pdf, extract_pdf_pages, page_cap,
+    InProcess, MAX_PAGES_ENV, OCR_MAX_SIDE_PX, OcrBackend, OcrPage, PdfDocument, PdfError, PdfPage,
+    TEXT_SOURCE_NATIVE, TEXT_SOURCE_OCR, extract_pdf, extract_pdf_pages, extract_pdf_pages_with,
+    page_cap,
 };
 pub use pdfium_probe::{
     Error, PDFIUM_API_BUILD, PDFIUM_LIB_DIR_ENV, PageProbe, Stage, TEXT_LAYER_MIN_CHARS,

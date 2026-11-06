@@ -149,3 +149,49 @@ case_ "this Mac's P-cores are read from sysctl" \
   's~    \(rc == 0 && len == std::mem::size_of::<i32>\(\) && value > 0\)\.then_some\(value as usize\)~    (rc == 0 \&\& len == 0).then_some(value as usize)~' \
   '(rc == 0 && len == 0)' \
   mnema-extract 'this_mac_names_its_performance_cores' --test ocr_parallel
+
+# Q1. A native page waits behind the scans before it. Handed over at once, it
+# overtakes pages still being recognised and the caller sees 1, 4, 7, 2, …
+case_ "a native page queues behind pages in flight" \
+  crates/mnema-extract/src/pdf.rs \
+  's~            order\n                \.queue\n                \.push_back\(Slot::Ready\(page_of\(page_no, &raw, TEXT_SOURCE_NATIVE, None\)\)\);~            on_page(declared, page_of(page_no, \&raw, TEXT_SOURCE_NATIVE, None));~' \
+  'on_page(declared, page_of(page_no, &raw, TEXT_SOURCE_NATIVE, None));' \
+  mnema-extract 'pages_answered_out_of_order_reach_the_caller_in_page_order' --test pdf_pipeline
+
+# Q2. The backend's capacity bounds the pages in flight — each one a 13.5 MB
+# image and a helper's attention.
+case_ "never more pages in flight than capacity" \
+  crates/mnema-extract/src/pdf.rs \
+  's~            while order\.in_flight >= backend\.capacity\(\)\.max\(1\) \{~            while order.in_flight > backend.capacity().max(1) {~' \
+  'while order.in_flight > backend.capacity().max(1) {' \
+  mnema-extract 'never_more_pages_in_flight_than_the_backend_holds' --test pdf_pipeline
+
+# Q3. An answer lands on the page it names. Put in the first waiting slot, a
+# backend answering out of order files page 3's text under page 2.
+case_ "an answer goes to the page it names" \
+  crates/mnema-extract/src/pdf.rs \
+  's~\.find\(\|slot\| matches!\(slot, Slot::Pending\(n\) if \*n == page_no\)\)~.find(|slot| matches!(slot, Slot::Pending(_)))~' \
+  '.find(|slot| matches!(slot, Slot::Pending(_)))' \
+  mnema-extract 'pages_answered_out_of_order_reach_the_caller_in_page_order' --test pdf_pipeline
+
+# Q4. The pages still in flight when the loop ends are waited for.
+case_ "the last pages in flight are waited for" \
+  crates/mnema-extract/src/pdf.rs \
+  's~    while order\.in_flight > 0 \{~    while order.in_flight > usize::MAX {~' \
+  'while order.in_flight > usize::MAX {' \
+  mnema-extract 'pages_answered_out_of_order_reach_the_caller_in_page_order' --test pdf_pipeline
+
+# Q5. A recognised page is held to the same threshold as a native one.
+case_ "a recognised page below the threshold is skipped" \
+  crates/mnema-extract/src/pdf.rs \
+  's~                Slot::Answered\(page_no, Ok\(Some\(read\)\)\)\n                    if has_text_layer\(text_layer_chars\(&read\.text\)\) =>~                Slot::Answered(page_no, Ok(Some(read))) =>~' \
+  'Slot::Answered(page_no, Ok(Some(read))) =>' \
+  mnema-extract 'pages_with_nothing_recognised_are_skipped_in_page_order' --test pdf_pipeline
+
+# Q6. An engine failure is not "no text on this page": journalled as skipped,
+# a scan the engine could not read is remembered as a blank one.
+case_ "an engine failure refuses the document, it is not a skip" \
+  crates/mnema-extract/src/pdf.rs \
+  's~                Slot::Answered\(_, Err\(e\)\) => return Err\(PdfError::Ocr\(e\)\),~                Slot::Answered(n, Err(_)) => self.skipped.push(n),~' \
+  'Slot::Answered(n, Err(_)) => self.skipped.push(n),' \
+  mnema-extract 'an_engine_failure_stops_at_its_page' --test pdf_pipeline
