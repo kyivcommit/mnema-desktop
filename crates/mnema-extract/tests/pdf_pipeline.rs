@@ -40,6 +40,9 @@ struct Fake {
     seq_shift: u32,
     most_in_flight: usize,
     submitted: Vec<u32>,
+    /// Answers are in as soon as a page is submitted, so `try_next` has them
+    /// (oldest first); otherwise only a waiting `next` gets one.
+    immediate: bool,
 }
 
 impl Fake {
@@ -51,6 +54,7 @@ impl Fake {
             seq_shift: 0,
             most_in_flight: 0,
             submitted: Vec::new(),
+            immediate: false,
         }
     }
 }
@@ -71,6 +75,13 @@ impl OcrBackend for Fake {
             .pop_back()
             .expect("next() only with a page in flight");
         (seq + self.seq_shift, (self.answer)(seq))
+    }
+    fn try_next(&mut self) -> Option<(u32, Result<Option<Recognised>, OcrError>)> {
+        if !self.immediate {
+            return None;
+        }
+        let seq = self.held.pop_front()?;
+        Some((seq + self.seq_shift, (self.answer)(seq)))
     }
 }
 
@@ -193,4 +204,49 @@ fn an_engine_failure_stops_at_its_page() {
         "{result:?}"
     );
     assert_eq!(pages, [1, 2, 3, 4]);
+}
+
+/// A page whose answer is already in does not hold up the pages behind it:
+/// they are handed over as they are read, not when the next textless page
+/// happens to need a slot — for `InProcess`, which answers every page at
+/// once, that would be the end of the file.
+#[test]
+fn answers_already_in_let_the_pages_behind_them_stream_on() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// [`Fake`] in immediate mode, counting submissions where the callback
+    /// can see them.
+    struct Counting(Fake, Rc<Cell<usize>>);
+    impl OcrBackend for Counting {
+        fn capacity(&self) -> usize {
+            self.0.capacity()
+        }
+        fn submit(&mut self, seq: u32, image: OwnedPageImage) {
+            self.1.set(self.1.get() + 1);
+            self.0.submit(seq, image)
+        }
+        fn next(&mut self) -> (u32, Result<Option<Recognised>, OcrError>) {
+            self.0.next()
+        }
+        fn try_next(&mut self) -> Option<(u32, Result<Option<Recognised>, OcrError>)> {
+            self.0.try_next()
+        }
+    }
+
+    let submitted = Rc::new(Cell::new(0));
+    let mut fake = Fake::new(3, recognised);
+    fake.immediate = true;
+    let mut backend = Counting(fake, submitted.clone());
+    let mut handed = Vec::new();
+    extract_pdf_pages_with(INTERLEAVED, &mut backend, |_, page| {
+        handed.push((page.page_no, submitted.get()))
+    })
+    .unwrap();
+    // Page 4 (native) is handed over before page 5 is submitted: 2 and 3 were
+    // answered the moment they went in.
+    assert_eq!(
+        handed,
+        [(1, 0), (2, 1), (3, 2), (4, 2), (5, 3), (6, 4), (7, 4)]
+    );
 }

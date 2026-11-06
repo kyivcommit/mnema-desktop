@@ -195,3 +195,13 @@ case_ "an engine failure refuses the document, it is not a skip" \
   's~                Slot::Answered\(_, Err\(e\)\) => return Err\(PdfError::Ocr\(e\)\),~                Slot::Answered(n, Err(_)) => self.skipped.push(n),~' \
   'Slot::Answered(n, Err(_)) => self.skipped.push(n),' \
   mnema-extract 'an_engine_failure_stops_at_its_page' --test pdf_pipeline
+
+# Q7. Answers already in are collected before every drain. Without it the
+# pages behind an answered one wait for the next textless page — with
+# `InProcess`, every native page after a scan waits for the end of the file
+# in memory instead of streaming (security review, 2026-11-06).
+case_ "answers already in are collected before the queue drains" \
+  crates/mnema-extract/src/pdf.rs \
+  's~        order\.collect\(backend\)\?;\n~~' \
+  '        // next textless page' \
+  mnema-extract 'answers_already_in_let_the_pages_behind_them_stream_on' --test pdf_pipeline

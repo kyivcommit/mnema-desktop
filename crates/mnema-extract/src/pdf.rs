@@ -249,11 +249,13 @@ pub fn extract_pdf_pages(
 /// `submit` takes a rendered page under its page number; `next` blocks until
 /// some submitted page is answered and returns it under the number it was
 /// submitted with — in any order. It is called only while a page is in
-/// flight, and never with more than `capacity` of them.
+/// flight, and never with more than `capacity` of them. `try_next` is `next`
+/// without the wait: an answer already in, or `None`.
 pub trait OcrBackend {
     fn capacity(&self) -> usize;
     fn submit(&mut self, page_no: u32, image: OwnedPageImage);
     fn next(&mut self) -> (u32, Result<Option<ocr::Recognised>, OcrError>);
+    fn try_next(&mut self) -> Option<(u32, Result<Option<ocr::Recognised>, OcrError>)>;
 }
 
 /// Recognises each page on the calling thread as it is submitted: the path
@@ -275,6 +277,9 @@ impl OcrBackend for InProcess {
         self.answered
             .pop_front()
             .expect("next() is called only while a page is in flight")
+    }
+    fn try_next(&mut self) -> Option<(u32, Result<Option<ocr::Recognised>, OcrError>)> {
+        self.answered.pop_front()
     }
 }
 
@@ -391,6 +396,10 @@ pub fn extract_pdf_pages_with(
             order.queue.push_back(Slot::Pending(page_no));
             order.in_flight += 1;
         }
+        // Answers already in are collected before the queue is drained, so the
+        // pages behind an answered one stream on instead of waiting for the
+        // next textless page — or, with `InProcess`, for the end of the file.
+        order.collect(backend)?;
         order.drain(declared, &mut on_page)?;
     }
 
@@ -417,9 +426,29 @@ struct InOrder {
 }
 
 impl InOrder {
-    /// One answer from `backend`, put in its page's place.
+    /// One answer from `backend`, waited for.
     fn receive(&mut self, backend: &mut dyn OcrBackend) -> Result<(), PdfError> {
         let (page_no, reply) = backend.next();
+        self.place(page_no, reply)
+    }
+
+    /// Every answer `backend` already has.
+    fn collect(&mut self, backend: &mut dyn OcrBackend) -> Result<(), PdfError> {
+        while self.in_flight > 0 {
+            let Some((page_no, reply)) = backend.try_next() else {
+                break;
+            };
+            self.place(page_no, reply)?;
+        }
+        Ok(())
+    }
+
+    /// An answer, put in its page's place.
+    fn place(
+        &mut self,
+        page_no: u32,
+        reply: Result<Option<ocr::Recognised>, OcrError>,
+    ) -> Result<(), PdfError> {
         let slot = self
             .queue
             .iter_mut()
