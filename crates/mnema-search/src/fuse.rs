@@ -85,11 +85,21 @@ fn interleave(text: &[i64], content: &[i64]) -> Vec<i64> {
 /// `rrf_lifts_the_chunk_that_stands_high_in_both_arms` and by
 /// `equal_scores_are_broken_by_chunk_id_so_two_runs_agree`.
 fn rrf(text: &[i64], content: &[i64]) -> Vec<i64> {
+    rrf_lists(&[text, content])
+}
+
+/// Reciprocal-rank fusion of any number of ranked lists, each weighted alike:
+/// how the several searches of one question (its own words, then each
+/// translated term) become one list before the result is cut. Pinned through
+/// `rrf` by every two-arm test, and on its own by
+/// `rrf_lists_of_one_list_keeps_its_order` and
+/// `a_chunk_in_several_lists_rises_above_one_in_a_single_list`.
+pub fn rrf_lists(lists: &[&[i64]]) -> Vec<i64> {
     use std::collections::BTreeMap;
 
     let mut score: BTreeMap<i64, f64> = BTreeMap::new();
-    for arm in [text, content] {
-        for (i, &id) in arm.iter().enumerate() {
+    for list in lists {
+        for (i, &id) in list.iter().enumerate() {
             let position = (i + 1) as i64;
             *score.entry(id).or_insert(0.0) += 1.0 / (RRF_K + position) as f64;
         }
@@ -101,6 +111,31 @@ fn rrf(text: &[i64], content: &[i64]) -> Vec<i64> {
     // function of the inputs alone.
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked.into_iter().map(|(id, _)| id).collect()
+}
+
+/// `own` cut to `limit`, with its last places given to `extra` — up to
+/// `reserved` of them, each one `own` does not already hold within the cut —
+/// and the rest of `own` after. The places before `limit - reserved` are
+/// `own`'s and nobody else's: a translated term's exact hit can reach a
+/// question its own words missed without pushing aside what they found (D192).
+/// Pinned by `the_head_is_never_touched_and_the_tail_takes_only_new_chunks`.
+pub fn reserve_tail(own: &[i64], extra: &[i64], limit: usize, reserved: usize) -> Vec<i64> {
+    let keep = limit.saturating_sub(reserved);
+    let mut out: Vec<i64> = own.iter().take(keep).copied().collect();
+    let mut taken = 0;
+    for &id in extra {
+        if taken == reserved || out.len() >= limit {
+            break;
+        }
+        if !own[..own.len().min(limit)].contains(&id) && !out.contains(&id) {
+            out.push(id);
+            taken += 1;
+        }
+    }
+    // An extra is never one of `own`'s first `limit`, so this cannot repeat one.
+    let room = limit - out.len().min(limit);
+    out.extend(own.iter().skip(keep).take(room));
+    out
 }
 
 /// The text arm entire, in its own order, then the content arm's contributions

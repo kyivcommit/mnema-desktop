@@ -67,7 +67,7 @@ pub fn check_class(q: &Question, universal: &BTreeSet<String>) -> ClassVerdict {
     let shared: Vec<String> = shared.into_iter().collect();
     let holds = match q.class {
         Class::Literal => !shared.is_empty(),
-        Class::Paraphrase | Class::Topical => shared.is_empty(),
+        Class::Paraphrase | Class::Topical | Class::CrossLingual | Class::Name => shared.is_empty(),
     };
     if holds {
         ClassVerdict::Holds

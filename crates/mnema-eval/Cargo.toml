@@ -27,6 +27,7 @@ mnema-index = { path = "../mnema-index" }
 mnema-ingest = { path = "../mnema-ingest" }
 mnema-pool = { path = "../mnema-pool" }
 mnema-provider = { path = "../mnema-provider" }
+mnema-rag = { path = "../mnema-rag" }
 mnema-search = { path = "../mnema-search" }
 mnema-walk = { path = "../mnema-walk" }
 serde = { workspace = true }

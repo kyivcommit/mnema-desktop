@@ -2114,3 +2114,54 @@ fn a_real_index_has_no_ineligible_vectors() {
     let db = open(std::path::Path::new(&path)).unwrap();
     assert_no_ineligible_vectors(&db);
 }
+
+#[test]
+fn a_sample_is_spread_across_the_index_and_bounded() {
+    let db = support::temp_db();
+    let doc = db
+        .insert_document(&"b".repeat(64), "text/plain", 12, SourceKind::Document)
+        .unwrap();
+    let page = db.insert_page(&doc, 1, "native:txt", None).unwrap();
+    for i in 0..12 {
+        let text = format!("chunk {i:02}");
+        let block = db
+            .insert_block(
+                page,
+                &Block {
+                    block_type: BlockType::Paragraph,
+                    reading_order: i,
+                    language: None,
+                    text: text.clone(),
+                    line_start: None,
+                    line_end: None,
+                },
+            )
+            .unwrap();
+        db.insert_chunk(
+            &doc,
+            i,
+            &text,
+            &Locator {
+                spans: vec![Segment {
+                    block_id: block,
+                    start: 0,
+                    end: text.len() as u32,
+                    block_start: 0,
+                }],
+                coordinate: Coordinate::None,
+            },
+            SourceKind::Document,
+        )
+        .unwrap();
+    }
+    db.set_document_status(&doc, DocumentStatus::Indexed)
+        .unwrap();
+
+    let sample = db.sample_chunk_texts(3).unwrap();
+    assert_eq!(sample.len(), 3, "{sample:?}");
+    // Spread, not the first three: the last of them sits past the middle.
+    assert_ne!(sample, ["chunk 00", "chunk 01", "chunk 02"], "{sample:?}");
+    assert!(sample[2].as_str() >= "chunk 06", "{sample:?}");
+    assert_eq!(db.sample_chunk_texts(0).unwrap(), Vec::<String>::new());
+    assert_eq!(db.sample_chunk_texts(50).unwrap().len(), 12);
+}

@@ -740,6 +740,32 @@ impl Db {
             .ok_or(Error::NoSuchSpace(space_id))
     }
 
+    /// The highest chunk id, 0 for an empty index: an O(log n) stamp that moves
+    /// whenever a scan adds chunks, for caching what is derived from them.
+    pub fn max_chunk_id(&self) -> Result<i64, Error> {
+        Ok(self
+            .conn()
+            .query_row("SELECT coalesce(max(id), 0) FROM chunk", [], |r| r.get(0))?)
+    }
+
+    /// Up to `n` chunk texts spread across the searchable index, for telling
+    /// which languages the library is written in. Spread by id rather than
+    /// the first `n`: a library is scanned document by document, and the
+    /// first chunks would be one book. Pinned by
+    /// `a_sample_is_spread_across_the_index_and_bounded`.
+    pub fn sample_chunk_texts(&self, n: i64) -> Result<Vec<String>, Error> {
+        if n <= 0 {
+            return Ok(Vec::new());
+        }
+        let max = self.max_chunk_id()?;
+        let step = (max / n).max(1);
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT c.text {SEARCHABLE_CHUNK} AND c.id % ?1 = 0 ORDER BY c.id LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![step, n], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// How many chunks the index holds at all — the denominator the settings
     /// screen shows [`Db::embedded_chunk_count`] against.
     ///

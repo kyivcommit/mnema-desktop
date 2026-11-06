@@ -45,6 +45,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_openrouter' | 'provider_mnema' | 'provider_mnema_hint' | 'provider_model_embed' | 'provider_model_chat' | 'provider_model_chat_tools' | 'provider_low_memory' | 'provider_download' | 'provider_cancel' | 'provider_remove' | 'provider_retry' | 'provider_no_space' | 'provider_row_ready' | 'provider_downloading' | 'provider_missing_local_models'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
+  | 'grounding_no_citations' | 'grounding_unsupported' | 'grounding_citation_unsupported'
   | 'tree_empty' | 'tree_failed' | 'tree_search_in' | 'tree_add_folder'
   | 'files_search_placeholder' | 'files_search_label' | 'files_nothing_found' | 'files_truncated' | 'files_search_failed'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
@@ -428,6 +429,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader cannot see the contradiction and correct for it.
     card_passages: 'Уривки',
     no_path_on_disk: 'нема на диску', answer_heading: 'Відповідь', citations_heading: 'Цитати',
+    grounding_no_citations: 'Відповідь не посилається на жоден знайдений уривок — звір її з документами.',
+    grounding_unsupported: 'Деякі цитати не підтверджують речення, біля яких стоять.',
+    grounding_citation_unsupported: 'не підтверджує речення',
     tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.', tree_add_folder: 'Додати теку',
     tree_search_in: 'Шукати в «{name}»',
     files_search_placeholder: 'Пошук слів у файлах',
@@ -1359,6 +1363,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     provider_missing_local_models: 'Download the Mnema models — open the model settings',
     card_passages: 'Passages',
     no_path_on_disk: 'no path on disk', answer_heading: 'Answer', citations_heading: 'Citations',
+    grounding_no_citations: 'This answer cites none of the passages found — check it against your documents.',
+    grounding_unsupported: 'Some citations do not support the sentences they stand beside.',
+    grounding_citation_unsupported: 'does not support its sentence',
     tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.', tree_add_folder: 'Add folder',
     tree_search_in: 'Search in “{name}”',
     files_search_placeholder: 'Find words in files',

@@ -222,3 +222,30 @@ test('an answer with no citations draws no Citations heading', () => {
   expect(screen.queryByRole('heading', { name: 'Citations' })).toBeNull();
   expect(screen.queryByRole('list')).toBeNull();
 });
+
+test('an answer whose citations stand behind it draws no grounding mark', () => {
+  render(Answer, { query: 'q', answer: gen(generated), onSelect: vi.fn() });
+  expect(screen.queryByTestId('grounding-note')).toBeNull();
+  expect(screen.queryAllByTestId('citation-unsupported')).toHaveLength(0);
+});
+
+test('an answer that cites nothing says so above its text and keeps the text', () => {
+  const a = { ...gen(generated), citations: [], grounding: { kind: 'noCitations' as const } };
+  render(Answer, { query: 'q', answer: a, onSelect: vi.fn() });
+  const note = screen.getByTestId('grounding-note');
+  expect(note.getAttribute('role')).toBe('note');
+  expect(note.textContent).toContain('cites none of the passages');
+  // A mark, never a replacement: the prose is still there.
+  expect(screen.getByTestId('answer-body').textContent!.length).toBeGreaterThan(0);
+});
+
+test('only the citation that does not support its sentence is marked', () => {
+  const base = gen(generated);
+  const [first, second] = base.citations;
+  const a = { ...base, grounding: { kind: 'unsupported' as const, anchors: [second.anchor] } };
+  render(Answer, { query: 'q', answer: a, onSelect: vi.fn() });
+  expect(screen.getByTestId('grounding-note').textContent).toContain('do not support');
+  const marked = within(screen.getByTestId(`preview-${second.anchor}`)).queryByTestId('citation-unsupported');
+  expect(marked?.textContent).toBe('does not support its sentence');
+  expect(within(screen.getByTestId(`preview-${first.anchor}`)).queryByTestId('citation-unsupported')).toBeNull();
+});

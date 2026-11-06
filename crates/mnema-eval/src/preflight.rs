@@ -4,8 +4,8 @@ use mnema_index::DocumentStatus;
 use mnema_ingest::StopReason;
 
 use crate::{
-    ClassVerdict, Corpus, EvalError, Gold, IndexedCorpus, QuestionSet, check_class, resolve_gold,
-    universal_terms,
+    ClassVerdict, Corpus, EvalError, Gold, IndexedCorpus, Language, QuestionSet, check_class,
+    resolve_gold, universal_terms,
 };
 
 /// Something that would make a score describe an input defect rather than
@@ -50,6 +50,14 @@ pub enum Problem {
     ClassViolated {
         question: String,
         shared: Vec<String>,
+    },
+    /// The class says the question crosses languages and the languages are
+    /// the same, or the other way round: a cross-lingual figure taken over
+    /// same-language questions would measure paraphrase under another name.
+    LanguageAgainstClass {
+        question: String,
+        question_language: Language,
+        document_language: Language,
     },
     WalkStoppedEarly {
         reason: String,
@@ -109,6 +117,19 @@ pub fn preflight(
             problems.push(Problem::ClassViolated {
                 question: q.id.clone(),
                 shared,
+            });
+        }
+
+        // Also from the in-memory corpus, so for the same reason it comes
+        // before the document guards. A document the corpus lacks is
+        // `DocumentMissing`'s to report, not this check's.
+        if let Some(document) = corpus.documents.iter().find(|d| d.id == q.document)
+            && q.class.crosses_language() == (document.language == q.language)
+        {
+            problems.push(Problem::LanguageAgainstClass {
+                question: q.id.clone(),
+                question_language: q.language,
+                document_language: document.language,
             });
         }
 

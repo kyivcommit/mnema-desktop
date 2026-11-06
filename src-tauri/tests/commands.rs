@@ -1959,6 +1959,110 @@ fn ask_with_a_model_but_no_candidates_refuses_without_calling_chat() {
     );
 }
 
+/// D192: a name the library spells in another script. The question
+/// «солпадеїн» matches nothing; the translator's «Solpadeine» does, and its hit
+/// takes a reserved place — so the answer is generated and cites the article,
+/// where without the term the same index refuses with no candidates.
+#[test]
+fn a_name_in_another_script_is_found_through_its_translated_term() {
+    const KEY: &str = "test-key-ask-name-term";
+    const ARTICLE: &str = "Solpadeine is a brand-name analgesic drug, a painkiller \
+        containing paracetamol, caffeine and codeine. It is taken for headache, \
+        toothache and period pain, and should not be combined with other \
+        medicines that also contain paracetamol.";
+    let translator = serde_json::json!({
+        "choices": [{ "message": { "content": "Solpadeine" } }]
+    })
+    .to_string();
+    let completion = serde_json::json!({
+        "choices": [{ "message": { "content": "Солпадеїн — знеболювальний препарат <c>1</c>." } }]
+    })
+    .to_string();
+    let server = MockServer::new(vec![
+        Reply::ok(ASK_CREDITS),
+        Reply::ok(&translator),
+        Reply::ok(&completion),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let state = app.state::<AppState>();
+    // The key first, and then the index — `ask_maps_each_anchor_to_the_right_citation_and_generates`
+    // says why.
+    set_key(state.clone(), KEY.into()).unwrap();
+    state.open_index().unwrap();
+    set_chat_model_via(&state, "openai/gpt-4o-mini");
+    let webview = main_webview(&app);
+    call(
+        &webview,
+        "set_search_arms",
+        json!({ "text": true, "content": false }),
+    )
+    .unwrap();
+    let chunk = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(db, &"a".repeat(64), ARTICLE))
+        })
+        .unwrap();
+
+    let answer = ask_q(&webview, "солпадеїн");
+    assert_eq!(answer["kind"], json!("generated"), "{answer}");
+    assert_eq!(answer["citations"][0]["chunkId"], json!(chunk), "{answer}");
+
+    let _credits = server.request();
+    let asked = server.request();
+    assert!(
+        asked.contains("search terms") && asked.contains("English"),
+        "the second request is the translation, naming the library's language: {asked}"
+    );
+
+    // The ask log has the turn step by step, under one turn id (spec
+    // 2026-11-05-ask-event-log).
+    let logs = state.data_dir().join("logs");
+    let file = std::fs::read_dir(&logs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let events: Vec<Value> = std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<String> = events
+        .iter()
+        .map(|e| {
+            let by = e["by"]
+                .as_str()
+                .map(|b| format!("({b})"))
+                .unwrap_or_default();
+            format!("{}{by}", e["event"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "question",
+            "search(app)",
+            "translation",
+            "search(term)",
+            "model_call",
+            "answer"
+        ],
+        "{events:?}"
+    );
+    assert!(
+        events.iter().all(|e| e["turn"] == events[0]["turn"]),
+        "{events:?}"
+    );
+    assert_eq!(events[2]["terms"], json!(["Solpadeine"]), "{events:?}");
+    assert_eq!(events[5]["cited"], json!([chunk]), "{events:?}");
+    assert!(
+        !events.iter().any(|e| e.to_string().contains("paracetamol")),
+        "no passage text is logged: {events:?}"
+    );
+}
+
 /// The anchor→citation mapping, and the off-by-one silent lie it exists to
 /// prevent (spec §9). `resolve_anchors` guarantees `1 <= n <= passages.len()
 /// == hits.len()`, so ordinal `n` maps to `hits[n-1]`. Two documents with
@@ -13535,6 +13639,114 @@ fn a_first_question_may_search_once_more_and_then_must_answer() {
     let next = ask_q(&webview, "and then?");
     assert_eq!(next["via"], json!("conversation"), "{next}");
     assert_eq!(next["citations"][0]["chunkId"], json!(ids[2]), "{next}");
+}
+
+/// A model's search whose own words already find something is not
+/// translated: the second chat call would only repeat what was found (the
+/// owner's log, DeepSeek searching «Solpadeine» itself).
+#[test]
+fn a_models_search_that_finds_by_its_own_words_is_not_translated() {
+    let server = MockServer::new(vec![
+        Reply::ok(&chat_text("quantum entanglement")),
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        Reply::ok(&chat_search(r#"{"query":"Solpadeine"}"#, Value::Null)),
+        // No translation call here: the next reply is the answer.
+        Reply::ok(&chat_text("Знеболювальний препарат <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _ids) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+    let article = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"d".repeat(64),
+                "Solpadeine is a brand-name analgesic drug, a painkiller containing \
+                 paracetamol, caffeine and codeine. It is taken for headache, toothache \
+                 and period pain, and should not be combined with other medicines that \
+                 also contain paracetamol.",
+            ))
+        })
+        .unwrap();
+
+    ask_q(&webview, FIRST_Q);
+    let second = ask_q(&webview, "а що там про препарат?");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(
+        second["citations"][0]["chunkId"],
+        json!(article),
+        "{second}"
+    );
+    for _ in 0..3 {
+        server.request();
+    }
+    let last = server.request();
+    assert!(
+        !last.contains("search terms"),
+        "the fourth request is the answer: {last}"
+    );
+    assert!(server.request_if_any().is_none(), "no further request");
+}
+
+/// D192: the model's own search in mixed words («Solpadeine» with Ukrainian
+/// around it, D191) matches nothing by every word; its translated term does,
+/// and the article takes a reserved place among what the model is shown.
+#[test]
+fn a_models_search_in_mixed_words_is_rescued_by_its_translated_term() {
+    let server = MockServer::new(vec![
+        // The first question: translated, but the term adds nothing new.
+        Reply::ok(&chat_text("quantum entanglement")),
+        Reply::ok(&chat_text("It resonates <c>1</c>.")),
+        // The follow-up: the model searches in mixed words…
+        Reply::ok(&chat_search(
+            r#"{"query":"Solpadeine препарат знеболювальний"}"#,
+            Value::Null,
+        )),
+        // …which the application translates to the key term alone.
+        Reply::ok(&chat_text("Solpadeine")),
+        Reply::ok(&chat_text("Знеболювальний препарат <c>1</c>.")),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_provider(dir.path(), server.base());
+    let (webview, _ids) = dialogue_ready(&app);
+    let state = app.state::<AppState>();
+    // Long enough for the library's language to be told reliably.
+    let article = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"d".repeat(64),
+                "Solpadeine is a brand-name analgesic drug, a painkiller containing \
+                 paracetamol, caffeine and codeine. It is taken for headache, toothache \
+                 and period pain, and should not be combined with other medicines that \
+                 also contain paracetamol.",
+            ))
+        })
+        .unwrap();
+    // The Ukrainian words are known to the index, as in a real bilingual
+    // library: the text arm then needs them all and the mixed query matches
+    // nothing (D108). Without this document they are unknown, dropped, and
+    // «Solpadeine» alone would match.
+    state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(write_one_document(
+                db,
+                &"e".repeat(64),
+                "препарат знеболювальний",
+            ))
+        })
+        .unwrap();
+
+    let first = ask_q(&webview, FIRST_Q);
+    assert_eq!(first["kind"], json!("generated"), "{first}");
+    let second = ask_q(&webview, "а що там про препарат?");
+    assert_eq!(second["kind"], json!("generated"), "{second}");
+    assert_eq!(
+        second["citations"][0]["chunkId"],
+        json!(article),
+        "{second}"
+    );
 }
 
 /// The first search finds nothing; the model tries other words, and the call

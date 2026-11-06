@@ -182,6 +182,39 @@ pub fn run_row(
     Ok(outcomes)
 }
 
+/// Scores every question against the list `search` returns for it, already
+/// cut to its final length: gold, rank and locations the way `run_row` takes
+/// them, for a search whose arms are not one text and one content list (the
+/// translated row merges several). Neither volume is a single arm's, so both
+/// are `None`.
+pub fn run_row_scored(
+    indexed: &IndexedCorpus,
+    questions: &QuestionSet,
+    mut search: impl FnMut(&Question) -> Result<Vec<i64>, EvalError>,
+) -> Result<Vec<Outcome>, EvalError> {
+    let mut outcomes = Vec::with_capacity(questions.questions.len());
+    for q in &questions.questions {
+        let gold = gold_chunks(indexed, q)?;
+        let returned = search(q)?;
+        let returned_locations = locate(indexed, &returned)?;
+        let rank = returned
+            .iter()
+            .position(|id| gold.contains(id))
+            .map(|i| i + 1);
+        outcomes.push(Outcome {
+            question: q.id.clone(),
+            class: q.class,
+            rank,
+            text_matched: None,
+            content_matched: None,
+            returned,
+            returned_locations,
+            gold,
+        });
+    }
+    Ok(outcomes)
+}
+
 /// Places every returned chunk against the index that just returned it.
 ///
 /// A chunk the index cannot place is carried as `None` rather than refused:

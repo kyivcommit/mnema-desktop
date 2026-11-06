@@ -11,8 +11,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use mnema_eval::{
-    Corpus, DenseAnswers, EVAL_MODEL, IndexedCorpus, QuestionSet, Sweep, corpus_dir, embed_corpus,
-    preflight, questions_path,
+    Corpus, DenseAnswers, EVAL_MODEL, IndexedCorpus, Merge, QuestionSet, Report, Sweep, Translated,
+    corpus_dir, embed_corpus, preflight, questions_path, run_translated,
 };
 use mnema_provider::OPENROUTER_BASE;
 use mnema_search::Provider;
@@ -27,6 +27,9 @@ const NO_WORKER: u8 = 2;
 /// Preflight found something, so no number was taken: one describing the
 /// corpus rather than the search is worse than none.
 const PREFLIGHT_FAILED: u8 = 3;
+/// Generous on purpose: this measures what translation finds, and a cut
+/// call would be counted as a translation that found nothing.
+const TRANSLATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn main() -> ExitCode {
     // Checked before the worker path: a missing key is this task's refusal
@@ -40,6 +43,10 @@ fn main() -> ExitCode {
         eprintln!(
             "MNEMA_EVAL_BASE and MNEMA_EVAL_MODEL override the product's own \
              ({OPENROUTER_BASE} and {EVAL_MODEL})."
+        );
+        eprintln!(
+            "MNEMA_EVAL_CHAT_MODELS, comma-separated, adds the translated rows: \
+             each chat model translates every question on the same service."
         );
         return ExitCode::from(NO_PROVIDER);
     };
@@ -85,8 +92,73 @@ fn evaluate(worker: &Path, provider: Provider, model: &str) -> ExitCode {
     // Before any call that costs money and after preflight has cleared the
     // corpus — the same point `sweep.rs`'s live test takes it.
     embed_corpus(&indexed, &provider, model).expect("the corpus embeds");
+    let dense_provider = provider.clone();
     let dense = DenseAnswers::ask(&indexed, &questions, provider).expect("the content arm runs");
     let sweep = Sweep::run(&indexed, &questions, &dense).expect("the sweep runs");
     println!("{}", sweep.render());
+
+    let chat_models = std::env::var("MNEMA_EVAL_CHAT_MODELS").unwrap_or_default();
+    let chunk_count = indexed
+        .db()
+        .chunk_count()
+        .expect("the index counts its chunks");
+    for chat_model in chat_models
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        let answered = mnema_eval::answer_all(
+            &indexed,
+            &questions,
+            &dense,
+            &dense_provider,
+            chat_model,
+            TRANSLATION_TIMEOUT,
+        )
+        .expect("the generation pass runs");
+        println!("{}", mnema_eval::render_answered(chat_model, &answered));
+        let translated = Translated::ask(
+            &corpus,
+            &indexed,
+            &questions,
+            &dense_provider,
+            &dense_provider,
+            chat_model,
+            TRANSLATION_TIMEOUT,
+        )
+        .expect("the translation pass runs");
+        println!(
+            "=== переклад: {} — мови бібліотеки: {}; збоїв виклику: {} ===",
+            translated.model,
+            translated.languages.join(", "),
+            translated.failed
+        );
+        for q in &questions.questions {
+            let terms: Vec<&str> = translated
+                .of(&q.id)
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect();
+            println!("  {}  {}", q.id, terms.join(" | "));
+        }
+        for merge in Merge::ALL {
+            let outcomes = run_translated(&indexed, &questions, &dense, &translated, merge)
+                .expect("the translated row runs");
+            println!("--- all-terms / rrf + переклад, {} ---", merge.label());
+            let report = Report::of(&outcomes, chunk_count);
+            println!("{}", report.render());
+            // The model sees the first eight: the figure the tail rule is for.
+            for class in mnema_eval::Class::ALL {
+                if let Some(r) = report.recall_at(class, mnema_eval::SHOWN) {
+                    println!(
+                        "  recall@{} {}: {:.1}%",
+                        mnema_eval::SHOWN,
+                        class.as_str(),
+                        r * 100.0
+                    );
+                }
+            }
+        }
+    }
     ExitCode::SUCCESS
 }

@@ -40,6 +40,7 @@ export const citationB: AskCitation = {
 export const generated: AskAnswer = {
   kind: 'generated',
   via: 'search',
+  grounding: { kind: 'supported' },
   // Both anchors appear in the prose, non-contiguous — a two-anchor test that
   // used <c>1</c><c>2</c> could not fail against citations[n-1].
   answer: 'Costs four hryvnias<c>3</c> and the total cannot exceed the cap<c>7</c>.',
@@ -57,6 +58,7 @@ export const generated: AskAnswer = {
 export const generatedOther: AskAnswer = {
   kind: 'generated',
   via: 'search',
+  grounding: { kind: 'supported' },
   answer: 'A second answer entirely<c>2</c>.',
   citations: [
     {
@@ -85,6 +87,7 @@ export const generatedOther: AskAnswer = {
 export const generatedArchived: AskAnswer = {
   kind: 'generated',
   via: 'search',
+  grounding: { kind: 'supported' },
   answer: 'An archived source says so<c>1</c>.',
   citations: [
     {
@@ -108,6 +111,7 @@ export const generatedArchived: AskAnswer = {
 export const generatedNoPath: AskAnswer = {
   kind: 'generated',
   via: 'search',
+  grounding: { kind: 'supported' },
   answer: 'Nothing locates this passage<c>1</c>.',
   citations: [
     {

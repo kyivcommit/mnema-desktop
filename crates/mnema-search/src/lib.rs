@@ -10,7 +10,7 @@ mod fuse;
 pub use content::{
     Arms, ContentArm, ContentQuery, Missing, Provider, TextArm, content_arm, embed_query,
 };
-pub use fuse::{CANDIDATES, FusionRule, RRF_K, fuse};
+pub use fuse::{CANDIDATES, FusionRule, RRF_K, fuse, reserve_tail, rrf_lists};
 
 use mnema_index::{Db, QueryRule};
 

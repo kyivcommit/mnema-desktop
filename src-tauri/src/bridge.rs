@@ -1377,6 +1377,31 @@ pub enum Via {
     Conversation,
 }
 
+/// [`mnema_rag::Grounding`] on the wire: the launcher marks an answer that
+/// cites nothing, and a citation whose sentence shares no word with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum Grounding {
+    #[default]
+    Unchecked,
+    Supported,
+    NoCitations,
+    Unsupported {
+        anchors: Vec<usize>,
+    },
+}
+
+impl From<mnema_rag::Grounding> for Grounding {
+    fn from(g: mnema_rag::Grounding) -> Self {
+        match g {
+            mnema_rag::Grounding::Unchecked => Grounding::Unchecked,
+            mnema_rag::Grounding::Supported => Grounding::Supported,
+            mnema_rag::Grounding::NoCitations => Grounding::NoCitations,
+            mnema_rag::Grounding::Unsupported { anchors } => Grounding::Unsupported { anchors },
+        }
+    }
+}
+
 /// One answer to one question, as the window draws it and as `query_history`
 /// stores it. Different states are different variants, never a `null` (the
 /// shape [`TextArmReport`]/[`ContentArmReport`] share). Every variant carries
@@ -1392,6 +1417,12 @@ pub enum AskAnswer {
         citations: Vec<AskCitation>,
         #[serde(default)]
         via: Via,
+        /// Whether the citations stand behind the text (spec
+        /// 2026-11-05-model-independent-search §4). `Unchecked` for rows
+        /// stored before the check existed: nobody checked them, and that is
+        /// the honest value.
+        #[serde(default)]
+        grounding: Grounding,
         text: TextArmReport,
         content: ContentArmReport,
     },
@@ -1545,8 +1576,16 @@ const MAX_TOOL_SEARCHES: usize = 2;
 /// wrote become citations.
 #[tauri::command(async)]
 pub fn ask(state: State<'_, AppState>, query: String) -> Result<AskReply, Error> {
+    let _turn = crate::ask_log::begin(state.data_dir());
     let mut taken = None;
-    let answer = answer_question(&state, &query, &mut taken)?;
+    let answer = match answer_question(&state, &query, &mut taken) {
+        Ok(answer) => answer,
+        Err(e) => {
+            crate::ask_log::event("error", serde_json::json!({ "error": e.to_string() }));
+            return Err(e);
+        }
+    };
+    log_answer(&answer);
     let history_id = record_answer(&state, &query, &answer, taken);
     Ok(AskReply { answer, history_id })
 }
@@ -1595,6 +1634,16 @@ fn answer_question(
     // and with the switch off; either way each question stands alone, and a
     // session left from before is dropped.
     let dialogue = dialogue_enabled(state, roles.chat);
+    crate::ask_log::event(
+        "question",
+        serde_json::json!({
+            "query": query,
+            "conversation": dialogue,
+            "chat": format!("{:?}", roles.chat),
+            "chatModel": state.with_index(|db| db.meta_get(mnema_index::META_CHAT_MODEL)).ok().flatten(),
+            "arms": { "text": arms.text, "content": arms.content },
+        }),
+    );
     if !dialogue {
         state.dialogue.clear();
     }
@@ -1619,6 +1668,7 @@ fn answer_question(
     }
     let remember = dialogue.then_some(generation);
     let (hits, text, content, unreachable) = retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
+    log_search("app", query, &hits, &text, &content);
 
     // Before readiness: "search is off for every folder" is true whether or
     // not a chat model is usable, and the citations-only "no passages matched"
@@ -1686,6 +1736,15 @@ fn answer_question(
         });
     }
 
+    // The question's key terms in the library's languages take the last places
+    // (D192): «солпадеїн» finds nothing, «Solpadeine» finds the article. Before
+    // the no-candidates refusal, so a question its own words missed entirely
+    // can still be answered from what the terms found.
+    let hits = if arms.text {
+        with_term_hits(state, hits, &name_terms(state, query, &endpoint, &model))
+    } else {
+        hits
+    };
     if hits.is_empty() {
         return Ok(AskAnswer::Refused {
             kind: RefusalKind::NoCandidates,
@@ -1735,12 +1794,14 @@ fn answer_question(
             query,
             (arms, roles),
             &ask_chat,
+            &|q: &str| name_terms(state, q, &endpoint, &model),
             (messages, asked, passages, vec![query.to_string()]),
             sources,
             remember,
             taken,
         );
     }
+    let started = std::time::Instant::now();
     let generated = mnema_rag::answer(
         &endpoint.base,
         &endpoint.token,
@@ -1749,6 +1810,16 @@ fn answer_question(
         &passages,
         state.voice_as(chat, query),
         chat.chat_timeout(),
+    );
+    log_model_call(
+        false,
+        &generated
+            .as_ref()
+            .map(|a| {
+                mnema_provider::Reply::Text(a.as_ref().map(|a| a.text.clone()).unwrap_or_default())
+            })
+            .map_err(ToString::to_string),
+        started.elapsed(),
     );
     let generated = match generated {
         Ok(generated) => generated,
@@ -1890,6 +1961,7 @@ fn follow_up(
         query,
         (arms, roles),
         &chat,
+        &|q: &str| name_terms(state, q, &endpoint, &model),
         (messages, asked, Vec::new(), Vec::new()),
         sources,
         Some(generation),
@@ -1911,6 +1983,168 @@ struct TurnSources {
     found: Option<Vec<Hit>>,
 }
 
+/// One search of the turn in the ask log: who made it, and what came back by
+/// chunk id, path and place — not the passages' text.
+fn log_search(
+    by: &str,
+    query: &str,
+    hits: &[Hit],
+    text: &TextArmReport,
+    content: &ContentArmReport,
+) {
+    let hits: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| serde_json::json!([h.chunk_id, h.relative_path, h.coordinate]))
+        .collect();
+    crate::ask_log::event(
+        "search",
+        serde_json::json!({ "by": by, "query": query, "text": text, "content": content, "hits": hits }),
+    );
+}
+
+/// One model call in the ask log: whether a tool was offered, what came back
+/// (its raw text cut to `RAW_LIMIT`), and how long it took.
+fn log_model_call<E: std::fmt::Display>(
+    tools: bool,
+    reply: &Result<mnema_provider::Reply, E>,
+    took: std::time::Duration,
+) {
+    let (kind, raw) = match reply {
+        Ok(mnema_provider::Reply::Text(t)) => ("text", serde_json::json!(crate::ask_log::raw(t))),
+        Ok(mnema_provider::Reply::Search(q)) => ("search", serde_json::json!(q)),
+        Err(e) => ("error", serde_json::json!(e.to_string())),
+    };
+    crate::ask_log::event(
+        "model_call",
+        serde_json::json!({ "tools": tools, "reply": kind, "raw": raw, "ms": took.as_millis() }),
+    );
+}
+
+/// The turn's answer in the ask log: its kind and reason, the grounding mark,
+/// and the cited chunks — not the text, which the history row already keeps.
+fn log_answer(answer: &AskAnswer) {
+    let v = serde_json::to_value(answer).unwrap_or_default();
+    let cited: Vec<serde_json::Value> = v["citations"]
+        .as_array()
+        .map(|c| c.iter().map(|c| c["chunkId"].clone()).collect())
+        .unwrap_or_default();
+    crate::ask_log::event(
+        "answer",
+        serde_json::json!({
+            "kind": v["kind"], "why": v["why"], "reason": v["reason"],
+            "grounding": v["grounding"], "via": v["via"], "cited": cited,
+        }),
+    );
+}
+
+/// How long the translation call may take: a few words back, so a reply
+/// slower than this is a provider in trouble, and the question is searched
+/// by its own words instead (D192).
+const TERMS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Of the [`ASK_TOP_K`] passages shown, the last places a translated term's
+/// exact hit may take (D192): the first ones stay the question's own.
+const TERM_PLACES: usize = 2;
+
+/// The question's key terms in the library's languages, from one chat call
+/// without tools (D192). None — and no call — when the library's languages
+/// cannot be told, or the library has one and the question is in it; none
+/// when the call fails, which only costs the question its translation.
+fn name_terms(
+    state: &AppState,
+    query: &str,
+    endpoint: &crate::provider::Endpoint,
+    model: &str,
+) -> Vec<String> {
+    let languages = state.library_languages();
+    let langs: Vec<&str> = languages.iter().map(|l| l.eng_name()).collect();
+    if !mnema_rag::needs_translation(query, &languages) {
+        let why = if languages.is_empty() {
+            "noLanguages"
+        } else {
+            "sameLanguage"
+        };
+        crate::ask_log::event(
+            "translation",
+            serde_json::json!({ "query": query, "langs": langs, "skipped": why }),
+        );
+        return Vec::new();
+    }
+    let messages = mnema_rag::translation_messages(query, &languages);
+    let started = std::time::Instant::now();
+    let reply = mnema_provider::complete_within(
+        &endpoint.base,
+        &endpoint.token,
+        model,
+        &messages,
+        TERMS_TIMEOUT,
+    );
+    let ms = started.elapsed().as_millis();
+    match reply {
+        Ok(raw) => {
+            let terms = mnema_rag::parse_terms(&raw, query, MAX_ASK_QUERY);
+            crate::ask_log::event(
+                "translation",
+                serde_json::json!({
+                    "query": query, "langs": langs, "terms": terms,
+                    "raw": crate::ask_log::raw(&raw), "ms": ms,
+                }),
+            );
+            terms
+        }
+        Err(e) => {
+            eprintln!("mnema: the question was not translated: {e}");
+            crate::ask_log::event(
+                "translation",
+                serde_json::json!({ "query": query, "langs": langs, "failed": e.to_string(), "ms": ms }),
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// `hits` with their last [`TERM_PLACES`] given to what `terms` find by the
+/// text arm alone — exact words, not a second meaning search, whose thirty
+/// candidates per term buried the exact hit in measurement (D192). A term
+/// whose search fails is skipped: the question keeps what it found.
+fn with_term_hits(state: &AppState, hits: Vec<Hit>, terms: &[String]) -> Vec<Hit> {
+    let text_only = Arms {
+        text: true,
+        content: false,
+    };
+    let mut found: Vec<Hit> = Vec::new();
+    let mut lists: Vec<Vec<i64>> = Vec::new();
+    for term in terms {
+        match retrieve(state, term, text_only, ASK_TOP_K, None) {
+            Ok((term_hits, text, content, _)) => {
+                log_search("term", term, &term_hits, &text, &content);
+                lists.push(term_hits.iter().map(|h| h.chunk_id).collect());
+                found.extend(term_hits);
+            }
+            Err(e) => eprintln!("mnema: a translated term was not searched: {e}"),
+        }
+    }
+    if lists.iter().all(Vec::is_empty) {
+        return hits;
+    }
+    let own: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+    let refs: Vec<&[i64]> = lists.iter().map(Vec::as_slice).collect();
+    let order = mnema_search::reserve_tail(
+        &own,
+        &mnema_search::rrf_lists(&refs),
+        ASK_TOP_K as usize,
+        TERM_PLACES,
+    );
+    order
+        .into_iter()
+        .filter_map(|id| {
+            hits.iter()
+                .chain(found.iter())
+                .find(|h| h.chunk_id == id)
+                .cloned()
+        })
+        .collect()
+}
+
 /// The model's turn: it may search up to [`MAX_TOOL_SEARCHES`] times in all
 /// (the queries `searched` already, their passages `shown` in front of `asked`, the
 /// question as [`mnema_rag::build_dialogue`] wrote it), and the call after the
@@ -1924,6 +2158,7 @@ fn answer_with_searches(
     query: &str,
     (arms, roles): (Arms, crate::provider::Roles),
     chat: &ChatCall<'_>,
+    terms_of: &dyn Fn(&str) -> Vec<String>,
     (mut messages, asked, mut shown, mut searched): (
         Vec<mnema_provider::Message>,
         String,
@@ -1942,6 +2177,12 @@ fn answer_with_searches(
         mut found,
     } = sources;
     let mut misses: Vec<String> = Vec::new();
+    let chat = |messages: &[mnema_provider::Message], offer_search: bool| {
+        let started = std::time::Instant::now();
+        let reply = chat(messages, offer_search);
+        log_model_call(offer_search, &reply, started.elapsed());
+        reply
+    };
     // No caller comes here with every search made.
     let mut reply = match chat(&messages, true) {
         Ok(reply) => reply,
@@ -1967,7 +2208,22 @@ fn answer_with_searches(
         // oversized one is a search that found nothing, and costs no embedding.
         let usable = !query.trim().is_empty() && query.chars().count() <= MAX_ASK_QUERY;
         let (new_hits, new_text, new_content, unreachable) = if usable {
-            retrieve(state, query, arms, ASK_TOP_K, roles.embed)?
+            let (found, text, content, unreachable) =
+                retrieve(state, query, arms, ASK_TOP_K, roles.embed)?;
+            log_search("model", query, &found, &text, &content);
+            // The model's own query in other words — DeepSeek wrote
+            // «Solpadeine» with Ukrainian words around it, which the text arm
+            // cannot match (D191) — gets the same last places (D192).
+            // Only when its own words matched nothing: a model that already
+            // searched «Solpadeine» found the article, and translating it
+            // again cost a second chat call for nothing (owner's log).
+            let missed = matches!(text, TextArmReport::Answered { matched: 0 });
+            let found = if arms.text && unreachable.is_none() && missed {
+                with_term_hits(state, found, &terms_of(query))
+            } else {
+                found
+            };
+            (found, text, content, unreachable)
         } else {
             (Vec::new(), text.clone(), content.clone(), None)
         };
@@ -2086,6 +2342,10 @@ fn generated_answer(
     text: TextArmReport,
     content: ContentArmReport,
 ) -> AskAnswer {
+    let grounding = mnema_rag::grounding(&a.text, |n| {
+        hits.get(n.wrapping_sub(1)).map(|h| h.text.as_str())
+    })
+    .into();
     let citations = a
         .cited
         .iter()
@@ -2109,6 +2369,7 @@ fn generated_answer(
         answer: a.text,
         citations,
         via,
+        grounding,
         text,
         content,
     }
@@ -2217,6 +2478,21 @@ enum Stored {
     Single(AskAnswer),
 }
 
+/// The grounding verdict with its anchors renumbered as the answer's are
+/// (`order[i]` becomes `i + 1`): a mark left on the old number would sit on
+/// another citation.
+fn renumber_grounding(grounding: &Grounding, order: &[usize]) -> Grounding {
+    match grounding {
+        Grounding::Unsupported { anchors } => Grounding::Unsupported {
+            anchors: anchors
+                .iter()
+                .filter_map(|a| order.iter().position(|o| o == a).map(|p| p + 1))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// The session an opened conversation continues from. Only the last generated
 /// turn carries sources — the passages it cited, renumbered 1..n with its
 /// answer — which are all a later turn can cite.
@@ -2234,6 +2510,7 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
                         answer,
                         citations,
                         via,
+                        grounding,
                         text,
                         content,
                     },
@@ -2283,6 +2560,7 @@ fn session_from(turns: &[StoredTurn]) -> Vec<crate::dialogue::SessionTurn> {
                             answer: mnema_rag::renumber_anchors(answer, &order),
                             citations: renumbered,
                             via: *via,
+                            grounding: renumber_grounding(grounding, &order),
                             text: text.clone(),
                             content: content.clone(),
                         },
@@ -2799,6 +3077,7 @@ mod tests {
                 answer: "a".into(),
                 citations: vec![],
                 via,
+                grounding: Grounding::Unchecked,
                 text: TextArmReport::Off,
                 content: ContentArmReport::Off,
             })
@@ -2812,6 +3091,133 @@ mod tests {
             AskAnswer::Generated { via, .. } => assert_eq!(via, Via::Search),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn grounding_has_wire_names_and_an_old_record_was_never_checked() {
+        use serde_json::json;
+        let generated = |grounding: Grounding| {
+            serde_json::to_value(AskAnswer::Generated {
+                answer: "a".into(),
+                citations: vec![],
+                via: Via::Search,
+                grounding,
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            generated(Grounding::NoCitations)["grounding"],
+            json!({ "kind": "noCitations" })
+        );
+        assert_eq!(
+            generated(Grounding::Unsupported { anchors: vec![2] })["grounding"],
+            json!({ "kind": "unsupported", "anchors": [2] })
+        );
+        let mut old = generated(Grounding::Supported);
+        assert_eq!(old["grounding"], json!({ "kind": "supported" }));
+        old.as_object_mut().unwrap().remove("grounding");
+        match serde_json::from_value::<AskAnswer>(old).unwrap() {
+            AskAnswer::Generated { grounding, .. } => assert_eq!(grounding, Grounding::Unchecked),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unsupported_anchor_is_renumbered_with_the_answer_or_dropped() {
+        // Answer cited 3 and 7; renumbered they are 1 and 2. A mark on 7 must
+        // move to 2, and a mark on an anchor no longer cited must go.
+        let g = Grounding::Unsupported {
+            anchors: vec![7, 5],
+        };
+        assert_eq!(
+            renumber_grounding(&g, &[3, 7]),
+            Grounding::Unsupported { anchors: vec![2] }
+        );
+        assert_eq!(
+            renumber_grounding(&Grounding::Supported, &[3]),
+            Grounding::Supported
+        );
+    }
+
+    #[test]
+    fn an_opened_conversation_keeps_the_mark_on_the_citation_it_was_on() {
+        let citation = |anchor: usize| AskCitation {
+            anchor,
+            chunk_id: anchor as i64,
+            text: format!("passage {anchor}"),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::None,
+            document_id: "d".into(),
+            ord: 0,
+            root_id: None,
+        };
+        let turns = [StoredTurn {
+            query: "q".into(),
+            answer: AskAnswer::Generated {
+                answer: "x <c>3</c> y <c>7</c>".into(),
+                citations: vec![citation(3), citation(7)],
+                via: Via::Search,
+                grounding: Grounding::Unsupported { anchors: vec![7] },
+                text: TextArmReport::Off,
+                content: ContentArmReport::Off,
+            },
+        }];
+        match &session_from(&turns)[0].answer {
+            AskAnswer::Generated {
+                answer, grounding, ..
+            } => {
+                assert_eq!(answer, "x <c>1</c> y <c>2</c>");
+                assert_eq!(grounding, &Grounding::Unsupported { anchors: vec![2] });
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_generated_answer_carries_the_check_of_its_citations() {
+        let hit = |text: &str| Hit {
+            chunk_id: 1,
+            text: text.into(),
+            relative_path: None,
+            section_title: None,
+            coordinate: Coordinate::None,
+            document_id: "d".into(),
+            ord: 0,
+            root_id: None,
+        };
+        let hits = [hit(
+            "The readiness probe waits ninety seconds before reporting healthy.",
+        )];
+        let answer = |text: &str, cited: Vec<usize>| match generated_answer(
+            mnema_rag::Answer {
+                text: text.into(),
+                cited,
+            },
+            &hits,
+            Via::Search,
+            TextArmReport::Off,
+            ContentArmReport::Off,
+        ) {
+            AskAnswer::Generated { grounding, .. } => grounding,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            answer(
+                "The probe waits ninety seconds before reporting a node healthy.",
+                vec![]
+            ),
+            Grounding::NoCitations
+        );
+        assert_eq!(
+            answer(
+                "The readiness probe waits ninety seconds before reporting <c>1</c>.",
+                vec![1]
+            ),
+            Grounding::Supported
+        );
     }
 
     #[test]
@@ -2979,6 +3385,7 @@ mod tests {
             answer: "a".into(),
             citations: vec![],
             via: Via::Search,
+            grounding: Grounding::Unchecked,
             text: TextArmReport::Off,
             content: ContentArmReport::Off,
         };

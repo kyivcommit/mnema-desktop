@@ -192,7 +192,7 @@ fn an_english_question_is_recognised() {
 }
 
 #[test]
-fn class_as_str_and_the_parser_agree_on_all_three_classes() {
+fn class_as_str_and_the_parser_agree_on_every_class() {
     for class in Class::ALL {
         let line = OK
             .replace(
@@ -253,4 +253,21 @@ fn answer_sentences_that_canonicalise_the_same_are_still_a_duplicate() {
         matches!(&err, EvalError::Questions(m) if m.contains("uk-01")),
         "got {err:?}"
     );
+}
+
+#[test]
+fn a_cross_lingual_or_name_question_carries_exactly_one_answer() {
+    for class in ["crosslingual", "name"] {
+        let two = OK
+            .replace(r#""class":"literal""#, &format!(r#""class":"{class}""#))
+            .replace(
+                r#"["Договір складено у двох примірниках."]"#,
+                r#"["Договір складено у двох примірниках.","Другий примірник у заявника."]"#,
+            );
+        let err = QuestionSet::load(file(&[&two]).path()).unwrap_err();
+        assert!(
+            matches!(&err, EvalError::Questions(m) if m.contains("uk-01")),
+            "{class}: got {err:?}"
+        );
+    }
 }

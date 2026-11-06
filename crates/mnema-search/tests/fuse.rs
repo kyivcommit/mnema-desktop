@@ -154,3 +154,47 @@ fn equal_scores_are_broken_by_chunk_id_so_two_runs_agree() {
     assert_eq!(fuse(FusionRule::Rrf, &text, &content, 2), vec![40, 50]);
     assert_eq!(fuse(FusionRule::Rrf, &content, &text, 2), vec![40, 50]);
 }
+
+#[test]
+fn rrf_lists_of_one_list_keeps_its_order() {
+    assert_eq!(mnema_search::rrf_lists(&[&[3, 1, 2]]), vec![3, 1, 2]);
+    assert_eq!(mnema_search::rrf_lists(&[]), Vec::<i64>::new());
+}
+
+#[test]
+fn a_chunk_in_several_lists_rises_above_one_in_a_single_list() {
+    // 7 is second in each of three lists; 1 is first in one list only. Three
+    // second places outweigh one first, which a fusion reading only the
+    // first list (or only positions) would not show.
+    let fused = mnema_search::rrf_lists(&[&[1, 7], &[2, 7], &[3, 7]]);
+    assert_eq!(fused[0], 7, "{fused:?}");
+    assert_eq!(fused.len(), 4);
+}
+
+#[test]
+fn the_head_is_never_touched_and_the_tail_takes_only_new_chunks() {
+    use mnema_search::reserve_tail;
+    let own = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    // 3 is already in the cut, so it is not taken twice; 20 and 21 are new.
+    assert_eq!(
+        reserve_tail(&own, &[3, 20, 21, 22], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 21]
+    );
+    // 7 is own's, inside the cut: it keeps its own place rather than taking
+    // a reserved one, and 20 gets the reserved place.
+    assert_eq!(
+        reserve_tail(&own, &[7, 20], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 7]
+    );
+    // No extra: own as it was, cut.
+    assert_eq!(reserve_tail(&own, &[], 8, 2), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    // One new extra: one reserved place, the other goes back to own.
+    assert_eq!(
+        reserve_tail(&own, &[20], 8, 2),
+        vec![1, 2, 3, 4, 5, 6, 20, 7]
+    );
+    // A short own list: extras fill in, nothing is invented.
+    assert_eq!(reserve_tail(&[1], &[20, 21, 22], 8, 2), vec![1, 20, 21]);
+    // An own list that found nothing: the extras are the answer.
+    assert_eq!(reserve_tail(&[], &[20, 21], 8, 2), vec![20, 21]);
+}

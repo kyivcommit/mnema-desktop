@@ -194,3 +194,34 @@ fn the_shared_list_comes_back_in_one_fixed_order() {
         }
     );
 }
+
+#[test]
+fn a_cross_lingual_or_name_question_that_shares_a_term_is_violated() {
+    // A shared term means the question is not cross-lingual at all: a
+    // Latin-script name copied verbatim into a Ukrainian question would match
+    // lexically and score as literal.
+    for class in [Class::CrossLingual, Class::Name] {
+        let q = question(
+            class,
+            "Хто такий Devon?",
+            &["Devon Marsh owns the checklist."],
+        );
+        assert_eq!(
+            check_class(&q, &BTreeSet::new()),
+            ClassVerdict::Violated {
+                shared: vec!["devon".to_string()]
+            },
+            "{class:?}"
+        );
+        let q = question(
+            class,
+            "Хто такий Девон?",
+            &["Devon Marsh owns the checklist."],
+        );
+        assert_eq!(
+            check_class(&q, &BTreeSet::new()),
+            ClassVerdict::Holds,
+            "{class:?}"
+        );
+    }
+}

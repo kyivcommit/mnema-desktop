@@ -16,7 +16,7 @@ fn the_shipped_corpus_is_what_the_spec_says_it_is() {
     assert_eq!(corpus.documents_in(mnema_eval::Language::En).count(), 10);
 
     let questions = QuestionSet::load(&questions_path()).unwrap();
-    assert_eq!(questions.questions.len(), 30);
+    assert_eq!(questions.questions.len(), 50);
     for class in Class::ALL {
         assert_eq!(
             questions
@@ -42,7 +42,7 @@ fn the_lexical_configuration_runs_end_to_end_and_prints_a_number() {
     assert_eq!(preflight(&corpus, &questions, &indexed).unwrap(), vec![]);
 
     let outcomes = run_lexical(&indexed, &questions).unwrap();
-    assert_eq!(outcomes.len(), 30);
+    assert_eq!(outcomes.len(), 50);
 
     let chunk_count = indexed.db().chunk_count().unwrap();
     assert!(chunk_count > 0, "an indexed corpus with no chunks");
