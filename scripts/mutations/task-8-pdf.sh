@@ -239,7 +239,7 @@ case_ "reader: pages are counted by FPDF_GetPageCount, not by an iterator that g
 # scan — which `pdf.rs`'s own comment forbids and this arm would have done.
 case_ "reader: a page that will not load is not a page without text" \
   crates/mnema-extract/src/pdf.rs \
-  's{        let page = all_pages\.get\(index\)\.map_err\(\|e\| \{\n            PdfError::Malformed\(format!\(\n                "page \{page_no\} of this PDF could not be loaded: \{e\}"\n            \)\)\n        \}\)\?;}{        let Ok(page) = all_pages.get(index) else \{\n            skipped.push(page_no);\n            continue;\n        \};}' \
+  's{        let page = all_pages\.get\(index\)\.map_err\(\|e\| \{\n            PdfError::Malformed\(format!\(\n                "page \{page_no\} of this PDF could not be loaded: \{e\}"\n            \)\)\n        \}\)\?;}{        let Ok(page) = all_pages.get(index) else \{\n            order.skipped.push(page_no);\n            continue;\n        \};}' \
   'let Ok(page) = all_pages.get(index) else {' \
   mnema-extract 'a_page_that_will_not_load_refuses_the_document_rather_than_ending_it' --test pdf
 
