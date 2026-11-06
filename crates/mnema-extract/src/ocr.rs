@@ -57,6 +57,30 @@ pub struct PageImage<'a> {
     pub dpi: u32,
 }
 
+/// A rendered page that owns its pixels — what crosses to another thread or
+/// process, where a borrow of pdfium's bitmap cannot go. Same layout as
+/// [`PageImage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedPageImage {
+    pub bgra: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub dpi: u32,
+}
+
+impl OwnedPageImage {
+    pub fn as_image(&self) -> PageImage<'_> {
+        PageImage {
+            bgra: &self.bgra,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            dpi: self.dpi,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recognised {
     pub text: String,

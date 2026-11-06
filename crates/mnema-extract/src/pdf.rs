@@ -60,7 +60,7 @@ use pdfium_render::prelude::{
     PdfBitmapFormat, PdfPage as PdfiumPage, PdfRenderConfig, PdfiumError, PdfiumInternalError,
 };
 
-use crate::ocr::{self, OcrError, PageImage};
+use crate::ocr::{self, OcrError, OwnedPageImage};
 use crate::pdfium_probe::{self, has_text_layer, lock_pdfium, page_text, text_layer_chars};
 
 /// `PdfPage::text_source` of a page read from its own text layer — and the
@@ -385,14 +385,22 @@ pub fn extract_pdf_pages(
     Ok(skipped)
 }
 
+/// Renders `page` and recognises it; an engine failure is [`PdfError::Ocr`].
+fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>, PdfError> {
+    let image = render_for_ocr(page, page_no)?;
+    ocr::recognise(&image.as_image()).map_err(PdfError::Ocr)
+}
+
 /// Renders `page` to BGRA — the only format Vision reads (`ocr` module doc) —
 /// at [`OCR_DPI`], or smaller if its long side would pass
-/// [`OCR_MAX_SIDE_PX`], and recognises it.
+/// [`OCR_MAX_SIDE_PX`].
+///
+/// Apart from recognition so that the image can be handed to another process
+/// while pdfium stays on this thread, under its lock.
 ///
 /// A render pdfium refuses is the page's fault and refuses the document as
-/// `Malformed`, like a page that will not load; an engine failure is
-/// [`PdfError::Ocr`].
-fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>, PdfError> {
+/// `Malformed`, like a page that will not load.
+fn render_for_ocr(page: &PdfiumPage, page_no: u32) -> Result<OwnedPageImage, PdfError> {
     let scale = render_scale(page.width().value, page.height().value);
     let config = PdfRenderConfig::new()
         .scale_page_by_factor(scale)
@@ -404,15 +412,14 @@ fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>,
     })?;
     let bgra = bitmap.as_raw_bytes();
     let (width, height) = (bitmap.width() as u32, bitmap.height() as u32);
-    let image = PageImage {
-        bgra: &bgra,
-        width,
-        height,
+    Ok(OwnedPageImage {
         // pdfium's buffer is `stride * height`; the stride is what is left.
         stride: bgra.len() / (height.max(1) as usize),
+        bgra,
+        width,
+        height,
         dpi: (scale * 72.0).round() as u32,
-    };
-    ocr::recognise(&image).map_err(PdfError::Ocr)
+    })
 }
 
 /// Pixels per point for a page of `width` × `height` points: [`OCR_DPI`], or
