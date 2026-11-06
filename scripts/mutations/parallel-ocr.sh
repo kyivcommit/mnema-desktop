@@ -154,7 +154,7 @@ case_ "this Mac's P-cores are read from sysctl" \
 # overtakes pages still being recognised and the caller sees 1, 4, 7, 2, …
 case_ "a native page queues behind pages in flight" \
   crates/mnema-extract/src/pdf.rs \
-  's~            order\n                \.queue\n                \.push_back\(Slot::Ready\(page_of\(page_no, &raw, TEXT_SOURCE_NATIVE, None\)\)\);~            on_page(declared, page_of(page_no, \&raw, TEXT_SOURCE_NATIVE, None));~' \
+  's~            order\.queue\.push_back\(Slot::Ready\(page_of\(\n                page_no,\n                &raw,\n                TEXT_SOURCE_NATIVE,\n                None,\n            \)\)\);~            on_page(declared, page_of(page_no, \&raw, TEXT_SOURCE_NATIVE, None));~' \
   'on_page(declared, page_of(page_no, &raw, TEXT_SOURCE_NATIVE, None));' \
   mnema-extract 'pages_answered_out_of_order_reach_the_caller_in_page_order' --test pdf_pipeline
 
