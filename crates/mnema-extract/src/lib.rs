@@ -20,6 +20,7 @@ mod html;
 pub mod manifest;
 mod markdown;
 mod ocr;
+pub mod ocr_wire;
 pub mod page_view;
 mod pdf;
 mod pdfium_probe;
