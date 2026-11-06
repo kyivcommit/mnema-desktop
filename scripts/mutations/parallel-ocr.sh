@@ -98,3 +98,54 @@ case_ "the crash hook fires after k replies, not before" \
   's~        if crash_after == Some\(served\) \{~        if crash_after == Some(served + 1) {~' \
   '        if crash_after == Some(served + 1) {' \
   mnema-extract 'the_crash_hook_kills_the_helper_after_k_replies' --test ocr_helper
+
+# P1. "0" in the environment is no override; taken as one, it would be the
+# in-process path for a machine that has eight cores to offer.
+case_ "an override of zero is ignored, not clamped to one" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~        \.and_then\(\|v\| v\.parse::<usize>\(\)\.ok\(\)\)\n        \.filter\(\|&n\| n >= 1\)~        .and_then(|v| v.parse::<usize>().ok())~' \
+  '        .or(p_cores.filter(|&n| n >= 1))' \
+  mnema-extract 'the_environment_overrides_and_a_bad_value_is_ignored' --test ocr_parallel
+
+# P2. A zero from sysctl is no answer.
+case_ "a zero P-core count falls through to parallelism" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~        \.or\(p_cores\.filter\(\|&n\| n >= 1\)\)~        .or(p_cores)~' \
+  '        .or(p_cores)' \
+  mnema-extract 'without_a_p_core_count_half_the_parallelism_is_taken' --test ocr_parallel
+
+# P3. Half the logical parallelism: all of it would count efficiency cores and
+# hyperthreads the plateau does not reward.
+case_ "without P-cores half the parallelism is taken" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~\.or\(parallelism\.map\(\|n\| n / 2\)\)~.or(parallelism)~' \
+  '        .or(parallelism)' \
+  mnema-extract 'without_a_p_core_count_half_the_parallelism_is_taken' --test ocr_parallel
+
+# P4. The floor.
+case_ "never fewer than one process" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~    chosen\.clamp\(1, MAX_PROCESSES\)~    chosen.min(MAX_PROCESSES)~' \
+  '    chosen.min(MAX_PROCESSES)' \
+  mnema-extract 'never_fewer_than_one' --test ocr_parallel
+
+# P5. The ceiling.
+case_ "never more than MAX_PROCESSES" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~    chosen\.clamp\(1, MAX_PROCESSES\)~    chosen.max(1)~' \
+  '    chosen.max(1)' \
+  mnema-extract 'performance_cores_decide_when_the_machine_names_them' --test ocr_parallel
+
+# P6. The environment comes first.
+case_ "the environment overrides the P-core count" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~    let chosen = env\n        \.and_then\(\|v\| v\.parse::<usize>\(\)\.ok\(\)\)\n        \.filter\(\|&n\| n >= 1\)\n        \.or\(p_cores\.filter\(\|&n\| n >= 1\)\)~    let chosen = p_cores\n        .filter(|\&n| n >= 1)\n        .or(env.and_then(|v| v.parse::<usize>().ok()).filter(|\&n| n >= 1))~' \
+  '    let chosen = p_cores' \
+  mnema-extract 'the_environment_overrides_and_a_bad_value_is_ignored' --test ocr_parallel
+
+# P7. The sysctl is actually asked (macOS only: elsewhere the stub is None).
+case_ "this Mac's P-cores are read from sysctl" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~    \(rc == 0 && len == std::mem::size_of::<i32>\(\) && value > 0\)\.then_some\(value as usize\)~    (rc == 0 \&\& len == 0).then_some(value as usize)~' \
+  '(rc == 0 && len == 0)' \
+  mnema-extract 'this_mac_names_its_performance_cores' --test ocr_parallel
