@@ -61,7 +61,8 @@ fn two_requests_in_a_row_arrive_in_order_and_then_a_clean_end() {
 fn only_the_rows_the_geometry_names_are_sent() {
     let mut sent = image(3, 2, 0);
     let rows = sent.bgra.clone();
-    sent.bgra.extend_from_slice(&[9; 5]);
+    // Not 9 (a tab): JSON would skip leading whitespace before the next header.
+    sent.bgra.extend_from_slice(b"tail!");
     let mut bytes = Vec::new();
     write_request(&mut bytes, 7, &sent.as_image()).unwrap();
     let next = image(2, 2, 0);
