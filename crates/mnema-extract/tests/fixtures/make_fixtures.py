@@ -396,6 +396,23 @@ if __name__ == "__main__":
         [[BODY_TEXT, BODY_TEXT_2], [STAMP_TEXT], [BODY_TEXT_3, BODY_TEXT_4]],
     )
     write("all-scanned.pdf", [[stamp] for stamp in SCAN_STAMPS])
+    # Text and textless pages interleaved, for the OCR pipeline (D196): pages
+    # handed to helpers come back in any order and have to reach the caller in
+    # page order, between the native pages around them. Two textless pages in
+    # a row, twice, so that more than one is in flight at a time; a native page
+    # first and last, so that neither end can be the only place order is kept.
+    write(
+        "interleaved-native-scan.pdf",
+        [
+            [BODY_TEXT, BODY_TEXT_2],
+            ["Scan 2 of 7"],
+            ["Scan 3 of 7"],
+            [BODY_TEXT_3, BODY_TEXT_4],
+            ["Scan 5 of 7"],
+            ["Scan 6 of 7"],
+            [BODY_TEXT_5, BODY_TEXT_6],
+        ],
+    )
     # Byte for byte the body of one-page-text.pdf, plus a lock. The pages it
     # would have read are the ones the reader proves it can read elsewhere, so
     # the refusal cannot be blamed on the content.

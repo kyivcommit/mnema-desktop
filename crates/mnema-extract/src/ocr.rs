@@ -17,14 +17,16 @@
 //! failure this module exists to remove. There is therefore no gray input type
 //! to choose by mistake.
 //!
-//! **Cold start.** The first recognition in an executable costs ~46 s, once per
-//! executable *path* — not per process, not per boot: the same binary copied to
-//! a new path paid it again, a rebuilt binary at the old path did not. The
-//! packaged worker pays it once per install, and a test binary once per
-//! `target/*/deps/<name>-<hash>` path (`tests/ocr.rs`: 45.9 s on its first run,
-//! 0.4 s after rebuilds — the hash did not move). A caller's per-page deadline
-//! has to cover it, two workers starting cold together included (66 s and 86 s,
-//! measured): the pool's 300 s does.
+//! **Cold start.** The first recognition can cost ~46 s, and what decides
+//! when is not known. It was first read as once per executable *path* (a copy
+//! at a new path paid again, a rebuild at the old path did not; `tests/ocr.rs`
+//! 45.9 s on its first run, 0.4 s after rebuilds). On 2026-11-06 both halves
+//! failed once: four copies of a rebuilt probe in a new directory warmed up in
+//! 0.6–0.7 s, and the first run of a rebuilt worker at its old path paid
+//! 46.9 s. So any first run may pay it, and `--ocr` helpers started together
+//! pay it together (D196). A caller's per-page deadline has to cover it, two
+//! workers starting cold together included (66 s and 86 s, measured): the
+//! pool's 300 s does.
 //!
 //! **Memory.** Resident size grows ~35 MB per recognised page and keeps
 //! growing (2 GB after 60 calls), but `phys_footprint` does not (178 → 183 MB
@@ -55,6 +57,30 @@ pub struct PageImage<'a> {
     /// The resolution the page was rendered at, carried through to
     /// [`Recognised::dpi`] for the `page` row.
     pub dpi: u32,
+}
+
+/// A rendered page that owns its pixels — what crosses to another thread or
+/// process, where a borrow of pdfium's bitmap cannot go. Same layout as
+/// [`PageImage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedPageImage {
+    pub bgra: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub dpi: u32,
+}
+
+impl OwnedPageImage {
+    pub fn as_image(&self) -> PageImage<'_> {
+        PageImage {
+            bgra: &self.bgra,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            dpi: self.dpi,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

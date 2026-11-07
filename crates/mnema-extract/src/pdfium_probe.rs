@@ -820,10 +820,11 @@ mod tests {
         // the reader. 1 + 2 + 3 + 3 + 3 + 1 + 3 + 3 over the eight fixtures that
         // load, with `broken-utf16.pdf` contributing page 1 only — its pages 2 and
         // 3 are the two the doc comment above excludes — plus 1 for page 1 of
-        // `mixed-native-scan.pdf`, plus 1 for the one page of `rotated-90.pdf`; the
-        // other scan fixtures have no text to compare.
+        // `mixed-native-scan.pdf`, plus 1 for the one page of `rotated-90.pdf`,
+        // plus all 7 of `interleaved-native-scan.pdf` (its "scan" pages carry a
+        // stamp, which is text); the other scan fixtures have no text to compare.
         assert_eq!(
-            compared, 21,
+            compared, 28,
             "the comparison must run on the pages it says it ran on: {names:?}"
         );
     }

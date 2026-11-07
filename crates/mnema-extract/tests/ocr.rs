@@ -5,10 +5,10 @@
 //! libc, which std's lock does not cover) is the race `set_var` is `unsafe` for.
 //! Here there is one test per platform and nothing else runs beside it.
 //!
-//! The macOS test pays Vision's ~46 s cold start on the first run of this
-//! binary's path (`deps/ocr-<hash>`; measured 45.9 s once, 0.4 s after
-//! rebuilds). Every new test binary would pay it again, which is why this is
-//! the only lib-level Vision test; the rest go through the worker.
+//! The macOS test may pay Vision's ~46 s cold start (measured 45.9 s on this
+//! binary's first run, 0.4 s after rebuilds; what triggers it is in `ocr.rs`'s
+//! module doc). A new test binary may pay it again, which is why this is the
+//! only lib-level Vision test; the rest go through the worker.
 
 use mnema_extract::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, recognise};
 

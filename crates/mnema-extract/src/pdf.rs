@@ -54,13 +54,14 @@
 //! is a block whose text is not a slice of the page.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use mnema_core::{Block, BlockType, nfc};
 use pdfium_render::prelude::{
     PdfBitmapFormat, PdfPage as PdfiumPage, PdfRenderConfig, PdfiumError, PdfiumInternalError,
 };
 
-use crate::ocr::{self, OcrError, PageImage};
+use crate::ocr::{self, OcrError, OwnedPageImage};
 use crate::pdfium_probe::{self, has_text_layer, lock_pdfium, page_text, text_layer_chars};
 
 /// `PdfPage::text_source` of a page read from its own text layer — and the
@@ -235,8 +236,64 @@ pub fn extract_pdf(bytes: &[u8]) -> Result<PdfDocument, PdfError> {
 /// OCR runs on the calling thread, under the same lock, between pages; on
 /// a 356-page scanned volume that is minutes, which is why the caller writes
 /// each page as it arrives and the pool's deadline is per page (D189).
+/// [`extract_pdf_pages_with`] hands those pages to other processes instead.
 pub fn extract_pdf_pages(
     bytes: &[u8],
+    on_page: impl FnMut(u32, PdfPage),
+) -> Result<Vec<u32>, PdfError> {
+    extract_pdf_pages_with(bytes, &mut InProcess::default(), on_page)
+}
+
+/// Where the pages without a text layer are recognised (D196).
+///
+/// `submit` takes a rendered page under its page number; `next` blocks until
+/// some submitted page is answered and returns it under the number it was
+/// submitted with — in any order. It is called only while a page is in
+/// flight, and never with more than `capacity` of them. `try_next` is `next`
+/// without the wait: an answer already in, or `None`.
+pub trait OcrBackend {
+    fn capacity(&self) -> usize;
+    fn submit(&mut self, page_no: u32, image: OwnedPageImage);
+    fn next(&mut self) -> (u32, Result<Option<ocr::Recognised>, OcrError>);
+    fn try_next(&mut self) -> Option<(u32, Result<Option<ocr::Recognised>, OcrError>)>;
+}
+
+/// Recognises each page on the calling thread as it is submitted: the path
+/// before D196, and the one a single helper would be no faster than.
+#[derive(Default)]
+pub struct InProcess {
+    answered: VecDeque<(u32, Result<Option<ocr::Recognised>, OcrError>)>,
+}
+
+impl OcrBackend for InProcess {
+    fn capacity(&self) -> usize {
+        1
+    }
+    fn submit(&mut self, page_no: u32, image: OwnedPageImage) {
+        let reply = ocr::recognise(&image.as_image());
+        self.answered.push_back((page_no, reply));
+    }
+    fn next(&mut self) -> (u32, Result<Option<ocr::Recognised>, OcrError>) {
+        self.answered
+            .pop_front()
+            .expect("next() is called only while a page is in flight")
+    }
+    fn try_next(&mut self) -> Option<(u32, Result<Option<ocr::Recognised>, OcrError>)> {
+        self.answered.pop_front()
+    }
+}
+
+/// [`extract_pdf_pages`] with the textless pages recognised by `backend`.
+///
+/// **Pages reach `on_page` in page order** whatever order `backend` answers
+/// in: a page waits in the queue until every page before it is handed over or
+/// skipped. An engine failure refuses the document when the queue reaches
+/// its page, so the pages before it are handed over and none after it — as
+/// when every page was read on this thread. An answer for a page that is not
+/// in flight is a broken backend and refuses the document.
+pub fn extract_pdf_pages_with(
+    bytes: &[u8],
+    backend: &mut dyn OcrBackend,
     mut on_page: impl FnMut(u32, PdfPage),
 ) -> Result<Vec<u32>, PdfError> {
     // First, and on its own line, because everything after it is about the
@@ -286,7 +343,7 @@ pub fn extract_pdf_pages(
     }
 
     let declared = count as u32;
-    let mut skipped = Vec::new();
+    let mut order = InOrder::default();
 
     for index in 0..count {
         let page_no = (index + 1) as u32;
@@ -323,76 +380,177 @@ pub fn extract_pdf_pages(
         // store `About the Authorsxxi`, one word the page does not show.
         let raw = replacement_runs_to_spaces(&raw);
 
-        let (raw, text_source, ocr) = if has_text_layer(text_layer_chars(&raw)) {
-            (raw, TEXT_SOURCE_NATIVE, None)
+        if has_text_layer(text_layer_chars(&raw)) {
+            // shortcut: native pages behind a page in flight are held, text and
+            // all, until it answers — the read-ahead that lets later scans fill
+            // the helpers. Unbounded but text-sized (a few KB a page); bound the
+            // queue if large mixed documents meet a cold start.
+            order.queue.push_back(Slot::Ready(page_of(
+                page_no,
+                &raw,
+                TEXT_SOURCE_NATIVE,
+                None,
+            )));
         } else {
-            match recognise(&page, page_no)? {
+            while order.in_flight >= backend.capacity().max(1) {
+                order.receive(backend)?;
+                order.drain(declared, &mut on_page)?;
+            }
+            backend.submit(page_no, render_for_ocr(&page, page_no)?);
+            order.queue.push_back(Slot::Pending(page_no));
+            order.in_flight += 1;
+        }
+        // Answers already in are collected before the queue is drained, so the
+        // pages behind an answered one stream on instead of waiting for the
+        // next textless page — or, with `InProcess`, for the end of the file.
+        order.collect(backend)?;
+        order.drain(declared, &mut on_page)?;
+    }
+
+    while order.in_flight > 0 {
+        order.receive(backend)?;
+        order.drain(declared, &mut on_page)?;
+    }
+    Ok(order.skipped)
+}
+
+/// A page in [`InOrder`]'s queue.
+enum Slot {
+    Ready(PdfPage),
+    Pending(u32),
+    Answered(u32, Result<Option<ocr::Recognised>, OcrError>),
+}
+
+/// The pages read so far that `on_page` has not been given, in page order.
+#[derive(Default)]
+struct InOrder {
+    queue: VecDeque<Slot>,
+    in_flight: usize,
+    skipped: Vec<u32>,
+}
+
+impl InOrder {
+    /// One answer from `backend`, waited for.
+    fn receive(&mut self, backend: &mut dyn OcrBackend) -> Result<(), PdfError> {
+        let (page_no, reply) = backend.next();
+        self.place(page_no, reply)
+    }
+
+    /// Every answer `backend` already has.
+    fn collect(&mut self, backend: &mut dyn OcrBackend) -> Result<(), PdfError> {
+        while self.in_flight > 0 {
+            let Some((page_no, reply)) = backend.try_next() else {
+                break;
+            };
+            self.place(page_no, reply)?;
+        }
+        Ok(())
+    }
+
+    /// An answer, put in its page's place.
+    fn place(
+        &mut self,
+        page_no: u32,
+        reply: Result<Option<ocr::Recognised>, OcrError>,
+    ) -> Result<(), PdfError> {
+        let slot = self
+            .queue
+            .iter_mut()
+            .find(|slot| matches!(slot, Slot::Pending(n) if *n == page_no))
+            .ok_or_else(|| {
+                PdfError::Malformed(format!(
+                    "OCR returned page {page_no}, which was not asked for"
+                ))
+            })?;
+        *slot = Slot::Answered(page_no, reply);
+        self.in_flight -= 1;
+        Ok(())
+    }
+
+    /// Hands over every page at the head of the queue that is no longer
+    /// waiting for an answer.
+    fn drain(
+        &mut self,
+        declared: u32,
+        on_page: &mut impl FnMut(u32, PdfPage),
+    ) -> Result<(), PdfError> {
+        while let Some(head) = self.queue.front() {
+            if matches!(head, Slot::Pending(_)) {
+                break;
+            }
+            match self.queue.pop_front().expect("the head was just seen") {
+                Slot::Ready(page) => on_page(declared, page),
                 // The same threshold as a native page, and no second one.
                 // `replacement_runs_to_spaces` is not applied: Vision returns
                 // characters it recognised, and U+FFFD is not among the shapes
                 // it reads (none in any page measured for D189).
-                Some(read) if has_text_layer(text_layer_chars(&read.text)) => {
+                Slot::Answered(page_no, Ok(Some(read)))
+                    if has_text_layer(text_layer_chars(&read.text)) =>
+                {
                     let ocr = OcrPage {
                         confidence: read.confidence,
                         width_px: read.width_px,
                         height_px: read.height_px,
                         dpi: read.dpi,
                     };
-                    (Cow::Owned(read.text), TEXT_SOURCE_OCR, Some(ocr))
+                    on_page(
+                        declared,
+                        page_of(page_no, &read.text, TEXT_SOURCE_OCR, Some(ocr)),
+                    );
                 }
                 // Vision found nothing worth a page, or there is no engine on
                 // this platform: a scan without text, as before OCR existed.
-                _ => {
-                    skipped.push(page_no);
-                    continue;
-                }
+                Slot::Answered(page_no, Ok(_)) => self.skipped.push(page_no),
+                Slot::Answered(_, Err(e)) => return Err(PdfError::Ocr(e)),
+                Slot::Pending(_) => unreachable!("stopped at above"),
             }
-        };
-
-        // Once, before the text is stored and after the threshold has been
-        // taken from the same normalisation (D32, D38): `text_layer_chars`
-        // normalises to count, so the string admitted and the string kept are
-        // the same string.
-        let text = nfc::normalise(&raw).into_owned();
-        on_page(
-            declared,
-            PdfPage {
-                page_no,
-                text_source,
-                ocr,
-                blocks: vec![Block {
-                    block_type: BlockType::Paragraph,
-                    // Restarts at 0 on every page: uniqueness in the schema is on
-                    // `(page_id, reading_order)`.
-                    reading_order: 0,
-                    // Nothing here detects language, as in every other reader:
-                    // a per-block guess is the extraction spec's subject.
-                    language: None,
-                    text,
-                    // **A PDF has no line to name.** Not a gap left to fill later:
-                    // `mnema_ingest::pages_of` gives this reader
-                    // `PageContext::Fixed(Coordinate::Page)` precisely because a
-                    // line range computed from these blocks would be
-                    // `Coordinate::None`, and a number invented here would be
-                    // cited as "рядки 1–1" of a page that has no rows.
-                    line_start: None,
-                    line_end: None,
-                }],
-            },
-        );
+        }
+        Ok(())
     }
+}
 
-    Ok(skipped)
+/// One page of text, read natively or recognised.
+fn page_of(page_no: u32, raw: &str, text_source: &'static str, ocr: Option<OcrPage>) -> PdfPage {
+    // Once, before the text is stored and after the threshold has been
+    // taken from the same normalisation (D32, D38): `text_layer_chars`
+    // normalises to count, so the string admitted and the string kept are
+    // the same string.
+    let text = nfc::normalise(raw).into_owned();
+    PdfPage {
+        page_no,
+        text_source,
+        ocr,
+        blocks: vec![Block {
+            block_type: BlockType::Paragraph,
+            // Restarts at 0 on every page: uniqueness in the schema is on
+            // `(page_id, reading_order)`.
+            reading_order: 0,
+            // Nothing here detects language, as in every other reader:
+            // a per-block guess is the extraction spec's subject.
+            language: None,
+            text,
+            // **A PDF has no line to name.** Not a gap left to fill later:
+            // `mnema_ingest::pages_of` gives this reader
+            // `PageContext::Fixed(Coordinate::Page)` precisely because a
+            // line range computed from these blocks would be
+            // `Coordinate::None`, and a number invented here would be
+            // cited as "рядки 1–1" of a page that has no rows.
+            line_start: None,
+            line_end: None,
+        }],
+    }
 }
 
 /// Renders `page` to BGRA — the only format Vision reads (`ocr` module doc) —
 /// at [`OCR_DPI`], or smaller if its long side would pass
-/// [`OCR_MAX_SIDE_PX`], and recognises it.
+/// [`OCR_MAX_SIDE_PX`].
+///
+/// Apart from recognition so that the image can be handed to another process
+/// while pdfium stays on this thread, under its lock.
 ///
 /// A render pdfium refuses is the page's fault and refuses the document as
-/// `Malformed`, like a page that will not load; an engine failure is
-/// [`PdfError::Ocr`].
-fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>, PdfError> {
+/// `Malformed`, like a page that will not load.
+fn render_for_ocr(page: &PdfiumPage, page_no: u32) -> Result<OwnedPageImage, PdfError> {
     let scale = render_scale(page.width().value, page.height().value);
     let config = PdfRenderConfig::new()
         .scale_page_by_factor(scale)
@@ -404,15 +562,14 @@ fn recognise(page: &PdfiumPage, page_no: u32) -> Result<Option<ocr::Recognised>,
     })?;
     let bgra = bitmap.as_raw_bytes();
     let (width, height) = (bitmap.width() as u32, bitmap.height() as u32);
-    let image = PageImage {
-        bgra: &bgra,
-        width,
-        height,
+    Ok(OwnedPageImage {
         // pdfium's buffer is `stride * height`; the stride is what is left.
         stride: bgra.len() / (height.max(1) as usize),
+        bgra,
+        width,
+        height,
         dpi: (scale * 72.0).round() as u32,
-    };
-    ocr::recognise(&image).map_err(PdfError::Ocr)
+    })
 }
 
 /// Pixels per point for a page of `width` × `height` points: [`OCR_DPI`], or

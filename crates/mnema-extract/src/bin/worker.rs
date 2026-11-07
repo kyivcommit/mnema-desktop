@@ -126,6 +126,15 @@ fn main() {
         return;
     }
 
+    // The fourth branch, and a long-lived one: an OCR helper (D196). The
+    // worker reading a scanned PDF starts several of these from its own
+    // binary and hands each rendered pages over `ocr_wire`; this process never
+    // opens a file and never loads Pdfium. Its exit code is the only thing the
+    // worker reads about how it ended.
+    if args.len() == 2 && args[1] == "--ocr" {
+        std::process::exit(serve_ocr());
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -155,6 +164,80 @@ fn main() {
 /// parent may be reading these as they arrive, or may kill this process on a
 /// timeout, and either way a frame sitting in an unflushed buffer is a frame
 /// the parent never sees.
+/// The `--ocr` loop: one reply per request, in order, flushed each time; 0 on
+/// EOF where the next request would start, 2 on anything else.
+fn serve_ocr() -> i32 {
+    use mnema_extract::ocr_wire::{
+        OCR_CRASH_AFTER_ENV, OCR_STALE_AFTER_ENV, OCR_STALL_MS_ENV, read_request, write_reply,
+    };
+
+    // A helper inside Vision does not see its stdin close until the page is
+    // done — and a cold start is ~46 s of one page. The worker it serves may
+    // be killed meanwhile (SIGKILL from the pool's deadline runs no cleanup),
+    // so the helper watches its parent instead: reparented means orphaned,
+    // and an orphan has no one to answer.
+    // Unix only: helpers are started only where there is an engine (macOS).
+    #[cfg(unix)]
+    {
+        let parent = std::os::unix::process::parent_id();
+        if parent == 1 {
+            return 3;
+        }
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if std::os::unix::process::parent_id() != parent {
+                    std::process::exit(3);
+                }
+            }
+        });
+    }
+
+    let crash_after: Option<usize> = std::env::var(OCR_CRASH_AFTER_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let stale_after: Option<usize> = std::env::var(OCR_STALE_AFTER_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let stall = std::env::var(OCR_STALL_MS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis);
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
+    let mut served = 0usize;
+    let mut previous = None;
+    loop {
+        let (seq, image) = match read_request(&mut stdin) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return 0,
+            Err(e) => {
+                eprintln!("mnema-extract-worker --ocr: {e}");
+                return 2;
+            }
+        };
+        if crash_after == Some(served) {
+            std::process::abort();
+        }
+        if let Some(stall) = stall {
+            std::thread::sleep(stall);
+        }
+        let reply = mnema_extract::recognise(&image.as_image());
+        let (seq, reply) = match previous.replace((seq, reply)) {
+            Some(stale) if stale_after.is_some_and(|k| served >= k) => stale,
+            _ => previous.clone().expect("just put there"),
+        };
+        // A worker that has gone away closed this pipe: nothing left to do.
+        if write_reply(&mut stdout, seq, &reply)
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            return 2;
+        }
+        served += 1;
+    }
+}
+
 fn write_frame(stdout: &mut io::Stdout, frame: &Frame) {
     let line = to_line(frame).expect("a Frame always serialises to JSON");
     if let Err(e) = stdout
@@ -477,7 +560,7 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 // Filled in from the document below.
                 pages: 0,
             });
-            let read = extract_pdf_pages(&bytes, |declared, page| {
+            let on_page = |declared, page: mnema_extract::PdfPage| {
                 // Written before the first page and not before: a document
                 // none of whose pages has text answers `no_text_layer`
                 // *instead of* a header, and that is only known at the end.
@@ -521,7 +604,18 @@ fn handle_request(line: &str, emit: &mut dyn FnMut(Frame)) -> Vec<Frame> {
                 for block in page.blocks {
                     emit(Frame::Block(block));
                 }
-            });
+            };
+            // Pages without a text layer go to `--ocr` helpers of this same
+            // binary when there is an engine to run and more than one core to
+            // run it on (D196); otherwise they are read on this thread.
+            let helpers = mnema_extract::ocr_parallel::configured();
+            let read = match std::env::current_exe() {
+                Ok(exe) if cfg!(target_os = "macos") && helpers > 1 => {
+                    let mut backend = mnema_extract::ocr_parallel::Helpers::new(exe, helpers);
+                    mnema_extract::extract_pdf_pages_with(&bytes, &mut backend, on_page)
+                }
+                _ => extract_pdf_pages(&bytes, on_page),
+            };
             match read {
                 // Every page was below the text-layer threshold, so there is no
                 // document to build — but the file *was* read, and this says so
