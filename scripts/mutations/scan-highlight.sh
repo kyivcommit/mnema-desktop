@@ -283,3 +283,11 @@ case_ "warm: the boot gives the warm-up a short deadline" \
   's~page_view::RENDER_TIMEOUT_SCAN~std::time::Duration::from_secs(5)~' \
   'std::time::Duration::from_secs(5)' \
   mnema-desktop 'the_boot_warms_the_ocr_engine_in_the_background_when_the_index_holds_a_scan' --test boot_warm
+
+# H12. A warm-up that worked says so on stdout. The refusal test never reaches
+# the success branch; the real-engine run does (on every platform).
+case_ "warm: the worker prints on stdout when the engine answered" \
+  $WK \
+  's~(eprintln!\("mnema-extract-worker: --warm-ocr: \{e\}"\);\n\s+\})~$1 else {\n            println!("warmed");\n        }~' \
+  'println!("warmed");' \
+  mnema-extract 'warm_ocr_exits_zero_and_writes_nothing_on_stdout' --test $WT
