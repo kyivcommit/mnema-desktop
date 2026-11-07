@@ -78,19 +78,12 @@ case_ "judge: no hash is unplaced" \
         return (TextMatch::Unplaced,' \
   mnema-extract "${VT}a_recognised_page_is_boxed_only_as_the_text_it_was_indexed_in" --lib
 
-# J4. Text NFC would rewrite is boxed: its offsets are of the rewritten text.
-case_ "judge: text NFC would rewrite is not refused" \
-  $V \
-  's~if matches!\(nfc::normalise\(&boxed\.text\), ~if false \&\& matches!(nfc::normalise(\&boxed.text), ~' \
-  'if false && matches!(nfc::normalise(&boxed.text), ' \
-  mnema-extract "${VT}text_nfc_would_rewrite_or_a_page_of_whitespace_is_never_boxed" --lib
-
 # J5. A page of whitespace is compared like any other (and its hash agrees).
 case_ "judge: a page of whitespace is compared" \
   $V \
   's~if boxed\.text\.chars\(\)\.all\(char::is_whitespace\) \{~if false \&\& boxed.text.chars().all(char::is_whitespace) {~' \
   'if false && boxed.text.chars().all(char::is_whitespace) {' \
-  mnema-extract "${VT}text_nfc_would_rewrite_or_a_page_of_whitespace_is_never_boxed" --lib
+  mnema-extract "${VT}a_page_of_whitespace_is_never_boxed" --lib
 
 # J6. A citation Vision gives no box for reads as "nothing cited here".
 case_ "judge: a range without a box is not unplaced" \

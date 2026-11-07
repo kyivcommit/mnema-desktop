@@ -9,7 +9,6 @@
 use std::fmt::Write as _;
 
 use base64::Engine as _;
-use mnema_core::nfc;
 use mnema_core::render::{
     RenderError, RenderRange, RenderRect, RenderReply, RenderRequest, TextMatch,
 };
@@ -170,8 +169,9 @@ fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch,
 }
 
 /// What a second recognition is worth against the request: apart from Vision
-/// so that the verdicts Vision never produces on a fixture (text that NFC
-/// rewrites, a page of whitespace) are tested on every platform.
+/// so that the verdicts Vision never produces on a fixture (a page of
+/// whitespace) are tested on every platform. No NFC check: the hash is of the
+/// stored text, so text NFC would rewrite already fails it.
 fn judge_recognised(boxed: Boxed, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
     let Some(wanted) = &req.text_sha256 else {
         return (TextMatch::None, Vec::new());
@@ -179,13 +179,11 @@ fn judge_recognised(boxed: Boxed, req: &RenderRequest) -> (TextMatch, Vec<Render
     if boxed.text.chars().all(char::is_whitespace) {
         return (TextMatch::None, Vec::new());
     }
-    // Indexing stores the NFC of what Vision read; offsets and hash are of that.
-    if matches!(nfc::normalise(&boxed.text), std::borrow::Cow::Owned(_)) {
-        return (TextMatch::Unplaced, Vec::new());
-    }
     if sha256_hex(&boxed.text) != *wanted {
         return (TextMatch::Unplaced, Vec::new());
     }
+    // One list per range by construction (`recognise_ranges`); if a change ever
+    // broke that, `zip` below would drop citations silently.
     if boxed.ranges.len() != req.ranges.len() {
         return (TextMatch::Unplaced, Vec::new());
     }
@@ -222,11 +220,7 @@ fn text_and_rects(
     if mapped.text.chars().all(char::is_whitespace) {
         return (TextMatch::None, Vec::new());
     }
-    let mut hex = String::new();
-    for byte in Sha256::digest(mapped.text.as_bytes()) {
-        write!(hex, "{byte:02x}").expect("a String takes a write");
-    }
-    if hex != *wanted {
+    if sha256_hex(&mapped.text) != *wanted {
         return (TextMatch::Mismatch, Vec::new());
     }
     // The same text, but the map lines up with it only when NFC left it alone.
@@ -384,14 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn text_nfc_would_rewrite_or_a_page_of_whitespace_is_never_boxed() {
-        // "й" decomposed: и + U+0306. Hashed as is, so only the NFC check refuses it.
-        let decomposed = "Ки\u{0306}ів";
-        let got = judge_recognised(
-            boxed(decomposed, vec![vec![rect()]]),
-            &req(Some(decomposed), vec![range(0, 2)]),
-        );
-        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+    fn a_page_of_whitespace_is_never_boxed() {
         let got = judge_recognised(
             boxed(" \n ", vec![vec![rect()]]),
             &req(Some(" \n "), vec![range(0, 1)]),

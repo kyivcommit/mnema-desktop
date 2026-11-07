@@ -53,7 +53,7 @@ case_ "map: a synthesised line break is given a pdfium index" \
 # under the index is boxed with offsets counted in other text.
 case_ "hash: the page text is not compared with the hash the offsets were counted in" \
   $V \
-  's~if hex != \*wanted \{~if false {~' \
+  's~if sha256_hex\(&mapped\.text\) != \*wanted \{~if false {~' \
   'if false {' \
   mnema-extract 'text_that_is_not_the_text_the_offsets_were_counted_in_gets_the_page_and_no_boxes' --test page_view
 
