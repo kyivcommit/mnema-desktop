@@ -519,6 +519,17 @@ fn a_scan_page_is_boxed_when_vision_repeats_the_text_indexing_stored() {
     assert!(r.rects[0].primary);
     assert!(ink(&r, &r.rects[0], 0.0, 0.0) > 50, "no ink under the box");
 
+    // The raster Vision reads is indexing's, whatever width is shown: at a
+    // width too small to read, the hash still matches and the fractions agree.
+    let tiny = rendered(&scan_request(name, 1, 150, &own, ranges.clone(), true));
+    assert_eq!((tiny.text, tiny.width_px), (TextMatch::Match, 150));
+    assert_eq!(tiny.rects.len(), r.rects.len());
+    let (a, b) = (tiny.rects[0], r.rects[0]);
+    assert!(
+        (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01 && (a.w - b.w).abs() < 0.01,
+        "{a:?} {b:?}"
+    );
+
     // Positive control: the same page and ranges, the hash of the neighbouring
     // page's text. Not `Mismatch` -- a different Vision is not a different file.
     let r = rendered(&scan_request(name, 1, 600, &next, ranges, true));
