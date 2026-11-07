@@ -70,24 +70,53 @@ function mount(props: Record<string, unknown> = {}) {
   return render(FilePane, { location, focus: null, onFocusHandled: () => {}, mode: 'page', ...props });
 }
 const FOCUS = { chunkId: 7, ord: 0, text: 'x' };
-const image = () => screen.getByTestId('page-image').getAttribute('src');
+// The strip's geometry in jsdom: 856 px of pane, less the guessed 44 px above
+// and 12 px below, is 800 px of page; slots are 800 + 12 apart.
+const TALL = 800;
+const STEP = TALL + 12;
 
-test('the page shown is the cited block\'s page, else the first', async () => {
-  view = pdf({ focusBlockIds: [20] });
-  const { unmount } = mount({ focus: FOCUS });
-  await screen.findByTestId('page-image');
-  expect(renderCalls()[0].pageNo).toBe(2);
-  unmount();
+// A document of `n` pages, one block per page (block id = page x 10).
+function book(n: number, over: Partial<Extract<DocumentView, { kind: 'file' }>> = {}): DocumentView {
+  return pdf({
+    blocks: Array.from({ length: n }, (_, i) => ({
+      blockId: (i + 1) * 10, kind: 'paragraph' as const, text: `Сторінка ${i + 1}.`, pageNo: i + 1, sectionTitle: null,
+    })),
+    ...over,
+  });
+}
+const slot = (n: number) => screen.getAllByTestId('page-slot').find((s) => s.dataset.page === String(n))!;
+const imageOf = (n: number) => slot(n).querySelector('[data-testid="page-image"]')?.getAttribute('src') ?? null;
+const asked = () => renderCalls().map((c) => c.pageNo);
+const settle = () => new Promise((r) => setTimeout(r, 20));
+async function scrollTo(n: number) {
+  document.documentElement.scrollTop = (n - 1) * STEP;
+  await fireEvent.scroll(window);
+}
+// Held answers by page, released by the test.
+function holding() {
+  const held = new Map<number, (v: unknown) => void>();
+  renderReply = (a) => new Promise((r) => { held.set(a.pageNo as number, r); });
+  return held;
+}
+afterEach(() => { document.documentElement.scrollTop = 0; });
 
-  invoke.mockClear();
-  view = pdf();
-  mount();
-  await screen.findByTestId('page-image');
-  expect(renderCalls()[0].pageNo).toBe(1);
+test('the cited page is asked for first and alone; then the pages either side', async () => {
+  view = book(3, { focusBlockIds: [20] });
+  const held = holding();
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(asked()).toEqual([2]));
+  held.get(2)!(page({ pages: 3 }));
+  await waitFor(() => expect(asked()).toEqual([2, 1, 3]));
 });
 
-test('only the spans of the shown page\'s block are sent as ranges', async () => {
-  view = pdf({
+test('with nothing cited the strip starts at the first page', async () => {
+  view = book(3);
+  mount();
+  await waitFor(() => expect(asked()).toEqual([1, 2]));
+});
+
+test('each page is sent its own spans as ranges', async () => {
+  view = book(3, {
     focusBlockIds: [20],
     spans: [
       { blockId: 10, blockStart: 1, length: 2, primary: false },
@@ -96,19 +125,21 @@ test('only the spans of the shown page\'s block are sent as ranges', async () =>
     ],
   });
   mount({ focus: FOCUS });
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(renderCalls()).toHaveLength(3));
   expect(renderCalls()[0]).toEqual({
     documentId: 'doc-1', rootId: 1, relativePath: 'papers/a.pdf', pageNo: 2, widthPx: 600,
     ranges: [{ blockId: 20, blockStart: 3, length: 4, primary: true }],
   });
+  expect(renderCalls()[1].ranges).toEqual([{ blockId: 10, blockStart: 1, length: 2, primary: false }]);
+  expect(renderCalls()[2].ranges).toEqual([{ blockId: 30, blockStart: 5, length: 6, primary: false }]);
 });
 
-test('boxes sit over the picture in percent of it, the primary one marked', async () => {
-  renderReply = () => Promise.resolve(page({
+test('boxes sit over their own page\'s picture in percent of it, the primary one marked', async () => {
+  renderReply = (a) => Promise.resolve(page(a.pageNo === 1 ? {
     rects: [{ x: 0.1, y: 0.2, w: 0.3, h: 0.4, primary: true }, { x: 0.5, y: 0.6, w: 0.25, h: 0.05, primary: false }],
-  }));
+  } : {}));
   mount();
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(imageOf(2)).not.toBeNull());
   const boxes = screen.getAllByTestId('page-box');
   const at = (el: HTMLElement) => ['left', 'top', 'width', 'height'].map((p) => parseFloat(el.style.getPropertyValue(p)));
   expect(boxes).toHaveLength(2);
@@ -117,129 +148,150 @@ test('boxes sit over the picture in percent of it, the primary one marked', asyn
   expect(at(boxes[1])).toEqual([50, 60, 25, 5].map((n) => expect.closeTo(n, 6)));
   expect(boxes[0].getAttribute('data-primary')).toBe('true');
   expect(boxes[1].getAttribute('data-primary')).toBeNull();
-  expect(screen.getByTestId('page-image').parentElement!.contains(boxes[0])).toBe(true);
+  const img = slot(1).querySelector('[data-testid="page-image"]')!;
+  expect(img.parentElement!.contains(boxes[0])).toBe(true);
 });
 
-test('the first load says it is loading; a later page keeps the old picture meanwhile', async () => {
-  let release!: (v: unknown) => void;
-  renderReply = (a) => a.pageNo === 1
-    ? Promise.resolve(page({ image: 'data:image/png;base64,ONE' }))
-    : new Promise((r) => { release = r; });
+test('the first load says it is loading; a page not drawn yet holds its place', async () => {
+  const held = holding();
   mount();
-  // Before the first answer: the loading line, no picture.
   expect(screen.getByTestId('file-loading')).toBeTruthy();
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(held.has(1)).toBe(true));
+  held.get(1)!(page({ image: 'data:image/png;base64,ONE' }));
+  await waitFor(() => expect(imageOf(1)).toBe('data:image/png;base64,ONE'));
   expect(screen.queryByTestId('file-loading')).toBeNull();
-
-  await fireEvent.click(screen.getByTestId('page-next'));
-  await waitFor(() => expect(renderCalls()).toHaveLength(2));
-  expect(image()).toBe('data:image/png;base64,ONE');
-  expect(screen.queryByTestId('file-loading')).toBeNull();
-  release(page({ image: 'data:image/png;base64,TWO' }));
-  await waitFor(() => expect(image()).toBe('data:image/png;base64,TWO'));
+  expect(imageOf(2)).toBeNull();
+  expect(slot(2).querySelector('[data-testid="page-wait"]')!.getAttribute('aria-busy')).toBe('true');
+  expect((slot(2).querySelector('[data-testid="page-wait"]') as HTMLElement).style.width).toBe('600px');
 });
 
-test('a late answer for an older request is not painted', async () => {
-  const held: Array<(v: unknown) => void> = [];
-  renderReply = (a) => a.pageNo === 1
-    ? Promise.resolve(page())
-    : new Promise((r) => { held.push(r); });
+test('every slot is as tall as the page, and the strip opens with the cited page at the top', async () => {
+  view = book(5, { focusBlockIds: [40] });
+  renderReply = () => Promise.resolve(page({ pages: 5 }));
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(imageOf(4)).not.toBeNull());
+  for (const n of [1, 2, 3, 4, 5]) {
+    expect(slot(n).style.height).toBe(`${TALL}px`);
+    expect(slot(n).style.marginBottom).toBe('12px');
+  }
+  await waitFor(() => expect(document.documentElement.scrollTop).toBe(3 * STEP));
+});
+
+test('no more than two pages are on their way at once', async () => {
+  view = book(10, { focusBlockIds: [30] });
+  const held = holding();
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(asked()).toEqual([3]));
+  held.get(3)!(page({ pages: 10 }));
+  await waitFor(() => expect(asked()).toEqual([3, 2, 4]));
+
+  await scrollTo(7); // 7, 6, 8 wanted; two are still on their way
+  await settle();
+  expect(asked()).toEqual([3, 2, 4]);
+  held.get(2)!(page({ pages: 10 }));
+  await waitFor(() => expect(asked()).toEqual([3, 2, 4, 7]));
+});
+
+test('scrolling draws the page in view and its neighbours, and the page line follows', async () => {
+  view = book(10);
+  renderReply = () => Promise.resolve(page({ pages: 10 }));
   mount();
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(asked()).toEqual([1, 2]));
+  expect(screen.getByTestId('page-of').textContent).toBe('page 1 of 10');
 
-  await fireEvent.click(screen.getByTestId('page-next')); // page 2, held
-  await fireEvent.click(screen.getByTestId('page-next')); // page 3, held
-  await waitFor(() => expect(held).toHaveLength(2));
-  held[1](page({ image: 'data:image/png;base64,THREE' }));
-  await waitFor(() => expect(image()).toBe('data:image/png;base64,THREE'));
-  held[0](page({ image: 'data:image/png;base64,TWO' }));
-  await new Promise((r) => setTimeout(r, 20));
-  expect(image()).toBe('data:image/png;base64,THREE');
+  await scrollTo(6);
+  await waitFor(() => expect(asked()).toEqual([1, 2, 6, 5, 7]));
+  expect(screen.getByTestId('page-of').textContent).toBe('page 6 of 10');
+  expect(screen.getByTestId('page-of').getAttribute('aria-live')).toBeNull();
 });
 
-test('a late failure for an older request does not replace a newer page', async () => {
-  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-  let failTwo: (e: unknown) => void = () => {};
-  renderReply = (a) => a.pageNo === 2
-    ? new Promise((_, reject) => { failTwo = reject; })
-    : Promise.resolve(page({ image: `data:image/png;base64,P${a.pageNo}` }));
+test('past twelve pictures the farthest from the page in view are let go', async () => {
+  view = book(30);
+  renderReply = (a) => Promise.resolve(page({ pages: 30, image: `data:image/png;base64,P${a.pageNo}` }));
   mount();
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(imageOf(2)).not.toBeNull());
+  for (let n = 2; n <= 20; n++) {
+    await scrollTo(n);
+    await waitFor(() => expect(imageOf(Math.min(n + 1, 30))).not.toBeNull());
+  }
+  const drawn = screen.getAllByTestId('page-slot').filter((s) => s.querySelector('[data-testid="page-image"]'));
+  expect(drawn.map((s) => Number(s.dataset.page))).toEqual([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]);
 
-  await fireEvent.click(screen.getByTestId('page-next')); // page 2, held
-  await fireEvent.click(screen.getByTestId('page-next')); // page 3, answered
-  await waitFor(() => expect(image()).toBe('data:image/png;base64,P3'));
-  failTwo('boom');
-  await new Promise((r) => setTimeout(r, 20));
-  expect(image()).toBe('data:image/png;base64,P3');
-  expect(screen.queryByTestId('page-unavailable')).toBeNull();
-  error.mockRestore();
+  // Back two pages: still there, nothing asked again.
+  const before = renderCalls().length;
+  await scrollTo(18);
+  await settle();
+  expect(renderCalls().length).toBe(before);
 });
 
-test('prev and next stop at the first and the last page', async () => {
+test('the window coming back draws the pages in view again, the citation boxed again', async () => {
+  view = book(3, { focusBlockIds: [20], spans: [{ blockId: 20, blockStart: 3, length: 4, primary: true }] });
+  renderReply = (a) => Promise.resolve(page({
+    image: `data:image/png;base64,A${a.pageNo}`,
+    rects: (a.ranges as unknown[]).length > 0 ? [{ x: 0.1, y: 0.1, w: 0.1, h: 0.1, primary: true }] : [],
+  }));
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(renderCalls()).toHaveLength(3));
+  const opened = openCalls().length;
+
+  const held = holding();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(held.has(2)).toBe(true));
+  expect(openCalls().length).toBe(opened + 1);
+  expect(renderCalls().slice(3).find((c) => c.pageNo === 2)!.ranges).toEqual([{ blockId: 20, blockStart: 3, length: 4, primary: true }]);
+  // The old picture stays up until the new one comes.
+  expect(imageOf(2)).toBe('data:image/png;base64,A2');
+  held.get(2)!(page({ image: 'data:image/png;base64,B2', rects: [{ x: 0.2, y: 0.2, w: 0.1, h: 0.1, primary: true }] }));
+  await waitFor(() => expect(imageOf(2)).toBe('data:image/png;base64,B2'));
+  expect(slot(2).querySelectorAll('[data-testid="page-box"]')).toHaveLength(1);
+});
+
+test('a late answer asked before the window came back is not painted', async () => {
+  view = book(3);
+  const first = holding();
   mount();
-  await screen.findByTestId('page-image');
-  const prev = screen.getByTestId('page-prev') as HTMLButtonElement;
-  const next = screen.getByTestId('page-next') as HTMLButtonElement;
-  expect(screen.getByTestId('page-of').textContent).toBe('page 1 of 3');
-  expect(prev.disabled).toBe(true);
-  expect(next.disabled).toBe(false);
+  await waitFor(() => expect(first.has(1)).toBe(true));
+  first.get(1)!(page());
+  await waitFor(() => expect(first.has(2)).toBe(true)); // page 2, held
 
-  await fireEvent.click(next);
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
-  expect(prev.disabled).toBe(false);
-  await fireEvent.click(next);
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 3 of 3'));
-  expect(next.disabled).toBe(true);
-  expect(renderCalls().map((c) => c.pageNo)).toEqual([1, 2, 3]);
+  const second = holding();
+  await fireEvent.focus(window);
+  await waitFor(() => expect(second.has(2)).toBe(true));
+  second.get(2)!(page({ image: 'data:image/png;base64,NEW' }));
+  await waitFor(() => expect(imageOf(2)).toBe('data:image/png;base64,NEW'));
+  first.get(2)!(page({ image: 'data:image/png;base64,OLD' }));
+  await settle();
+  expect(imageOf(2)).toBe('data:image/png;base64,NEW');
 });
 
-test('the arrow keys turn the page inside the pane, and stop at both ends', async () => {
+test('there is no turning: no buttons, and the arrow keys ask for nothing', async () => {
   mount();
-  await screen.findByTestId('page-image');
-  const pane = screen.getByTestId('pdf-page');
-
-  await fireEvent.keyDown(pane, { key: 'ArrowLeft' }); // already on page 1
-  await new Promise((r) => setTimeout(r, 10));
-  expect(renderCalls().map((c) => c.pageNo)).toEqual([1]);
-
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 3 of 3'));
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' }); // past the last
-  await new Promise((r) => setTimeout(r, 10));
-  expect(renderCalls().map((c) => c.pageNo)).toEqual([1, 2, 3]);
-
-  await fireEvent.keyDown(pane, { key: 'ArrowLeft' });
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
+  await waitFor(() => expect(asked()).toEqual([1, 2]));
+  expect(screen.queryByTestId('page-prev')).toBeNull();
+  expect(screen.queryByTestId('page-next')).toBeNull();
+  await fireEvent.keyDown(screen.getByTestId('pdf-page'), { key: 'ArrowRight' });
+  await fireEvent.keyDown(screen.getByTestId('pdf-page'), { key: 'ArrowLeft' });
+  await settle();
+  expect(asked()).toEqual([1, 2]);
 });
 
-test('the arrow keys do not turn before the first page has come, when the count is unknown', async () => {
-  let answer: (v: unknown) => void = () => {};
-  renderReply = () => new Promise((resolve) => { answer = resolve; });
+test('each page has its number in the picture\'s text', async () => {
   mount();
-  const pane = await screen.findByTestId('pdf-page');
-  await screen.findByTestId('file-loading');
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
-  await new Promise((r) => setTimeout(r, 10));
-  expect(renderCalls().map((c) => c.pageNo)).toEqual([1]);
-
-  answer(page());
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 1 of 3'));
-  await fireEvent.keyDown(pane, { key: 'ArrowRight' });
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
+  await waitFor(() => expect(imageOf(2)).not.toBeNull());
+  expect(slot(2).querySelector('img')!.getAttribute('alt')).toBe('Page 2');
 });
 
-test('each note state says its line, and shown and noText say nothing', async () => {
+test('each note says its line over the cited page, and a page with nothing cited has none', async () => {
   const note = async (highlight: 'shown' | 'changed' | 'scan' | 'noText' | 'unplaced') => {
     invoke.mockClear();
+    view = book(3, { focusBlockIds: [20], spans: [{ blockId: 20, blockStart: 1, length: 2, primary: true }] });
     renderReply = () => Promise.resolve(page({ highlight }));
-    const { unmount } = mount();
-    await screen.findByTestId('page-image');
-    const el = screen.queryByTestId('page-note');
-    const text = el?.textContent ?? null;
+    const { unmount } = mount({ focus: FOCUS });
+    await waitFor(() => expect(renderCalls()).toHaveLength(3));
+    await waitFor(() => expect(imageOf(3)).not.toBeNull());
+    expect(slot(1).querySelector('[data-testid="page-note"]')).toBeNull();
+    expect(slot(3).querySelector('[data-testid="page-note"]')).toBeNull();
+    const text = slot(2).querySelector('[data-testid="page-note"]')?.textContent ?? null;
     unmount();
     return text;
   };
@@ -255,21 +307,41 @@ test('each note state says its line, and shown and noText say nothing', async ()
   expect(await note('unplaced')).toBe('Уривок не вдалося позначити на сторінці — він є в режимі «Текст».');
 });
 
-test('an unavailable page says so and offers the text, which switches the mode', async () => {
+test('a page that could not be drawn says so in its own place; the rest of the strip is drawn', async () => {
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  view = book(3, { focusBlockIds: [20] });
+  renderReply = (a) => a.pageNo === 1 ? Promise.reject('boom')
+    : a.pageNo === 3 ? Promise.resolve({ kind: 'unavailable', reason: 'failed' })
+    : Promise.resolve(page());
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(slot(1).querySelector('[data-testid="page-failed"]')).not.toBeNull());
+  await waitFor(() => expect(slot(3).querySelector('[data-testid="page-failed"]')!.textContent).toBe('The page could not be shown.'));
+  expect(imageOf(2)).not.toBeNull();
+  expect(screen.queryByTestId('page-unavailable')).toBeNull();
+  error.mockRestore();
+});
+
+test('a file that cannot be drawn says so for the whole document and offers the text', async () => {
   const onShowText = vi.fn();
   renderReply = () => Promise.resolve({ kind: 'unavailable', reason: 'failed' });
-  mount({ onShowText });
+  const { unmount } = mount({ onShowText });
   expect((await screen.findByTestId('page-unavailable')).textContent).toBe('The page could not be shown.');
   expect(screen.queryByTestId('page-image')).toBeNull();
   await fireEvent.click(screen.getByTestId('page-show-text'));
   expect(onShowText).toHaveBeenCalledTimes(1);
-});
-
-test('a missing file has its own line, and so does a rejected command', async () => {
-  renderReply = () => Promise.resolve({ kind: 'unavailable', reason: 'fileMissing' });
-  const { unmount } = mount();
-  expect((await screen.findByTestId('page-unavailable')).textContent).toBe('The file is missing from disk.');
   unmount();
+
+  renderReply = () => Promise.resolve({ kind: 'unavailable', reason: 'fileMissing' });
+  const second = mount();
+  expect((await screen.findByTestId('page-unavailable')).textContent).toBe('The file is missing from disk.');
+  second.unmount();
+
+  // A neighbour that finds the file gone takes the whole strip down too.
+  view = book(3);
+  renderReply = (a) => Promise.resolve(a.pageNo === 1 ? page() : { kind: 'unavailable', reason: 'fileMissing' });
+  const third = mount();
+  expect((await screen.findByTestId('page-unavailable')).textContent).toBe('The file is missing from disk.');
+  third.unmount();
 
   const error = vi.spyOn(console, 'error').mockImplementation(() => {});
   renderReply = () => Promise.reject('boom');
@@ -279,32 +351,18 @@ test('a missing file has its own line, and so does a rejected command', async ()
   error.mockRestore();
 });
 
-test('the window coming back reads the document again and draws the same page again', async () => {
-  mount();
-  await screen.findByTestId('page-image');
-  await fireEvent.click(screen.getByTestId('page-next'));
-  await waitFor(() => expect(screen.getByTestId('page-of').textContent).toBe('page 2 of 3'));
-  const opened = openCalls().length;
-  const drawn = renderCalls().length;
-
-  await fireEvent.focus(window);
-  await waitFor(() => expect(renderCalls().length).toBe(drawn + 1));
-  expect(openCalls().length).toBe(opened + 1);
-  expect(renderCalls().at(-1)!.pageNo).toBe(2);
-});
-
 test('the page is as tall as the pane: the width asked follows, rounded up to 200 and capped at 3000', async () => {
   paneHeight(753); // 697 tall x 0.75 = 522.75 wide, x2 = 1045.5 -> 1200
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
   const { unmount } = mount();
-  await screen.findByTestId('page-image');
-  expect(renderCalls().map((c) => c.widthPx)).toEqual([1200]);
+  await waitFor(() => expect(renderCalls()).toHaveLength(2));
+  expect(renderCalls().map((c) => c.widthPx)).toEqual([1200, 1200]);
   unmount();
 
   invoke.mockClear();
   paneHeight(3000);
   mount();
-  await waitFor(() => expect(renderCalls()).toHaveLength(1));
+  await waitFor(() => expect(renderCalls().length).toBeGreaterThan(0));
   expect(renderCalls()[0].widthPx).toBe(3000);
 });
 
@@ -312,17 +370,28 @@ test('a resize asks again only when the rounded width changes', async () => {
   paneHeight(753);
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
   mount();
-  await screen.findByTestId('page-image');
-  expect(renderCalls()).toHaveLength(1);
+  await waitFor(() => expect(renderCalls()).toHaveLength(2));
 
   paneHeight(840); // 784 x 0.75 x 2 = 1176 -> still 1200
   resize!();
-  await new Promise((r) => setTimeout(r, 20));
-  expect(renderCalls()).toHaveLength(1);
+  await settle();
+  expect(renderCalls()).toHaveLength(2);
 
   paneHeight(990); // 934 x 0.75 x 2 = 1401 -> 1600
   resize!();
-  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([1200, 1600]));
+  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([1200, 1200, 1600, 1600]));
+});
+
+test('the cited page\'s shape sets the width asked; a neighbour of another shape does not', async () => {
+  // 800 tall; portrait guess 0.75 -> 600; the cited page is landscape 4:3.
+  // A strip that took every page's shape would ask again for ever: past a
+  // handful of calls the answers stop, so that shows as a count, not a hang.
+  renderReply = (a) => renderCalls().length > 10 ? new Promise(() => {})
+    : Promise.resolve(a.pageNo === 1 ? page({ widthPx: 800, heightPx: 600 }) : page({ widthPx: 300, heightPx: 900 }));
+  mount();
+  await waitFor(() => expect(renderCalls().map((c) => [c.pageNo, c.widthPx])).toEqual([[1, 600], [1, 1200], [2, 1200]]));
+  await settle();
+  expect(renderCalls()).toHaveLength(3);
 });
 
 test('the text mode draws no page, and neither does a document that is not a PDF', async () => {
@@ -341,61 +410,49 @@ test('the text mode draws no page, and neither does a document that is not a PDF
 test('the pane reports the document\'s type upward', async () => {
   const onMime = vi.fn();
   mount({ onMime });
-  await screen.findByTestId('page-image');
+  await waitFor(() => expect(asked().length).toBeGreaterThan(0));
   expect(onMime).toHaveBeenLastCalledWith('application/pdf');
 });
 
-test('the image is drawn as tall as the pane, less the page line', async () => {
-  paneHeight(856);
-  mount();
-  const img = await screen.findByTestId('page-image');
-  expect(img.style.height).toBe('800px');
-});
-
-test('a page of another shape asks again for the width that fills the height', async () => {
-  // 856 - 56 = 800 tall; portrait guess 0.75 -> 600; the answer is landscape 4:3.
-  renderReply = () => Promise.resolve(page({ widthPx: 800, heightPx: 600 }));
-  mount();
-  await waitFor(() => expect(renderCalls().map((c) => c.widthPx)).toEqual([600, 1200]));
-});
-
-test('a new page opens scrolled sideways to its citation, and a redraw keeps the person\'s scroll', async () => {
+test('the strip opens scrolled sideways to the citation, and a redraw keeps the person\'s scroll', async () => {
   Object.defineProperty(HTMLElement.prototype, 'scrollWidth', { configurable: true, get: () => 2000 });
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 500 });
-  renderReply = () => Promise.resolve(page({
+  view = book(3, { focusBlockIds: [20] });
+  renderReply = (a) => Promise.resolve(page(a.pageNo === 2 ? {
     rects: [{ x: 0.1, y: 0.1, w: 0.1, h: 0.01, primary: false }, { x: 0.5, y: 0.2, w: 0.1, h: 0.01, primary: true }],
-  }));
+  } : {}));
   try {
-    mount();
+    mount({ focus: FOCUS });
     const strip = await screen.findByTestId('page-strip');
     // The primary box: 0.5 x 2000 = 1000, 200 wide, centred in 500 -> 1000 - 150.
     await waitFor(() => expect(strip.scrollLeft).toBe(850));
 
     strip.scrollLeft = 0;
+    document.documentElement.scrollTop = 5;
     const drawn = renderCalls().length;
     await fireEvent.focus(window);
-    await waitFor(() => expect(renderCalls().length).toBe(drawn + 1));
-    await new Promise((r) => setTimeout(r, 20));
+    await waitFor(() => expect(renderCalls().length).toBeGreaterThan(drawn));
+    await settle();
     expect(screen.getByTestId('page-strip').scrollLeft).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(5);
   } finally {
     delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollWidth;
     delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
   }
 });
 
-test('a note above the page takes its height from the page, not from below the pane', async () => {
+test('the page takes its height from where the strip starts, under the page line', async () => {
   const real = HTMLElement.prototype.getBoundingClientRect;
   HTMLElement.prototype.getBoundingClientRect = function () {
     const top = this.dataset.testid === 'page-strip' ? 150 : 0;
     return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON() {} } as DOMRect;
   };
-  renderReply = () => Promise.resolve(page({ highlight: 'scan' }));
   try {
     paneHeight(856);
     mount();
-    await screen.findByTestId('page-note');
-    // 856 - 150 (the strip's top, under the note and the page line) - 12 = 694.
-    await waitFor(() => expect(screen.getByTestId('page-image').style.height).toBe('694px'));
+    await waitFor(() => expect(imageOf(1)).not.toBeNull());
+    // 856 - 150 (the strip's top, under the page line) - 12 = 694.
+    await waitFor(() => expect(slot(1).style.height).toBe('694px'));
   } finally {
     HTMLElement.prototype.getBoundingClientRect = real;
   }

@@ -56,7 +56,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
   | 'pdf_view_label' | 'pdf_view_text' | 'pdf_view_page'
-  | 'page_prev' | 'page_next' | 'page_of' | 'page_image_alt'
+  | 'page_of' | 'page_image_alt'
   | 'page_note_changed' | 'page_note_scan' | 'page_note_unplaced'
   | 'page_unavailable' | 'page_unavailable_missing' | 'page_show_text'
   | 'card_passages'
@@ -469,10 +469,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     pdf_view_label: 'Вигляд PDF',
     pdf_view_text: 'Текст',
     pdf_view_page: 'Сторінка',
-    page_prev: 'Попередня сторінка',
-    page_next: 'Наступна сторінка',
     page_of: 'стор. {n} з {m}',
-    page_image_alt: 'Сторінка документа',
+    page_image_alt: 'Сторінка {n}',
     page_note_changed: 'Файл змінено після індексації — підсвітки немає. Текст цитати — у режимі «Текст».',
     page_note_scan: 'Сторінка зі скану — підсвітка лише в режимі «Текст».',
     page_note_unplaced: 'Уривок не вдалося позначити на сторінці — він є в режимі «Текст».',
@@ -1398,10 +1396,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     pdf_view_label: 'PDF view',
     pdf_view_text: 'Text',
     pdf_view_page: 'Page',
-    page_prev: 'Previous page',
-    page_next: 'Next page',
     page_of: 'page {n} of {m}',
-    page_image_alt: 'Document page',
+    page_image_alt: 'Page {n}',
     page_note_changed: 'The file changed after indexing — there is no highlight. The citation text is in “Text” mode.',
     page_note_scan: 'This page is a scan — the highlight is only available in “Text” mode.',
     page_note_unplaced: 'The passage could not be marked on this page — it is shown in “Text” mode.',

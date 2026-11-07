@@ -439,16 +439,24 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 .pdf-page { display: flex; flex-direction: column; gap: 10px; outline: none; }
 .pdf-page p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); overflow-wrap: anywhere; }
 .pdf-page [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
-.pdf-page .page-nav { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 12px; color: var(--ink-soft); }
-.pdf-page .page-nav button, .pdf-page .page-show-text {
-  font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line);
-  border-radius: 5px; padding: 1px 9px; cursor: pointer;
+/* The page line stays over the strip while it scrolls by (the pane's scroller
+   is `.pane-body`, whose top padding is 0). */
+.pdf-page .page-line {
+  position: sticky; top: 0; z-index: 1; padding: 6px 0; text-align: center;
+  font-size: 12px; color: var(--ink-soft); background: var(--surface);
 }
-.pdf-page .page-nav button:disabled { opacity: 0.4; cursor: default; }
-.pdf-page .page-show-text { align-self: flex-start; padding: 3px 10px; }
+.pdf-page .page-show-text {
+  font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 5px; cursor: pointer; align-self: flex-start; padding: 3px 10px;
+}
+/* One sideways scroll for the whole strip; the pane scrolls it down. */
 .pdf-page .page-strip { overflow-x: auto; overflow-y: hidden; }
-.pdf-page .page-sheet { position: relative; display: inline-block; line-height: 0; }
-.pdf-page .page-sheet img { display: block; width: auto; max-width: none; border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
+/* Every slot is exactly the page's height (the strip's arithmetic rests on it):
+   a note takes its lines from the picture, which shrinks under it. */
+.pdf-page .page-slot { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.pdf-page .page-sheet { position: relative; flex: 1 1 0; min-height: 0; line-height: 0; }
+.pdf-page .page-sheet img { display: block; height: 100%; width: auto; max-width: none; border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
+.pdf-page .page-wait { background: var(--surface-2); border-radius: 3px; box-shadow: 0 0 0 1px var(--line); }
 /* The paper is white in either theme, so the wash is a marker's, not a theme
    token (the dark theme's wash is near-black and hid the words). `multiply`
    keeps the ink black under it. */
