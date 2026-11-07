@@ -53,7 +53,7 @@ case_ "map: a synthesised line break is given a pdfium index" \
 # under the index is boxed with offsets counted in other text.
 case_ "hash: the page text is not compared with the hash the offsets were counted in" \
   $V \
-  's~if hex != \*wanted \{~if false {~' \
+  's~if sha256_hex\(&mapped\.text\) != \*wanted \{~if false {~' \
   'if false {' \
   mnema-extract 'text_that_is_not_the_text_the_offsets_were_counted_in_gets_the_page_and_no_boxes' --test page_view
 
@@ -234,7 +234,7 @@ AP=src-tauri/src/page_view.rs
 # own path is opened.
 case_ "app: the worker is started when the path is not in the index" \
   $AP \
-  's~return unavailable\(PageUnavailable::NoPath\);~let _ = mnema_pool::render_page(worker, \&RenderRequest { path: relative_path.unwrap_or_default().to_string(), page_no, width_px, text_sha256: None, ranges: Vec::new() }, timeout); return unavailable(PageUnavailable::NoPath);~' \
+  's~return unavailable\(PageUnavailable::NoPath\);~let _ = mnema_pool::render_page(worker, \&RenderRequest { path: relative_path.unwrap_or_default().to_string(), page_no, width_px, text_sha256: None, ranges: Vec::new(), recognise: false }, timeout); return unavailable(PageUnavailable::NoPath);~' \
   'relative_path.unwrap_or_default()' \
   mnema-desktop "${AT}a_path_the_index_does_not_hold_is_no_path_and_starts_no_worker" --lib
 
@@ -275,18 +275,19 @@ case_ "app: a reindexed path still sends the hash" \
   'if true || occupant.current_document_id == document_id' \
   mnema-desktop "${AT}a_path_that_now_names_another_document_is_drawn_bare_and_changed" --lib
 
-# A4. A scan page is not recognised: its OCR text is hashed like a native one.
+# A4. A scan page is not recognised: it is asked for like a native one, with no
+# second recognition.
 case_ "app: an ocr page is not recognised as a scan" \
   $AP \
   's~source\.starts_with\("ocr:"\)~source.starts_with("ocrx:")~' \
   'source.starts_with("ocrx:")' \
-  mnema-desktop "${AT}a_scan_page_is_drawn_bare_and_marked_scan" --lib
+  mnema-desktop "${AT}a_scan_page_is_asked_for_with_the_hash_of_its_text_and_a_second_recognition" --lib
 
 # A5. A page the reader skipped is reported as changed.
 case_ "app: a skipped page is reported as changed" \
   $AP \
-  's~Some\(None\) => \(None, Some\(Highlight::NoText\)\)~Some(None) => (None, Some(Highlight::Changed))~' \
-  'Some(None) => (None, Some(Highlight::Changed))' \
+  's~Some\(None\) => \(None, Some\(Highlight::NoText\), false\)~Some(None) => (None, Some(Highlight::Changed), false)~' \
+  'Some(None) => (None, Some(Highlight::Changed), false)' \
   mnema-desktop "${AT}a_page_the_reader_skipped_is_asked_for_without_a_hash" --lib
 
 # A6. The image is passed on without the data: prefix the window sets as src.

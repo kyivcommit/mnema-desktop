@@ -10,7 +10,7 @@
 //! module doc). A new test binary may pay it again, which is why this is the
 //! only lib-level Vision test; the rest go through the worker.
 
-use mnema_extract::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, recognise};
+use mnema_extract::{OCR_UNAVAILABLE_ENV, OcrError, PageImage, recognise, recognise_ranges};
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -77,10 +77,15 @@ fn a_scanned_page_is_read_and_the_seam_makes_the_engine_unavailable() {
     // environment while it changes.
     unsafe { std::env::set_var(OCR_UNAVAILABLE_ENV, "1") };
     let seamed = recognise(&image);
+    let seamed_ranges = recognise_ranges(&image, &[]);
     unsafe { std::env::remove_var(OCR_UNAVAILABLE_ENV) };
     assert!(
         matches!(seamed, Err(OcrError::Unavailable(_))),
         "with {OCR_UNAVAILABLE_ENV} set: {seamed:?}"
+    );
+    assert!(
+        matches!(seamed_ranges, Err(OcrError::Unavailable(_))),
+        "with {OCR_UNAVAILABLE_ENV} set: {seamed_ranges:?}"
     );
 }
 
@@ -96,13 +101,19 @@ fn without_vision_there_is_no_engine_and_the_seam_still_reports_unavailable() {
         dpi: 300,
     };
     assert_eq!(recognise(&image), Ok(None));
+    assert_eq!(recognise_ranges(&image, &[]), Ok(None));
 
     // SAFETY: the only test in this binary.
     unsafe { std::env::set_var(OCR_UNAVAILABLE_ENV, "1") };
     let seamed = recognise(&image);
+    let seamed_ranges = recognise_ranges(&image, &[]);
     unsafe { std::env::remove_var(OCR_UNAVAILABLE_ENV) };
     assert!(
         matches!(seamed, Err(OcrError::Unavailable(_))),
         "{seamed:?}"
+    );
+    assert!(
+        matches!(seamed_ranges, Err(OcrError::Unavailable(_))),
+        "{seamed_ranges:?}"
     );
 }

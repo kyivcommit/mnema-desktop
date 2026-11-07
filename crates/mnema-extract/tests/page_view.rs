@@ -52,6 +52,7 @@ fn request(name: &str, page_no: u32, width_px: u32, ranges: Vec<RenderRange>) ->
         width_px,
         text_sha256: Some(sha(&stored(name, 1))),
         ranges,
+        recognise: false,
     }
 }
 
@@ -292,6 +293,7 @@ fn a_page_without_a_text_layer_is_drawn_and_has_no_text_to_compare() {
             len: 10,
             primary: true,
         }],
+        recognise: false,
     };
     let r = rendered(&req);
     assert_eq!((r.text, r.rects.len()), (TextMatch::None, 0));
@@ -355,6 +357,7 @@ fn a_page_far_taller_than_wide_is_drawn_within_the_height_cap() {
         width_px: 3000,
         text_sha256: None,
         ranges: vec![],
+        recognise: false,
     });
     let (_, w, h) = decode(&r.png);
     assert_eq!((w, h), (r.width_px, r.height_px));
@@ -436,6 +439,7 @@ fn a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line
         width_px: 612,
         text_sha256: Some(sha(&text)),
         ranges: vec![range_of(&text, "quick", true)],
+        recognise: false,
     };
     let r = rendered(&req);
     // The file did not change, so it is not reported as changed.
@@ -463,6 +467,7 @@ fn colours_are_drawn_as_the_page_has_them() {
         width_px: 200,
         text_sha256: None,
         ranges: vec![],
+        recognise: false,
     });
     let (px, w, h) = decode(&r.png);
     let at = |fx: f32, fy: f32| {
@@ -472,4 +477,170 @@ fn colours_are_drawn_as_the_page_has_them() {
     assert_eq!(at(0.25, 0.5), (255, 0, 0, 255), "left: red");
     assert_eq!(at(0.75, 0.25), (0, 255, 0, 255), "upper right: green");
     assert_eq!(at(0.75, 0.75), (0, 0, 255, 255), "lower right: blue");
+}
+
+// ---- scanned pages (`recognise: true`): the boxes come from Vision, not from a text layer ----
+//
+// Vision pays ~46 s the first time a new test binary path runs it; the first run
+// of this file waits, it is not hung.
+
+/// A request for page `page_no` of a scan, whose hash is of `hashed_text` —
+/// the page's own stored text, or a neighbour's for the control.
+#[cfg(target_os = "macos")]
+fn scan_request(
+    name: &str,
+    page_no: u32,
+    width_px: u32,
+    hashed_text: &str,
+    ranges: Vec<RenderRange>,
+    recognise: bool,
+) -> RenderRequest {
+    RenderRequest {
+        path: fixture(name).display().to_string(),
+        page_no,
+        width_px,
+        text_sha256: Some(sha(hashed_text)),
+        ranges,
+        recognise,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_scan_page_is_boxed_when_vision_repeats_the_text_indexing_stored() {
+    let name = "scan-six-pages.pdf";
+    let (own, next) = (stored(name, 1), stored(name, 2));
+    assert_ne!(own, next, "the control needs a different text");
+    let ranges = vec![range_of(&own, "Номер 1 стоїть", true)];
+
+    let r = rendered(&scan_request(name, 1, 600, &own, ranges.clone(), true));
+    assert_eq!(r.text, TextMatch::Match);
+    assert_eq!(r.rects.len(), 1, "{:?}", r.rects);
+    assert!(r.rects[0].primary);
+    assert!(ink(&r, &r.rects[0], 0.0, 0.0) > 50, "no ink under the box");
+
+    // The raster Vision reads is indexing's, whatever width is shown: at a
+    // width too small to read, the hash still matches and the fractions agree.
+    let tiny = rendered(&scan_request(name, 1, 150, &own, ranges.clone(), true));
+    assert_eq!((tiny.text, tiny.width_px), (TextMatch::Match, 150));
+    assert_eq!(tiny.rects.len(), r.rects.len());
+    let (a, b) = (tiny.rects[0], r.rects[0]);
+    assert!(
+        (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01 && (a.w - b.w).abs() < 0.01,
+        "{a:?} {b:?}"
+    );
+
+    // Positive control: the same page and ranges, the hash of the neighbouring
+    // page's text. Not `Mismatch` -- a different Vision is not a different file.
+    let r = rendered(&scan_request(name, 1, 600, &next, ranges, true));
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Unplaced, 0));
+    assert_eq!(r.width_px, 600, "the page is still drawn");
+
+    // No hash sent: nothing to compare, so no boxes -- and not `Unplaced`.
+    let mut req = scan_request(
+        name,
+        1,
+        600,
+        &own,
+        vec![range_of(&own, "Номер 1", true)],
+        true,
+    );
+    req.text_sha256 = None;
+    let r = rendered(&req);
+    assert_eq!((r.text, r.rects.len()), (TextMatch::None, 0));
+}
+
+/// A citation Vision gives no box for (a lone space is a zero box) must not
+/// read as "nothing cited here": the page is `Unplaced`, as on the native branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_range_vision_gives_no_box_for_leaves_the_scan_unplaced() {
+    let name = "scan-two-columns.pdf";
+    let text = stored(name, 1);
+    let word = range_of(&text, "Київ", true);
+    let space = RenderRange {
+        start: text.chars().position(|c| c == ' ').unwrap() as u32,
+        len: 1,
+        primary: false,
+    };
+
+    let r = rendered(&scan_request(name, 1, 600, &text, vec![word], true));
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Match, 1));
+    let r = rendered(&scan_request(name, 1, 600, &text, vec![word, space], true));
+    assert_eq!((r.text, r.rects.len()), (TextMatch::Unplaced, 0));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_range_in_the_middle_of_a_line_lands_within_its_line_on_a_narrower_bitmap() {
+    let name = "scan-two-columns.pdf";
+    let text = stored(name, 1);
+    // The OCR raster is ~2500 px wide; the bitmap shown, 800.
+    let r = rendered(&scan_request(
+        name,
+        1,
+        800,
+        &text,
+        vec![
+            range_of(&text, "ЛІВА 2", false),
+            range_of(&text, "Дніпра і славиться", true),
+        ],
+        true,
+    ));
+    assert_eq!(r.text, TextMatch::Match);
+    assert_eq!(r.rects.len(), 2, "{:?}", r.rects);
+    let (start, mid) = (r.rects[0], r.rects[1]);
+    assert!(!start.primary && mid.primary, "{start:?} {mid:?}");
+    assert!(
+        mid.x > start.x + start.w * 0.5 && mid.x + mid.w <= 1.0,
+        "starts right of the line's own start and stays on the page: {start:?} {mid:?}"
+    );
+    assert!(
+        mid.x + mid.w < 0.6,
+        "the left column, not the right one: {mid:?}"
+    );
+    assert!(
+        (mid.y - start.y).abs() < start.h * 0.5,
+        "the same line: {start:?} {mid:?}"
+    );
+    assert!(ink(&r, &mid, 0.0, 0.0) > 100, "no ink under the box");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_scan_stood_upright_by_rotate_is_boxed_at_the_top_left_of_what_is_shown() {
+    let name = "scan-rotated-90.pdf";
+    let text = stored(name, 1);
+    assert!(
+        text.contains("ПОВОРОТ один") && text.contains("ПОВОРОТ два"),
+        "Vision reads both lines upright: {text:?}"
+    );
+    let r = rendered(&scan_request(
+        name,
+        1,
+        800,
+        &text,
+        vec![range_of(&text, "ПОВОРОТ один", true)],
+        true,
+    ));
+    assert_eq!(r.text, TextMatch::Match);
+    assert_eq!(r.rects.len(), 1, "{:?}", r.rects);
+    let b = r.rects[0];
+    assert!(b.y < 0.2 && b.x < 0.3, "top left of the display: {b:?}");
+    assert!(b.w > b.h, "along the x axis: {b:?}");
+    assert!(ink(&r, &b, 0.0, 0.0) > 100, "no ink under the box");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn recognise_false_on_a_scan_behaves_as_before_the_field_existed() {
+    let name = "scan-two-columns.pdf";
+    let text = stored(name, 1);
+    let ranges = vec![range_of(&text, "Київ стоїть", true)];
+    // Everything but the field is the same as in the request that is boxed.
+    let off = rendered(&scan_request(name, 1, 600, &text, ranges.clone(), false));
+    assert_eq!((off.text, off.rects.len()), (TextMatch::None, 0));
+    let on = rendered(&scan_request(name, 1, 600, &text, ranges, true));
+    assert_eq!(on.text, TextMatch::Match);
+    assert_eq!(on.rects.len(), 1, "{:?}", on.rects);
 }

@@ -15,6 +15,8 @@ use mnema_core::render::{
 use pdfium_render::prelude::{PdfBitmapFormat, PdfPage, PdfPoints, PdfRenderConfig};
 use sha2::{Digest, Sha256};
 
+use crate::ocr::{Boxed, recognise_ranges};
+use crate::pdf::render_for_ocr;
 use crate::pdfium_probe::{lock_pdfium, mapped_page_text, pdfium};
 use crate::typing::PDF_MAGIC;
 
@@ -101,13 +103,17 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
         Err(e) => return refused(RenderError::Unreadable, format!("PNG: {e}")),
     };
 
-    let (text, rects) = match mapped_page_text(&page) {
-        Ok(mapped) => text_and_rects(&page, &config, req, mapped, (w, h)),
-        // The file read and drew; only its text layer did not. Nothing says
-        // the file changed, so the page is not reported as changed.
-        Err(e) => {
-            eprintln!("mnema-extract-worker: page {} text: {e}", req.page_no);
-            (TextMatch::Unplaced, Vec::new())
+    let (text, rects) = if req.recognise {
+        recognised_text_and_rects(&page, req)
+    } else {
+        match mapped_page_text(&page) {
+            Ok(mapped) => text_and_rects(&page, &config, req, mapped, (w, h)),
+            // The file read and drew; only its text layer did not. Nothing says
+            // the file changed, so the page is not reported as changed.
+            Err(e) => {
+                eprintln!("mnema-extract-worker: page {} text: {e}", req.page_no);
+                (TextMatch::Unplaced, Vec::new())
+            }
         }
     };
 
@@ -132,6 +138,75 @@ fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, png::EncodingError
     Ok(out)
 }
 
+/// The page of an `ocr:*` row: there is no text layer to read, so the page is
+/// recognised again -- from the raster indexing used ([`render_for_ocr`], no
+/// other), by the call indexing used ([`recognise_ranges`]) -- and the boxes come
+/// back as fractions of the page, which fit the display bitmap whatever its width.
+///
+/// A different hash here most likely means a different Vision, not a different
+/// file, so it is `Unplaced`, never `Mismatch` (spec R3).
+fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
+    let image = match render_for_ocr(page, req.page_no) {
+        Ok(image) => image,
+        // The display bitmap drew; only the second raster did not.
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page {} raster: {e}", req.page_no);
+            return (TextMatch::Unplaced, Vec::new());
+        }
+    };
+    let boxed = match recognise_ranges(&image.as_image(), &req.ranges) {
+        Ok(Some(boxed)) => boxed,
+        Ok(None) => {
+            eprintln!("mnema-extract-worker: no OCR engine on this platform");
+            return (TextMatch::None, Vec::new());
+        }
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page {} OCR: {e}", req.page_no);
+            return (TextMatch::None, Vec::new());
+        }
+    };
+    judge_recognised(boxed, req)
+}
+
+/// What a second recognition is worth against the request: apart from Vision
+/// so that the verdicts Vision never produces on a fixture (a page of
+/// whitespace) are tested on every platform. No NFC check: the hash is of the
+/// stored text, so text NFC would rewrite already fails it.
+fn judge_recognised(boxed: Boxed, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
+    let Some(wanted) = &req.text_sha256 else {
+        return (TextMatch::None, Vec::new());
+    };
+    if boxed.text.chars().all(char::is_whitespace) {
+        return (TextMatch::None, Vec::new());
+    }
+    if sha256_hex(&boxed.text) != *wanted {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    // One list per range by construction (`recognise_ranges`); if a change ever
+    // broke that, `zip` below would drop citations silently.
+    if boxed.ranges.len() != req.ranges.len() {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    for (range, boxes) in req.ranges.iter().zip(&boxed.ranges) {
+        // A citation with no box would read as "nothing cited here".
+        if boxes.is_empty() && range.len > 0 {
+            return (TextMatch::Unplaced, Vec::new());
+        }
+    }
+    (
+        TextMatch::Match,
+        boxed.ranges.into_iter().flatten().collect(),
+    )
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hex = String::new();
+    for byte in Sha256::digest(text.as_bytes()) {
+        write!(hex, "{byte:02x}").expect("a String takes a write");
+    }
+    hex
+}
+
 fn text_and_rects(
     page: &PdfPage,
     config: &PdfRenderConfig,
@@ -145,11 +220,7 @@ fn text_and_rects(
     if mapped.text.chars().all(char::is_whitespace) {
         return (TextMatch::None, Vec::new());
     }
-    let mut hex = String::new();
-    for byte in Sha256::digest(mapped.text.as_bytes()) {
-        write!(hex, "{byte:02x}").expect("a String takes a write");
-    }
-    if hex != *wanted {
+    if sha256_hex(&mapped.text) != *wanted {
         return (TextMatch::Mismatch, Vec::new());
     }
     // The same text, but the map lines up with it only when NFC left it alone.
@@ -241,4 +312,98 @@ fn range_rects(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(text: Option<&str>, ranges: Vec<RenderRange>) -> RenderRequest {
+        RenderRequest {
+            path: String::new(),
+            page_no: 1,
+            width_px: 100,
+            text_sha256: text.map(sha256_hex),
+            ranges,
+            recognise: true,
+        }
+    }
+
+    fn range(start: u32, len: u32) -> RenderRange {
+        RenderRange {
+            start,
+            len,
+            primary: true,
+        }
+    }
+
+    fn rect() -> RenderRect {
+        RenderRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.5,
+            h: 0.05,
+            primary: true,
+        }
+    }
+
+    fn boxed(text: &str, ranges: Vec<Vec<RenderRect>>) -> Boxed {
+        Boxed {
+            text: text.to_string(),
+            ranges,
+        }
+    }
+
+    #[test]
+    fn a_recognised_page_is_boxed_only_as_the_text_it_was_indexed_in() {
+        let text = "Київ на березі";
+        // Control: the same text, a box per range.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some(text), vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Match, 1));
+        // Another text's hash: not the file changed, the passage not placed.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some("інший"), vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+        // No hash: nothing to compare.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(None, vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::None, 0));
+    }
+
+    #[test]
+    fn a_page_of_whitespace_is_never_boxed() {
+        let got = judge_recognised(
+            boxed(" \n ", vec![vec![rect()]]),
+            &req(Some(" \n "), vec![range(0, 1)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::None, 0));
+    }
+
+    #[test]
+    fn a_range_without_a_box_or_a_missing_list_leaves_the_page_unplaced() {
+        let text = "Київ на березі";
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()], vec![]]),
+            &req(Some(text), vec![range(0, 4), range(5, 2)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+        // An empty range needs no box.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()], vec![]]),
+            &req(Some(text), vec![range(0, 4), range(5, 0)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Match, 1));
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some(text), vec![range(0, 4), range(5, 2)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+    }
 }

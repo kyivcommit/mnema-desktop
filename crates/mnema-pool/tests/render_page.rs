@@ -20,6 +20,7 @@ fn request(path: &str, hash: Option<&str>) -> RenderRequest {
         width_px: 640,
         text_sha256: hash.map(str::to_string),
         ranges: Vec::new(),
+        recognise: false,
     }
 }
 

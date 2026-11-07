@@ -4,8 +4,8 @@
 //
 //     swift make_scan_fixtures.swift
 //
-// Writes scan-uk.pdf, scan-two-columns.pdf, mixed-native-scan.pdf and
-// scan-six-pages.pdf next to the script — or only the ones named:
+// Writes scan-uk.pdf, scan-two-columns.pdf, mixed-native-scan.pdf,
+// scan-six-pages.pdf and scan-rotated-90.pdf next to the script — or only the ones named:
 //
 //     swift make_scan_fixtures.swift scan-six-pages.pdf
 //
@@ -23,6 +23,7 @@
 import CoreGraphics
 import CoreText
 import Foundation
+import PDFKit
 
 let dpi: CGFloat = 300
 let pageW: CGFloat = 595   // A4, points
@@ -147,3 +148,38 @@ let sixPages: [[String]] = (1...6).map { n in [
 writePDF("scan-six-pages.pdf", pages: sixPages.map { lines in
     scanPage { draw(lines, x: 60, top: 90, in: $0) }
 })
+
+// A scanner that fed the sheet sideways: the picture lies on its side in a
+// landscape MediaBox, and `/Rotate 90` (clockwise) is what stands it upright.
+// Displayed, it is the same portrait A4 as the others, its text where `draw`
+// puts it. CoreGraphics cannot write `/Rotate`, so PDFKit sets it on the page.
+let rotatedLines = [
+    "ПОВОРОТ один: рядок угорі сторінки для рамки.",
+    "ПОВОРОТ два: другий рядок стоїть нижче першого.",
+]
+if only.isEmpty || only.contains("scan-rotated-90.pdf") {
+    let mediaW = pageH, mediaH = pageW   // landscape
+    let w = Int(mediaW * dpi / 72), h = Int(mediaH * dpi / 72)
+    let bitmap = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                           space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+    bitmap.setFillColor(CGColor(gray: 1, alpha: 1))
+    bitmap.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    bitmap.scaleBy(x: dpi / 72, y: dpi / 72)
+    // Displayed (X, Y) lands at media (mediaW - Y, X): the inverse of the
+    // clockwise turn `/Rotate 90` makes when the page is shown.
+    bitmap.translateBy(x: mediaW, y: 0)
+    bitmap.rotate(by: .pi / 2)
+    draw(rotatedLines, x: 60, top: 90, in: bitmap)
+    let image = bitmap.makeImage()!
+
+    let data = NSMutableData()
+    var box = CGRect(x: 0, y: 0, width: mediaW, height: mediaH)
+    let ctx = CGContext(consumer: CGDataConsumer(data: data as CFMutableData)!, mediaBox: &box, nil)!
+    ctx.beginPDFPage(nil)
+    ctx.draw(image, in: box)
+    ctx.endPDFPage()
+    ctx.closePDF()
+    let doc = PDFDocument(data: data as Data)!
+    doc.page(at: 0)!.rotation = 90
+    precondition(doc.write(to: URL(fileURLWithPath: "scan-rotated-90.pdf")), "write scan-rotated-90.pdf")
+}
