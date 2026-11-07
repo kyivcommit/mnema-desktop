@@ -151,4 +151,15 @@ impl Db {
             )
             .optional()?)
     }
+
+    /// Whether any page was read by OCR (`text_source` `ocr:*`): the question
+    /// the application asks at start-up before warming the OCR engine, which
+    /// costs a library with no scans nothing.
+    pub fn has_scanned_page(&self) -> Result<bool, Error> {
+        Ok(self.conn().query_row(
+            "SELECT EXISTS(SELECT 1 FROM page WHERE text_source GLOB 'ocr:*')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
 }

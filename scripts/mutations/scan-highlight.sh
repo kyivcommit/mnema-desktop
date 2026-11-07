@@ -192,3 +192,94 @@ case_ "app: the scan deadline is not the pool's" \
   's~const RENDER_TIMEOUT_SCAN: Duration = Duration::from_secs\(300\);~const RENDER_TIMEOUT_SCAN: Duration = Duration::from_secs(301);~' \
   'Duration::from_secs(301)' \
   mnema-desktop "${AT}the_scan_deadline_is_the_pools_own" --lib
+
+# ── The warm-up of the OCR engine at start-up (spec R6) ──────────────────────
+#
+# What is silent when it is wrong here is a first scan page that waits a minute
+# for Vision's cold start again, or a library with no scan that starts a worker
+# at every launch.
+
+WK=crates/mnema-extract/src/bin/worker.rs
+PL=crates/mnema-pool/src/lib.rs
+IX=crates/mnema-index/src/file_view.rs
+AL=src-tauri/src/lib.rs
+WT='worker_cli'
+
+# H1. `--warm-ocr` does not ask the engine: it exits 0 having warmed nothing.
+case_ "warm: the worker does not recognise" \
+  $WK \
+  's~if let Err\(e\) = mnema_extract::recognise\(&image\) \{~if let Err(e) = Ok::<(), String>(()) {~' \
+  'Ok::<(), String>(())' \
+  mnema-extract 'warm_ocr_asks_the_engine_and_survives_its_refusal' --test $WT
+
+# H2. The pool asks the worker for another mode.
+case_ "warm: the pool passes another argument" \
+  $PL \
+  's~\.arg\("--warm-ocr"\)~.arg("--warm")~' \
+  '.arg("--warm")' \
+  mnema-pool 'the_worker_is_started_with_the_warm_ocr_argument_and_nothing_else' --test warm_ocr
+
+# H3. A worker past the deadline is reported as warmed.
+case_ "warm: a deadline is reported as success" \
+  $PL \
+  's~return Err\(PoolError::WarmTimeout \{ after: timeout \}\);~return Ok(());~' \
+  'return Ok(());' \
+  mnema-pool 'a_worker_that_outlives_the_deadline_is_killed_and_gone' --test warm_ocr
+
+# H4. A worker past the deadline is waited for, not killed: the call returns
+# when the worker does.
+case_ "warm: a worker past the deadline is not killed" \
+  $PL \
+  's~let _ = child\.kill\(\);(\n\s+let _ = child\.wait\(\);\n\s+return Err\(PoolError::WarmTimeout)~let _ = 0;${1}~' \
+  'let _ = 0;' \
+  mnema-pool 'a_worker_that_outlives_the_deadline_is_killed_and_gone' --test warm_ocr
+
+# H5. A worker that exits nonzero warmed the path.
+case_ "warm: a nonzero exit is success" \
+  $PL \
+  's~    if status\.success\(\) \{~    if true {~' \
+  'if true {' \
+  mnema-pool 'a_worker_that_exits_nonzero_is_an_error_with_what_it_said' --test warm_ocr
+
+# H6. The question "is there a scan" is answered for every page.
+case_ "warm: any page is a scanned page" \
+  $IX \
+  "s~GLOB 'ocr:\\*'~GLOB '*'~" \
+  "GLOB '*'" \
+  mnema-index 'a_scanned_page_is_found_only_when_one_was_read_by_ocr' --test file_view
+
+# H7. A library with no scan starts a worker at every launch.
+case_ "warm: a library without a scan is warmed" \
+  $AP \
+  's~    if !scanned \{~    if false {~' \
+  'if false {' \
+  mnema-desktop "${AT}a_library_with_a_scan_warms_the_ocr_engine_and_one_without_does_not" --lib
+
+# H8. A library with a scan is never warmed.
+case_ "warm: a library with a scan is not warmed" \
+  $AP \
+  's~    if !scanned \{~    if true {~' \
+  'if true {' \
+  mnema-desktop "${AT}a_library_with_a_scan_warms_the_ocr_engine_and_one_without_does_not" --lib
+
+# H9. The warm-up is given another deadline than the one it was handed.
+case_ "warm: the deadline handed in is not the one used" \
+  $AP \
+  's~mnema_pool::warm_ocr\(worker, timeout\)~mnema_pool::warm_ocr(worker, Duration::from_secs(20))~' \
+  'Duration::from_secs(20)' \
+  mnema-desktop "${AT}a_warm_up_is_held_to_the_deadline_it_is_given_and_never_panics" --lib
+
+# H10. The boot never starts the warm-up.
+case_ "warm: the boot does not warm" \
+  $AL \
+  's~page_view::warm_ocr_if_scanned\(~let _ = (~' \
+  'let _ = (' \
+  mnema-desktop 'the_boot_warms_the_ocr_engine_in_the_background_when_the_index_holds_a_scan' --test boot_warm
+
+# H11. The boot gives the warm-up a shorter deadline than the scan page's: a
+# warm-up cut short leaves the path cold.
+case_ "warm: the boot gives the warm-up a short deadline" \
+  $AL \
+  's~page_view::RENDER_TIMEOUT_SCAN~std::time::Duration::from_secs(5)~' \
+  'std::time::Duration::from_secs(5)' \
+  mnema-desktop 'the_boot_warms_the_ocr_engine_in_the_background_when_the_index_holds_a_scan' --test boot_warm

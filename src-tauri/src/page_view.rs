@@ -40,7 +40,7 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 /// start under a new binary path takes a minute and a process killed during it
 /// leaves the path cold, so a shorter deadline would never box a scan. It is
 /// `PoolConfig::timeout`'s number, and a test keeps the two equal.
-const RENDER_TIMEOUT_SCAN: Duration = Duration::from_secs(300);
+pub(crate) const RENDER_TIMEOUT_SCAN: Duration = Duration::from_secs(300);
 
 /// One stretch of the page's stored text to box: the window's `PaneSpan` for
 /// the page's block, in the unit `RenderRange` counts (Unicode scalar values).
@@ -253,6 +253,27 @@ pub(crate) fn render_page_in(
             eprintln!("mnema: the page worker failed: {e}");
             unavailable(PageUnavailable::Failed)
         }
+    }
+}
+
+/// Warms the OCR engine for `worker`'s path when the index holds a scanned page
+/// (spec R6): the first recognition under a new binary path costs ~46 s, and
+/// paying it here, in the background, keeps it out of the first scan page the
+/// person opens. Blocks for as long as the warm-up takes, so the caller runs it
+/// on a thread of its own; never panics, and says how it ended on stderr. A
+/// warm-up killed by `timeout` leaves the path cold, so `timeout` is the scan
+/// deadline, not a shorter one.
+pub(crate) fn warm_ocr_if_scanned(state: &AppState, worker: &Path, timeout: Duration) {
+    let scanned = state
+        .with_index(|db| db.has_scanned_page())
+        .unwrap_or(false);
+    if !scanned {
+        return;
+    }
+    let began = std::time::Instant::now();
+    match mnema_pool::warm_ocr(worker, timeout) {
+        Ok(()) => eprintln!("mnema: the OCR engine was warmed in {:?}", began.elapsed()),
+        Err(e) => eprintln!("mnema: the OCR warm-up failed: {e}"),
     }
 }
 
@@ -724,6 +745,63 @@ mod tests {
             highlight(&s.render_within(&slow, "h1", "doc.pdf", 800, native, scan)),
             Highlight::Shown,
             "a scan page is held to the scan deadline"
+        );
+    }
+
+    /// A worker that records the arguments it was started with, to `s.log`.
+    fn warm_stand_in(s: &Stand, tail: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = s.scripts.path().join("warm-worker");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ -n \"$1\" ] || exit 0\necho \"$*\" > '{}'\n{tail}",
+                s.log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_file(&s.log);
+        wait_until_it_will_run(&path);
+        assert!(!s.log.exists(), "the pre-run wrote the log");
+        path
+    }
+
+    #[test]
+    fn a_library_with_a_scan_warms_the_ocr_engine_and_one_without_does_not() {
+        let s = stand();
+        let worker = warm_stand_in(&s, "");
+
+        warm_ocr_if_scanned(&s.state, &worker, Duration::from_secs(10));
+        assert!(!s.log.exists(), "native pages only: the worker was started");
+
+        s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h2'");
+        warm_ocr_if_scanned(&s.state, &worker, Duration::from_secs(10));
+        assert_eq!(
+            std::fs::read_to_string(&s.log).expect("the worker ran"),
+            "--warm-ocr\n"
+        );
+    }
+
+    #[test]
+    fn a_warm_up_is_held_to_the_deadline_it_is_given_and_never_panics() {
+        let s = stand();
+        s.sql("UPDATE page SET text_source = 'ocr:vision'");
+        let hung = warm_stand_in(&s, "exec sleep 30\n");
+        let began = std::time::Instant::now();
+        warm_ocr_if_scanned(&s.state, &hung, Duration::from_millis(300));
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+
+        let crashing = warm_stand_in(&s, "exit 3\n");
+        warm_ocr_if_scanned(&s.state, &crashing, Duration::from_secs(10));
+        warm_ocr_if_scanned(
+            &s.state,
+            Path::new("/nonexistent/worker"),
+            Duration::from_secs(10),
         );
     }
 

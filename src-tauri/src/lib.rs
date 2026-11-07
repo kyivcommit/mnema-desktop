@@ -264,6 +264,16 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::
     // thread costs one spawn and does nothing. A condition here would be a
     // second spelling of a rule that is written once, over there.
     let app = app.clone();
+    // The OCR engine's warm-up (spec R6) gets a thread of its own and is not
+    // returned: it can take the whole scan deadline (300 s), which no caller
+    // may wait for, and the models thread above must not queue behind it. The
+    // thread starts at most one worker, once per launch, and only for an index
+    // that holds a scanned page.
+    let warm = app.clone();
+    std::thread::spawn(move || {
+        let state = warm.state::<state::AppState>();
+        page_view::warm_ocr_if_scanned(&state, state.worker_path(), page_view::RENDER_TIMEOUT_SCAN);
+    });
     std::thread::spawn(move || {
         models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
     })

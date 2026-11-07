@@ -135,6 +135,27 @@ fn main() {
         std::process::exit(serve_ocr());
     }
 
+    // The fifth one-shot branch: warm Vision under this binary's path and exit
+    // (spec R6). A cold start costs ~46 s per new path, paid by the first
+    // recognition of a process; a blank image pays all of it and leaves the
+    // path warm for the next process. Prints nothing and exits 0 whatever the
+    // engine said: a warm-up is not an answer, and an engine error is stderr.
+    if args.len() == 2 && args[1] == "--warm-ocr" {
+        let (width, height) = (64u32, 32u32);
+        let bgra = vec![255u8; (width * height * 4) as usize];
+        let image = mnema_extract::PageImage {
+            bgra: &bgra,
+            width,
+            height,
+            stride: (width * 4) as usize,
+            dpi: 72,
+        };
+        if let Err(e) = mnema_extract::recognise(&image) {
+            eprintln!("mnema-extract-worker: --warm-ocr: {e}");
+        }
+        return;
+    }
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 

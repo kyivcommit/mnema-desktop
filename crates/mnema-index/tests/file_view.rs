@@ -278,6 +278,21 @@ fn a_pages_view_text_is_its_first_block_and_its_source() {
     assert_eq!(db.page_view_text("missing", 1).unwrap(), None);
 }
 
+/// Both directions: an empty index and one of native pages hold no scan; the
+/// first `ocr:` page, wherever it sits among them, makes it true.
+#[test]
+fn a_scanned_page_is_found_only_when_one_was_read_by_ocr() {
+    let db = support::temp_db();
+    assert!(!db.has_scanned_page().unwrap(), "empty index");
+    let doc = db
+        .insert_document(&"d".repeat(64), "application/pdf", 1, SourceKind::Document)
+        .unwrap();
+    db.insert_page(&doc, 1, "native:pdf", None).unwrap();
+    assert!(!db.has_scanned_page().unwrap(), "native pages only");
+    db.insert_page(&doc, 2, "ocr:vision", None).unwrap();
+    assert!(db.has_scanned_page().unwrap());
+}
+
 #[test]
 fn the_view_carries_the_documents_mime() {
     let db = support::temp_db();

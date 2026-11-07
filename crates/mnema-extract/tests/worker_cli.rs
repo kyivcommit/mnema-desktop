@@ -2553,3 +2553,35 @@ fn render_page_names_a_non_pdf_and_a_line_that_is_not_a_request() {
         }
     }
 }
+
+/// `--warm-ocr`: no stdin, no stdout, exit 0. Returns (stdout, stderr).
+fn warm_ocr_run(env: &[(&str, &str)]) -> (String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
+        .arg("--warm-ocr")
+        .envs(env.iter().copied())
+        .stdin(Stdio::null())
+        .output()
+        .expect("the worker binary starts");
+    assert!(output.status.success(), "{:?}", output.status);
+    (
+        String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+    )
+}
+
+/// On macOS this pays Vision's cold start for a new binary path (~46 s): that
+/// is the point of the mode, and the cost of testing it for real.
+#[test]
+fn warm_ocr_exits_zero_and_writes_nothing_on_stdout() {
+    let (stdout, _) = warm_ocr_run(&[]);
+    assert_eq!(stdout, "");
+}
+
+/// Proof that the mode asks the engine at all: with the engine refused by the
+/// seam, the refusal is what the worker says on stderr, and still exit 0.
+#[test]
+fn warm_ocr_asks_the_engine_and_survives_its_refusal() {
+    let (stdout, stderr) = warm_ocr_run(&[(mnema_extract::OCR_UNAVAILABLE_ENV, "1")]);
+    assert_eq!(stdout, "");
+    assert!(stderr.contains("MNEMA_OCR_UNAVAILABLE"), "{stderr}");
+}

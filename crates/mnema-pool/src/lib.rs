@@ -451,6 +451,8 @@ pub enum PoolError {
     Encode { source: serde_json::Error },
     #[error("the worker did not draw the page within {after:?} and was killed")]
     RenderTimeout { after: Duration },
+    #[error("the worker did not finish warming the OCR engine within {after:?} and was killed")]
+    WarmTimeout { after: Duration },
 }
 
 // --------------------------------------------------------- drawing one page
@@ -532,6 +534,59 @@ pub fn render_page(
             &format!("--render-page did not answer with a reply line: {source}"),
         )
     })
+}
+
+/// Asks `worker --warm-ocr` to pay the OCR engine's cold start for this worker
+/// path (spec R6) and waits for it: no stdin, no stdout, outside the pool's
+/// slots like [`render_page`]. A worker that outlives `timeout` is killed and
+/// reaped before this returns, and a killed warm-up leaves the path cold.
+/// A nonzero exit is [`PoolError::Protocol`] with the worker's stderr as the line.
+pub fn warm_ocr(worker: &Path, timeout: Duration) -> Result<(), PoolError> {
+    let mut command = Command::new(worker);
+    command
+        .arg("--warm-ocr")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = {
+        let _one_at_a_time = spawn_guard();
+        command.spawn()
+    }
+    .map_err(|source| PoolError::Spawn {
+        worker: worker.to_path_buf(),
+        source,
+    })?;
+    let deadline = Instant::now() + timeout;
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let stderr = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = io::Read::read_to_end(&mut stderr, &mut bytes);
+        bytes
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PoolError::WarmTimeout { after: timeout });
+            }
+            Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PoolError::Wait { source });
+            }
+        }
+    };
+    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    if status.success() {
+        return Ok(());
+    }
+    Err(protocol(
+        &stderr,
+        &format!("{worker:?} --warm-ocr ended with {status}"),
+    ))
 }
 
 // ------------------------------------------------------- the memory ceiling
