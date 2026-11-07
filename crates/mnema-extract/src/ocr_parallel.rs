@@ -94,8 +94,10 @@ const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// answered.** Vision's cold start (~46 s) is paid one process after another:
 /// eight helpers starting cold together gave the first page after 295 s
 /// (2026-11-06, `Tom_05`, M2 Max), against the pool's 300 s per page. One
-/// helper pays it alone and warms the cache the rest then find. Each has a thread that writes its requests and
-/// reads its replies; every reply comes back over one channel.
+/// helper pays it alone and warms the cache the rest then find.
+///
+/// Each helper has a thread that writes its requests and reads its replies;
+/// every reply comes back over one channel.
 ///
 /// **A helper that fails is not trusted again for this file.** Its page — the
 /// one it held when its pipe broke, it answered garbage, or it answered

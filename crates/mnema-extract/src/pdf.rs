@@ -381,6 +381,10 @@ pub fn extract_pdf_pages_with(
         let raw = replacement_runs_to_spaces(&raw);
 
         if has_text_layer(text_layer_chars(&raw)) {
+            // shortcut: native pages behind a page in flight are held, text and
+            // all, until it answers — the read-ahead that lets later scans fill
+            // the helpers. Unbounded but text-sized (a few KB a page); bound the
+            // queue if large mixed documents meet a cold start.
             order.queue.push_back(Slot::Ready(page_of(
                 page_no,
                 &raw,

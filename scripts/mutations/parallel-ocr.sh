@@ -72,6 +72,22 @@ case_ "a reply of no engine is not sent as unavailable" \
   'Ok(None) => Answer::Unavailable(String::new()),' \
   mnema-extract 'every_reply_comes_back_as_itself' --test ocr_wire
 
+# W9. A reply has its own, longer limit. At the header's 64 KiB, a page with
+# a lot of text is refused and its helper retired for the rest of the file.
+case_ "a reply may be longer than a request header" \
+  crates/mnema-extract/src/ocr_wire.rs \
+  's~read_line\(r, MAX_REPLY_LINE\)~read_line(r, MAX_HEADER_LINE /* reply */)~' \
+  'MAX_HEADER_LINE /* reply */' \
+  mnema-extract 'a_reply_longer_than_a_header_may_be_comes_back_as_itself' --test ocr_wire
+
+# W10. A request header keeps the short limit: read on to the reply's 4 MiB,
+# a corrupt stream is buffered before it is refused.
+case_ "a request header is refused at the header limit" \
+  crates/mnema-extract/src/ocr_wire.rs \
+  's~read_line\(r, MAX_HEADER_LINE\)~read_line(r, MAX_REPLY_LINE /* header */)~' \
+  'MAX_REPLY_LINE /* header */' \
+  mnema-extract 'a_reply_longer_than_a_header_may_be_comes_back_as_itself' --test ocr_wire
+
 # H1. A helper whose worker closed stdin has finished, not failed. Exiting 2
 # there, every helper of every file would read to the worker as a crash.
 case_ "a helper exits 0 on EOF between frames" \
@@ -155,8 +171,8 @@ case_ "a native page queues behind pages in flight" \
   'on_page(declared, page_of(page_no, &raw, TEXT_SOURCE_NATIVE, None));' \
   mnema-extract 'pages_answered_out_of_order_reach_the_caller_in_page_order' --test pdf_pipeline
 
-# Q2. The backend's capacity bounds the pages in flight — each one a 13.5 MB
-# image and a helper's attention.
+# Q2. The backend's capacity bounds the pages in flight — each one an image
+# of up to ~35 MB (A4 at 300 dpi, BGRA) and a helper's attention.
 case_ "never more pages in flight than capacity" \
   crates/mnema-extract/src/pdf.rs \
   's~            while order\.in_flight >= backend\.capacity\(\)\.max\(1\) \{~            while order.in_flight > backend.capacity().max(1) {~' \

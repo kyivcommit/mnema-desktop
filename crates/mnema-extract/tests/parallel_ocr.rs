@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use mnema_extract::OCR_UNAVAILABLE_ENV;
 use mnema_extract::ocr_parallel::OCR_PROCESSES_ENV;
-use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, OCR_STALL_MS_ENV};
+use mnema_extract::ocr_wire::{OCR_CRASH_AFTER_ENV, OCR_STALE_AFTER_ENV, OCR_STALL_MS_ENV};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_mnema-extract-worker");
 
@@ -72,6 +72,20 @@ fn a_helper_that_crashes_loses_no_page() {
         &[(OCR_PROCESSES_ENV, "3"), (OCR_CRASH_AFTER_ENV, "1")],
     );
     assert_eq!(crashing, alone);
+}
+
+/// A helper that answers with the page before the one it was sent is caught
+/// by the page number it names: trusted, it would put that page's text under
+/// this page's number, a citation of the wrong page. Caught, the page is read
+/// in the worker and nothing differs.
+#[test]
+fn a_helper_answering_for_another_page_is_not_believed() {
+    let alone = frames("scan-six-pages.pdf", &[(OCR_PROCESSES_ENV, "1")]);
+    let stale = frames(
+        "scan-six-pages.pdf",
+        &[(OCR_PROCESSES_ENV, "3"), (OCR_STALE_AFTER_ENV, "1")],
+    );
+    assert_eq!(stale, alone);
 }
 
 #[test]

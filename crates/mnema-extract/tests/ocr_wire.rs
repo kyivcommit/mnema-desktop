@@ -174,3 +174,29 @@ fn a_reply_that_is_not_one_is_malformed() {
         );
     }
 }
+
+/// A page with far more text than a dense A4 still comes back as itself: a
+/// reply refused for its length would retire the helper for the rest of the
+/// file (review of PR #92: 80 KB was refused at the header limit).
+#[test]
+fn a_reply_longer_than_a_header_may_be_comes_back_as_itself() {
+    let reply: Reply = Ok(Some(Recognised {
+        text: "слово ".repeat(40_000),
+        confidence: 0.5,
+        width_px: 2480,
+        height_px: 3508,
+        dpi: 300,
+    }));
+    let mut bytes = Vec::new();
+    write_reply(&mut bytes, 7, &reply).unwrap();
+    assert!(bytes.len() > 128 * 1024, "{} bytes", bytes.len());
+    assert_eq!(read_reply(&mut reader(bytes)).unwrap(), Some((7, reply)));
+
+    // A request header of that length is still not a header: refused at the
+    // header limit (Malformed), not read on until the stream ends (Io).
+    let long = " ".repeat(128 * 1024).into_bytes();
+    assert!(matches!(
+        read_request(&mut reader(long)),
+        Err(WireError::Malformed(_))
+    ));
+}

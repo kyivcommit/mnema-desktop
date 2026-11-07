@@ -37,8 +37,18 @@ pub const OCR_CRASH_AFTER_ENV: &str = "MNEMA_OCR_CRASH_AFTER";
 /// the test that a helper does not outlive a killed worker only.
 pub const OCR_STALL_MS_ENV: &str = "MNEMA_OCR_STALL_MS";
 
-/// A header line longer than this is not a header.
-const MAX_LINE: u64 = 64 * 1024;
+/// Set to `k`, an `--ocr` helper answers every page after its `k`-th with
+/// the previous page's seq and reply — a helper that has lost track of which
+/// page it holds. For the test of the worker's seq check only.
+pub const OCR_STALE_AFTER_ENV: &str = "MNEMA_OCR_STALE_AFTER";
+
+/// A request header line longer than this is not a header.
+const MAX_HEADER_LINE: u64 = 64 * 1024;
+
+/// A reply line longer than this is not a reply. Far above any page's text (a
+/// dense A4 page is ~5 k characters), so a reply is never cut for its length:
+/// a refused reply retires the helper for the rest of the file.
+const MAX_REPLY_LINE: u64 = 4 * 1024 * 1024;
 
 /// What the engine made of one image — [`crate::recognise`]'s result.
 pub type Reply = Result<Option<Recognised>, OcrError>;
@@ -126,7 +136,7 @@ pub fn write_request(w: &mut impl Write, seq: u32, image: &PageImage) -> io::Res
 /// Reads one request. `Ok(None)` is a clean end — EOF where the next header
 /// would start; EOF anywhere inside a frame is `Io`.
 pub fn read_request(r: &mut impl BufRead) -> Result<Option<(u32, OwnedPageImage)>, WireError> {
-    let Some(line) = read_line(r)? else {
+    let Some(line) = read_line(r, MAX_HEADER_LINE)? else {
         return Ok(None);
     };
     let h: Header = serde_json::from_str(&line)
@@ -178,7 +188,7 @@ pub fn write_reply(w: &mut impl Write, seq: u32, reply: &Reply) -> io::Result<()
 
 /// Reads one reply; `Ok(None)` is EOF where the next one would start.
 pub fn read_reply(r: &mut impl BufRead) -> Result<Option<(u32, Reply)>, WireError> {
-    let Some(line) = read_line(r)? else {
+    let Some(line) = read_line(r, MAX_REPLY_LINE)? else {
         return Ok(None);
     };
     let WireReply { seq, answer } = serde_json::from_str(&line)
@@ -198,13 +208,13 @@ pub fn read_reply(r: &mut impl BufRead) -> Result<Option<(u32, Reply)>, WireErro
     Ok(Some((seq, reply)))
 }
 
-/// One `\n`-terminated line of at most [`MAX_LINE`] bytes; `None` at EOF
-/// before its first byte.
-fn read_line(r: &mut impl BufRead) -> Result<Option<String>, WireError> {
+/// One `\n`-terminated line of at most `max` bytes; `None` at EOF before its
+/// first byte.
+fn read_line(r: &mut impl BufRead, max: u64) -> Result<Option<String>, WireError> {
     let mut line = String::new();
-    let n = r.take(MAX_LINE).read_line(&mut line).map_err(|e| {
+    let n = r.take(max).read_line(&mut line).map_err(|e| {
         if e.kind() == io::ErrorKind::InvalidData {
-            WireError::Malformed(format!("a header line is not UTF-8: {e}"))
+            WireError::Malformed(format!("a line is not UTF-8: {e}"))
         } else {
             WireError::Io(e)
         }
@@ -213,8 +223,8 @@ fn read_line(r: &mut impl BufRead) -> Result<Option<String>, WireError> {
         return Ok(None);
     }
     if !line.ends_with('\n') {
-        return Err(if n as u64 == MAX_LINE {
-            WireError::Malformed(format!("a header line longer than {MAX_LINE} bytes"))
+        return Err(if n as u64 == max {
+            WireError::Malformed(format!("a line longer than {max} bytes"))
         } else {
             WireError::Io(io::ErrorKind::UnexpectedEof.into())
         });

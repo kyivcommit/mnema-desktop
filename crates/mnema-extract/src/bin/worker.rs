@@ -168,7 +168,7 @@ fn main() {
 /// EOF where the next request would start, 2 on anything else.
 fn serve_ocr() -> i32 {
     use mnema_extract::ocr_wire::{
-        OCR_CRASH_AFTER_ENV, OCR_STALL_MS_ENV, read_request, write_reply,
+        OCR_CRASH_AFTER_ENV, OCR_STALE_AFTER_ENV, OCR_STALL_MS_ENV, read_request, write_reply,
     };
 
     // A helper inside Vision does not see its stdin close until the page is
@@ -196,6 +196,9 @@ fn serve_ocr() -> i32 {
     let crash_after: Option<usize> = std::env::var(OCR_CRASH_AFTER_ENV)
         .ok()
         .and_then(|v| v.parse().ok());
+    let stale_after: Option<usize> = std::env::var(OCR_STALE_AFTER_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok());
     let stall = std::env::var(OCR_STALL_MS_ENV)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -203,6 +206,7 @@ fn serve_ocr() -> i32 {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut served = 0usize;
+    let mut previous = None;
     loop {
         let (seq, image) = match read_request(&mut stdin) {
             Ok(Some(frame)) => frame,
@@ -219,6 +223,10 @@ fn serve_ocr() -> i32 {
             std::thread::sleep(stall);
         }
         let reply = mnema_extract::recognise(&image.as_image());
+        let (seq, reply) = match previous.replace((seq, reply)) {
+            Some(stale) if stale_after.is_some_and(|k| served >= k) => stale,
+            _ => previous.clone().expect("just put there"),
+        };
         // A worker that has gone away closed this pipe: nothing left to do.
         if write_reply(&mut stdout, seq, &reply)
             .and_then(|()| stdout.flush())

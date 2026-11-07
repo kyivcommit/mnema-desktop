@@ -44,3 +44,12 @@ case_ "helpers after the first wait for its answer" \
   's~        let startable = if self\.warm \|\| self\.helpers\.is_empty\(\) \{~        let startable = if true {~' \
   '        let startable = if true {' \
   mnema-extract 'more_helpers_start_only_after_the_first_has_answered' --test parallel_ocr
+
+# R5. A reply names the page it answers, and one naming another page is not
+# believed. Trusted, a helper that lost track puts the previous page's text
+# under this page's number: a citation of the wrong page, and no error.
+case_ "a reply for another page retires its helper" \
+  crates/mnema-extract/src/ocr_parallel.rs \
+  's~Ok\(Some\(\(seq, reply\)\)\) if seq == page_no =>~Ok(Some((seq, reply))) if seq == page_no || seq != page_no =>~' \
+  'seq == page_no || seq != page_no' \
+  mnema-extract 'a_helper_answering_for_another_page_is_not_believed' --test parallel_ocr
