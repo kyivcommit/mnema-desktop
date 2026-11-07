@@ -196,6 +196,7 @@ pub(crate) fn render_page_in(
         page_no,
         width_px: width_px.min(MAX_WIDTH_PX),
         text_sha256,
+        recognise: false,
         ranges: ranges
             .iter()
             .map(|r| RenderRange {

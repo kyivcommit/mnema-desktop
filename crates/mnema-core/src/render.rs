@@ -29,6 +29,10 @@ pub struct RenderRequest {
     pub width_px: u32,
     pub text_sha256: Option<String>,
     pub ranges: Vec<RenderRange>,
+    /// True only for a page the index holds as `ocr:*`: the worker then
+    /// recognises the page again to box the citation (spec R3). Required, not
+    /// defaulted: the application and the worker ship together.
+    pub recognise: bool,
 }
 
 /// A stretch of the page's stored text: `len` chars from `start`.
@@ -116,6 +120,7 @@ mod tests {
                 len: 7,
                 primary: true,
             }],
+            recognise: true,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert_eq!(
@@ -127,6 +132,20 @@ mod tests {
         assert!(
             serde_json::from_str::<RenderRequest>(&extra).is_err(),
             "{extra}"
+        );
+    }
+
+    #[test]
+    fn a_request_without_recognise_is_refused() {
+        let line =
+            r#"{"path":"/tmp/a.pdf","page_no":1,"width_px":400,"text_sha256":null,"ranges":[]}"#;
+        assert!(serde_json::from_str::<RenderRequest>(line).is_err());
+        // Control: the same line with the field is a request, so the refusal
+        // above is about `recognise` and nothing else.
+        let with = line.replacen('}', ",\"recognise\":false}", 1);
+        assert!(
+            serde_json::from_str::<RenderRequest>(&with).is_ok(),
+            "{with}"
         );
     }
 

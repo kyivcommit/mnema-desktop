@@ -52,6 +52,7 @@ fn request(name: &str, page_no: u32, width_px: u32, ranges: Vec<RenderRange>) ->
         width_px,
         text_sha256: Some(sha(&stored(name, 1))),
         ranges,
+        recognise: false,
     }
 }
 
@@ -292,6 +293,7 @@ fn a_page_without_a_text_layer_is_drawn_and_has_no_text_to_compare() {
             len: 10,
             primary: true,
         }],
+        recognise: false,
     };
     let r = rendered(&req);
     assert_eq!((r.text, r.rects.len()), (TextMatch::None, 0));
@@ -355,6 +357,7 @@ fn a_page_far_taller_than_wide_is_drawn_within_the_height_cap() {
         width_px: 3000,
         text_sha256: None,
         ranges: vec![],
+        recognise: false,
     });
     let (_, w, h) = decode(&r.png);
     assert_eq!((w, h), (r.width_px, r.height_px));
@@ -436,6 +439,7 @@ fn a_page_whose_text_nfc_rewrote_has_no_boxes_because_its_offsets_no_longer_line
         width_px: 612,
         text_sha256: Some(sha(&text)),
         ranges: vec![range_of(&text, "quick", true)],
+        recognise: false,
     };
     let r = rendered(&req);
     // The file did not change, so it is not reported as changed.
@@ -463,6 +467,7 @@ fn colours_are_drawn_as_the_page_has_them() {
         width_px: 200,
         text_sha256: None,
         ranges: vec![],
+        recognise: false,
     });
     let (px, w, h) = decode(&r.png);
     let at = |fx: f32, fy: f32| {

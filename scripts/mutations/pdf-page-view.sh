@@ -234,7 +234,7 @@ AP=src-tauri/src/page_view.rs
 # own path is opened.
 case_ "app: the worker is started when the path is not in the index" \
   $AP \
-  's~return unavailable\(PageUnavailable::NoPath\);~let _ = mnema_pool::render_page(worker, \&RenderRequest { path: relative_path.unwrap_or_default().to_string(), page_no, width_px, text_sha256: None, ranges: Vec::new() }, timeout); return unavailable(PageUnavailable::NoPath);~' \
+  's~return unavailable\(PageUnavailable::NoPath\);~let _ = mnema_pool::render_page(worker, \&RenderRequest { path: relative_path.unwrap_or_default().to_string(), page_no, width_px, text_sha256: None, ranges: Vec::new(), recognise: false }, timeout); return unavailable(PageUnavailable::NoPath);~' \
   'relative_path.unwrap_or_default()' \
   mnema-desktop "${AT}a_path_the_index_does_not_hold_is_no_path_and_starts_no_worker" --lib
 

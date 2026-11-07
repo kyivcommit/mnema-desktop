@@ -2442,7 +2442,7 @@ fn render_page_run(stdin_text: &str) -> String {
 
 fn render_request(path: &str) -> String {
     format!(
-        "{{\"path\":{path:?},\"page_no\":1,\"width_px\":400,\"text_sha256\":null,\"ranges\":[]}}\n"
+        "{{\"path\":{path:?},\"page_no\":1,\"width_px\":400,\"text_sha256\":null,\"ranges\":[],\"recognise\":false}}\n"
     )
 }
 
