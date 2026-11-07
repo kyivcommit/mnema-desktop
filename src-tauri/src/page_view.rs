@@ -9,8 +9,10 @@
 //! What the boxes are worth is decided here, before the worker is asked: the
 //! offsets of a citation were counted in the text the reader stored, so the
 //! worker gets the hash of that text and draws boxes only when the file still
-//! reads the same. Where no such text exists (a scan, a path that now names
-//! another document) the page is drawn alone and the window is told why.
+//! reads the same. A scan page has no text layer, so the worker recognises it
+//! again and judges the stored text against that. Where no stored text exists
+//! (or a path now names another document) the page is drawn alone and the
+//! window is told why.
 
 use std::path::Path;
 use std::time::Duration;
@@ -33,6 +35,12 @@ const MAX_WIDTH_PX: u32 = 3000;
 
 /// How long the worker may take to draw one page before it is killed.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The same for a scan page, which the worker recognises again. Vision's cold
+/// start under a new binary path takes a minute and a process killed during it
+/// leaves the path cold, so a shorter deadline would never box a scan. It is
+/// `PoolConfig::timeout`'s number, and a test keeps the two equal.
+const RENDER_TIMEOUT_SCAN: Duration = Duration::from_secs(300);
 
 /// One stretch of the page's stored text to box: the window's `PaneSpan` for
 /// the page's block, in the unit `RenderRange` counts (Unicode scalar values).
@@ -116,11 +124,12 @@ pub fn render_pdf_page(
         width_px,
         &ranges,
         RENDER_TIMEOUT,
+        RENDER_TIMEOUT_SCAN,
     )
 }
 
-/// [`render_pdf_page`] with the worker and its deadline given, which is what
-/// lets a test point it at a stand-in.
+/// [`render_pdf_page`] with the worker and its deadlines (native page, scan
+/// page) given, which is what lets a test point it at a stand-in.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_in(
     state: &AppState,
@@ -132,6 +141,7 @@ pub(crate) fn render_page_in(
     width_px: u32,
     ranges: &[RangeArg],
     timeout: Duration,
+    scan_timeout: Duration,
 ) -> Result<PdfPageView, Error> {
     let unavailable = |reason| Ok(PdfPageView::Unavailable { reason });
 
@@ -183,20 +193,20 @@ pub(crate) fn render_page_in(
         return unavailable(PageUnavailable::Failed);
     };
 
-    // `fixed` is a verdict reached without asking the file.
-    let (text_sha256, fixed) = match stored {
-        None => (None, Some(Highlight::Changed)),
-        Some(Some((_, source))) if source.starts_with("ocr:") => (None, Some(Highlight::Scan)),
-        Some(Some((text, _))) => (Some(sha256_hex(&text)), None),
+    // `fixed` is a verdict reached without asking the file; `scan` pages are
+    // asked for with a second recognition.
+    let (text_sha256, fixed, scan) = match stored {
+        None => (None, Some(Highlight::Changed), false),
+        Some(Some((text, source))) => (Some(sha256_hex(&text)), None, source.starts_with("ocr:")),
         // Not `Changed`: nothing was indexed here, so nothing can have moved.
-        Some(None) => (None, Some(Highlight::NoText)),
+        Some(None) => (None, Some(Highlight::NoText), false),
     };
     let request = RenderRequest {
         path: path.to_string(),
         page_no,
         width_px: width_px.min(MAX_WIDTH_PX),
         text_sha256,
-        recognise: false,
+        recognise: scan,
         ranges: ranges
             .iter()
             .map(|r| RenderRange {
@@ -207,7 +217,7 @@ pub(crate) fn render_page_in(
             .collect(),
     };
 
-    match mnema_pool::render_page(worker, &request, timeout) {
+    match mnema_pool::render_page(worker, &request, if scan { scan_timeout } else { timeout }) {
         Ok(RenderReply::Rendered {
             pages,
             width_px,
@@ -223,6 +233,11 @@ pub(crate) fn render_page_in(
             highlight: fixed.unwrap_or(match text {
                 TextMatch::Match => Highlight::Shown,
                 TextMatch::Unplaced => Highlight::Unplaced,
+                // A scan is judged against a second recognition, never against
+                // the file's bytes: a different Vision is not a changed file,
+                // and no engine is the old note.
+                TextMatch::Mismatch if scan => Highlight::Unplaced,
+                TextMatch::None if scan => Highlight::Scan,
                 TextMatch::Mismatch | TextMatch::None => Highlight::Changed,
             }),
             rects,
@@ -376,6 +391,19 @@ mod tests {
             path: &str,
             width_px: u32,
         ) -> PdfPageView {
+            let ten = Duration::from_secs(10);
+            self.render_within(worker, document_id, path, width_px, ten, ten)
+        }
+
+        fn render_within(
+            &self,
+            worker: &Path,
+            document_id: &str,
+            path: &str,
+            width_px: u32,
+            native: Duration,
+            scan: Duration,
+        ) -> PdfPageView {
             let ranges = [RangeArg {
                 block_start: 1,
                 length: 2,
@@ -390,7 +418,8 @@ mod tests {
                 1,
                 width_px,
                 &ranges,
-                Duration::from_secs(10),
+                native,
+                scan,
             )
             .unwrap()
         }
@@ -477,6 +506,7 @@ mod tests {
         );
         let sent = s.request();
         assert_eq!(sent.text_sha256.as_deref(), Some(ABC));
+        assert!(!sent.recognise, "a native page is not recognised again");
         assert_eq!(sent.width_px, 3000);
         assert_eq!(sent.page_no, 1);
         assert_eq!(
@@ -617,16 +647,93 @@ mod tests {
         assert_eq!(s.request().text_sha256, None);
     }
 
+    /// Even when the pages are scans: no stored text of this document, nothing
+    /// to recognise the page against.
     #[test]
-    fn a_scan_page_is_drawn_bare_and_marked_scan() {
+    fn a_path_that_now_names_another_document_is_not_recognised_even_for_a_scan() {
+        let s = stand();
+        s.sql("UPDATE page SET text_source = 'ocr:vision'");
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+
+        let view = s.render(&worker, "h2", "doc.pdf", 800);
+
+        assert_eq!(highlight(&view), Highlight::Changed);
+        let sent = s.request();
+        assert_eq!(sent.text_sha256, None);
+        assert!(!sent.recognise);
+    }
+
+    #[test]
+    fn a_scan_page_is_asked_for_with_the_hash_of_its_text_and_a_second_recognition() {
         let s = stand();
         s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
         let worker = s.worker_answering(&rendered(TextMatch::Match));
 
         let view = s.render(&worker, "h1", "doc.pdf", 800);
 
-        assert_eq!(highlight(&view), Highlight::Scan);
-        assert_eq!(s.request().text_sha256, None);
+        assert_eq!(highlight(&view), Highlight::Shown);
+        let sent = s.request();
+        assert_eq!(sent.text_sha256.as_deref(), Some(ABC));
+        assert!(sent.recognise);
+    }
+
+    /// `None` and `Mismatch` would be `Changed` for a native page: these are
+    /// the answers that tell the two branches apart.
+    #[test]
+    fn each_answer_for_a_scan_page_has_its_own_note() {
+        let s = stand();
+        s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
+        for (text, expected) in [
+            (TextMatch::Match, Highlight::Shown),
+            (TextMatch::Unplaced, Highlight::Unplaced),
+            (TextMatch::None, Highlight::Scan),
+            (TextMatch::Mismatch, Highlight::Unplaced),
+        ] {
+            let worker = s.worker_answering(&rendered(text));
+            assert_eq!(
+                highlight(&s.render(&worker, "h1", "doc.pdf", 800)),
+                expected,
+                "{text:?}"
+            );
+            std::fs::remove_file(&s.log).unwrap();
+        }
+    }
+
+    /// A worker slower than the native deadline and quicker than the scan one:
+    /// the scan page waits for it, the native page does not.
+    #[test]
+    fn a_scan_page_is_given_the_longer_deadline() {
+        let s = stand();
+        let slow = s.script(&format!(
+            "sleep 1\nprintf '%s\\n' '{}'\n",
+            serde_json::to_string(&rendered(TextMatch::Match)).unwrap()
+        ));
+        let (native, scan) = (Duration::from_millis(300), Duration::from_secs(20));
+
+        assert_eq!(
+            s.render_within(&slow, "h1", "doc.pdf", 800, native, scan),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            },
+            "a native page is held to the native deadline"
+        );
+        std::fs::remove_file(&s.log).unwrap();
+
+        s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
+        assert_eq!(
+            highlight(&s.render_within(&slow, "h1", "doc.pdf", 800, native, scan)),
+            Highlight::Shown,
+            "a scan page is held to the scan deadline"
+        );
+    }
+
+    #[test]
+    fn the_scan_deadline_is_the_pools_own() {
+        assert_eq!(
+            RENDER_TIMEOUT_SCAN,
+            PoolConfig::new(Path::new("worker")).timeout
+        );
+        assert!(RENDER_TIMEOUT < RENDER_TIMEOUT_SCAN);
     }
 
     #[test]
@@ -639,7 +746,9 @@ mod tests {
         let view = s.render(&worker, "h1", "doc.pdf", 800);
 
         assert_eq!(highlight(&view), Highlight::NoText);
-        assert_eq!(s.request().text_sha256, None);
+        let sent = s.request();
+        assert_eq!(sent.text_sha256, None);
+        assert!(!sent.recognise);
     }
 
     #[test]

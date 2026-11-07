@@ -275,18 +275,19 @@ case_ "app: a reindexed path still sends the hash" \
   'if true || occupant.current_document_id == document_id' \
   mnema-desktop "${AT}a_path_that_now_names_another_document_is_drawn_bare_and_changed" --lib
 
-# A4. A scan page is not recognised: its OCR text is hashed like a native one.
+# A4. A scan page is not recognised: it is asked for like a native one, with no
+# second recognition.
 case_ "app: an ocr page is not recognised as a scan" \
   $AP \
   's~source\.starts_with\("ocr:"\)~source.starts_with("ocrx:")~' \
   'source.starts_with("ocrx:")' \
-  mnema-desktop "${AT}a_scan_page_is_drawn_bare_and_marked_scan" --lib
+  mnema-desktop "${AT}a_scan_page_is_asked_for_with_the_hash_of_its_text_and_a_second_recognition" --lib
 
 # A5. A page the reader skipped is reported as changed.
 case_ "app: a skipped page is reported as changed" \
   $AP \
-  's~Some\(None\) => \(None, Some\(Highlight::NoText\)\)~Some(None) => (None, Some(Highlight::Changed))~' \
-  'Some(None) => (None, Some(Highlight::Changed))' \
+  's~Some\(None\) => \(None, Some\(Highlight::NoText\), false\)~Some(None) => (None, Some(Highlight::Changed), false)~' \
+  'Some(None) => (None, Some(Highlight::Changed), false)' \
   mnema-desktop "${AT}a_page_the_reader_skipped_is_asked_for_without_a_hash" --lib
 
 # A6. The image is passed on without the data: prefix the window sets as src.
