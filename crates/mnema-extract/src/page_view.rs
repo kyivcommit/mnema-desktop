@@ -184,7 +184,7 @@ fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch,
     }
     for (range, boxes) in req.ranges.iter().zip(&boxed.ranges) {
         // A citation with no box would read as "nothing cited here".
-        if range.len > 0 && boxes.is_empty() {
+        if boxes.is_empty() && range.len > 0 {
             return (TextMatch::Unplaced, Vec::new());
         }
     }
