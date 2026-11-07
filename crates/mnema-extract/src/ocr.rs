@@ -216,7 +216,7 @@ fn languages(supported: &[String]) -> Result<Vec<&'static str>, OcrError> {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use mnema_core::render::{RenderRange, RenderRect};
+    use mnema_core::render::RenderRange;
 
     use super::{OcrError, PageImage, Read};
 
