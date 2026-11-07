@@ -259,14 +259,9 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::
     }
     state.set_boot_open_error(outcome.err().map(|e| e.to_string()));
 
-    // Spawned unconditionally, including after a failed open: every step of what
-    // it runs is already silent against an index that will not answer, so the
-    // thread costs one spawn and does nothing. A condition here would be a
-    // second spelling of a rule that is written once, over there.
-    let app = app.clone();
     // The OCR engine's warm-up (spec R6) gets a thread of its own and is not
     // returned: it can take the whole scan deadline (300 s), which no caller
-    // may wait for, and the models thread above must not queue behind it. The
+    // may wait for, and the models thread below must not queue behind it. The
     // thread starts at most one worker, once per launch, and only for an index
     // that holds a scanned page.
     let warm = app.clone();
@@ -274,6 +269,12 @@ pub fn boot_index<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::thread::
         let state = warm.state::<state::AppState>();
         page_view::warm_ocr_if_scanned(&state, state.worker_path(), page_view::RENDER_TIMEOUT_SCAN);
     });
+
+    // Spawned unconditionally, including after a failed open: every step of what
+    // it runs is already silent against an index that will not answer, so the
+    // thread costs one spawn and does nothing. A condition here would be a
+    // second spelling of a rule that is written once, over there.
+    let app = app.clone();
     std::thread::spawn(move || {
         models::choose_the_default_models_for_a_stored_key(&app.state::<state::AppState>());
     })
