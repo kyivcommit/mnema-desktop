@@ -2422,8 +2422,13 @@ fn a_document_with_more_sections_than_the_ceiling_is_refused_under_its_reader() 
 /// `--render-page`: one line on stdin, one line on stdout, exit 0. Returns the
 /// raw stdout.
 fn render_page_run(stdin_text: &str) -> String {
+    render_page_run_with(stdin_text, &[])
+}
+
+fn render_page_run_with(stdin_text: &str, env: &[(&str, &str)]) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mnema-extract-worker"))
         .arg("--render-page")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2470,6 +2475,59 @@ fn render_page_answers_a_pdf_with_one_rendered_line() {
             ..
         } => {
             assert_eq!((pages, width_px, text), (1, 400, TextMatch::None));
+            assert!(png_base64.starts_with("iVBOR"), "a PNG, base64");
+        }
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
+/// A `recognise: true` request for page 1 of a scan, hashed as indexing stores it.
+#[cfg(target_os = "macos")]
+fn recognise_request() -> String {
+    use sha2::{Digest, Sha256};
+    let path = format!(
+        "{}/tests/fixtures/scan-two-columns.pdf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let doc = mnema_extract::extract_pdf(&std::fs::read(&path).unwrap()).unwrap();
+    let text = &doc.pages[0].blocks[0].text;
+    let sha: String = Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let start = text[..text.find("Київ стоїть").unwrap()].chars().count();
+    format!(
+        "{{\"path\":{path:?},\"page_no\":1,\"width_px\":400,\"text_sha256\":\"{sha}\",\"ranges\":[{{\"start\":{start},\"len\":11,\"primary\":true}}],\"recognise\":true}}\n"
+    )
+}
+
+/// The engine present, the worker boxes the scan; the engine missing (the seam),
+/// the same request gets the page and no boxes -- the pair, so "no boxes" is
+/// not what a broken request would give as well.
+#[cfg(target_os = "macos")]
+#[test]
+fn render_page_boxes_a_scan_and_without_the_engine_draws_it_unboxed() {
+    use mnema_core::render::{RenderReply, TextMatch};
+    let request = recognise_request();
+
+    match one_reply(&render_page_run(&request)) {
+        RenderReply::Rendered { text, rects, .. } => {
+            assert_eq!((text, rects.len()), (TextMatch::Match, 1), "{rects:?}");
+        }
+        other => panic!("expected a page, got {other:?}"),
+    }
+    match one_reply(&render_page_run_with(
+        &request,
+        &[(mnema_extract::OCR_UNAVAILABLE_ENV, "1")],
+    )) {
+        RenderReply::Rendered {
+            width_px,
+            png_base64,
+            text,
+            rects,
+            ..
+        } => {
+            assert_eq!((width_px, text, rects.len()), (400, TextMatch::None, 0));
             assert!(png_base64.starts_with("iVBOR"), "a PNG, base64");
         }
         other => panic!("expected a page, got {other:?}"),

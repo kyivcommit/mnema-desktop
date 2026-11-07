@@ -9,12 +9,15 @@
 use std::fmt::Write as _;
 
 use base64::Engine as _;
+use mnema_core::nfc;
 use mnema_core::render::{
     RenderError, RenderRange, RenderRect, RenderReply, RenderRequest, TextMatch,
 };
 use pdfium_render::prelude::{PdfBitmapFormat, PdfPage, PdfPoints, PdfRenderConfig};
 use sha2::{Digest, Sha256};
 
+use crate::ocr::recognise_ranges;
+use crate::pdf::render_for_ocr;
 use crate::pdfium_probe::{lock_pdfium, mapped_page_text, pdfium};
 use crate::typing::PDF_MAGIC;
 
@@ -101,13 +104,17 @@ pub fn render_page(req: &RenderRequest) -> RenderReply {
         Err(e) => return refused(RenderError::Unreadable, format!("PNG: {e}")),
     };
 
-    let (text, rects) = match mapped_page_text(&page) {
-        Ok(mapped) => text_and_rects(&page, &config, req, mapped, (w, h)),
-        // The file read and drew; only its text layer did not. Nothing says
-        // the file changed, so the page is not reported as changed.
-        Err(e) => {
-            eprintln!("mnema-extract-worker: page {} text: {e}", req.page_no);
-            (TextMatch::Unplaced, Vec::new())
+    let (text, rects) = if req.recognise {
+        recognised_text_and_rects(&page, req)
+    } else {
+        match mapped_page_text(&page) {
+            Ok(mapped) => text_and_rects(&page, &config, req, mapped, (w, h)),
+            // The file read and drew; only its text layer did not. Nothing says
+            // the file changed, so the page is not reported as changed.
+            Err(e) => {
+                eprintln!("mnema-extract-worker: page {} text: {e}", req.page_no);
+                (TextMatch::Unplaced, Vec::new())
+            }
         }
     };
 
@@ -130,6 +137,69 @@ fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, png::EncodingError
     encoder.set_compression(png::Compression::Balanced);
     encoder.write_header()?.write_image_data(rgba)?;
     Ok(out)
+}
+
+/// The page of an `ocr:*` row: there is no text layer to read, so the page is
+/// recognised again -- from the raster indexing used ([`render_for_ocr`], no
+/// other), by the call indexing used ([`recognise_ranges`]) -- and the boxes come
+/// back as fractions of the page, which fit the display bitmap whatever its width.
+///
+/// A different hash here most likely means a different Vision, not a different
+/// file, so it is `Unplaced`, never `Mismatch` (spec R3).
+fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
+    let image = match render_for_ocr(page, req.page_no) {
+        Ok(image) => image,
+        // The display bitmap drew; only the second raster did not.
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page {} raster: {e}", req.page_no);
+            return (TextMatch::Unplaced, Vec::new());
+        }
+    };
+    let boxed = match recognise_ranges(&image.as_image(), &req.ranges) {
+        Ok(Some(boxed)) => boxed,
+        Ok(None) => {
+            eprintln!("mnema-extract-worker: no OCR engine on this platform");
+            return (TextMatch::None, Vec::new());
+        }
+        Err(e) => {
+            eprintln!("mnema-extract-worker: page {} OCR: {e}", req.page_no);
+            return (TextMatch::None, Vec::new());
+        }
+    };
+    let Some(wanted) = &req.text_sha256 else {
+        return (TextMatch::None, Vec::new());
+    };
+    if boxed.text.chars().all(char::is_whitespace) {
+        return (TextMatch::None, Vec::new());
+    }
+    // Indexing stores the NFC of what Vision read; offsets and hash are of that.
+    if matches!(nfc::normalise(&boxed.text), std::borrow::Cow::Owned(_)) {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    if sha256_hex(&boxed.text) != *wanted {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    if boxed.ranges.len() != req.ranges.len() {
+        return (TextMatch::Unplaced, Vec::new());
+    }
+    for (range, boxes) in req.ranges.iter().zip(&boxed.ranges) {
+        // A citation with no box would read as "nothing cited here".
+        if range.len > 0 && boxes.is_empty() {
+            return (TextMatch::Unplaced, Vec::new());
+        }
+    }
+    (
+        TextMatch::Match,
+        boxed.ranges.into_iter().flatten().collect(),
+    )
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hex = String::new();
+    for byte in Sha256::digest(text.as_bytes()) {
+        write!(hex, "{byte:02x}").expect("a String takes a write");
+    }
+    hex
 }
 
 fn text_and_rects(
