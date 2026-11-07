@@ -16,7 +16,7 @@ use mnema_core::render::{
 use pdfium_render::prelude::{PdfBitmapFormat, PdfPage, PdfPoints, PdfRenderConfig};
 use sha2::{Digest, Sha256};
 
-use crate::ocr::recognise_ranges;
+use crate::ocr::{Boxed, recognise_ranges};
 use crate::pdf::render_for_ocr;
 use crate::pdfium_probe::{lock_pdfium, mapped_page_text, pdfium};
 use crate::typing::PDF_MAGIC;
@@ -166,6 +166,13 @@ fn recognised_text_and_rects(page: &PdfPage, req: &RenderRequest) -> (TextMatch,
             return (TextMatch::None, Vec::new());
         }
     };
+    judge_recognised(boxed, req)
+}
+
+/// What a second recognition is worth against the request: apart from Vision
+/// so that the verdicts Vision never produces on a fixture (text that NFC
+/// rewrites, a page of whitespace) are tested on every platform.
+fn judge_recognised(boxed: Boxed, req: &RenderRequest) -> (TextMatch, Vec<RenderRect>) {
     let Some(wanted) = &req.text_sha256 else {
         return (TextMatch::None, Vec::new());
     };
@@ -311,4 +318,105 @@ fn range_rects(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(text: Option<&str>, ranges: Vec<RenderRange>) -> RenderRequest {
+        RenderRequest {
+            path: String::new(),
+            page_no: 1,
+            width_px: 100,
+            text_sha256: text.map(sha256_hex),
+            ranges,
+            recognise: true,
+        }
+    }
+
+    fn range(start: u32, len: u32) -> RenderRange {
+        RenderRange {
+            start,
+            len,
+            primary: true,
+        }
+    }
+
+    fn rect() -> RenderRect {
+        RenderRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.5,
+            h: 0.05,
+            primary: true,
+        }
+    }
+
+    fn boxed(text: &str, ranges: Vec<Vec<RenderRect>>) -> Boxed {
+        Boxed {
+            text: text.to_string(),
+            ranges,
+        }
+    }
+
+    #[test]
+    fn a_recognised_page_is_boxed_only_as_the_text_it_was_indexed_in() {
+        let text = "Київ на березі";
+        // Control: the same text, a box per range.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some(text), vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Match, 1));
+        // Another text's hash: not the file changed, the passage not placed.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some("інший"), vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+        // No hash: nothing to compare.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(None, vec![range(0, 4)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::None, 0));
+    }
+
+    #[test]
+    fn text_nfc_would_rewrite_or_a_page_of_whitespace_is_never_boxed() {
+        // "й" decomposed: и + U+0306. Hashed as is, so only the NFC check refuses it.
+        let decomposed = "Ки\u{0306}ів";
+        let got = judge_recognised(
+            boxed(decomposed, vec![vec![rect()]]),
+            &req(Some(decomposed), vec![range(0, 2)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+        let got = judge_recognised(
+            boxed(" \n ", vec![vec![rect()]]),
+            &req(Some(" \n "), vec![range(0, 1)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::None, 0));
+    }
+
+    #[test]
+    fn a_range_without_a_box_or_a_missing_list_leaves_the_page_unplaced() {
+        let text = "Київ на березі";
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()], vec![]]),
+            &req(Some(text), vec![range(0, 4), range(5, 2)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+        // An empty range needs no box.
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()], vec![]]),
+            &req(Some(text), vec![range(0, 4), range(5, 0)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Match, 1));
+        let got = judge_recognised(
+            boxed(text, vec![vec![rect()]]),
+            &req(Some(text), vec![range(0, 4), range(5, 2)]),
+        );
+        assert_eq!((got.0, got.1.len()), (TextMatch::Unplaced, 0));
+    }
 }
