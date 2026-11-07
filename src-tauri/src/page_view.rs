@@ -201,12 +201,20 @@ pub(crate) fn render_page_in(
         // Not `Changed`: nothing was indexed here, so nothing can have moved.
         Some(None) => (None, Some(Highlight::NoText), false),
     };
+    // A scan page with nothing cited (the page strip draws the cited page's
+    // neighbours too) is only a picture: no second recognition, and no hash —
+    // against a junk text layer the hash would read as `Unplaced`.
+    let recognise = scan && !ranges.is_empty();
     let request = RenderRequest {
         path: path.to_string(),
         page_no,
         width_px: width_px.min(MAX_WIDTH_PX),
-        text_sha256,
-        recognise: scan,
+        text_sha256: if scan && !recognise {
+            None
+        } else {
+            text_sha256
+        },
+        recognise,
         ranges: ranges
             .iter()
             .map(|r| RenderRange {
@@ -217,7 +225,8 @@ pub(crate) fn render_page_in(
             .collect(),
     };
 
-    match mnema_pool::render_page(worker, &request, if scan { scan_timeout } else { timeout }) {
+    let deadline = if recognise { scan_timeout } else { timeout };
+    match mnema_pool::render_page(worker, &request, deadline) {
         Ok(RenderReply::Rendered {
             pages,
             width_px,
@@ -302,6 +311,14 @@ mod tests {
     /// sha256("abc"), the standard vector — written out so the test does not
     /// check `sha256_hex` against itself.
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// One cited range on the page, as every render of the stand sends unless
+    /// a test asks for a page with nothing cited on it.
+    const CITED: [RangeArg; 1] = [RangeArg {
+        block_start: 1,
+        length: 2,
+        primary: true,
+    }];
 
     struct Stand {
         _data: tempfile::TempDir,
@@ -413,23 +430,20 @@ mod tests {
             width_px: u32,
         ) -> PdfPageView {
             let ten = Duration::from_secs(10);
-            self.render_within(worker, document_id, path, width_px, ten, ten)
+            self.render_within(worker, document_id, path, width_px, &CITED, ten, ten)
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn render_within(
             &self,
             worker: &Path,
             document_id: &str,
             path: &str,
             width_px: u32,
+            ranges: &[RangeArg],
             native: Duration,
             scan: Duration,
         ) -> PdfPageView {
-            let ranges = [RangeArg {
-                block_start: 1,
-                length: 2,
-                primary: true,
-            }];
             render_page_in(
                 &self.state,
                 worker,
@@ -438,7 +452,7 @@ mod tests {
                 Some(path),
                 1,
                 width_px,
-                &ranges,
+                ranges,
                 native,
                 scan,
             )
@@ -732,7 +746,7 @@ mod tests {
         let (native, scan) = (Duration::from_millis(300), Duration::from_secs(20));
 
         assert_eq!(
-            s.render_within(&slow, "h1", "doc.pdf", 800, native, scan),
+            s.render_within(&slow, "h1", "doc.pdf", 800, &CITED, native, scan),
             PdfPageView::Unavailable {
                 reason: PageUnavailable::Failed
             },
@@ -742,9 +756,61 @@ mod tests {
 
         s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
         assert_eq!(
-            highlight(&s.render_within(&slow, "h1", "doc.pdf", 800, native, scan)),
+            highlight(&s.render_within(&slow, "h1", "doc.pdf", 800, &CITED, native, scan)),
             Highlight::Shown,
             "a scan page is held to the scan deadline"
+        );
+    }
+
+    /// The page strip draws the pages around the cited one too: a scan page with
+    /// nothing cited on it is only a picture — no second recognition, and no
+    /// hash, which would turn a junk text layer into `Unplaced`.
+    #[test]
+    fn a_scan_page_with_nothing_cited_is_drawn_without_a_second_recognition() {
+        let s = stand();
+        s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
+        let worker = s.worker_answering(&rendered(TextMatch::None));
+        let ten = Duration::from_secs(10);
+
+        let view = s.render_within(&worker, "h1", "doc.pdf", 800, &[], ten, ten);
+
+        assert_eq!(highlight(&view), Highlight::Scan);
+        let sent = s.request();
+        assert!(!sent.recognise, "nothing cited, nothing to box");
+        assert_eq!(sent.text_sha256, None);
+    }
+
+    /// Only scans lose the hash: a native page with nothing cited still says
+    /// when the file changed under the index.
+    #[test]
+    fn a_native_page_with_nothing_cited_is_still_checked_against_its_text() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Mismatch));
+        let ten = Duration::from_secs(10);
+
+        let view = s.render_within(&worker, "h1", "doc.pdf", 800, &[], ten, ten);
+
+        assert_eq!(highlight(&view), Highlight::Changed);
+        assert_eq!(s.request().text_sha256.as_deref(), Some(ABC));
+    }
+
+    /// Without a recognition a scan page is an ordinary drawing, held to the
+    /// native deadline.
+    #[test]
+    fn a_scan_page_with_nothing_cited_is_held_to_the_native_deadline() {
+        let s = stand();
+        s.sql("UPDATE page SET text_source = 'ocr:vision' WHERE document_id = 'h1'");
+        let slow = s.script(&format!(
+            "sleep 1\nprintf '%s\\n' '{}'\n",
+            serde_json::to_string(&rendered(TextMatch::None)).unwrap()
+        ));
+        let (native, scan) = (Duration::from_millis(300), Duration::from_secs(20));
+
+        assert_eq!(
+            s.render_within(&slow, "h1", "doc.pdf", 800, &[], native, scan),
+            PdfPageView::Unavailable {
+                reason: PageUnavailable::Failed
+            },
         );
     }
 

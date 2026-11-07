@@ -116,8 +116,8 @@ case_ "render: recognise has a serde default" \
 # S1. A scan page is asked for like a native one: no second recognition.
 case_ "app: a scan page is asked for without a second recognition" \
   $AP \
-  's~        recognise: scan,~        recognise: false,~' \
-  '        recognise: false,' \
+  's~let recognise = scan && !ranges\.is_empty\(\);~let recognise = false;~' \
+  'let recognise = false;' \
   mnema-desktop "${AT}a_scan_page_is_asked_for_with_the_hash_of_its_text_and_a_second_recognition" --lib
 
 # S2. A scan page is asked for with no hash of its stored text.
@@ -130,8 +130,8 @@ case_ "app: a scan page is asked for without a hash" \
 # S3. Every page is asked for with a second recognition.
 case_ "app: every page is asked for with a second recognition" \
   $AP \
-  's~        recognise: scan,~        recognise: true,~' \
-  '        recognise: true,' \
+  's~let recognise = scan && !ranges\.is_empty\(\);~let recognise = true;~' \
+  'let recognise = true;' \
   mnema-desktop "${AT}a_native_page_that_matches_is_shown_with_the_hash_of_its_stored_text" --lib
 
 # S4. A path that now names another document is asked for with a second
@@ -167,16 +167,47 @@ case_ "app: a scan whose hash differs is changed" \
 # short and the path stays cold.
 case_ "app: a scan page gets the native deadline" \
   $AP \
-  's~if scan \{ scan_timeout \} else \{ timeout \}~timeout~' \
-  'render_page(worker, &request, timeout)' \
+  's~let deadline = if recognise \{ scan_timeout \} else \{ timeout \};~let deadline = timeout;~' \
+  'let deadline = timeout;' \
   mnema-desktop "${AT}a_scan_page_is_given_the_longer_deadline" --lib
 
 # D2. A native page waits the scan's deadline: a stuck worker holds the window.
 case_ "app: a native page gets the scan deadline" \
   $AP \
-  's~if scan \{ scan_timeout \} else \{ timeout \}~scan_timeout~' \
-  'render_page(worker, &request, scan_timeout)' \
+  's~let deadline = if recognise \{ scan_timeout \} else \{ timeout \};~let deadline = scan_timeout;~' \
+  'let deadline = scan_timeout;' \
   mnema-desktop "${AT}a_scan_page_is_given_the_longer_deadline" --lib
+
+# P1. The page strip asks for the cited page's neighbours too: a scan page with
+# nothing cited on it is recognised again all the same (~0,2 s of Vision each).
+case_ "strip: a scan page with nothing cited is recognised" \
+  $AP \
+  's~let recognise = scan && !ranges\.is_empty\(\);~let recognise = scan;~' \
+  'let recognise = scan;' \
+  mnema-desktop "${AT}a_scan_page_with_nothing_cited_is_drawn_without_a_second_recognition" --lib
+
+# P2. Not recognised, but still sent the hash: a junk text layer reads as Unplaced.
+case_ "strip: a scan page with nothing cited still sends the hash" \
+  $AP \
+  's~text_sha256: if scan && !recognise \{~text_sha256: if false \&\& scan \&\& !recognise {~' \
+  'text_sha256: if false && scan && !recognise {' \
+  mnema-desktop "${AT}a_scan_page_with_nothing_cited_is_drawn_without_a_second_recognition" --lib
+
+# P3. Every page with nothing cited loses the hash: a native page no longer says
+# its file changed.
+case_ "strip: a native page with nothing cited loses the hash" \
+  $AP \
+  's~text_sha256: if scan && !recognise \{~text_sha256: if !recognise {~' \
+  'text_sha256: if !recognise {' \
+  mnema-desktop "${AT}a_native_page_with_nothing_cited_is_still_checked_against_its_text" --lib
+
+# P4. The deadline follows the page's kind, not the recognition: a scan page
+# drawn as a picture waits Vision's five minutes on a stuck worker.
+case_ "strip: a scan page with nothing cited gets the scan deadline" \
+  $AP \
+  's~let deadline = if recognise \{~let deadline = if scan {~' \
+  'let deadline = if scan {' \
+  mnema-desktop "${AT}a_scan_page_with_nothing_cited_is_held_to_the_native_deadline" --lib
 
 # D3. The scan deadline is not the pool's own: a worker the pool lets run is
 # cut short here, or the other way round.
