@@ -55,7 +55,10 @@ pub use docx::{DocxError, DocxSection, extract_docx};
 pub use epub::{BOOK_MAX_BYTES, EpubBook, EpubChapter, EpubError, extract_epub};
 pub use html::{HtmlPage, extract_html};
 pub use markdown::{MarkdownPage, SECTION_TITLE_MAX_CHARS, extract_markdown};
-pub use ocr::{OCR_UNAVAILABLE_ENV, OcrError, OwnedPageImage, PageImage, Recognised, recognise};
+pub use ocr::{
+    Boxed, OCR_UNAVAILABLE_ENV, OcrError, OwnedPageImage, PageImage, Recognised, recognise,
+    recognise_ranges,
+};
 pub use page_view::render_page;
 pub use pdf::{
     InProcess, MAX_PAGES_ENV, OCR_MAX_SIDE_PX, OcrBackend, OcrPage, PdfDocument, PdfError, PdfPage,

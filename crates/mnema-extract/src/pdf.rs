@@ -550,7 +550,7 @@ fn page_of(page_no: u32, raw: &str, text_source: &'static str, ocr: Option<OcrPa
 ///
 /// A render pdfium refuses is the page's fault and refuses the document as
 /// `Malformed`, like a page that will not load.
-fn render_for_ocr(page: &PdfiumPage, page_no: u32) -> Result<OwnedPageImage, PdfError> {
+pub(crate) fn render_for_ocr(page: &PdfiumPage, page_no: u32) -> Result<OwnedPageImage, PdfError> {
     let scale = render_scale(page.width().value, page.height().value);
     let config = PdfRenderConfig::new()
         .scale_page_by_factor(scale)
