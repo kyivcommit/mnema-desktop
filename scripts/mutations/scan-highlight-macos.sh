@@ -5,11 +5,10 @@
 #
 # not-in-matrix: every test named here is #[cfg(target_os = "macos")] (Vision is the oracle); on the ubuntu leg the baseline selects 0 tests and the whole file exits 1 — the same reason as parallel-ocr-macos.sh. Vision's cold start under a new binary path is ~46 s: the first test run of each target directory waits.
 #
-# Not here, on purpose: a `recognise_ranges` that asks Vision for something
-# other than `recognise` does. There is one request (`platform::recognise`,
-# both functions call it), so the only way to make them differ is to branch on
-# `ranges.is_empty()` inside it, and no test can tell that from a different
-# recognition of the same page.
+# Not here, on purpose: `setUsesLanguageCorrection` that differs between a
+# plain and a boxed recognition survives (measured 2026-11-07: the fixtures
+# read the same either way). The recognition level is case V5 below, and dies
+# of an error, not of a different text -- see its comment.
 
 O=crates/mnema-extract/src/ocr.rs
 V=crates/mnema-extract/src/page_view.rs
@@ -71,3 +70,14 @@ case_ "vision: a box loses its range's primary flag" \
   'false,
                         ));' \
   mnema-extract "${VT}a_range_is_boxed_where_its_words_are" --lib
+
+# V5. A boxed recognition asks Vision for another level than the plain one.
+# `Fast` has no Ukrainian: the request fails ("uk-UA is not among the supported
+# languages"), the worker answers `None`, and the hash test sees no `Match`.
+# A level that read the fixtures differently but without an error would
+# survive; none is known.
+case_ "vision: a boxed recognition uses another level" \
+  $O \
+  's~request\.setRecognitionLevel\(VNRequestTextRecognitionLevel::Accurate\);~request.setRecognitionLevel(if ranges.is_empty() { VNRequestTextRecognitionLevel::Accurate } else { VNRequestTextRecognitionLevel::Fast });~' \
+  'VNRequestTextRecognitionLevel::Fast' \
+  mnema-extract 'a_scan_page_is_boxed_when_vision_repeats_the_text_indexing_stored' --test page_view
