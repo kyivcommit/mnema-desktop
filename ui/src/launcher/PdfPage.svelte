@@ -19,6 +19,57 @@
   export function heightFor(paneHeight: number, above: number = ABOVE_GUESS_PX): number {
     return Math.max(MIN_HEIGHT_PX, paneHeight - above - BELOW_PX);
   }
+
+  // The page strip. Every page's slot is `tall` high whatever has been drawn,
+  // so where a page starts is arithmetic, true before its picture arrives.
+  export const GAP_PX = 12;
+  export function pageTop(n: number, tall: number, gap: number = GAP_PX): number {
+    return (n - 1) * (tall + gap);
+  }
+
+  // The page with the most of it inside [scrollTop, scrollTop + viewport];
+  // a tie goes to the page above.
+  export function pageAt(
+    scrollTop: number, viewport: number, tall: number, pages: number, gap: number = GAP_PX,
+  ): number {
+    const step = tall + gap;
+    const first = Math.max(1, Math.floor(scrollTop / step) + 1);
+    const bottom = scrollTop + viewport;
+    let best = Math.min(first, Math.max(1, pages));
+    let most = -1;
+    for (let n = first; n <= pages && pageTop(n, tall, gap) < bottom; n++) {
+      const top = pageTop(n, tall, gap);
+      const seen = Math.min(bottom, top + tall) - Math.max(scrollTop, top);
+      if (seen > most) { most = seen; best = n; }
+    }
+    return best;
+  }
+
+  // The pages to draw around `at`, in the order they are asked for.
+  export function wanted(at: number, pages: number): number[] {
+    return [at, at - 1, at + 1].filter((n) => n >= 1 && n <= pages);
+  }
+
+  // What to start now: the wanted pages not drawn and not on their way, while
+  // fewer than `limit` are on their way (each is a worker process; scans are heavy).
+  export function nextRequests(
+    want: number[], inFlight: ReadonlySet<number>, cached: ReadonlySet<number>, limit = 2,
+  ): number[] {
+    const start: number[] = [];
+    for (const n of want) {
+      if (inFlight.size + start.length >= limit) break;
+      if (!inFlight.has(n) && !cached.has(n)) start.push(n);
+    }
+    return start;
+  }
+
+  // The pictures to let go of past `cap`: the farthest from `at`, not the
+  // oldest — going back two pages must be instant. Equal distance: the page
+  // above goes first (reading runs down).
+  export function evict(cached: number[], at: number, cap: number): number[] {
+    const order = [...cached].sort((a, b) => Math.abs(b - at) - Math.abs(a - at) || a - b);
+    return order.slice(0, Math.max(0, cached.length - cap));
+  }
 </script>
 
 <script lang="ts">
