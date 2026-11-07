@@ -457,3 +457,25 @@ test('the page takes its height from where the strip starts, under the page line
     HTMLElement.prototype.getBoundingClientRect = real;
   }
 });
+
+test('a new page height keeps the strip on the page it was on', async () => {
+  view = book(10, { focusBlockIds: [60] });
+  renderReply = () => Promise.resolve(page({ pages: 10 }));
+  mount({ focus: FOCUS });
+  await waitFor(() => expect(document.documentElement.scrollTop).toBe(5 * STEP));
+
+  paneHeight(756); // 700 tall: every slot above page 6 is 100 px shorter
+  resize!();
+  await waitFor(() => expect(document.documentElement.scrollTop).toBe(5 * (700 + 12)));
+  await fireEvent.scroll(window);
+  expect(screen.getByTestId('page-of').textContent).toBe('page 6 of 10');
+});
+
+test('a drawn page\'s sheet has the page\'s own shape, so the boxes land on its picture', async () => {
+  renderReply = (a) => Promise.resolve(page(a.pageNo === 1 ? { widthPx: 600, heightPx: 800 } : { widthPx: 900, heightPx: 600 }));
+  mount();
+  await waitFor(() => expect(imageOf(2)).not.toBeNull());
+  const sheet = (n: number) => slot(n).querySelector<HTMLElement>('[data-testid="page-sheet"]')!;
+  expect(sheet(1).style.aspectRatio).toBe('600 / 800');
+  expect(sheet(2).style.aspectRatio).toBe('900 / 600');
+});

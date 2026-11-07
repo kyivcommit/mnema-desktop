@@ -239,6 +239,18 @@
     });
   }
 
+  // A new page height (the strip's top measured, the pane resized) moves every
+  // slot below the first: the scroll is rescaled to stay on the same page —
+  // left alone, a citation hundreds of pages down opened pages away from it.
+  let laidStep = 0;
+  $effect(() => {
+    const step = tall + GAP_PX;
+    untrack(() => {
+      if (laidStep > 0 && step !== laidStep) setScrollTop((scrollTop() * step) / laidStep);
+      laidStep = step;
+    });
+  });
+
   // Where the strip starts, measured once the line above it is laid out. A
   // layout-less DOM reports 0, which keeps the guess.
   $effect(() => {
@@ -314,7 +326,9 @@
             {#if note !== ''}
               <p role="status" data-testid="page-note">{note}</p>
             {/if}
-            <div class="page-sheet">
+            <!-- The sheet takes the page's own shape, so its width is the picture's
+                 and the boxes, in fractions of it, land on the words. -->
+            <div class="page-sheet" data-testid="page-sheet" style:aspect-ratio="{got.widthPx} / {got.heightPx}">
               <img src={got.image} alt={altFor(n)} data-testid="page-image" />
               {#each got.rects as r}
                 <span class="page-box" data-testid="page-box" data-primary={r.primary ? 'true' : undefined}

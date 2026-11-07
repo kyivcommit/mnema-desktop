@@ -180,6 +180,24 @@ case_ "open: the picture's text has no page number" \
   "t('page_image_alt', { n: 1 })" \
   $PT "each page has its number in the picture's text" runner=vitest
 
+# O9. A new page height leaves the scroll where it was in pixels: every slot
+# above moved, and a citation hundreds of pages down opens pages away from it
+# (seen live, 2026-11-07: page 557 for 560).
+case_ "open: a new page height is not rescaled" \
+  $PP \
+  's~if \(laidStep > 0 && step !== laidStep\) setScrollTop~if (false) setScrollTop~' \
+  'if (false) setScrollTop' \
+  $PT 'a new page height keeps the strip on the page it was on' runner=vitest
+
+# O10. The sheet takes the picture's natural width, not its drawn one: WebKit
+# laid it out wider than the page, the boxes slid right and the strip grew
+# wider than its pages (seen live, 2026-11-07).
+case_ "open: the sheet has no shape of its own" \
+  $PP \
+  's~ style:aspect-ratio="\{got\.widthPx\} / \{got\.heightPx\}"~~' \
+  '<div class="page-sheet" data-testid="page-sheet">' \
+  $PT "a drawn page's sheet has the page's own shape, so the boxes land on its picture" runner=vitest
+
 # ── The notes over a cited page ──────────────────────────────────────────────
 
 # T1. The two notes swapped.
