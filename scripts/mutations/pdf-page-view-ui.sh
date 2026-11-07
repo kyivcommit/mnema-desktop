@@ -289,6 +289,16 @@ case_ "unavailable: a gone file is one page's failure" \
   "'unavailable' && (pages === 0))" \
   $PT 'a file that cannot be drawn says so for the whole document and offers the text' runner=vitest
 
+# V7. A whole-document failure is final: the window coming back finds the
+# file and redraws the strip under a "missing" line it never takes away
+# (external review of PR #94).
+case_ "unavailable: a whole-document failure never clears" \
+  $PP \
+  "s~    if \\(got\\.kind === 'page'\\) gone = null;\\n~~" \
+  'failure is never final (a missing file restored, a first page that timed out).
+    slots.set' \
+  $PT 'a whole-document failure clears once the window coming back finds the file again' runner=vitest
+
 # V6. A rejected command is no answer at all: the page waits for ever.
 case_ "unavailable: a rejected command leaves the page waiting" \
   $PP \

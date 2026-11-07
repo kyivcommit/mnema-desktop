@@ -479,3 +479,15 @@ test('a drawn page\'s sheet has the page\'s own shape, so the boxes land on its 
   expect(sheet(1).style.aspectRatio).toBe('600 / 800');
   expect(sheet(2).style.aspectRatio).toBe('900 / 600');
 });
+
+test('a whole-document failure clears once the window coming back finds the file again', async () => {
+  view = book(3);
+  renderReply = () => Promise.resolve({ kind: 'unavailable', reason: 'fileMissing' });
+  mount();
+  expect((await screen.findByTestId('page-unavailable')).textContent).toBe('The file is missing from disk.');
+
+  renderReply = () => Promise.resolve(page());
+  await fireEvent.focus(window);
+  await waitFor(() => expect(imageOf(1)).not.toBeNull());
+  expect(screen.queryByTestId('page-unavailable')).toBeNull();
+});

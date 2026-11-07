@@ -212,6 +212,9 @@
       gone = got;
       return;
     }
+    // A page drawn in this generation means the file is back: a whole-document
+    // failure is never final (a missing file restored, a first page that timed out).
+    if (got.kind === 'page') gone = null;
     slots.set(n, { got, gen: g });
     const asked = width;
     if (got.kind === 'page') {
