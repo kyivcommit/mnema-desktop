@@ -70,7 +70,15 @@ jobs:
     # is a cold `target/` on both arms — unmeasured here; the nearest figure
     # is `mutations`' 3:02–3:23 per leg for the same dependencies — and the
     # limit has to hold that run too.
-    timeout-minutes: 15
+    #
+    # Fifteen stopped being margin. On macos-15 the job took 10-14 minutes on
+    # the last five green `main` runs (`cargo test --workspace` alone 599 s on
+    # 42401469565), and a branch that changes `mnema-core` recompiles nearly
+    # the whole workspace over `main`'s cache: PR #95 ran it in 696-730 s and
+    # was cancelled twice at the limit, once mid-test and once in the cache
+    # save after every step had passed. Twenty is the same hang guard with
+    # room for that rebuild.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No toolchain action on purpose: rust-toolchain.toml is the single place
