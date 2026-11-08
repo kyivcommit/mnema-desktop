@@ -74,7 +74,7 @@ case_ "manifest: epub is decided by content, so the map does not claim it" \
 # application.
 case_ "reader: a chapter that is not there does not refuse the book" \
   crates/mnema-extract/src/epub.rs \
-  's{            Err\(ZipPartError::Missing\) => \{\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ZipPartError::Missing) => \{\n                return Err(EpubError::Malformed("a chapter is missing".to_string()));\n            \}}' \
+  's{            Err\(ChapterError::NotAChapter\) => \{\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ChapterError::NotAChapter) => \{\n                return Err(EpubError::Malformed("a chapter is missing".to_string()));\n            \}}' \
   'return Err(EpubError::Malformed("a chapter is missing".to_string()));' \
   mnema-extract 'a_chapter_the_archive_does_not_hold_is_named_rather_than_refusing_the_book' --test epub
 
@@ -83,8 +83,8 @@ case_ "reader: a chapter that is not there does not refuse the book" \
 # chapter shorter, and the journal has no row saying which one.
 case_ "reader: a chapter that is not there is named rather than dropped" \
   crates/mnema-extract/src/epub.rs \
-  's{            Err\(ZipPartError::Missing\) => \{\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ZipPartError::Missing) => \{\n                continue;\n            \}}' \
-  'Err(ZipPartError::Missing) => {
+  's{            Err\(ChapterError::NotAChapter\) => \{\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ChapterError::NotAChapter) => \{\n                continue;\n            \}}' \
+  'Err(ChapterError::NotAChapter) => {
                 continue;
             }' \
   mnema-extract 'a_chapter_the_archive_does_not_hold_is_named_rather_than_refusing_the_book' --test epub
@@ -124,7 +124,7 @@ case_ "reader: a chapter that yields no block is named rather than stored empty"
 # member of it is.
 case_ "reader: one chapter that will not decompress does not cost the book" \
   crates/mnema-extract/src/epub.rs \
-  's{            Err\(ZipPartError::Malformed\) => \{\n                saw_damage = true;\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ZipPartError::Malformed) => \{\n                return Err(EpubError::Malformed("a chapter is damaged".to_string()));\n            \}}' \
+  's{            Err\(ChapterError::Malformed\(_\)\) => \{\n                saw_damage = true;\n                skipped\.push\(page_no\);\n                continue;\n            \}}{            Err(ChapterError::Malformed(_)) => \{\n                return Err(EpubError::Malformed("a chapter is damaged".to_string()));\n            \}}' \
   'return Err(EpubError::Malformed("a chapter is damaged".to_string()));' \
   mnema-extract 'one_chapter_that_will_not_decompress_does_not_cost_the_book' --test epub
 
@@ -174,7 +174,7 @@ case_ "reader: a chapter's title still names it" \
 # claiming position 0 — and the index's uniqueness is `(page_id, reading_order)`.
 case_ "reader: a chapter's blocks are numbered once across the whole chapter" \
   crates/mnema-extract/src/epub.rs \
-  's{                block\.reading_order = blocks\.len\(\) as i64;}{                /* the order the page gave it is kept */}' \
+  's{            block\.reading_order = blocks\.len\(\) as i64;}{            /* the order the page gave it is kept */}' \
   '/* the order the page gave it is kept */' \
   mnema-extract 'a_chapters_blocks_are_numbered_once_across_the_whole_chapter' --test epub
 
@@ -272,8 +272,8 @@ case_ "reader: an escape that spells a path segment stays a filename" \
 # by a route the HTML reader's own skip list does not cover.
 case_ "reader: a picture in the spine is not mined for the text inside its markup" \
   crates/mnema-extract/src/epub.rs \
-  's{        if !is_content_document\(item\.media_type\.as_deref\(\)\) \{}{        if false \{}' \
-  '        if false {' \
+  's{    if !is_content_document\(item\.media_type\.as_deref\(\)\) \{}{    if false \{}' \
+  '    if false {' \
   mnema-extract 'a_spine_entry_that_is_not_a_content_document_is_skipped' --test epub
 
 # C26. …and the filter drawn too tight. `text/html` is what books made before
@@ -303,8 +303,8 @@ case_ "reader: an entry with no stated media type is read rather than skipped" \
 # what a document reads like from the top.
 case_ "reader: chapters come back in the order the spine gives them" \
   crates/mnema-extract/src/epub.rs \
-  's{    for \(index, idref\) in package\.spine\.iter\(\)\.enumerate\(\) \{}{    for (index, idref) in package.spine.iter().rev().enumerate() \{}' \
-  'package.spine.iter().rev().enumerate()' \
+  's{        \.and_then\(\|index\| package\.spine\.get\(index as usize\)\)}{        .and_then(|index| package.spine.get(package.spine.len() - 1 - index as usize))}' \
+  'package.spine.get(package.spine.len() - 1 - index as usize)' \
   mnema-extract 'chapters_come_back_in_spine_order' --test epub
 
 # C29. The rootfile chosen by position rather than by what it says it is. A

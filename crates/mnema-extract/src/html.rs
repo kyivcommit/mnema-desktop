@@ -154,16 +154,6 @@ pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
     walk(&parse(bytes), HeadTitle::IsText).pages
 }
 
-/// The same read, for a document that is one chapter of a book rather than a
-/// file of its own: its `<title>` names the chapter and is not stored as text.
-///
-/// Everything else is identical, deliberately — an EPUB chapter is an XHTML
-/// document, and `epub.rs`'s module doc records why it is parsed by the HTML
-/// parsing algorithm rather than as XML.
-pub(crate) fn extract_html_chapter(bytes: &[u8]) -> Vec<HtmlPage> {
-    walk(&parse(bytes), HeadTitle::NamesOnly).pages
-}
-
 /// Decodes and parses a file into the tree [`walk`] reads.
 ///
 /// Separate from the walk so that a caller drawing the page can keep the tree

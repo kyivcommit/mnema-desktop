@@ -2,7 +2,7 @@
 //! page of the document.
 //!
 //! Almost none of this file is reading. `zip_part::read_member` opens a member
-//! under a cap and `html::extract_html_chapter` turns one chapter into prose;
+//! under a cap and `html::walk` turns one chapter into prose;
 //! what is decided here is the three seams between them — which member is a
 //! chapter, what happens when one of them is not there, and what a book made of
 //! nothing but pictures is.
@@ -187,47 +187,13 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
     // already allocated what it is measuring.
     let mut budget = budget;
 
-    // **`text::decode` — the crate's one guess — for these two XML documents as
-    // well as for prose, and that is a correction to what this file did first.**
-    //
-    // The argument for decoding structure strictly as UTF-8 is a good one on
-    // paper: XML states its encoding rather than leaving it to be guessed, EPUB
-    // narrows it to UTF-8 or UTF-16, and a mis-guessed package document is a
-    // Cyrillic href turned into mojibake, a member name matching nothing, and
-    // every chapter of the book silently skipped. It was written that way, and
-    // then measured, and the measurement went the other way:
-    //
-    //   package document                        chardetng   strict UTF-8
-    //   UTF-8, one Cyrillic letter in one href  correct     correct
-    //   UTF-8, minimal, two Cyrillic letters    correct     correct
-    //   windows-1251, long                      correct     mojibake
-    //   windows-1251, minimal                   mojibake    mojibake
-    //
-    // The case the strict rule was written for — a short, mostly-ASCII document
-    // where a detector has little to go on — does not exist: chardetng answered
-    // UTF-8 for every UTF-8 fixture including the shortest. What does exist is
-    // the row under it: EPUB forbids a windows-1251 package document and
-    // producers have shipped them, and there the guess is right where the
-    // standard is not. Strict decoding is never better and sometimes worse, so
-    // the crate keeps one decoder — which is also `text.rs`'s own promise, that
-    // the same bytes are read the same way whichever reader opens them.
-    // `a_package_document_in_a_legacy_encoding_is_still_read` holds the bottom
-    // two rows; mutation C33 puts the strict rule back and reddens it.
-    let container = read_structure(bytes, CONTAINER_PATH, &mut budget)?;
-    let opf_path = rootfile_path(&crate::text::decode(&container))?;
-    let opf = read_structure(bytes, &opf_path, &mut budget)?;
-    let package = parse_package(&crate::text::decode(&opf))?;
+    let (package, base) = open(bytes, &mut budget)?;
 
     if package.spine.is_empty() {
         return Err(EpubError::Malformed(
             "the package document's spine names no chapter".to_string(),
         ));
     }
-
-    // Every href in the package is relative to the package document, not to the
-    // archive's root — `OEBPS/content.opf` naming `Text/ch1.xhtml` means
-    // `OEBPS/Text/ch1.xhtml`.
-    let base = parent_of(&opf_path);
 
     let mut chapters = Vec::new();
     let mut skipped = Vec::new();
@@ -238,68 +204,38 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
     // book" as a book of photographs.
     let mut saw_damage = false;
 
-    for (index, idref) in package.spine.iter().enumerate() {
+    for index in 0..package.spine.len() {
         // 1-based, and the position in the spine rather than in `chapters`:
         // this is the number that goes into `skipped_pages` when nothing comes
         // back, and it has to mean the same thing in both lists.
         let page_no = index as u32 + 1;
 
-        // Two ways to be here and one answer: a spine entry that names an id
-        // the manifest does not declare, and one that names no id this reader
-        // could read at all (`<itemref/>`, or an `idref` holding an entity no
-        // package document declares). Both are invalid and both are survivable
-        // — what must not happen is that either leaves no number behind.
-        let Some(item) = idref.as_ref().and_then(|idref| package.items.get(idref)) else {
-            skipped.push(page_no);
-            continue;
-        };
-        if !is_content_document(item.media_type.as_deref()) {
-            skipped.push(page_no);
-            continue;
-        }
-        let Some(path) = resolve(&base, &item.href) else {
-            // An href that names no member at all — empty, or `..` climbing
-            // out of the archive.
-            skipped.push(page_no);
-            continue;
-        };
-
-        let chapter = match read_member(bytes, &path, &mut budget) {
+        let chapter = match read_chapter(bytes, &package, &base, page_no, &mut budget) {
             Ok(chapter) => chapter,
             // The bomb, and the only failure inside a chapter that stops the
             // book. Continuing would mean inflating the next chapter of a file
             // that has already asked for more memory than the whole book may
             // have.
-            Err(ZipPartError::TooLarge) => return Err(EpubError::TooLarge),
-            Err(ZipPartError::Missing) => {
+            Err(ChapterError::TooLarge) => return Err(EpubError::TooLarge),
+            Err(ChapterError::NotAChapter) => {
                 skipped.push(page_no);
                 continue;
             }
-            Err(ZipPartError::Malformed) => {
+            Err(ChapterError::Malformed(_)) => {
                 saw_damage = true;
                 skipped.push(page_no);
                 continue;
             }
         };
 
-        let pages = html::extract_html_chapter(&chapter);
-        // The first name anything in the chapter gives it: its `<title>` if it
-        // has one, and otherwise its first heading. `None` when it has neither,
-        // which `pages_of` renders as an empty section rather than inventing a
-        // name.
-        let section_title = pages.iter().find_map(|page| page.section_title.clone());
-        let mut blocks: Vec<Block> = Vec::new();
-        for page in pages {
-            for mut block in page.blocks {
-                // Renumbered across the whole chapter. The HTML reader restarts
-                // `reading_order` on every page it makes, and several of its
-                // pages become one page here — left alone, a chapter with two
-                // headings would hold two blocks claiming position 0, and the
-                // index's uniqueness is on `(page_id, reading_order)`.
-                block.reading_order = blocks.len() as i64;
-                blocks.push(block);
-            }
-        }
+        let ChapterWalk {
+            section_title,
+            blocks,
+            ..
+        } = number_chapter(
+            page_no,
+            html::walk(&html::parse(&chapter), html::HeadTitle::NamesOnly),
+        );
 
         if blocks.is_empty() {
             // A chapter that is there and says nothing: a cover, a plate, a
@@ -326,6 +262,189 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
     }
 
     Ok(EpubBook { chapters, skipped })
+}
+
+/// The container and the package document: what the book's members are, in
+/// what order, and the directory every href in the package is relative to.
+///
+/// Shared by [`extract`] and [`chapter_source`] so that both draw the same
+/// structure against the same budget.
+fn open(bytes: &[u8], budget: &mut usize) -> Result<(Package, String), EpubError> {
+    // **`text::decode` — the crate's one guess — for these two XML documents as
+    // well as for prose, and that is a correction to what this file did first.**
+    //
+    // The argument for decoding structure strictly as UTF-8 is a good one on
+    // paper: XML states its encoding rather than leaving it to be guessed, EPUB
+    // narrows it to UTF-8 or UTF-16, and a mis-guessed package document is a
+    // Cyrillic href turned into mojibake, a member name matching nothing, and
+    // every chapter of the book silently skipped. It was written that way, and
+    // then measured, and the measurement went the other way:
+    //
+    //   package document                        chardetng   strict UTF-8
+    //   UTF-8, one Cyrillic letter in one href  correct     correct
+    //   UTF-8, minimal, two Cyrillic letters    correct     correct
+    //   windows-1251, long                      correct     mojibake
+    //   windows-1251, minimal                   mojibake    mojibake
+    //
+    // The case the strict rule was written for — a short, mostly-ASCII document
+    // where a detector has little to go on — does not exist: chardetng answered
+    // UTF-8 for every UTF-8 fixture including the shortest. What does exist is
+    // the row under it: EPUB forbids a windows-1251 package document and
+    // producers have shipped them, and there the guess is right where the
+    // standard is not. Strict decoding is never better and sometimes worse, so
+    // the crate keeps one decoder — which is also `text.rs`'s own promise, that
+    // the same bytes are read the same way whichever reader opens them.
+    // `a_package_document_in_a_legacy_encoding_is_still_read` holds the bottom
+    // two rows; mutation C33 puts the strict rule back and reddens it.
+    let container = read_structure(bytes, CONTAINER_PATH, budget)?;
+    let opf_path = rootfile_path(&crate::text::decode(&container))?;
+    let opf = read_structure(bytes, &opf_path, budget)?;
+    let package = parse_package(&crate::text::decode(&opf))?;
+
+    // Every href in the package is relative to the package document, not to the
+    // archive's root — `OEBPS/content.opf` naming `Text/ch1.xhtml` means
+    // `OEBPS/Text/ch1.xhtml`.
+    let base = parent_of(&opf_path);
+    Ok((package, base))
+}
+
+/// Why spine position N gave no chapter bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChapterError {
+    /// No such position, an entry naming no XHTML member, or a member the
+    /// archive does not hold — what [`extract`] skips by number.
+    NotAChapter,
+    /// The member, or the book so far, inflates past its cap.
+    TooLarge,
+    /// The book's structure is damaged, or the chapter's stream will not
+    /// decompress.
+    Malformed(String),
+}
+
+/// The raw bytes of the chapter at spine position `page_no` (1-based), read the
+/// way [`extract_epub`] reads it: same structure, same budget, same member.
+///
+/// For a caller that draws one chapter rather than indexing the book: it runs
+/// [`html::parse`] and [`html::walk`] over these bytes and numbers the result
+/// with [`number_chapter`], which is what makes its block numbers the stored
+/// ones.
+#[cfg_attr(not(test), allow(dead_code))] // the page view is its caller (D199)
+pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<Vec<u8>, ChapterError> {
+    let mut budget = BOOK_MAX_BYTES;
+    let (package, base) = open(bytes, &mut budget).map_err(|e| match e {
+        EpubError::TooLarge => ChapterError::TooLarge,
+        EpubError::Malformed(why) => ChapterError::Malformed(why),
+        EpubError::NoReadableChapter => ChapterError::NotAChapter,
+    })?;
+    read_chapter(bytes, &package, &base, page_no, &mut budget)
+}
+
+/// Which member spine position `page_no` is, read against the book's budget.
+///
+/// The one place that decides it, so a chapter drawn on its own is the member
+/// [`extract`] indexed under that number.
+fn read_chapter(
+    bytes: &[u8],
+    package: &Package,
+    base: &str,
+    page_no: u32,
+    budget: &mut usize,
+) -> Result<Vec<u8>, ChapterError> {
+    // Two ways to be here and one answer: a spine entry that names an id the
+    // manifest does not declare, and one that names no id this reader could
+    // read at all (`<itemref/>`, or an `idref` holding an entity no package
+    // document declares). Both are invalid and both are survivable — what must
+    // not happen is that either leaves no number behind.
+    let Some(item) = page_no
+        .checked_sub(1)
+        .and_then(|index| package.spine.get(index as usize))
+        .and_then(|idref| idref.as_ref())
+        .and_then(|idref| package.items.get(idref))
+    else {
+        return Err(ChapterError::NotAChapter);
+    };
+    if !is_content_document(item.media_type.as_deref()) {
+        return Err(ChapterError::NotAChapter);
+    }
+    // An href that names no member at all — empty, or `..` climbing out of the
+    // archive.
+    let Some(path) = resolve(base, &item.href) else {
+        return Err(ChapterError::NotAChapter);
+    };
+    read_member(bytes, &path, budget).map_err(|e| match e {
+        ZipPartError::TooLarge => ChapterError::TooLarge,
+        ZipPartError::Missing => ChapterError::NotAChapter,
+        ZipPartError::Malformed => {
+            ChapterError::Malformed(format!("{path} could not be decompressed"))
+        }
+    })
+}
+
+/// One chapter as the index stores it, and where its text nodes sit.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // `texts`, `unverbatim`: the page view's (D199)
+pub(crate) struct ChapterWalk {
+    pub section_title: Option<String>,
+    pub blocks: Vec<Block>,
+    /// [`html::Walk::texts`] with `page_no` the spine position and
+    /// `reading_order` the chapter's own, i.e. the stored block's.
+    pub texts: Vec<html::TextAt>,
+    /// [`html::Walk::unverbatim`], renumbered the same way.
+    pub unverbatim: Vec<(u32, u32)>,
+}
+
+/// Numbers one chapter's walk as page `page_no` of the book. The only
+/// numbering of a chapter: [`extract`] stores these blocks and a caller
+/// drawing the chapter looks its text nodes up by the same keys.
+pub(crate) fn number_chapter(page_no: u32, walk: html::Walk) -> ChapterWalk {
+    // The first name anything in the chapter gives it: its `<title>` if it
+    // has one, and otherwise its first heading. `None` when it has neither,
+    // which `pages_of` renders as an empty section rather than inventing a
+    // name.
+    let section_title = walk
+        .pages
+        .iter()
+        .find_map(|page| page.section_title.clone());
+    // Where each HTML page's blocks start in the chapter. The HTML reader's
+    // `reading_order` is the block's index on its page (`html.rs` `flush`).
+    let mut first: HashMap<u32, u32> = HashMap::new();
+    let mut blocks: Vec<Block> = Vec::new();
+    for page in walk.pages {
+        first.insert(page.page_no, blocks.len() as u32);
+        for mut block in page.blocks {
+            // Renumbered across the whole chapter. The HTML reader restarts
+            // `reading_order` on every page it makes, and several of its
+            // pages become one page here — left alone, a chapter with two
+            // headings would hold two blocks claiming position 0, and the
+            // index's uniqueness is on `(page_id, reading_order)`.
+            block.reading_order = blocks.len() as i64;
+            blocks.push(block);
+        }
+    }
+    let renumber = |html_page: u32, order: u32| (page_no, first[&html_page] + order);
+    let texts = walk
+        .texts
+        .into_iter()
+        .map(|at| {
+            let (page_no, reading_order) = renumber(at.page_no, at.reading_order);
+            html::TextAt {
+                page_no,
+                reading_order,
+                ..at
+            }
+        })
+        .collect();
+    let unverbatim = walk
+        .unverbatim
+        .into_iter()
+        .map(|(html_page, order)| renumber(html_page, order))
+        .collect();
+    ChapterWalk {
+        section_title,
+        blocks,
+        texts,
+        unverbatim,
+    }
 }
 
 /// A member the book's structure depends on: absent, it is not a book.
@@ -790,7 +909,7 @@ mod tests {
     /// decides what the test costs. Measured, on this machine, in the debug
     /// profile the suite runs:
     ///
-    /// | 1 MiB of… | `extract_html_chapter` | blocks |
+    /// | 1 MiB of… | the HTML reader | blocks |
     /// |---|---|---|
     /// | a comment | **371 ms** | 0 |
     /// | a `<p>` of text | 13 ms | 1 |
@@ -930,5 +1049,158 @@ mod tests {
         assert_eq!(percent_decode("a%zz"), "a%zz");
         assert_eq!(percent_decode("a%2"), "a%2");
         assert_eq!(percent_decode("%D0%A0"), "Р");
+    }
+
+    /// A book whose spine names `items` in order: `(href, media type, member)`,
+    /// with `None` for a member the archive does not hold.
+    fn spine_book(items: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
+        use std::io::Write;
+
+        let manifest: String = items
+            .iter()
+            .enumerate()
+            .map(|(n, (href, media, _))| {
+                format!("<item id=\"c{n}\" href=\"{href}\" media-type=\"{media}\"/>")
+            })
+            .collect();
+        let spine: String = (0..items.len())
+            .map(|n| format!("<itemref idref=\"c{n}\"/>"))
+            .collect();
+        let opf = format!(
+            "<package xmlns=\"http://www.idpf.org/2007/opf\">\
+             <manifest>{manifest}</manifest><spine>{spine}</spine></package>"
+        );
+        let container = "<container xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">\
+                         <rootfiles><rootfile full-path=\"content.opf\" \
+                         media-type=\"application/oebps-package+xml\"/></rootfiles></container>";
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("mimetype", options).unwrap();
+            w.write_all(b"application/epub+zip").unwrap();
+            w.start_file("META-INF/container.xml", options).unwrap();
+            w.write_all(container.as_bytes()).unwrap();
+            w.start_file("content.opf", options).unwrap();
+            w.write_all(opf.as_bytes()).unwrap();
+            for (href, _, member) in items {
+                if let Some(member) = member {
+                    w.start_file(*href, options).unwrap();
+                    w.write_all(member.as_bytes()).unwrap();
+                }
+            }
+            w.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    const XHTML: &str = "application/xhtml+xml";
+    /// Two headings, so the HTML reader makes two pages of it; the second
+    /// section holds a decomposed `й` that NFC changes.
+    const TWO_SECTIONS: &str = "<html><head><title>Перший</title></head><body>\
+                                <h1>А</h1><p>один</p><h1>Б</h1><p>два и&#774;</p>\
+                                </body></html>";
+    const COVER: &str = "<html><head><title>Обкладинка</title></head>\
+                         <body><img src=\"cover.jpg\"/></body></html>";
+    const PLAIN: &str = "<html><body><p>третій</p></body></html>";
+
+    fn three_chapters() -> Vec<u8> {
+        spine_book(&[
+            ("ch1.xhtml", XHTML, Some(TWO_SECTIONS)),
+            ("ch2.xhtml", XHTML, Some(COVER)),
+            ("ch3.xhtml", XHTML, Some(PLAIN)),
+        ])
+    }
+
+    fn numbered(bytes: &[u8], page_no: u32) -> ChapterWalk {
+        let source = chapter_source(bytes, page_no).unwrap();
+        number_chapter(
+            page_no,
+            html::walk(&html::parse(&source), html::HeadTitle::NamesOnly),
+        )
+    }
+
+    /// **One chapter drawn on its own is numbered exactly as the book stored
+    /// it**, and its text nodes point at those numbers.
+    #[test]
+    fn a_chapter_read_alone_is_numbered_as_the_book_stores_it() {
+        let bytes = three_chapters();
+        let book = extract_epub(&bytes).unwrap();
+        assert_eq!(book.skipped, vec![2]);
+
+        // The fixture's own premise: chapter 1's blocks sit on two HTML pages,
+        // so its second section's are renumbered rather than restarting at 0.
+        let source = chapter_source(&bytes, 1).unwrap();
+        let walk = html::walk(&html::parse(&source), html::HeadTitle::NamesOnly);
+        assert_eq!(
+            walk.pages.iter().filter(|p| !p.blocks.is_empty()).count(),
+            2
+        );
+
+        for n in [1, 3] {
+            let stored = book.chapters.iter().find(|c| c.page_no == n).unwrap();
+            let alone = numbered(&bytes, n);
+            assert_eq!(alone.blocks, stored.blocks, "chapter {n}");
+            assert_eq!(alone.section_title, stored.section_title, "chapter {n}");
+
+            let block_keys: std::collections::BTreeSet<(u32, u32)> = stored
+                .blocks
+                .iter()
+                .map(|b| (n, b.reading_order as u32))
+                .collect();
+            let text_keys: std::collections::BTreeSet<(u32, u32)> = alone
+                .texts
+                .iter()
+                .map(|at| (at.page_no, at.reading_order))
+                .collect();
+            assert_eq!(text_keys, block_keys, "chapter {n}");
+        }
+        assert_eq!(numbered(&bytes, 1).blocks.len(), 4);
+    }
+
+    #[test]
+    fn an_unverbatim_block_is_renumbered_too() {
+        let alone = numbered(&three_chapters(), 1);
+        // `два и&#774;` is the chapter's fourth block: second HTML page, order 1.
+        assert_eq!(alone.unverbatim, vec![(1, 3)]);
+        assert!(alone.blocks[3].text.contains("два"));
+    }
+
+    #[test]
+    fn a_cover_has_a_source_and_no_blocks() {
+        let bytes = three_chapters();
+        assert!(!chapter_source(&bytes, 2).unwrap().is_empty());
+        let alone = numbered(&bytes, 2);
+        assert!(alone.blocks.is_empty());
+        assert!(alone.texts.is_empty());
+    }
+
+    #[test]
+    fn a_position_that_names_no_xhtml_member_is_not_a_chapter() {
+        let bytes = three_chapters();
+        assert_eq!(chapter_source(&bytes, 0), Err(ChapterError::NotAChapter));
+        assert_eq!(chapter_source(&bytes, 4), Err(ChapterError::NotAChapter));
+
+        let odd = spine_book(&[
+            ("ch1.xhtml", XHTML, Some(PLAIN)),
+            (
+                "cover.svg",
+                "image/svg+xml",
+                Some("<svg><title>x</title></svg>"),
+            ),
+            ("gone.xhtml", XHTML, None),
+        ]);
+        assert!(chapter_source(&odd, 1).is_ok());
+        assert_eq!(chapter_source(&odd, 2), Err(ChapterError::NotAChapter));
+        assert_eq!(chapter_source(&odd, 3), Err(ChapterError::NotAChapter));
+    }
+
+    #[test]
+    fn a_book_with_no_structure_is_malformed() {
+        assert!(matches!(
+            chapter_source(b"not a zip at all", 1),
+            Err(ChapterError::Malformed(_))
+        ));
     }
 }
