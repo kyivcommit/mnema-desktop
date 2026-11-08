@@ -609,6 +609,9 @@ jobs:
     # (`^[^#]*`: a file whose comment only mentions the runner, as
     # `debt-rust-mutants.sh`'s does, holds no vitest case.)
     #
+    # `doc-page-view` (D199, 11 cases, Rust and vitest) joined the shortest leg
+    # of main run 42401469565, `pr10b-theme pr8-ui-masks pr10d-launcher` at 4m27s.
+    #
     # `pdf-page-view pdf-page-view-ui` joined the bucket that held the least
     # (`pr8-exclusions citation-identity`): measured on an Apple M2 Max with a
     # warm target directory, 1m53s + 24s before, and the two new files 1m41s
@@ -637,7 +640,7 @@ jobs:
           - pr9-shell pr10c-fonts task-13 scan-highlight
           - pr8-masks task-d64 task-6 parallel-ocr
           - pr9b-scan task-13-xlsx task-1
-          - pr10b-theme pr8-ui-masks pr10d-launcher
+          - pr10b-theme pr8-ui-masks pr10d-launcher doc-page-view
           - task-8 task-14 grounding
           - agent-access
           - agent-connect
