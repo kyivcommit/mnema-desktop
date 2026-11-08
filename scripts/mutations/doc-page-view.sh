@@ -15,6 +15,7 @@ SA=crates/mnema-extract/src/doc_view/sanitize.rs
 DV=src-tauri/src/doc_view.rs
 DP=ui/src/launcher/DocPage.svelte
 LA=ui/src/launcher/Launcher.svelte
+DT=src/launcher/DocPage.test.ts
 MT='doc_view::markdown::tests::'
 ST='doc_view::sanitize::tests::'
 AT='doc_view::tests::'
@@ -180,7 +181,7 @@ case_ "window: a slow answer for an older draw paints over the newer one" \
 # W2. A Markdown file is not offered its page.
 case_ "window: the choice is offered for a PDF only" \
   $LA \
-  's~\Qnew Set(['"'"'application/pdf'"'"', '"'"'text/markdown'"'"'])\E~new Set(['"'"'application/pdf'"'"'])~' \
+  's~\Qnew Set(['"'"'application/pdf'"'"', ...DOC_PAGE_MIMES])\E~new Set(['"'"'application/pdf'"'"'])~' \
   "new Set(['application/pdf'])" \
   src/launcher/LauncherPdf.test.ts 'a Markdown file is offered the choice too, and its page is the HTML view' runner=vitest
 
@@ -208,3 +209,78 @@ case_ "window: a failed draw is final" \
   's~\Q    failed = false;\E\n\Q    got = answer;\E~    got = answer;~' \
   '    got = answer;' \
   src/launcher/DocPage.test.ts 'a failed draw is not final: a later answer replaces the failure' runner=vitest
+
+# ── An EPUB's chapters ───────────────────────────────────────────────────────
+
+# W4. An HTML file is not drawn as a page: it falls through to the text.
+case_ "window: an HTML file is not one the page view draws" \
+  $DP \
+  's~\Q'"'"'text/markdown'"'"', '"'"'text/html'"'"', \E~'"'"'text/markdown'"'"', ~' \
+  "new Set(['text/markdown', 'application/epub+zip'])" \
+  src/launcher/LauncherPdf.test.ts 'an HTML file is offered the choice, and its page is the HTML view' runner=vitest
+
+# W5. Next is offered on the last chapter.
+case_ "chapters: next is not disabled on the last chapter" \
+  $DP \
+  's~\Qdisabled={at >= chapters.length - 1}\E~disabled={false}~' \
+  'disabled={false} onclick={() => go(1)}' \
+  $DT 'next and previous ask for the neighbour chapter; there is no next after the last' runner=vitest
+
+# W6. Previous is offered on the first chapter.
+case_ "chapters: previous is not disabled on the first chapter" \
+  $DP \
+  's~\Qdisabled={at <= 0}\E~disabled={false}~' \
+  'disabled={false} onclick={() => go(-1)}' \
+  $DT 'there is no previous chapter on the first' runner=vitest
+
+# W7. A button asks for the chapter on the page again, not its neighbour.
+case_ "chapters: a button draws the chapter it is on" \
+  $DP \
+  's~\Qchapters[at + step]\E~chapters[at]~' \
+  'const next = chapters[at];' \
+  $DT 'next and previous ask for the neighbour chapter; there is no next after the last' runner=vitest
+
+# W8. A refresh lets the backend pick: the person is thrown back to the cited chapter.
+case_ "chapters: a refresh does not pass the chapter on the page" \
+  $DP \
+  's~\Qvoid draw(place, spans, reveal, chapter);\E~void draw(place, spans, reveal);~' \
+  'void draw(place, spans, reveal);' \
+  $DT 'the window coming back draws the chapter on the page, not the cited one' runner=vitest
+
+# W9. Every file gets chapters: a whole HTML file shows a bar for its one page.
+case_ "chapters: shown for a file that is not an EPUB" \
+  $DP \
+  's~\Qview.mime === '"'"'application/epub+zip'"'"'\E\n~true\n~' \
+  'const chapters = $derived(true' \
+  $DT 'a Markdown or HTML file has no chapters' runner=vitest
+
+# W10. A slow chapter is painted over the one the person moved on to.
+case_ "chapters: an older chapter's answer paints over the newer one" \
+  $DP \
+  's~\Q    if (id !== request) return;\E\n(\Q    // An answer ends a failure\E)~$1~' \
+  '    // An answer ends a failure' \
+  $DT 'a slow chapter is not painted once the person has moved on' runner=vitest
+
+# W11. A chapter without the citation opens where the last one was scrolled to.
+case_ "chapters: a chapter with no mark keeps the old scroll" \
+  $DP \
+  's~\Q    else scroller.scrollTop = 0;\E\n~~' \
+  "    if (target) scrollWithin(scroller, target, 'center');
+  }" \
+  $DT 'a chapter without the citation is shown from its top' runner=vitest
+
+# W12. A chapter with no indexed text says nothing.
+case_ "chapters: noChapter has no message of its own" \
+  $DP \
+  's~\Q      case '"'"'noChapter'"'"': return t('"'"'page_unavailable_no_chapter'"'"');\E\n~~' \
+  "      case 'fileMissing': return t('page_unavailable_missing');
+      case 'tooLarge': return t('page_unavailable_too_large');
+      case 'noPath'" \
+  $DT 'a chapter with no indexed text says so and offers the text' runner=vitest
+
+# W13. An EPUB is not drawn as a page: it falls through to the text.
+case_ "window: an EPUB is not one the page view draws" \
+  $DP \
+  's~\Q, '"'"'application/epub+zip'"'"']);\E~]);~' \
+  "new Set(['text/markdown', 'text/html'])" \
+  src/launcher/LauncherPdf.test.ts 'an EPUB is offered the choice, and its page is the HTML view' runner=vitest

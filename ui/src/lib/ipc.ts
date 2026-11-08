@@ -303,16 +303,20 @@ export const renderPdfPage = (location: DocumentLocation, pageNo: number, widthP
     pageNo, widthPx, ranges,
   });
 
-// A document drawn as HTML by `render_doc` (`doc_view.rs`, D199) — Markdown
-// today. `html` is allow-listed by the worker and goes into the page as it is;
-// cited text is in `<mark>` (`data-primary` on the clicked one), each block in a
-// `div[data-block="page:order"]`. `highlight` as for a PDF page, without `scan`.
+// A document drawn as HTML by `render_doc` (`doc_view.rs`, D199) — a Markdown
+// or HTML file whole, an EPUB one chapter at a time. `html` is allow-listed by
+// the worker and goes into the page as it is; cited text is in `<mark>`
+// (`data-primary` on the clicked one), each block in a `div[data-block="page:order"]`.
+// `highlight` as for a PDF page, without `scan`. `pageNo` is the EPUB chapter
+// drawn (the index's page number, its spine position), `null` for a whole file;
+// asked without one, an EPUB opens on the cited chapter, else its first with text.
 export type DocPageView =
-  | { kind: 'page'; html: string; pages: number; highlight: 'shown' | 'changed' | 'noText' | 'unplaced' }
-  | { kind: 'unavailable'; reason: 'noPath' | 'fileMissing' | 'tooLarge' | 'failed' };
-export const renderDoc = (location: DocumentLocation, spans: PaneSpan[]) =>
+  | { kind: 'page'; html: string; pages: number; highlight: 'shown' | 'changed' | 'noText' | 'unplaced'; pageNo: number | null }
+  | { kind: 'unavailable'; reason: 'noPath' | 'fileMissing' | 'tooLarge' | 'failed' | 'noChapter' };
+export const renderDoc = (location: DocumentLocation, spans: PaneSpan[], pageNo?: number) =>
   invoke<DocPageView>('render_doc', {
     documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath, spans,
+    pageNo: pageNo ?? null,
   });
 
 // A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only

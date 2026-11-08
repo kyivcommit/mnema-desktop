@@ -156,6 +156,9 @@ const standTree: TreeListing = {
 };
 
 // What the stand's files say, by documentId, for `find_in_files` to look in.
+// `?doc=` names a file the page view draws as HTML instead of the PDF.
+const DOC_MIMES: Record<string, string> = { md: 'text/markdown', html: 'text/html', epub: 'application/epub+zip' };
+
 const standTexts: Record<string, string> = {
   'doc-1': 'Notes on the lease: the rent is due on the first of each month.',
   'doc-2': 'The second set of notes covers the deposit and the inspection.',
@@ -463,8 +466,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       return {
         kind: 'file',
         // A PDF with a block per page, so both modes of the pane can be seen;
-        // `?doc=md` makes it Markdown, for the HTML page view (D199).
-        mime: new URLSearchParams(location.search).get('doc') === 'md' ? 'text/markdown' : 'application/pdf',
+        // `?doc=md|html|epub` makes it a file drawn as HTML (D199) — for an
+        // EPUB the three pages are its chapters.
+        mime: DOC_MIMES[new URLSearchParams(location.search).get('doc') ?? ''] ?? 'application/pdf',
         blocks: [
           { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
           { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 2, sectionTitle: null },
@@ -499,17 +503,28 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       } satisfies PdfPageView;
     },
 
-    // A Markdown file as the worker would render it: a heading, a cited
+    // A Markdown or HTML file as the worker would render it: a heading, a cited
     // paragraph, a table, highlighted code and a neighbour's mark.
-    render_doc: (a) => ({
+    // An EPUB answers one chapter, the cited one (2) when none is asked for.
+    render_doc: (a) => new URLSearchParams(location.search).get('doc') === 'epub' ? (() => {
+      const no = a.pageNo == null ? 2 : Number(a.pageNo);
+      const body = no === 2
+        ? '<p>The whole file, <mark data-primary="true">rendered by the pane</mark>. Press <kbd>⌘</kbd> <kbd>K</kbd>.</p>'
+        : `<p>${no === 1 ? 'The opening chapter.' : 'The last page.'}</p>`;
+      return {
+        kind: 'page', pages: 3, highlight: 'shown', pageNo: no,
+        html: `<div data-block="${no}:0"><h2>Chapter ${no}</h2></div><div data-block="${no}:1">${body}</div>`,
+      } satisfies DocPageView;
+    })() : ({
       kind: 'page',
       pages: 3,
       highlight: 'shown',
+      pageNo: null,
       html: '<div data-block="1:0"><h2>Demo document</h2></div>'
         + '<div data-block="2:0"><p>The whole file, <mark data-primary="true">rendered by the</mark> <strong><mark data-primary="true">pane</mark></strong>.</p></div>'
         + '<div data-block="2:1"><table><thead><tr><th>Format</th><th align="right">Blocks</th></tr></thead><tbody><tr><td>md</td><td align="right">12</td></tr><tr><td>pdf</td><td align="right">1</td></tr></tbody></table></div>'
         + '<div data-block="2:2"><pre class="syntax-highlighting"><code class="language-rust"><span class="sx-source sx-rust"><span class="sx-storage sx-type sx-function sx-rust">fn</span> <span class="sx-entity sx-name sx-function sx-rust">main</span>() { <span class="sx-support sx-macro sx-rust">println!</span>(<span class="sx-string sx-quoted sx-double sx-rust">&quot;hi&quot;</span>); }\n</span></code></pre></div>'
-        + '<div data-block="3:0"><ul><li><mark>The last page.</mark></li><li>A <span class="link">link</span> and <code>inline code</code>.</li></ul></div>'
+        + '<div data-block="3:0"><ul><li><mark>The last page.</mark></li><li>A <span class="link">link</span>, <code>inline code</code> and <kbd>Ctrl</kbd>.</li></ul></div>'
         + '<blockquote><p>A quote.</p></blockquote>',
     } satisfies DocPageView),
 
