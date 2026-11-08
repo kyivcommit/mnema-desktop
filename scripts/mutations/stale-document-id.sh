@@ -18,8 +18,10 @@ case_ "follow: a gone document does not look at its cited path" \
   'let Some(occupant) = None::<PathOccupant> else {' \
   mnema-desktop 'open_document_follows_the_path_when_the_cited_document_is_gone' --test commands
 
-# S2. The status gate asks about the cited id, not the one shown: a document
-# still being written is shown as if whole.
+# S2. The status gate asks about the cited id, not the one shown. With the
+# cited document gone there is no status to read, so the mutant surfaces as
+# the command being rejected (the test's `expect`), not as a half-written file
+# shown whole — measured; either way the pane would not say "rebuilding".
 case_ "follow: the status gate is asked about the cited document" \
   $TR \
   's~\Qdocument_status(&shown)\E~document_status(document_id)~' \
