@@ -197,6 +197,25 @@ test('next and previous ask for the neighbour chapter; there is no next after th
   expect(docCalls().at(-1)!.pageNo).toBe(2);
 });
 
+test('a chapter with no text is not counted and is stepped over', async () => {
+  // Spine 2 is a cover: the index holds no block on it.
+  view = md({
+    mime: 'application/epub+zip',
+    blocks: [
+      { blockId: 1, kind: 'paragraph', text: 'Перший.', pageNo: 1, sectionTitle: null },
+      { blockId: 2, kind: 'paragraph', text: 'Абзац про важливе.', pageNo: 3, sectionTitle: null },
+      { blockId: 3, kind: 'paragraph', text: 'Останній.', pageNo: 4, sectionTitle: null },
+    ],
+  });
+  docReply = (args) => Promise.resolve(page({ pageNo: (args.pageNo as number | null) ?? 3, html: '<p>x</p>', pages: 4 }));
+  mount();
+  await screen.findByTestId('doc-body');
+  expect(label()).toBe('Chapter 2 of 3');
+  await fireEvent.click(button('prev'));
+  await waitFor(() => expect(label()).toBe('Chapter 1 of 3'));
+  expect(docCalls().at(-1)!.pageNo).toBe(1);
+});
+
 test('there is no previous chapter on the first', async () => {
   view = epub();
   docReply = (args) => Promise.resolve(page({ pageNo: (args.pageNo as number | null) ?? 1, html: '<p>перший</p>' }));

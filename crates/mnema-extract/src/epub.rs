@@ -333,7 +333,9 @@ pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<ChapterSource
     let (package, base) = open(bytes, &mut budget).map_err(|e| match e {
         EpubError::TooLarge => ChapterError::TooLarge,
         EpubError::Malformed(why) => ChapterError::Malformed(why),
-        EpubError::NoReadableChapter => ChapterError::NotAChapter,
+        // `open` reads the container and the package only; the "no chapter
+        // could be read" verdict is `extract`'s, after reading them all.
+        EpubError::NoReadableChapter => unreachable!("open reads no chapter"),
     })?;
     let (path, bytes) = read_chapter(bytes, &package, &base, page_no, &mut budget)?;
     Ok(ChapterSource {

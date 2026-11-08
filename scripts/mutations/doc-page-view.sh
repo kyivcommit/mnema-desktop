@@ -528,3 +528,11 @@ case_ "pictures: a src with a URL scheme is read from the archive" \
   's~\Qif scheme {\E~if false && scheme {~' \
   'if false && scheme {' \
   mnema-extract "${HT}a_picture_outside_the_archive_or_not_in_it_is_its_alt" --lib
+
+# W14. The label counts spine positions: a book with a cover says "3 of 3" on
+# its second readable chapter.
+case_ "chapters: the label counts spine numbers, not chapters that can be read" \
+  $DP \
+  's~\Q{ n: at + 1, m: chapters.length }\E~{ n: chapter ?? 0, m: chapters.length }~' \
+  '{ n: chapter ?? 0, m: chapters.length }' \
+  $DT 'a chapter with no text is not counted and is stepped over' runner=vitest

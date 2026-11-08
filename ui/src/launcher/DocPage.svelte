@@ -31,6 +31,9 @@
   // draws it again. Unset for a new place, where the backend picks the cited one.
   let chapter = $state<number | undefined>(undefined);
   // An EPUB's chapters are the page numbers its blocks sit on; a whole file has none.
+  // Only chapters with text count: a cover or a plate has no block, cannot be
+  // opened (`noChapter`), and "Chapter N of M" counts what can be read — so N and
+  // M are positions in this list, not spine numbers (`pageNo`, the reply's `pages`).
   const chapters = $derived(view.mime === 'application/epub+zip'
     ? [...new Set(view.blocks.map((b) => b.pageNo))].sort((a, b) => a - b)
     : []);
