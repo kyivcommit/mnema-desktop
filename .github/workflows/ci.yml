@@ -617,7 +617,7 @@ jobs:
     # (`^[^#]*`: a file whose comment only mentions the runner, as
     # `debt-rust-mutants.sh`'s does, holds no vitest case.)
     #
-    # `doc-page-view` (D199, 65 cases since EPUB pictures, Rust and vitest) joined the shortest leg
+    # `doc-page-view` (D199, 66 cases since EPUB pictures, Rust and vitest) joined the shortest leg
     # of main run 42401469565, `pr10b-theme pr8-ui-masks pr10d-launcher` at 4m27s.
     #
     # `pdf-page-view pdf-page-view-ui` joined the bucket that held the least
