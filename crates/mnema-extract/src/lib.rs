@@ -14,6 +14,7 @@
 //! columns, hyphenation, tables, OCR for the pages `pdf::extract_pdf` skips —
 //! is the extraction spec's subject and is deliberately still not decided here.
 
+mod doc_view;
 mod docx;
 mod epub;
 mod html;
