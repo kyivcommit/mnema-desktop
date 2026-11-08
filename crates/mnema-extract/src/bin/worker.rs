@@ -88,42 +88,22 @@ fn main() {
         return;
     }
 
-    // The third one-shot branch, and the only one that reads stdin: one
-    // `RenderRequest` line in, one `RenderReply` line out, exit 0 whatever the
-    // answer (a refusal is an answer; a nonzero exit means the process died).
-    // The page view cannot link this crate (D40), so it spawns this.
+    // The one-shot branches that read stdin: one request line in, one reply
+    // line out, exit 0 whatever the answer (a refusal is an answer; a nonzero
+    // exit means the process died). The page view cannot link this crate
+    // (D40), so it spawns this — `--render-page` for a PDF page,
+    // `--render-doc` for a document shown as HTML (D199).
     if args.len() == 2 && args[1] == "--render-page" {
-        use mnema_core::render::{RenderError, RenderReply, RenderRequest};
-        let mut line = String::new();
-        let reply = match io::stdin().lock().read_line(&mut line) {
-            Err(e) => (
-                RenderError::Unreadable,
-                format!("could not read the request: {e}"),
-            ),
-            Ok(_) => match serde_json::from_str::<RenderRequest>(&line) {
-                Ok(request) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&mnema_extract::render_page(&request))
-                            .expect("a reply serialises")
-                    );
-                    return;
-                }
-                Err(e) => (
-                    RenderError::Unreadable,
-                    format!("not a render request: {e}"),
-                ),
-            },
-        };
-        println!(
-            "{}",
-            serde_json::to_string(&RenderReply::Refused {
-                error: reply.0,
-                message: reply.1,
-            })
-            .expect("a reply serialises")
-        );
-        return;
+        use mnema_core::render::{RenderReply, RenderRequest};
+        return one_shot::<RenderRequest, _>(mnema_extract::render_page, |error, message| {
+            RenderReply::Refused { error, message }
+        });
+    }
+    if args.len() == 2 && args[1] == "--render-doc" {
+        use mnema_core::render::{DocRenderReply, DocRenderRequest};
+        return one_shot::<DocRenderRequest, _>(mnema_extract::render_doc, |error, message| {
+            DocRenderReply::Refused { error, message }
+        });
     }
 
     // The fourth branch, and a long-lived one: an OCR helper (D196). The
@@ -1064,4 +1044,35 @@ fn hex(bytes: &[u8]) -> String {
         out.push(DIGITS[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// One request line from stdin, one reply line to stdout. A line that cannot
+/// be read or is not a `Req` is answered with `refuse(Unreadable, …)`, so the
+/// parent always gets a reply line from a worker that did not crash.
+fn one_shot<Req, Reply>(
+    answer: fn(&Req) -> Reply,
+    refuse: fn(mnema_core::render::RenderError, String) -> Reply,
+) where
+    Req: serde::de::DeserializeOwned,
+    Reply: serde::Serialize,
+{
+    use mnema_core::render::RenderError;
+    let mut line = String::new();
+    let reply = match io::stdin().lock().read_line(&mut line) {
+        Err(e) => refuse(
+            RenderError::Unreadable,
+            format!("could not read the request: {e}"),
+        ),
+        Ok(_) => match serde_json::from_str::<Req>(&line) {
+            Ok(request) => answer(&request),
+            Err(e) => refuse(
+                RenderError::Unreadable,
+                format!("not a render request: {e}"),
+            ),
+        },
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&reply).expect("a reply serialises")
+    );
 }

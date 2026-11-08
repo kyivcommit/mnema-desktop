@@ -16,7 +16,7 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { emit } from '@tauri-apps/api/event';
 import { generated, historyTwoQuestions, oneRootTwoFolders } from '../src/lib/fixtures';
 import type {
-  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, PdfPageView, HistoryEntry, IndexRead,
+  AppPrefs, AskAnswer, Catalogue, Change, ClientState, RoleCatalogue, DocumentView, DocPageView, PdfPageView, HistoryEntry, IndexRead,
   KeyState, LocaleChoice, ModelRole, Phase, ScanState, ThemeChoice, TreeListing, UiScale,
 } from '../src/lib/ipc';
 
@@ -462,8 +462,9 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       const paragraph = 'The whole file, rendered by the pane.';
       return {
         kind: 'file',
-        // A PDF with a block per page, so both modes of the pane can be seen.
-        mime: 'application/pdf',
+        // A PDF with a block per page, so both modes of the pane can be seen;
+        // `?doc=md` makes it Markdown, for the HTML page view (D199).
+        mime: new URLSearchParams(location.search).get('doc') === 'md' ? 'text/markdown' : 'application/pdf',
         blocks: [
           { blockId: 1, kind: 'headline', text: '## Demo document', pageNo: 1, sectionTitle: null },
           { blockId: 2, kind: 'paragraph', text: paragraph, pageNo: 2, sectionTitle: null },
@@ -497,6 +498,20 @@ export function installMockBackend(win: 'settings' | 'launcher') {
           : [],
       } satisfies PdfPageView;
     },
+
+    // A Markdown file as the worker would render it: a heading, a cited
+    // paragraph, a table, highlighted code and a neighbour's mark.
+    render_doc: (a) => ({
+      kind: 'page',
+      pages: 3,
+      highlight: 'shown',
+      html: '<div data-block="1:0"><h2>Demo document</h2></div>'
+        + '<div data-block="2:0"><p>The whole file, <mark data-primary="true">rendered by the</mark> <strong><mark data-primary="true">pane</mark></strong>.</p></div>'
+        + '<div data-block="2:1"><table><thead><tr><th>Format</th><th align="right">Blocks</th></tr></thead><tbody><tr><td>md</td><td align="right">12</td></tr><tr><td>pdf</td><td align="right">1</td></tr></tbody></table></div>'
+        + '<div data-block="2:2"><pre class="syntax-highlighting"><code class="language-rust"><span class="sx-source sx-rust"><span class="sx-storage sx-type sx-function sx-rust">fn</span> <span class="sx-entity sx-name sx-function sx-rust">main</span>() { <span class="sx-support sx-macro sx-rust">println!</span>(<span class="sx-string sx-quoted sx-double sx-rust">&quot;hi&quot;</span>); }\n</span></code></pre></div>'
+        + '<div data-block="3:0"><ul><li><mark>The last page.</mark></li><li>A <span class="link">link</span> and <code>inline code</code>.</li></ul></div>'
+        + '<blockquote><p>A quote.</p></blockquote>',
+    } satisfies DocPageView),
 
     'plugin:dialog|open': () => '/Users/demo/Documents/Projects',
   };

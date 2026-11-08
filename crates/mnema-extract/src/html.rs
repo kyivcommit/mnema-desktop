@@ -458,7 +458,7 @@ fn block_type(element: &Element) -> BlockType {
 ///
 /// The cost is named rather than hidden: prose that only appears when scripting
 /// is off, or only inside a client-side template, is not indexed.
-fn gives_no_text(element: &Element) -> bool {
+pub(crate) fn gives_no_text(element: &Element) -> bool {
     matches!(
         element.name(),
         "script" | "style" | "noscript" | "iframe" | "noembed" | "noframes" | "template"

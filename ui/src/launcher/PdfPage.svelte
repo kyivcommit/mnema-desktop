@@ -298,7 +298,7 @@
   const L = $derived.by(() => {
     void $locale;
     return {
-      label: t('pdf_view_label'), showText: t('page_show_text'),
+      label: t('page_view_label'), showText: t('page_show_text'),
       failed: t('page_unavailable'), loading: t('file_loading'),
     };
   });

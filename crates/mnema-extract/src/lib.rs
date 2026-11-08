@@ -14,6 +14,7 @@
 //! columns, hyphenation, tables, OCR for the pages `pdf::extract_pdf` skips —
 //! is the extraction spec's subject and is deliberately still not decided here.
 
+mod doc_view;
 mod docx;
 mod epub;
 mod html;
@@ -51,6 +52,7 @@ pub use mnema_core::wire;
 // worker route "the library would not load" and "the document is damaged" to
 // two different frames — one `Error` for both would have made that a decision
 // about a string.
+pub use doc_view::render_doc;
 pub use docx::{DocxError, DocxSection, extract_docx};
 pub use epub::{BOOK_MAX_BYTES, EpubBook, EpubChapter, EpubError, extract_epub};
 pub use html::{HtmlPage, extract_html};

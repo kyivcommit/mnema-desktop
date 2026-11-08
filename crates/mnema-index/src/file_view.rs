@@ -18,6 +18,9 @@ pub struct ViewBlockRow {
     pub kind: String,
     pub text: String,
     pub page_no: i64,
+    /// Restarts on every page; with `page_no` it names the block to the page
+    /// view's worker, which has no index to look an id up in.
+    pub reading_order: i64,
     pub section_title: Option<String>,
 }
 
@@ -73,7 +76,7 @@ impl Db {
         // `(document_id, page_no)` lookup that finds one document's pages — and
         // each page's blocks then come out of `ix_block_page`.
         let mut stmt = self.conn().prepare(
-            "SELECT b.id, b.type, b.text, p.page_no, p.section_title
+            "SELECT b.id, b.type, b.text, p.page_no, p.section_title, b.reading_order
                FROM page p
                JOIN block b ON b.page_id = p.id
               WHERE p.document_id = ?1
@@ -88,6 +91,7 @@ impl Db {
                     text: r.get(2)?,
                     page_no: r.get(3)?,
                     section_title: r.get(4)?,
+                    reading_order: r.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

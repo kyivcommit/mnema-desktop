@@ -70,7 +70,15 @@ jobs:
     # is a cold `target/` on both arms — unmeasured here; the nearest figure
     # is `mutations`' 3:02–3:23 per leg for the same dependencies — and the
     # limit has to hold that run too.
-    timeout-minutes: 15
+    #
+    # Fifteen stopped being margin. On macos-15 the job took 10-14 minutes on
+    # the last five green `main` runs (`cargo test --workspace` alone 599 s on
+    # 42401469565), and a branch that changes `mnema-core` recompiles nearly
+    # the whole workspace over `main`'s cache: PR #95 ran it in 696-730 s and
+    # was cancelled twice at the limit, once mid-test and once in the cache
+    # save after every step had passed. Twenty is the same hang guard with
+    # room for that rebuild.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No toolchain action on purpose: rust-toolchain.toml is the single place
@@ -609,6 +617,9 @@ jobs:
     # (`^[^#]*`: a file whose comment only mentions the runner, as
     # `debt-rust-mutants.sh`'s does, holds no vitest case.)
     #
+    # `doc-page-view` (D199, 11 cases, Rust and vitest) joined the shortest leg
+    # of main run 42401469565, `pr10b-theme pr8-ui-masks pr10d-launcher` at 4m27s.
+    #
     # `pdf-page-view pdf-page-view-ui` joined the bucket that held the least
     # (`pr8-exclusions citation-identity`): measured on an Apple M2 Max with a
     # warm target directory, 1m53s + 24s before, and the two new files 1m41s
@@ -637,7 +648,7 @@ jobs:
           - pr9-shell pr10c-fonts task-13 scan-highlight
           - pr8-masks task-d64 task-6 parallel-ocr
           - pr9b-scan task-13-xlsx task-1
-          - pr10b-theme pr8-ui-masks pr10d-launcher
+          - pr10b-theme pr8-ui-masks pr10d-launcher doc-page-view
           - task-8 task-14 grounding
           - agent-access
           - agent-connect

@@ -86,13 +86,42 @@ pub struct MarkdownPage {
 /// that arrive, so a reader that answered "no pages" would have to remember to
 /// announce zero as well.
 pub fn extract_markdown(bytes: &[u8]) -> Vec<MarkdownPage> {
-    let decoded = crate::text::decode(bytes);
-    // Once, and before anything takes an offset from it (D32, D38).
-    let source = nfc::normalise(&decoded);
-    let lines = Lines::new(&source);
-
+    let source = markdown_source(bytes);
     let arena = Arena::new();
-    let root = parse_document(&arena, &source, &options());
+    let root = parse_markdown(&arena, &source);
+    read(&source, root).0
+}
+
+/// The decoded, NFC-normalised text every offset of a markdown block is
+/// counted in — normalised once, before anything takes an offset from it
+/// (D32, D38). The page view reads the file through this too, so that its
+/// offsets are the index's.
+pub(crate) fn markdown_source(bytes: &[u8]) -> String {
+    nfc::normalise(&crate::text::decode(bytes)).into_owned()
+}
+
+/// `source` parsed with this reader's options.
+pub(crate) fn parse_markdown<'a>(arena: &'a Arena<'a>, source: &str) -> &'a AstNode<'a> {
+    parse_document(arena, source, &options())
+}
+
+/// A block of [`read`]'s output, with the top-level node it was read from and
+/// the byte its text starts at in the source — what the page view needs to
+/// put a citation's offsets back on the tree.
+pub(crate) struct Placed<'a> {
+    pub node: &'a AstNode<'a>,
+    pub page_no: u32,
+    pub reading_order: u32,
+    pub start: usize,
+}
+
+/// The pages of a parsed document, and where each block came from.
+pub(crate) fn read<'a>(
+    source: &str,
+    root: &'a AstNode<'a>,
+) -> (Vec<MarkdownPage>, Vec<Placed<'a>>) {
+    let lines = Lines::new(source);
+    let mut placed = Vec::new();
 
     let mut pages = vec![MarkdownPage {
         page_no: 1,
@@ -144,6 +173,12 @@ pub fn extract_markdown(bytes: &[u8]) -> Vec<MarkdownPage> {
         }
 
         let page = pages.last_mut().expect("a page is always open");
+        placed.push(Placed {
+            node,
+            page_no: page.page_no,
+            reading_order: page.blocks.len() as u32,
+            start: lines.span(first).0,
+        });
         page.blocks.push(Block {
             block_type,
             // Restarts on every page: the schema's uniqueness is on
@@ -159,7 +194,7 @@ pub fn extract_markdown(bytes: &[u8]) -> Vec<MarkdownPage> {
         });
     }
 
-    pages
+    (pages, placed)
 }
 
 /// Starts the page a heading opens — or names the one already open, when that
@@ -270,7 +305,7 @@ pub(crate) fn bound_section_title(flattened: String) -> Option<String> {
 /// `a_file_that_opens_with_a_rule_loses_what_is_between_it_and_the_next_rule`
 /// records that. Both losses are silent, so the choice is which is rarer, and
 /// a `.md` beginning with a rule is far rarer than one beginning with YAML.
-fn options() -> Options<'static> {
+pub(crate) fn options() -> Options<'static> {
     let mut options = Options::default();
     options.extension.front_matter_delimiter = Some("---".to_string());
     options.extension.table = true;

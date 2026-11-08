@@ -2821,6 +2821,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "unicode-normalization",
 ]
 
@@ -2982,6 +2983,7 @@ dependencies = [
  "libc",
  "mnema-core",
  "mnema-index",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",

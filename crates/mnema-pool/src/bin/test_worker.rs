@@ -36,6 +36,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--render-page") {
         return render_once();
     }
+    if std::env::args().nth(1).as_deref() == Some("--render-doc") {
+        return render_doc_once();
+    }
     std::thread::spawn(|| {
         std::thread::sleep(SELF_DESTRUCT);
         eprintln!("test worker: self-destruct after {SELF_DESTRUCT:?}");
@@ -100,6 +103,23 @@ fn render_once() {
             println!("{}", serde_json::to_string(&reply).unwrap());
         }
     }
+}
+
+/// `--render-doc`: answers a canned `Rendered` whose `html` echoes the request's
+/// path and whether it carried a hash, so a test sees the line reached the
+/// branch that parses a `DocRenderRequest`.
+fn render_doc_once() {
+    use mnema_core::render::{DocRenderReply, DocRenderRequest, TextMatch};
+
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).expect("a line");
+    let request: DocRenderRequest = serde_json::from_str(&line).expect("a doc render request");
+    let reply = DocRenderReply::Rendered {
+        html: format!("{}|{}", request.path, request.text_sha256.is_some()),
+        pages: 4,
+        text: TextMatch::None,
+    };
+    println!("{}", serde_json::to_string(&reply).unwrap());
 }
 
 fn act(mode: &str, rest: &str, request: &Request, stdout: &mut io::Stdout) {

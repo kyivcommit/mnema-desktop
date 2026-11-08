@@ -57,6 +57,7 @@ beforeEach(() => {
       case 'list_history': return Promise.resolve([]);
       case 'open_document': return Promise.resolve(document_());
       case 'render_pdf_page': return Promise.resolve(pageReply);
+      case 'render_doc': return Promise.resolve({ kind: 'page', html: '<p>drawn</p>', pages: 1, highlight: 'shown' });
       default: return Promise.resolve();
     }
   });
@@ -82,13 +83,27 @@ test('a PDF is drawn as its page by default, with the choice in the right head',
   expect(screen.queryByTestId('file-block')).toBeNull();
 });
 
-test('the choice is not offered for anything but a PDF', async () => {
+test('a Markdown file is offered the choice too, and its page is the HTML view', async () => {
+  mime = 'text/markdown';
+  render(Launcher);
+  await openFile();
+  await screen.findByTestId('doc-body');
+  expect(pressed('page')).toBe('true');
+  expect(screen.queryByTestId('file-block')).toBeNull();
+  expect(invoke.mock.calls.some(([c]) => c === 'render_pdf_page')).toBe(false);
+  await fireEvent.click(screen.getByTestId('pdf-view-text'));
+  expect(await screen.findByTestId('file-block')).toBeTruthy();
+  expect(screen.queryByTestId('doc-body')).toBeNull();
+});
+
+test('the choice is not offered for anything but a PDF or Markdown', async () => {
   mime = 'text/plain';
   render(Launcher);
   await openFile();
   await screen.findByTestId('file-block');
   expect(screen.queryByTestId('pdf-view')).toBeNull();
   expect(invoke.mock.calls.some(([c]) => c === 'render_pdf_page')).toBe(false);
+  expect(invoke.mock.calls.some(([c]) => c === 'render_doc')).toBe(false);
 });
 
 test('choosing the text shows the text, and the choice survives a remount', async () => {
