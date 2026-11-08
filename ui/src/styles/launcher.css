@@ -458,7 +458,7 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 .doc-body blockquote { padding: 2px 12px; border-left: 3px solid var(--line-strong); color: var(--ink-soft); }
 .doc-body hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
 .doc-body code { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; padding: 1px 4px; border-radius: 4px; background: var(--surface-2); }
-.doc-body kbd { font-family: var(--mono); font-size: 12px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); }
+.doc-body kbd { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); }
 .doc-body pre { padding: 10px 12px; border-radius: 6px; background: var(--surface-2); overflow-x: auto; white-space: pre; }
 .doc-body pre code { padding: 0; background: none; font-size: 12px; line-height: 1.55; }
 .doc-body table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 12.5px; }

@@ -218,15 +218,15 @@ test('a chapter without the citation is shown from its top', async () => {
 test('a Markdown or HTML file has no chapters', async () => {
   const first = mount();
   await screen.findByTestId('doc-body');
-  expect(screen.queryByTestId('doc-chapter-next')).toBeNull();
+  expect(screen.queryAllByTestId('doc-chapter-next')).toHaveLength(0);
   first.unmount();
   view = md({ mime: 'text/html' });
   // Even an answer that names a page draws no chapter bar for a whole file.
   docReply = () => Promise.resolve(page({ pageNo: 1 }));
   mount();
   await screen.findByTestId('doc-body');
-  expect(screen.queryByTestId('doc-chapter-next')).toBeNull();
-  expect(screen.queryByTestId('doc-chapter-label')).toBeNull();
+  expect(screen.queryAllByTestId('doc-chapter-next')).toHaveLength(0);
+  expect(screen.queryAllByTestId('doc-chapter-label')).toHaveLength(0);
 });
 
 test('a slow chapter is not painted once the person has moved on', async () => {
