@@ -94,6 +94,80 @@ case_ "app: another document at the path is hashed and marked as this one" \
   'if ours || true {' \
   mnema-desktop "${AT}a_path_that_names_another_document_now_is_rendered_bare" --lib
 
+# ── A book, one chapter at a time, and an HTML file (D199) ──────────────────
+
+# E1. The whole book is hashed: the worker hashes one chapter, so every
+# citation in a book reads as changed text.
+case_ "book: every chapter's blocks go into the hash" \
+  $DV \
+  's~\Q.filter(|b| shown(b.page_no))\E~.filter(|b| shown(b.page_no) || true)~' \
+  'shown(b.page_no) || true' \
+  mnema-desktop "${AT}a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone" --lib
+
+# E2. A span in another chapter is sent: its offsets name a block the worker
+# never reads, or one of this chapter's at the same place.
+case_ "book: a span of another chapter is sent with this one" \
+  $DV \
+  's~\Qif !shown(block.page_no) {\E~if false && !shown(block.page_no) {~' \
+  'if false && !shown(block.page_no) {' \
+  mnema-desktop "${AT}a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone" --lib
+
+# E3. The chapter the window asks for loses to the citation's: turning a page
+# draws the cited chapter again.
+case_ "book: the chapter asked for is overruled by the citation's" \
+  $DV \
+  's~\Qmatch page_no.or_else(cited).or_else(first) {\E~match cited().or(page_no).or_else(first) {~' \
+  'match cited().or(page_no)' \
+  mnema-desktop "${AT}a_chapter_asked_for_wins_over_the_citation_s_and_its_spans_stay_home" --lib
+
+# E4. The citation does not choose the chapter: a book opens at its first
+# chapter with the clicked passage elsewhere.
+case_ "book: the cited chapter is not where the book opens" \
+  $DV \
+  's~\Qmatch page_no.or_else(cited).or_else(first) {\E~match page_no.or_else(first) {~' \
+  'match page_no.or_else(first) {' \
+  mnema-desktop "${AT}a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone" --lib
+
+# E5. A chapter with no indexed text is sent: the worker refuses it, and the
+# window says the render failed instead of naming the chapter.
+case_ "book: a chapter the index holds no text in is sent to the worker" \
+  $DV \
+  's~\QSome(p) if view.blocks.iter().any(|b| b.page_no as u32 == p) => Some(p),\E~Some(p) => Some(p),~' \
+  'Some(p) => Some(p),' \
+  mnema-desktop "${AT}a_chapter_with_no_indexed_text_is_not_sent_to_the_worker" --lib
+
+# E6. The reply does not say which chapter is shown: the window cannot tell
+# where the book is open.
+case_ "book: the reply leaves out the chapter it shows" \
+  $DV \
+  's~(\Q            },\E\n\Q            page_no: \E)page,~${1}None,~' \
+  '            page_no: None,' \
+  mnema-desktop "${AT}a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone" --lib
+
+# E7. An EPUB is not drawn as HTML.
+case_ "reader: a book's mime has no reader" \
+  $DV \
+  's~\Q        "application/epub+zip" => Some(DocReader::Epub),\E\n~~' \
+  '        "text/html" => Some(DocReader::Html),
+        _ => None,' \
+  mnema-desktop "${AT}a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone" --lib
+
+# E8. An HTML file is not drawn as HTML.
+case_ "reader: an HTML file's mime has no reader" \
+  $DV \
+  's~\Q        "text/html" => Some(DocReader::Html),\E\n~~' \
+  '        "text/markdown" => Some(DocReader::Markdown),
+        "application/epub+zip"' \
+  mnema-desktop "${AT}an_html_file_is_drawn_whole_with_the_hash_of_all_its_blocks" --lib
+
+# E9. An HTML file is cut to a chapter like a book: its other pages' blocks
+# leave the hash and every citation in it reads as changed.
+case_ "reader: a whole file is drawn as one chapter" \
+  $DV \
+  's~\Qlet page = if reader == DocReader::Epub {\E~let page = if reader != DocReader::Markdown {~' \
+  'if reader != DocReader::Markdown {' \
+  mnema-desktop "${AT}an_html_file_is_drawn_whole_with_the_hash_of_all_its_blocks" --lib
+
 # ── The window ───────────────────────────────────────────────────────────────
 
 # W1. An older answer is painted over a newer one.
