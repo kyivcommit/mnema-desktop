@@ -12,3 +12,6 @@ serde = { workspace = true }
 # already pay — every crate that talks to a model or the wire needs it.
 serde_json = { workspace = true }
 unicode-normalization = { workspace = true }
+# `render::doc_text_sha256`: the one formula both sides of `--render-doc` hash
+# a document's blocks with. The application already links it (`page_view.rs`).
+sha2 = { workspace = true }

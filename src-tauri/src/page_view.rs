@@ -291,6 +291,7 @@ fn refusal(error: RenderError) -> &'static str {
         RenderError::NotPdf => "not a pdf",
         RenderError::NoSuchPage => "no such page",
         RenderError::Unreadable => "unreadable",
+        RenderError::TooLarge => "too large",
     }
 }
 
