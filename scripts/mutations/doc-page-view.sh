@@ -1,4 +1,4 @@
-# Mutation cases for the page view of a Markdown file (D199): the worker reads
+# Mutation cases for the page view of a Markdown, HTML or EPUB file (D199): the worker reads
 # the file again, renders it as allow-listed HTML and marks a citation only when
 # the file still hashes to the index's blocks. Run with:
 #
@@ -19,6 +19,9 @@ DT=src/launcher/DocPage.test.ts
 MT='doc_view::markdown::tests::'
 ST='doc_view::sanitize::tests::'
 AT='doc_view::tests::'
+HD=crates/mnema-extract/src/doc_view/html_doc.rs
+DM=crates/mnema-extract/src/doc_view/mod.rs
+HT='doc_view::html_doc::tests::'
 
 # ── Whether marks may be drawn at all ────────────────────────────────────────
 
@@ -284,3 +287,145 @@ case_ "window: an EPUB is not one the page view draws" \
   's~\Q, '"'"'application/epub+zip'"'"']);\E~]);~' \
   "new Set(['text/markdown', 'text/html'])" \
   src/launcher/LauncherPdf.test.ts 'an EPUB is offered the choice, and its page is the HTML view' runner=vitest
+
+# ── HTML files and EPUB chapters (html_doc.rs) ───────────────────────────────
+
+# X1. A block NFC rewrote is marked with offsets that count other text.
+case_ "html view: a block NFC rewrote is marked with offsets that count other text" \
+  $HD \
+  's~\Qif read.unverbatim.contains(&key) {\E~if false && read.unverbatim.contains(&key) {~' \
+  'if false && read.unverbatim.contains(&key) {' \
+  mnema-extract "${HT}a_block_nfc_rewrote_is_not_marked" --lib
+
+# X2. A chapter is hashed under page 1, so it never matches its own index rows.
+case_ "html view: a chapter is hashed under page 1, so it never matches its own index rows" \
+  $HD \
+  's~\Qc.blocks.into_iter().map(|b| (page_no, b))\E~c.blocks.into_iter().map(|b| (1, b))~' \
+  'c.blocks.into_iter().map(|b| (1, b))' \
+  mnema-extract "${HT}a_chapter_is_marked_with_its_own_hash_and_not_the_books" --lib
+
+# X3. A chapter's <title>, which the index holds no block for, reaches the view.
+case_ "html view: a chapter's <title>, which the index holds no block for, reaches the view" \
+  $HD \
+  's~\Qrender(read, source.spine_len, req, names_the_document, limit)\E~render(read, source.spine_len, req, |_| false, limit)~' \
+  'render(read, source.spine_len, req, |_| false, limit)' \
+  mnema-extract "${HT}a_chapter_title_is_not_shown_and_an_svg_title_is" --lib
+
+# X4. Every title is skipped, so an SVG title the index holds vanishes from the view.
+case_ "html view: every title is skipped, so an SVG title the index holds vanishes from the view" \
+  $HD \
+  's~\Qrender(read, source.spine_len, req, names_the_document, limit)\E~render(read, source.spine_len, req, |e| e.name() == "title", limit)~' \
+  'render(read, source.spine_len, req, |e| e.name() == "title", limit)' \
+  mnema-extract "${HT}a_chapter_title_is_not_shown_and_an_svg_title_is" --lib
+
+# X5. An HTML file's <title>, a block of the index, is dropped from the view.
+case_ "html view: an HTML file's <title>, a block of the index, is dropped from the view" \
+  $HD \
+  's~\Qrender(read, pages, req, |_| false, limit)\E~render(read, pages, req, names_the_document, limit)~' \
+  'render(read, pages, req, names_the_document, limit)' \
+  mnema-extract "${HT}an_html_title_is_shown_and_can_be_cited" --lib
+
+# X6. A neighbouring citation is drawn as the clicked one.
+case_ "html view: a neighbouring citation is drawn as the clicked one" \
+  $HD \
+  's~\QSome(false) => MARK_OTHER,\E~Some(false) => MARK_PRIMARY,~' \
+  'Some(false) => MARK_PRIMARY,' \
+  mnema-extract "${HT}a_neighbour_is_marked_without_primary_and_each_range_in_its_own_block" --lib
+
+# X7. A node that only touches a range at its edge is marked.
+case_ "html view: a node that only touches a range at its edge is marked" \
+  $HD \
+  's~\Qif mine(r) && r.start < y && x < r.start + r.len {\E~if mine(r) && r.start <= y && x < r.start + r.len {~' \
+  'if mine(r) && r.start <= y && x < r.start + r.len {' \
+  mnema-extract "${HT}a_cited_phrase_crossing_an_element_is_marked_and_the_text_is_intact" --lib
+
+# X8. A range marks every block that has the same offsets.
+case_ "html view: a range marks every block that has the same offsets" \
+  $HD \
+  's~\Qif mine(r) && r.start < y\E~if r.start < y~' \
+  'if r.start < y' \
+  mnema-extract "${HT}a_neighbour_is_marked_without_primary_and_each_range_in_its_own_block" --lib
+
+# X9. A range ending exactly at its block end is refused.
+case_ "html view: a range ending exactly at its block end is refused" \
+  $HD \
+  's~\Qend as usize > chars)\E~end as usize >= chars)~' \
+  'end as usize >= chars)' \
+  mnema-extract "${HT}a_range_that_cannot_be_placed_marks_nothing_at_all" --lib
+
+# X10. A range one past its block end is placed.
+case_ "html view: a range one past its block end is placed" \
+  $HD \
+  's~\Qend as usize > chars)\E~end as usize > chars + 1)~' \
+  'end as usize > chars + 1)' \
+  mnema-extract "${HT}a_range_that_cannot_be_placed_marks_nothing_at_all" --lib
+
+# X11. A range that marked nothing still counts as placed.
+case_ "html view: a range that marked nothing still counts as placed" \
+  $HD \
+  's~\Qhit.iter().all(|&h| h)\E~hit.iter().all(|_| true)~' \
+  'hit.iter().all(|_| true)' \
+  mnema-extract "${HT}a_range_that_cannot_be_placed_marks_nothing_at_all" --lib
+
+# X12. A file already holding a mark character is marked anyway.
+case_ "html view: a file already holding a mark character is marked anyway" \
+  $HD \
+  's~\QSome(_) if tree_has_marks(&read.doc) =>\E~Some(_) if false && tree_has_marks(&read.doc) =>~' \
+  'Some(_) if false && tree_has_marks(&read.doc) =>' \
+  mnema-extract "${HT}a_file_holding_a_mark_character_is_not_marked" --lib
+
+# X13. An unmarked render draws the file's own mark characters.
+case_ "html view: an unmarked render draws the file's own mark characters" \
+  $HD \
+  's~\Qtext == TextMatch::Match, skip)\E~true, skip)~' \
+  'true, skip)' \
+  mnema-extract "${HT}a_file_holding_a_mark_character_is_not_marked" --lib
+
+# X14. The hash is never compared: a changed file is marked.
+case_ "html view: the hash is never compared: a changed file is marked" \
+  $HD \
+  's~\QSome(sent) if *sent != hash =>\E~Some(sent) if false && *sent != hash =>~' \
+  'Some(sent) if false && *sent != hash =>' \
+  mnema-extract "${HT}a_changed_file_is_rendered_without_marks" --lib
+
+# X15. A request with no hash is treated as a match.
+case_ "html view: a request with no hash is treated as a match" \
+  $HD \
+  's~\QNone => TextMatch::None,\E~None if req.ranges.is_empty() => TextMatch::None,\n        None => TextMatch::Match,~' \
+  'None => TextMatch::Match,' \
+  mnema-extract "${HT}no_hash_is_no_comparison" --lib
+
+# X16. HTML over the limit reaches the window.
+case_ "html view: HTML over the limit reaches the window" \
+  $HD \
+  's~\Qif html.len() > limit {\E~if html.len() > limit + 1 {~' \
+  'if html.len() > limit + 1 {' \
+  mnema-extract "${HT}too_much_html_is_refused" --lib
+
+# X17. A chapter with no blocks is drawn as an empty page.
+case_ "html view: a chapter with no blocks is drawn as an empty page" \
+  $HD \
+  's~\Qif c.blocks.is_empty() {\E~if false && c.blocks.is_empty() {~' \
+  'if false && c.blocks.is_empty() {' \
+  mnema-extract "${HT}a_chapter_that_is_not_one_or_is_not_named_is_refused" --lib
+
+# X18. An EPUB request naming no chapter draws chapter 1.
+case_ "html view: an EPUB request naming no chapter draws chapter 1" \
+  $HD \
+  's~\Qlet Some(page_no) = req.page_no else {\E~let Some(page_no) = req.page_no.or(Some(1)) else {~' \
+  'let Some(page_no) = req.page_no.or(Some(1)) else {' \
+  mnema-extract "${HT}a_chapter_that_is_not_one_or_is_not_named_is_refused" --lib
+
+# X19. The page count is not the length of the spine.
+case_ "html view: the page count is not the length of the spine" \
+  $HD \
+  's~\Qrender(read, source.spine_len,\E~render(read, 1,~' \
+  'render(read, 1,' \
+  mnema-extract "${HT}a_chapter_is_marked_with_its_own_hash_and_not_the_books" --lib
+
+# X20. The worker hands an HTML file to the Markdown renderer.
+case_ "html view: the worker hands an HTML file to the Markdown renderer" \
+  $DM \
+  's~\QDocReader::Html => html_doc::render_html(&bytes, req),\E~DocReader::Html => markdown::render_markdown(&bytes, req),~' \
+  'DocReader::Html => markdown::render_markdown(&bytes, req),' \
+  mnema-extract "render_doc_answers_an_html_file_with_its_citation_marked" --test worker_cli
