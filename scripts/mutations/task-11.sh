@@ -165,7 +165,7 @@ case_ "reader: a chapter's tab label is not its text" \
 # spec §6, invariant 1.
 case_ "reader: a chapter's title still names it" \
   crates/mnema-extract/src/html.rs \
-  's{                                if let Some\(title\) = section_title\(node\) \{\n                                    open_page\(&mut pages, title\);\n                                \}}{                                /* the title names nothing */}' \
+  's{                                if let Some\(title\) = section_title\(node\) \{\n                                    open_page\(&mut out\.pages, title\);\n                                \}}{                                /* the title names nothing */}' \
   '/* the title names nothing */' \
   mnema-extract 'a_chapters_title_names_it_without_being_its_text' --test epub
 
@@ -370,8 +370,8 @@ case_ "reader: a package document in a legacy encoding is still read" \
 # nothing downstream can undo.
 case_ "reader: a chapter's text is not folded on its way into a block" \
   crates/mnema-extract/src/html.rs \
-  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");}' \
-  'let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");' \
+  's{    let text = nfc::normalise\(&run\.text\)\.into_owned\(\);}{    let text = nfc::normalise(\&run.text).split_whitespace().collect::<Vec<_>>().join(" ");}' \
+  'let text = nfc::normalise(&run.text).split_whitespace().collect::<Vec<_>>().join(" ");' \
   mnema-extract 'a_chapters_text_is_verbatim_after_nfc_and_nothing_else' --test epub
 
 # C35. NFC dropped. A Ukrainian `й` written decomposed and one written composed
@@ -380,8 +380,8 @@ case_ "reader: a chapter's text is not folded on its way into a block" \
 # characters themselves.
 case_ "reader: a chapter's block text is normalised at all" \
   crates/mnema-extract/src/html.rs \
-  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = run.clone();}' \
-  'let text = run.clone();' \
+  's{    let text = nfc::normalise\(&run\.text\)\.into_owned\(\);}{    let text = run.text.clone();}' \
+  'let text = run.text.clone();' \
   mnema-extract 'a_chapters_text_is_verbatim_after_nfc_and_nothing_else' --test epub
 
 # C36. The chapter's name left unbounded. `section_title` is one column shown by
