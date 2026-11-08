@@ -205,11 +205,14 @@ fn write_text(out: &mut String, text: &str, mark: &mut Option<bool>) {
     flush(out, &mut piece, *mark);
 }
 
-/// `fragment` as allow-listed HTML, its marks turned into `<mark>`.
+/// `fragment` as allow-listed HTML, its marks turned into `<mark>` — or, with
+/// `marks` false, dropped: the marks are the caller's only when it placed
+/// them, and a file that holds one of these characters itself must not get a
+/// highlight out of it.
 ///
 /// A mark left open at the end is closed there: the fragment is one block, and
 /// a citation never runs out of the block it was counted in.
-pub(crate) fn sanitize(fragment: &str) -> String {
+pub(crate) fn sanitize(fragment: &str, marks: bool) -> String {
     let parsed = Html::parse_fragment(fragment);
     let mut out = String::with_capacity(fragment.len());
     let mut mark: Option<bool> = None;
@@ -254,7 +257,14 @@ pub(crate) fn sanitize(fragment: &str) -> String {
                         None => owed.push(None),
                     }
                 }
-                Node::Text(text) if skipping == 0 => write_text(&mut out, text, &mut mark),
+                Node::Text(text) if skipping == 0 && marks => write_text(&mut out, text, &mut mark),
+                Node::Text(text) if skipping == 0 => {
+                    let plain: String = text
+                        .chars()
+                        .filter(|&c| !matches!(c, MARK_PRIMARY | MARK_OTHER | MARK_END))
+                        .collect();
+                    escape_text(&mut out, &plain);
+                }
                 _ => {}
             },
             Edge::Close(node) => {
@@ -280,6 +290,19 @@ mod tests {
     const P: char = MARK_PRIMARY;
     const O: char = MARK_OTHER;
     const E: char = MARK_END;
+
+    /// The caller placed the marks: the case every test below but one is about.
+    fn sanitize(fragment: &str) -> String {
+        super::sanitize(fragment, true)
+    }
+
+    #[test]
+    fn marks_the_caller_did_not_place_are_dropped_not_drawn() {
+        assert_eq!(
+            super::sanitize(&format!("<p>а{P}б{E}в</p>"), false),
+            "<p>абв</p>"
+        );
+    }
 
     #[test]
     fn listed_elements_stay_with_their_listed_attributes() {
