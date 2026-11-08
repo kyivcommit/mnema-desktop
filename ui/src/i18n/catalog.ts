@@ -55,7 +55,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'file_loading' | 'file_failed' | 'file_focus_gone'
   | 'file_unavailable_no_such_document' | 'file_unavailable_no_blocks'
   | 'file_unavailable_rebuilding' | 'file_unavailable_too_large'
-  | 'page_view_label' | 'pdf_view_text' | 'pdf_view_page'
+  | 'page_view_label' | 'pdf_view_text' | 'pdf_view_page' | 'reveal_in_finder'
   | 'page_of' | 'page_image_alt'
   | 'page_note_changed' | 'page_note_scan' | 'page_note_unplaced'
   | 'page_unavailable' | 'page_unavailable_missing' | 'page_unavailable_too_large' | 'page_show_text'
@@ -470,6 +470,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_view_label: 'Вигляд документа',
     pdf_view_text: 'Текст',
     pdf_view_page: 'Сторінка',
+    reveal_in_finder: 'Показати у Finder',
     page_of: 'стор. {n} з {m}',
     page_image_alt: 'Сторінка {n}',
     page_note_changed: 'Файл змінено після індексації — підсвітки немає. Текст цитати — у режимі «Текст».',
@@ -1402,6 +1403,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_view_label: 'Document view',
     pdf_view_text: 'Text',
     pdf_view_page: 'Page',
+    reveal_in_finder: 'Show in Finder',
     page_of: 'page {n} of {m}',
     page_image_alt: 'Page {n}',
     page_note_changed: 'The file changed after indexing — there is no highlight. The citation text is in “Text” mode.',

@@ -452,6 +452,13 @@ pub enum Error {
         retired: Vec<crate::models::RetiredSpace>,
         source: mnema_index::Error,
     },
+    /// `reveal_document` was asked about a path the index holds no row for
+    /// — removed by a scan, or a citation that names no single path.
+    #[error("this file is not in the index any more")]
+    NothingToReveal,
+    /// The file manager could not be started to show the file.
+    #[error("could not show the file: {0}")]
+    Reveal(std::io::Error),
 }
 
 /// The retirements as a clause, for [`Error::RetiredThenFailed`]'s sentence.

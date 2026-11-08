@@ -924,6 +924,54 @@ pub(crate) fn freshness_of(
     Ok(decide_freshness(occupant.as_ref(), document_id))
 }
 
+/// Shows the open document's file in the system file manager, selected.
+///
+/// The path is the index's own row, never a string from the webview: a
+/// page can only point the file manager at a file the index already holds.
+#[tauri::command(async)]
+pub fn reveal_document(
+    state: State<'_, AppState>,
+    root_id: Option<i64>,
+    relative_path: Option<String>,
+) -> Result<(), Error> {
+    let occupant = state.with_index(|db| {
+        db.read_snapshot(|db| cited_occupant(db, root_id, relative_path.as_deref()))
+    })?;
+    let occupant = occupant.ok_or(Error::NothingToReveal)?;
+    let full = Path::new(&occupant.root_absolute_path).join(&occupant.relative_path);
+    reveal(&full).map_err(Error::Reveal)
+}
+
+#[cfg(target_os = "macos")]
+fn reveal(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .map(drop)
+}
+
+#[cfg(target_os = "windows")]
+fn reveal(path: &Path) -> std::io::Result<()> {
+    let mut select = std::ffi::OsString::from("/select,");
+    select.push(path);
+    std::process::Command::new("explorer")
+        .arg(select)
+        .status()
+        .map(drop)
+}
+
+// shortcut: opens the folder without selecting the file; a file-manager
+// D-Bus call would select it, if Linux ever ships.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal(path: &Path) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open")
+        .arg(dir)
+        .status()
+        .map(drop)
+}
+
 /// One level of a watched folder's tree as the exclusion screen needs it.
 ///
 /// **A struct rather than a bare `Vec`, because of `unnameable`.** Entries

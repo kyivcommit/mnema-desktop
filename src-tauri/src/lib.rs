@@ -88,6 +88,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         tree::set_folder_searched,
         tree::mask_preview,
         tree::open_document,
+        tree::reveal_document,
         page_view::render_pdf_page,
         doc_view::render_doc,
         models::provider_models,
@@ -691,7 +692,21 @@ pub fn run() -> anyhow::Result<()> {
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
-        ));
+        ))
+        // The launcher reopens at the size and place it was left: the panels'
+        // widths are remembered by the page, but a window back at 1440 has no
+        // room for them and hides the conversations pane. Never `VISIBLE` — the
+        // launcher starts hidden and only `focus_launcher` shows it.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_denylist(&["settings"])
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        );
     // §6's ⌘Q menu is a macOS thing; off macOS none is set (D154, see
     // `with_app_menu`).
     with_app_menu(builder)

@@ -286,6 +286,11 @@ export const openDocument = (location: DocumentLocation, focus: DocumentFocus | 
     chunkId: focus?.chunkId ?? null, citedOrd: focus?.ord ?? null, citedText: focus?.text ?? null,
   });
 
+// Shows the file in Finder, selected. The backend resolves the path from its own
+// index row for (rootId, relativePath); nothing else is sent.
+export const revealDocument = (location: DocumentLocation) =>
+  invoke<void>('reveal_document', { rootId: location.rootId, relativePath: location.relativePath });
+
 // One PDF page drawn by `render_pdf_page` (`page_view.rs`). `image` is a data URL;
 // `rects` are fractions 0..1 of the page's width and height. `highlight` says
 // whether they can be trusted: `shown` the citation, `changed` the file moved
