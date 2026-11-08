@@ -70,7 +70,7 @@ fn render_within(bytes: &[u8], req: &DocRenderRequest, limit: usize) -> DocRende
     let text = match &req.text_sha256 {
         None => TextMatch::None,
         Some(sent) if *sent != hash => TextMatch::Mismatch,
-        Some(_) if has_marks(&source) => TextMatch::Unplaced,
+        Some(_) if tree_has_marks(root) => TextMatch::Unplaced,
         Some(_) if !place_all(&source, &placed, &req.ranges) => TextMatch::Unplaced,
         Some(_) => TextMatch::Match,
     };
@@ -126,6 +126,24 @@ fn finish<'a>(
         }
     }
     DocRenderReply::Rendered { html, pages, text }
+}
+
+/// Whether the file, as parsed, already holds a mark character in any text
+/// that reaches the view. The parsed tree, not the source: `&#xE000;` holds
+/// none of the three characters on disk and one in its `Text` literal, and the
+/// literal is what the allow-list would draw (security review, 2026-11-08).
+/// comrak 0.54 happens to decode those entities to U+FFFD; this does not lean
+/// on that.
+fn tree_has_marks<'a>(root: &'a AstNode<'a>) -> bool {
+    root.descendants()
+        .any(|node| match &node.data.borrow().value {
+            NodeValue::Text(t) => has_marks(t),
+            NodeValue::Code(c) => has_marks(&c.literal),
+            NodeValue::CodeBlock(c) => has_marks(&c.literal) || has_marks(&c.info),
+            NodeValue::HtmlInline(h) => has_marks(h),
+            NodeValue::HtmlBlock(h) => has_marks(&h.literal),
+            _ => false,
+        })
 }
 
 /// Byte offset of a 1-based `(line, column)` in `source`.
@@ -484,6 +502,23 @@ mod tests {
         ));
         assert_eq!(text, TextMatch::Unplaced);
         assert!(!html.contains("<mark"), "{html}");
+    }
+
+    #[test]
+    fn a_mark_character_spelled_as_an_entity_draws_nothing() {
+        // comrak 0.54 decodes these to U+FFFD (measured); `tree_has_marks`
+        // holds the line if a later version passes them through.
+        for spelled in ["&#xE000;", "&#57344;", "&#xe002;"] {
+            let doc = format!("Перший {spelled} абзац.\n\nДругий абзац.\n");
+            let b = doc.as_bytes();
+            let (html, _) = rendered(render_markdown(
+                b,
+                &req(b, vec![range_of(b, 1, 1, "Другий", true)]),
+            ));
+            let first = html.split("data-block=\"1:1\"").next().unwrap();
+            assert!(!first.contains("<mark"), "{spelled}: {html}");
+            assert!(!has_marks(&html), "{spelled}: {html:?}");
+        }
     }
 
     #[test]
