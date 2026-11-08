@@ -303,7 +303,7 @@ fn sha256_hex(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mnema_core::{Block, BlockType, OnDisk, SourceKind};
     use mnema_index::DocumentStatus;
@@ -469,7 +469,7 @@ mod tests {
     /// Runs the script once before use, retrying while Linux says it is still
     /// open for writing (the same function `scan_job`'s tests carry, for the
     /// same reason).
-    fn wait_until_it_will_run(path: &Path) {
+    pub(crate) fn wait_until_it_will_run(path: &Path) {
         use std::process::{Command, Stdio};
         for _ in 0..400 {
             match Command::new(path)

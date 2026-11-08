@@ -10,6 +10,7 @@ pub mod agent_clients;
 pub mod ask_log;
 pub mod bridge;
 pub mod dialogue;
+mod doc_view;
 pub mod embed_job;
 pub mod error;
 pub mod job;
@@ -88,6 +89,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         tree::mask_preview,
         tree::open_document,
         page_view::render_pdf_page,
+        doc_view::render_doc,
         models::provider_models,
         models::key_present,
         models::set_key,

@@ -2660,7 +2660,13 @@ fn render_doc_refuses_a_missing_file_and_a_line_that_is_not_a_request() {
     for line in [missing, garbled] {
         let reply = render_doc_run(&format!("{line}\n"));
         assert!(
-            matches!(reply, DocRenderReply::Refused { error: RenderError::Unreadable, .. }),
+            matches!(
+                reply,
+                DocRenderReply::Refused {
+                    error: RenderError::Unreadable,
+                    ..
+                }
+            ),
             "{line}: {reply:?}"
         );
     }

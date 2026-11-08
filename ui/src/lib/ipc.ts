@@ -303,6 +303,18 @@ export const renderPdfPage = (location: DocumentLocation, pageNo: number, widthP
     pageNo, widthPx, ranges,
   });
 
+// A document drawn as HTML by `render_doc` (`doc_view.rs`, D199) — Markdown
+// today. `html` is allow-listed by the worker and goes into the page as it is;
+// cited text is in `<mark>` (`data-primary` on the clicked one), each block in a
+// `div[data-block="page:order"]`. `highlight` as for a PDF page, without `scan`.
+export type DocPageView =
+  | { kind: 'page'; html: string; pages: number; highlight: 'shown' | 'changed' | 'noText' | 'unplaced' }
+  | { kind: 'unavailable'; reason: 'noPath' | 'fileMissing' | 'tooLarge' | 'failed' };
+export const renderDoc = (location: DocumentLocation, spans: PaneSpan[]) =>
+  invoke<DocPageView>('render_doc', {
+    documentId: location.documentId, rootId: location.rootId, relativePath: location.relativePath, spans,
+  });
+
 // A NARROW read of `model_settings` (models.rs:590) — the arms row (PR 6) only
 // ever needed presence and the two arm flags, so `index`'s `Read` arm carried
 // only those. PR 7's Models section (Task 4) widens the two `cause` fields

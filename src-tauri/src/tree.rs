@@ -577,7 +577,7 @@ fn decide_freshness(occupant: Option<&PathOccupant>, document_id: &str) -> Fresh
 ///
 /// shortcut: paging, when a document this size actually turns up; v1 sends the
 /// whole file in one payload.
-const MAX_BLOCKS: usize = 50_000;
+pub(crate) const MAX_BLOCKS: usize = 50_000;
 
 /// The whole of one document's indexed text, or the reason it cannot be shown.
 ///
