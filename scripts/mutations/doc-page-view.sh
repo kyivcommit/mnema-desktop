@@ -59,8 +59,8 @@ case_ "unplaced: a range that marked nothing still counts as placed" \
 # content reaches the page as text.
 case_ "allow-list: the elements that give no text keep their content" \
   $SA \
-  's~\Qif skipping > 0 || gives_no_text(element) {\E~if skipping > 0 {~' \
-  'if skipping > 0 {' \
+  's~\Qif skipping > 0 || gives_no_text(element) || skip(element) {\E~if skipping > 0 || skip(element) {~' \
+  'if skipping > 0 || skip(element) {' \
   mnema-extract "${ST}scripts_handlers_styles_and_urls_do_not_get_through" --lib
 
 # S2. Any class is kept: a file restyles the window's own marks or labels.
