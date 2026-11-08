@@ -99,8 +99,8 @@ case_ "app: another document at the path is hashed and marked as this one" \
 # W1. An older answer is painted over a newer one.
 case_ "window: a slow answer for an older draw paints over the newer one" \
   $DP \
-  's~\Q    if (id !== request) return;\E\n\Q    got = answer;\E~    got = answer;~' \
-  '    got = answer;' \
+  's~\Q    if (id !== request) return;\E\n(\Q    // An answer ends a failure\E)~$1~' \
+  '    // An answer ends a failure' \
   src/launcher/DocPage.test.ts 'a slow answer for an older draw does not paint over the newer one' runner=vitest
 
 # W2. A Markdown file is not offered its page.
@@ -109,3 +109,28 @@ case_ "window: the choice is offered for a PDF only" \
   's~\Qnew Set(['"'"'application/pdf'"'"', '"'"'text/markdown'"'"'])\E~new Set(['"'"'application/pdf'"'"'])~' \
   "new Set(['application/pdf'])" \
   src/launcher/LauncherPdf.test.ts 'a Markdown file is offered the choice too, and its page is the HTML view' runner=vitest
+
+# ── Placing a citation in code (review, PR #95) ──────────────────────────────
+
+# P1. An end at column 0 is read literally: an indented code block followed by
+# a blank line has no span, and every mark of the render is withdrawn.
+case_ "place: an end at column 0 is not read as the end of the previous line" \
+  $MD \
+  's~\Qlet b = if at.end.column == 0 {\E~let b = if false {~' \
+  'let b = if false {' \
+  mnema-extract "${MT}an_indented_code_block_followed_by_a_blank_line_is_marked" --lib
+
+# P2. A code block's literal is looked for only with its line breaks flattened:
+# a multi-line fence never matches and a citation of one word marks it whole.
+case_ "place: a multi-line code literal is not found in its own source" \
+  $MD \
+  's~\Qonce(slice).or_else(\E~None.or_else(~' \
+  'None.or_else(' \
+  mnema-extract "${MT}a_partial_citation_in_a_multi_line_fence_marks_only_itself" --lib
+
+# W3. A failure outlives a later answer: the page never comes back.
+case_ "window: a failed draw is final" \
+  $DP \
+  's~\Q    failed = false;\E\n\Q    got = answer;\E~    got = answer;~' \
+  '    got = answer;' \
+  src/launcher/DocPage.test.ts 'a failed draw is not final: a later answer replaces the failure' runner=vitest

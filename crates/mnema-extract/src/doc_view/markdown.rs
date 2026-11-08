@@ -31,15 +31,10 @@ use crate::markdown::{Placed, markdown_source, parse_markdown, read};
 /// tool and the text view is still there.
 pub(crate) const MAX_HTML_BYTES: usize = 8 << 20;
 
-/// The options the view renders with: the reader's parse, and nothing raw.
+/// The options the view renders with: the reader's own, so the tree is
+/// formatted with what it was parsed with, and nothing raw.
 fn render_options() -> Options<'static> {
-    let mut options = Options::default();
-    options.extension.front_matter_delimiter = Some("---".to_string());
-    options.extension.table = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
-    options.extension.strikethrough = true;
-    options.extension.autolink = true;
+    let mut options = crate::markdown::options();
     // The default, named: raw HTML in the file is omitted, not passed on.
     options.render.r#unsafe = false;
     options
@@ -152,9 +147,22 @@ fn offset(starts: &[usize], line: usize, column: usize) -> Option<usize> {
 }
 
 /// The byte range a node occupies in `source`, end exclusive.
+///
+/// An end at column 0 is comrak's "the end of the previous line" — an indented
+/// code block followed by a blank line ends there — as `Lines::rows` and
+/// [`block_end`] read it too; taken literally it has no byte at all.
 fn span(starts: &[usize], source: &str, at: Sourcepos) -> Option<(usize, usize)> {
     let a = offset(starts, at.start.line, at.start.column)?;
-    let b = (offset(starts, at.end.line, at.end.column)? + 1).min(source.len());
+    let b = if at.end.column == 0 {
+        let mut end = *starts.get(at.end.line.checked_sub(1)?)?;
+        end = end.checked_sub(1)?; // the previous line's '\n'
+        if end > a && source.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
+        end
+    } else {
+        (offset(starts, at.end.line, at.end.column)? + 1).min(source.len())
+    };
     (a < b && source.is_char_boundary(a) && source.is_char_boundary(b)).then_some((a, b))
 }
 
@@ -162,21 +170,28 @@ fn span(starts: &[usize], source: &str, at: Sourcepos) -> Option<(usize, usize)>
 /// of `source[a..b]` (once), `None` when it is not.
 fn verbatim(source: &str, (a, b): (usize, usize), literal: &str) -> Option<usize> {
     let slice = &source[a..b];
-    // A code block's literal ends at a newline its fence line does not show;
-    // inline code turns a line break into a space of the same length.
+    // A code block's literal ends at a newline its fence line does not show,
+    // and keeps the ones inside it; inline code turns a line break into a
+    // space of the same length. So the source is searched as it is, then with
+    // its line breaks as spaces.
     let probe = literal.trim_end_matches('\n');
     if probe.is_empty() {
         return None;
     }
-    let flat: String = slice
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect();
-    let at = flat.find(probe)?;
-    flat[at + probe.len()..]
-        .find(probe)
-        .is_none()
-        .then_some(a + at)
+    let once = |hay: &str| {
+        let at = hay.find(probe)?;
+        hay[at + probe.len()..]
+            .find(probe)
+            .is_none()
+            .then_some(a + at)
+    };
+    once(slice).or_else(|| {
+        let flat: String = slice
+            .chars()
+            .map(|c| if c == '\n' { ' ' } else { c })
+            .collect();
+        once(&flat)
+    })
 }
 
 /// A citation range in source bytes, and whether it is the clicked one.
@@ -410,6 +425,25 @@ mod tests {
             html.contains("<strong><mark data-primary=\"true\">жирним</mark> словом</strong>"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn an_indented_code_block_followed_by_a_blank_line_is_marked() {
+        // comrak ends such a block at the next line, column 0 (review, PR #95).
+        let b = b"# t\n\n    code one\n    code two\n\nafter\n";
+        let r = range_of(b, 1, 1, "    code one\n    code two", true);
+        let (html, text) = rendered(render_markdown(b, &req(b, vec![r])));
+        assert_eq!(text, TextMatch::Match);
+        assert!(primary_marks(&html).concat().contains("code two"), "{html}");
+    }
+
+    #[test]
+    fn a_partial_citation_in_a_multi_line_fence_marks_only_itself() {
+        let b = b"```rust\nlet a = 1;\nlet needle = 2;\n```\n";
+        let r = range_of(b, 1, 0, "needle", true);
+        let (html, text) = rendered(render_markdown(b, &req(b, vec![r])));
+        assert_eq!(text, TextMatch::Match);
+        assert_eq!(primary_marks(&html).concat(), "needle", "{html}");
     }
 
     #[test]

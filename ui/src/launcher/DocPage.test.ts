@@ -93,7 +93,7 @@ test('a changed file says so where a citation was asked for, and not otherwise',
 test('a file too large for the page says so and offers the text', async () => {
   docReply = () => Promise.resolve({ kind: 'unavailable', reason: 'tooLarge' });
   mount();
-  expect((await screen.findByTestId('page-unavailable')).textContent).toMatch(/too large/i);
+  expect((await screen.findByTestId('page-unavailable')).textContent).toMatch(/too large to show as a page/i);
   expect(screen.getByTestId('page-show-text')).toBeTruthy();
 });
 
@@ -132,3 +132,12 @@ test('the window coming back draws the page again without blanking it', async ()
   expect(scrollWithin).toHaveBeenCalledTimes(1);
 });
 
+test('a failed draw is not final: a later answer replaces the failure', async () => {
+  docReply = () => Promise.reject(new Error('index busy'));
+  mount();
+  await screen.findByTestId('page-unavailable');
+  docReply = () => Promise.resolve(page());
+  window.dispatchEvent(new Event('focus'));
+  expect((await screen.findByTestId('doc-body')).querySelector('h1')).toBeTruthy();
+  expect(screen.queryByTestId('page-unavailable')).toBeNull();
+});

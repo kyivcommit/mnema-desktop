@@ -59,7 +59,7 @@
   }
   const pdfViewLabels = $derived.by(() => {
     void $locale;
-    return { group: t('pdf_view_label'), text: t('pdf_view_text'), page: t('pdf_view_page') };
+    return { group: t('page_view_label'), text: t('pdf_view_text'), page: t('pdf_view_page') };
   });
   // The tree's mark is the (root, path) pair, never `documentId` (spec §3):
   // one document can sit at several paths, and a key on the id would mark

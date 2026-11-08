@@ -42,11 +42,15 @@
     } catch (e) {
       if (id !== request) return;
       console.error('render_doc failed', e);
-      // A failed refresh keeps the page it has (FilePane's rule).
+      // A thrown refresh keeps the page it has (FilePane's rule); an answer —
+      // a page or a refusal — always replaces it.
       if (reveal) failed = true;
       return;
     }
     if (id !== request) return;
+    // An answer ends a failure, as in `PdfPage.settle`: one that failed
+    // before is never final.
+    failed = false;
     got = answer;
     await tick();
     const scroller = pane();
@@ -75,7 +79,7 @@
   const L = $derived.by(() => {
     void $locale;
     return {
-      label: t('pdf_view_label'), showText: t('page_show_text'),
+      label: t('page_view_label'), showText: t('page_show_text'),
       failed: t('page_unavailable'), loading: t('file_loading'),
     };
   });
@@ -95,7 +99,7 @@
     if (got?.kind !== 'unavailable') return '';
     switch (got.reason) {
       case 'fileMissing': return t('page_unavailable_missing');
-      case 'tooLarge': return t('file_unavailable_too_large');
+      case 'tooLarge': return t('page_unavailable_too_large');
       case 'noPath': case 'failed': return t('page_unavailable');
     }
   });

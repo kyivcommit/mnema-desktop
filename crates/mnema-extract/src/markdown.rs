@@ -305,7 +305,7 @@ pub(crate) fn bound_section_title(flattened: String) -> Option<String> {
 /// `a_file_that_opens_with_a_rule_loses_what_is_between_it_and_the_next_rule`
 /// records that. Both losses are silent, so the choice is which is rarer, and
 /// a `.md` beginning with a rule is far rarer than one beginning with YAML.
-fn options() -> Options<'static> {
+pub(crate) fn options() -> Options<'static> {
     let mut options = Options::default();
     options.extension.front_matter_delimiter = Some("---".to_string());
     options.extension.table = true;
