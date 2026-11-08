@@ -268,13 +268,13 @@ mod tests {
                 let p2 = db.insert_page("m1", 2, "native:md", None)?;
                 let ids = vec![
                     db.insert_block(p1, &block(0, BlockType::Headline, "# a"))?,
-                    db.insert_block(p1, &block(1, BlockType::Paragraph, "текст"))?,
+                    db.insert_block(p1, &block(1, BlockType::Paragraph, "text"))?,
                     db.insert_block(p2, &block(0, BlockType::Code, "```\nx\n```"))?,
                 ];
                 db.set_document_status("m1", DocumentStatus::Indexed)?;
                 db.insert_document("m2", "text/markdown", 1, SourceKind::Document)?;
                 let q = db.insert_page("m2", 1, "native:md", None)?;
-                let other_id = db.insert_block(q, &block(0, BlockType::Paragraph, "інше"))?;
+                let other_id = db.insert_block(q, &block(0, BlockType::Paragraph, "other"))?;
                 db.set_document_status("m2", DocumentStatus::Indexed)?;
                 db.insert_path(
                     root,
@@ -388,7 +388,7 @@ mod tests {
             Some(
                 doc_text_sha256([
                     (1, "headline", "# a"),
-                    (1, "paragraph", "текст"),
+                    (1, "paragraph", "text"),
                     (2, "code", "```\nx\n```"),
                 ])
                 .as_str()
