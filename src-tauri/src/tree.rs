@@ -694,6 +694,9 @@ enum ComposedView {
     Pending {
         file: FileFields,
         occupant: Option<PathOccupant>,
+        /// The document whose blocks are in `file` — the cited one, or the
+        /// one now at its path when the cited one is gone.
+        shown: String,
     },
 }
 
@@ -713,10 +716,31 @@ fn build_document_view(
     focus: Option<(i64, i64, &str)>,
     limit: usize,
 ) -> Result<ComposedView, mnema_index::Error> {
-    let Some(view) = db.document_view(document_id, limit)? else {
-        return Ok(ComposedView::Settled(DocumentView::Unavailable {
+    let no_such = || {
+        Ok(ComposedView::Settled(DocumentView::Unavailable {
             reason: UnavailableReason::NoSuchDocument,
-        }));
+        }))
+    };
+    // A walk that re-indexed an edited file deletes its old document once no
+    // path names it (`forget_if_unnamed`), so the id the pane holds can be gone
+    // while the file is still there. The person opened a file, not a version:
+    // the document now at the cited place is shown. Everything about what is
+    // shown — status, size, blocks, and the freshness badge — is read for
+    // `shown`, so the badge describes the text on screen. The focus stays with
+    // the cited id, so the old citation is never laid on the new text: the
+    // pane says the passage is gone, one warning in either view. No place, or
+    // nothing at it, is still `NoSuchDocument`.
+    let (shown, view, followed) = match db.document_view(document_id, limit)? {
+        Some(view) => (document_id.to_string(), view, None),
+        None => {
+            let Some(occupant) = cited_occupant(db, root_id, relative_path)? else {
+                return no_such();
+            };
+            let Some(view) = db.document_view(&occupant.current_document_id, limit)? else {
+                return no_such();
+            };
+            (occupant.current_document_id.clone(), view, Some(occupant))
+        }
     };
 
     // The status gate, and why it is not optional: ingest records a rebuild and
@@ -728,7 +752,7 @@ fn build_document_view(
     // answering with those blocks would be a partial file that claims to be
     // whole — the one failure this pane exists to avoid. `failed`/`skipped`
     // have no corpus text to show.
-    match db.document_status(document_id)? {
+    match db.document_status(&shown)? {
         DocumentStatus::Pending => {
             return Ok(ComposedView::Settled(DocumentView::Unavailable {
                 reason: UnavailableReason::Rebuilding,
@@ -788,12 +812,13 @@ fn build_document_view(
         None => (Vec::new(), Vec::new()),
     };
 
-    let occupant = match (root_id, relative_path) {
-        (None, None) => match db.document_path(document_id)? {
+    let occupant = match (followed, root_id, relative_path) {
+        (Some(occupant), ..) => Some(occupant),
+        (None, None, None) => match db.document_path(document_id)? {
             Some((root, path)) => cited_occupant(db, Some(root), Some(&path))?,
             None => None,
         },
-        (root_id, relative_path) => cited_occupant(db, root_id, relative_path)?,
+        (None, root_id, relative_path) => cited_occupant(db, root_id, relative_path)?,
     };
 
     Ok(ComposedView::Pending {
@@ -819,6 +844,7 @@ fn build_document_view(
             root_name: occupant.as_ref().map(|o| basename(&o.root_absolute_path)),
         },
         occupant,
+        shown,
     })
 }
 
@@ -873,8 +899,12 @@ pub(crate) fn document_view_in(
     })?;
     Ok(match composed {
         ComposedView::Settled(view) => view,
-        ComposedView::Pending { file, occupant } => {
-            let freshness = decide_freshness(occupant.as_ref(), document_id);
+        ComposedView::Pending {
+            file,
+            occupant,
+            shown,
+        } => {
+            let freshness = decide_freshness(occupant.as_ref(), &shown);
             file.with(freshness)
         }
     })
