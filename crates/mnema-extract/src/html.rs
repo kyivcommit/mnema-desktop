@@ -460,7 +460,7 @@ fn section_title<'a>(element: NodeRef<'a, Node>) -> Option<String> {
 /// reason: under [`HeadTitle::NamesOnly`] this decides which subtree is skipped,
 /// and skipping `<svg><title>` would be right by accident while skipping a
 /// diagram's `<text>` would not.
-fn names_the_document(element: &Element) -> bool {
+pub(crate) fn names_the_document(element: &Element) -> bool {
     element.name.ns == ns!(html) && element.name() == "title"
 }
 

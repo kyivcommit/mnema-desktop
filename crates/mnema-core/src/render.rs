@@ -1,7 +1,7 @@
 //! The one-shot exchanges that draw a document for the window's page view:
 //! one request line on the worker's stdin, one reply line on its stdout. A PDF
 //! page is [`RenderRequest`]/[`RenderReply`] (`--render-page`); a document the
-//! window shows as HTML — Markdown now — is [`DocRenderRequest`]/[`DocRenderReply`]
+//! window shows as HTML — Markdown, HTML, an EPUB chapter — is [`DocRenderRequest`]/[`DocRenderReply`]
 //! (`--render-doc`).
 //!
 //! Here, beside `wire`, for the same reason `wire` is here (D40): the worker
@@ -133,6 +133,9 @@ pub struct DocRenderRequest {
 #[serde(rename_all = "snake_case")]
 pub enum DocReader {
     Markdown,
+    Html,
+    /// One chapter of a book, named by `page_no` (its spine position).
+    Epub,
 }
 
 /// `len` chars from `start` in the text of one block, the block named by its
@@ -304,6 +307,18 @@ mod tests {
             serde_json::from_str::<DocRenderRequest>(&extra).is_err(),
             "{extra}"
         );
+    }
+
+    #[test]
+    fn every_reader_has_its_wire_name() {
+        for (reader, name) in [
+            (DocReader::Markdown, "\"markdown\""),
+            (DocReader::Html, "\"html\""),
+            (DocReader::Epub, "\"epub\""),
+        ] {
+            assert_eq!(serde_json::to_string(&reader).unwrap(), name);
+            assert_eq!(serde_json::from_str::<DocReader>(name).unwrap(), reader);
+        }
     }
 
     #[test]

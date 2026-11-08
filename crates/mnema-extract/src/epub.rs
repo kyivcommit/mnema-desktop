@@ -328,15 +328,25 @@ pub(crate) enum ChapterError {
 /// [`html::parse`] and [`html::walk`] over these bytes and numbers the result
 /// with [`number_chapter`], which is what makes its block numbers the stored
 /// ones.
-#[cfg_attr(not(test), allow(dead_code))] // the page view is its caller (D199)
-pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<Vec<u8>, ChapterError> {
+pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<ChapterSource, ChapterError> {
     let mut budget = BOOK_MAX_BYTES;
     let (package, base) = open(bytes, &mut budget).map_err(|e| match e {
         EpubError::TooLarge => ChapterError::TooLarge,
         EpubError::Malformed(why) => ChapterError::Malformed(why),
         EpubError::NoReadableChapter => ChapterError::NotAChapter,
     })?;
-    read_chapter(bytes, &package, &base, page_no, &mut budget)
+    Ok(ChapterSource {
+        bytes: read_chapter(bytes, &package, &base, page_no, &mut budget)?,
+        spine_len: package.spine.len() as u32,
+    })
+}
+
+/// One chapter's bytes, and how many entries the spine declares — the book's
+/// page count, which [`extract`] numbers every chapter against.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ChapterSource {
+    pub bytes: Vec<u8>,
+    pub spine_len: u32,
 }
 
 /// Which member spine position `page_no` is, read against the book's budget.
@@ -382,7 +392,6 @@ fn read_chapter(
 
 /// One chapter as the index stores it, and where its text nodes sit.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))] // `texts`, `unverbatim`: the page view's (D199)
 pub(crate) struct ChapterWalk {
     pub section_title: Option<String>,
     pub blocks: Vec<Block>,
@@ -813,7 +822,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A book of `chapters` members, each holding `bytes_each` repeated bytes.
@@ -1053,7 +1062,7 @@ mod tests {
 
     /// A book whose spine names `items` in order: `(href, media type, member)`,
     /// with `None` for a member the archive does not hold.
-    fn spine_book(items: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
+    pub(crate) fn spine_book(items: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
         use std::io::Write;
 
         let manifest: String = items
@@ -1095,7 +1104,7 @@ mod tests {
         buf.into_inner()
     }
 
-    const XHTML: &str = "application/xhtml+xml";
+    pub(crate) const XHTML: &str = "application/xhtml+xml";
     /// Two headings, so the HTML reader makes two pages of it; the second
     /// section holds a decomposed `й` that NFC changes.
     const TWO_SECTIONS: &str = "<html><head><title>Перший</title></head><body>\
@@ -1114,7 +1123,7 @@ mod tests {
     }
 
     fn numbered(bytes: &[u8], page_no: u32) -> ChapterWalk {
-        let source = chapter_source(bytes, page_no).unwrap();
+        let source = chapter_source(bytes, page_no).unwrap().bytes;
         number_chapter(
             page_no,
             html::walk(&html::parse(&source), html::HeadTitle::NamesOnly),
@@ -1131,7 +1140,7 @@ mod tests {
 
         // The fixture's own premise: chapter 1's blocks sit on two HTML pages,
         // so its second section's are renumbered rather than restarting at 0.
-        let source = chapter_source(&bytes, 1).unwrap();
+        let source = chapter_source(&bytes, 1).unwrap().bytes;
         let walk = html::walk(&html::parse(&source), html::HeadTitle::NamesOnly);
         assert_eq!(
             walk.pages.iter().filter(|p| !p.blocks.is_empty()).count(),
@@ -1170,7 +1179,7 @@ mod tests {
     #[test]
     fn a_cover_has_a_source_and_no_blocks() {
         let bytes = three_chapters();
-        assert!(!chapter_source(&bytes, 2).unwrap().is_empty());
+        assert!(!chapter_source(&bytes, 2).unwrap().bytes.is_empty());
         let alone = numbered(&bytes, 2);
         assert!(alone.blocks.is_empty());
         assert!(alone.texts.is_empty());
@@ -1191,7 +1200,7 @@ mod tests {
             ),
             ("gone.xhtml", XHTML, None),
         ]);
-        assert!(chapter_source(&odd, 1).is_ok());
+        assert_eq!(chapter_source(&odd, 1).unwrap().spine_len, 3);
         assert_eq!(chapter_source(&odd, 2), Err(ChapterError::NotAChapter));
         assert_eq!(chapter_source(&odd, 3), Err(ChapterError::NotAChapter));
     }
