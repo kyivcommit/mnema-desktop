@@ -5962,6 +5962,169 @@ fn open_document_reports_reindexed_when_the_cited_path_now_names_another_documen
     );
 }
 
+/// What a walk leaves behind when an edited file was the only path naming its
+/// document: the cited location repointed at a new content hash, and the old
+/// document gone (`forget_if_unnamed`, `mnema-ingest/src/lib.rs`). The old one
+/// is deleted **before** the new one is written, so SQLite hands the new
+/// document's chunk the old chunk's id — the reuse the focus check exists for.
+/// Returns the old chunk id, the new one, the passage text and the root.
+fn cited_document_gone(
+    db: &mnema_index::Db,
+    dir: &std::path::Path,
+    doc: &str,
+    replacement: Option<(&str, mnema_index::DocumentStatus)>,
+) -> (i64, Option<i64>, String, i64) {
+    let (corpus, root) = watched_corpus(db, dir);
+    let (old_chunk, passage) = write_paragraph_document(
+        db,
+        doc,
+        &PARAGRAPHS,
+        2,
+        0,
+        PARAGRAPHS[2].chars().count() as u32,
+    );
+    let original = PARAGRAPHS.join("\n\n");
+    record_real_file(db, &corpus, root, "dohov-01.md", doc, &original);
+
+    db.delete_path(root, "dohov-01.md").unwrap();
+    db.delete_document(doc).unwrap();
+    let new_chunk = replacement.map(|(edited, status)| {
+        let mut edited_paragraphs = PARAGRAPHS.to_vec();
+        edited_paragraphs.push("Додано абзац.");
+        // The same passage at the same place: only the document differs.
+        let (chunk, _) = write_paragraph_document(
+            db,
+            edited,
+            &edited_paragraphs,
+            2,
+            0,
+            PARAGRAPHS[2].chars().count() as u32,
+        );
+        db.set_document_status(edited, status).unwrap();
+        record_real_file(
+            db,
+            &corpus,
+            root,
+            "dohov-01.md",
+            edited,
+            &edited_paragraphs.join("\n\n"),
+        );
+        chunk
+    });
+    (old_chunk, new_chunk, passage, root)
+}
+
+/// The edited file's old document is gone and its path names the new one:
+/// the file at that path is shown, not "no longer in the index". The old
+/// citation is not laid on the new text — its chunk id now belongs to the new
+/// document — and the marker says the path names another document.
+#[test]
+fn open_document_follows_the_path_when_the_cited_document_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "8".repeat(64);
+    let edited = "b".repeat(64);
+    let (old_chunk, new_chunk, passage, root) = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(cited_document_gone(
+                db,
+                dir.path(),
+                &doc,
+                Some((&edited, mnema_index::DocumentStatus::Indexed)),
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        Some(old_chunk),
+        new_chunk,
+        "the fixture must reuse the chunk id, or the focus check is not exercised"
+    );
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({
+            "documentId": doc, "rootId": root, "relativePath": "dohov-01.md",
+            "chunkId": old_chunk, "citedOrd": 0, "citedText": passage,
+        }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v["kind"], json!("file"), "{v}");
+    assert_eq!(v["freshness"]["kind"], json!("reindexed"), "{v}");
+    assert_eq!(v["blocks"].as_array().map(Vec::len), Some(6), "{v}");
+    assert_eq!(v["blocks"][5]["text"], json!("Додано абзац."), "{v}");
+    assert_eq!(v["focusBlockIds"], json!([]), "{v}");
+    assert_eq!(v["spans"], json!([]), "{v}");
+}
+
+/// The old document is gone and nothing holds its path: there is no file to
+/// follow, so the answer stays `noSuchDocument`.
+#[test]
+fn a_gone_document_whose_path_holds_nothing_is_no_such_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "8".repeat(64);
+    let (_, _, _, root) = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(cited_document_gone(db, dir.path(), &doc, None))
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(
+        v,
+        json!({ "kind": "unavailable", "reason": "noSuchDocument" })
+    );
+}
+
+/// The document now at the path is still being written: the status gate
+/// applies to what would be shown, so a half-written file is not shown whole.
+#[test]
+fn a_gone_document_whose_path_is_being_rebuilt_is_rebuilding() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let state = app.state::<AppState>();
+    state.open_index().expect("the index opens");
+    let webview = main_webview(&app);
+
+    let doc = "8".repeat(64);
+    let edited = "b".repeat(64);
+    let (_, _, _, root) = state
+        .with_index(|db| {
+            Ok::<_, mnema_index::Error>(cited_document_gone(
+                db,
+                dir.path(),
+                &doc,
+                Some((&edited, mnema_index::DocumentStatus::Pending)),
+            ))
+        })
+        .unwrap();
+
+    let v = call(
+        &webview,
+        "open_document",
+        json!({ "documentId": doc, "rootId": root, "relativePath": "dohov-01.md" }),
+    )
+    .expect("open_document was rejected");
+
+    assert_eq!(v, json!({ "kind": "unavailable", "reason": "rebuilding" }));
+}
+
 /// Two roots share the cited path, and the answer is `noPath` **even though
 /// the document could have disambiguated it**. That is the decision, not a
 /// shortcut.
