@@ -2983,6 +2983,7 @@ dependencies = [
  "libc",
  "mnema-core",
  "mnema-index",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",

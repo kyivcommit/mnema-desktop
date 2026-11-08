@@ -56,7 +56,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mnema_core::manifest::Manifest;
-use mnema_core::render::{RenderReply, RenderRequest};
+use mnema_core::render::{DocRenderReply, DocRenderRequest, RenderReply, RenderRequest};
 use mnema_core::wire::{Frame, Request, from_line, to_request_line};
 use mnema_core::{Block, SourceKind};
 use mnema_index::SkipRule;
@@ -470,11 +470,32 @@ pub fn render_page(
     req: &RenderRequest,
     timeout: Duration,
 ) -> Result<RenderReply, PoolError> {
+    one_shot(worker, "--render-page", req, timeout)
+}
+
+/// Asks `worker --render-doc` to render one document as HTML (D199) — the same
+/// one-shot exchange as [`render_page`], with its kill-on-timeout and its
+/// errors.
+pub fn render_doc(
+    worker: &Path,
+    req: &DocRenderRequest,
+    timeout: Duration,
+) -> Result<DocRenderReply, PoolError> {
+    one_shot(worker, "--render-doc", req, timeout)
+}
+
+/// One request line to `worker <mode>`, one reply line back.
+fn one_shot<Req: serde::Serialize, Reply: serde::de::DeserializeOwned>(
+    worker: &Path,
+    mode: &str,
+    req: &Req,
+    timeout: Duration,
+) -> Result<Reply, PoolError> {
     let mut line = serde_json::to_string(req).map_err(|source| PoolError::Encode { source })?;
     line.push('\n');
     let mut command = Command::new(worker);
     command
-        .arg("--render-page")
+        .arg(mode)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -525,13 +546,13 @@ pub fn render_page(
     if !status.success() {
         return Err(protocol(
             &stderr,
-            &format!("{worker:?} --render-page ended with {status}"),
+            &format!("{worker:?} {mode} ended with {status}"),
         ));
     }
     serde_json::from_slice(&stdout).map_err(|source| {
         protocol(
             &String::from_utf8_lossy(&stdout),
-            &format!("--render-page did not answer with a reply line: {source}"),
+            &format!("{mode} did not answer with a reply line: {source}"),
         )
     })
 }

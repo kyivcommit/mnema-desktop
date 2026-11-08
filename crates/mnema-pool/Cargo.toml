@@ -24,6 +24,9 @@ mnema-core = { path = "../mnema-core" }
 # For `SkipRule` alone, so that `impl From<Failure> for SkipRule` can live here.
 # See `Failure`'s doc comment for why the mapping belongs on this side.
 mnema-index = { path = "../mnema-index" }
+# `one_shot`'s bounds: the request and reply types of `--render-page` and
+# `--render-doc` share one exchange.
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
