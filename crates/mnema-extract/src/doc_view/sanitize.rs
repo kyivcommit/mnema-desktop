@@ -22,6 +22,7 @@
 
 use std::fmt::Write as _;
 
+use ego_tree::NodeRef;
 use ego_tree::iter::Edge;
 use scraper::node::Element;
 use scraper::{Html, Node};
@@ -54,7 +55,7 @@ enum Out {
     Span(&'static str),
 }
 
-const SAME: [&str; 39] = [
+const SAME: [&str; 40] = [
     "h1",
     "h2",
     "h3",
@@ -94,6 +95,7 @@ const SAME: [&str; 39] = [
     "span",
     "div",
     "small",
+    "kbd",
 ];
 
 fn allowed(name: &str) -> Option<Out> {
@@ -214,17 +216,30 @@ fn write_text(out: &mut String, text: &str, mark: &mut Option<bool>) {
 /// a citation never runs out of the block it was counted in.
 pub(crate) fn sanitize(fragment: &str, marks: bool) -> String {
     let parsed = Html::parse_fragment(fragment);
-    let mut out = String::with_capacity(fragment.len());
+    sanitize_tree(parsed.tree.root(), marks, |_| false)
+}
+
+/// [`sanitize`] over a tree the caller has already parsed — and, for an HTML
+/// file or an EPUB chapter, marked in its text nodes. `skip` drops elements
+/// with their content on top of the seven [`gives_no_text`]: a chapter's
+/// `<title>`, which its reader stores no block for, so the view must not show
+/// it either.
+pub(crate) fn sanitize_tree(
+    root: NodeRef<'_, Node>,
+    marks: bool,
+    skip: impl Fn(&Element) -> bool,
+) -> String {
+    let mut out = String::new();
     let mut mark: Option<bool> = None;
     // The close tag each open element owes, `None` for one that was unwrapped.
     let mut owed: Vec<Option<&'static str>> = Vec::new();
     // Depth inside a `gives_no_text` subtree; nothing there is written.
     let mut skipping = 0usize;
-    for edge in parsed.tree.root().traverse() {
+    for edge in root.traverse() {
         match edge {
             Edge::Open(node) => match node.value() {
                 Node::Element(element) => {
-                    if skipping > 0 || gives_no_text(element) {
+                    if skipping > 0 || gives_no_text(element) || skip(element) {
                         skipping += 1;
                         continue;
                     }
@@ -294,6 +309,31 @@ mod tests {
     /// The caller placed the marks: the case every test below but one is about.
     fn sanitize(fragment: &str) -> String {
         super::sanitize(fragment, true)
+    }
+
+    #[test]
+    fn keyboard_keys_stay_keys() {
+        assert_eq!(
+            sanitize("<p>Натисни <kbd>Ctrl</kbd>+<kbd>C</kbd></p>"),
+            "<p>Натисни <kbd>Ctrl</kbd>+<kbd>C</kbd></p>"
+        );
+    }
+
+    #[test]
+    fn a_whole_document_keeps_its_text_and_a_skipped_element_goes_with_its_own() {
+        let document = Html::parse_document(
+            "<html><head><title>Назва</title><meta charset=\"utf-8\"></head>\
+             <body><section><p>текст <i>тут</i></p></section></body></html>",
+        );
+        let root = document.tree.root();
+        assert_eq!(
+            sanitize_tree(root, true, |_| false),
+            "Назва<p>текст <i>тут</i></p>"
+        );
+        assert_eq!(
+            sanitize_tree(root, true, |e| e.name() == "title"),
+            "<p>текст <i>тут</i></p>"
+        );
     }
 
     #[test]
