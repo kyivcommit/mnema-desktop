@@ -13,6 +13,8 @@
 //! block NFC rewrote (`unverbatim`) is never marked: its offsets count the
 //! stored text, not the nodes'.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use mnema_core::Block;
 use mnema_core::render::{
     DocRange, DocRenderReply, DocRenderRequest, RenderError, TextMatch, doc_text_sha256,
@@ -22,7 +24,7 @@ use scraper::{Html, Node};
 
 use super::markdown::MAX_HTML_BYTES;
 use super::sanitize::{MARK_END, MARK_OTHER, MARK_PRIMARY, has_marks, sanitize_tree};
-use crate::epub::{ChapterError, chapter_source, number_chapter};
+use crate::epub::{ChapterError, chapter_image, chapter_source, number_chapter};
 use crate::html::{HeadTitle, TextAt, names_the_document, parse, walk};
 
 /// One document read the way the index read it, its tree kept.
@@ -56,16 +58,55 @@ fn html_within(bytes: &[u8], req: &DocRenderRequest, limit: usize) -> DocRenderR
         unverbatim: w.unverbatim,
         doc,
     };
-    // A standalone file's `<title>` is a block of it, so it is shown.
-    render(read, pages, req, |_| false, limit)
+    // A standalone file's `<title>` is a block of it, so it is shown. Its
+    // pictures are not: a file's `src` names the disk, not an archive.
+    render(read, pages, req, |_| false, limit, &mut |_| None)
+}
+
+/// The most one picture of a chapter may inflate to before it is its alt text
+/// instead. The largest measured in a real library was 307 KB.
+const IMAGE_MAX_BYTES: usize = 2 << 20;
+
+/// The most a chapter's pictures may add to its HTML, as `data:` URIs, counted
+/// in document order: the first picture past it and every later one are alt
+/// text. The heaviest measured chapter held 5.2 MB of pictures.
+const CHAPTER_IMAGES_MAX_BYTES: usize = 16 << 20;
+
+/// What a picture is, by its first bytes and never by its name: an SVG (a
+/// document that can carry script) or anything else the window should not be
+/// handed as an image is `None`.
+fn image_type(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() >= 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 /// Renders chapter `req.page_no` of the book in `bytes`.
 pub(crate) fn render_epub(bytes: &[u8], req: &DocRenderRequest) -> DocRenderReply {
-    epub_within(bytes, req, MAX_HTML_BYTES)
+    epub_within(
+        bytes,
+        req,
+        MAX_HTML_BYTES,
+        IMAGE_MAX_BYTES,
+        CHAPTER_IMAGES_MAX_BYTES,
+    )
 }
 
-fn epub_within(bytes: &[u8], req: &DocRenderRequest, limit: usize) -> DocRenderReply {
+fn epub_within(
+    bytes: &[u8],
+    req: &DocRenderRequest,
+    limit: usize,
+    image_cap: usize,
+    image_budget: usize,
+) -> DocRenderReply {
     let Some(page_no) = req.page_no else {
         return refused(RenderError::Unreadable, "no chapter named".into());
     };
@@ -103,7 +144,27 @@ fn epub_within(bytes: &[u8], req: &DocRenderRequest, limit: usize) -> DocRenderR
     };
     // A chapter's own `<title>` is no block of it (`HeadTitle::NamesOnly`), so
     // the view does not show it either; SVG's `<title>` is a block and stays.
-    render(read, source.spine_len, req, names_the_document, limit)
+    let mut left = image_budget;
+    let mut images = |src: &str| {
+        let data = chapter_image(bytes, &source.path, src, image_cap)?;
+        let mime = image_type(&data)?;
+        let uri = format!("data:{mime};base64,{}", STANDARD.encode(&data));
+        if uri.len() > left {
+            // This one and every later one: the budget is spent in reading order.
+            left = 0;
+            return None;
+        }
+        left -= uri.len();
+        Some(uri)
+    };
+    render(
+        read,
+        source.spine_len,
+        req,
+        names_the_document,
+        limit,
+        &mut images,
+    )
 }
 
 fn refused(error: RenderError, message: String) -> DocRenderReply {
@@ -116,6 +177,7 @@ fn render(
     req: &DocRenderRequest,
     skip: fn(&Element) -> bool,
     limit: usize,
+    images: &mut dyn FnMut(&str) -> Option<String>,
 ) -> DocRenderReply {
     let hash = doc_text_sha256(
         read.blocks
@@ -132,8 +194,19 @@ fn render(
     // No fresh parse after a refused placement, unlike markdown.rs: with
     // `marks` false the allow-list drops every mark character, so a
     // half-marked tree draws exactly what a clean one does.
-    let html = sanitize_tree(read.doc.tree.root(), text == TextMatch::Match, skip);
-    if html.len() > limit {
+    // The limit is on the markup: a chapter's pictures have their own budget.
+    let mut image_bytes = 0;
+    let html = sanitize_tree(
+        read.doc.tree.root(),
+        text == TextMatch::Match,
+        skip,
+        &mut |src| {
+            let uri = images(src)?;
+            image_bytes += uri.len();
+            Some(uri)
+        },
+    );
+    if html.len() - image_bytes > limit {
         return refused(RenderError::TooLarge, format!("over {limit} bytes of HTML"));
     }
     DocRenderReply::Rendered { html, pages, text }
@@ -629,12 +702,240 @@ mod tests {
             .0
             .len();
         assert!(matches!(
-            epub_within(&b, &epub_req(&b, Some(1), vec![]), full - 1),
+            epub_within(
+                &b,
+                &epub_req(&b, Some(1), vec![]),
+                full - 1,
+                IMAGE_MAX_BYTES,
+                CHAPTER_IMAGES_MAX_BYTES
+            ),
             DocRenderReply::Refused {
                 error: RenderError::TooLarge,
                 ..
             }
         ));
+    }
+
+    // ── EPUB pictures ───────────────────────────────────────────────────────
+
+    const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0jpeg body";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\npng body";
+
+    /// A picture of `n` bytes that sniffs as JPEG.
+    fn jpeg_of(n: usize) -> Vec<u8> {
+        let mut b = JPEG.to_vec();
+        b.resize(n, 7);
+        b
+    }
+
+    /// A book whose one chapter, `OEBPS/Text/ch1.xhtml`, holds `body` and a
+    /// paragraph to cite, with `pictures` beside it in the archive.
+    fn picture_book(body: &str, pictures: &[(&str, &[u8])]) -> Vec<u8> {
+        let chapter = format!("<html><body><p>Текст біля картинки.</p>{body}</body></html>");
+        crate::epub::tests::spine_book_with(
+            &[("OEBPS/Text/ch1.xhtml", XHTML, Some(&chapter))],
+            pictures,
+        )
+    }
+
+    fn chapter_one(b: &[u8], ranges: Vec<DocRange>) -> (String, TextMatch) {
+        rendered(render_epub(b, &epub_req(b, Some(1), ranges)))
+    }
+
+    /// The bytes each shown picture's URI carries, with its type, in order.
+    fn shown(html: &str) -> Vec<(String, Vec<u8>)> {
+        html.split("<img src=\"data:")
+            .skip(1)
+            .map(|rest| {
+                let uri = rest.split('"').next().unwrap();
+                let (mime, data) = uri.split_once(";base64,").unwrap();
+                (mime.to_string(), STANDARD.decode(data).unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chapters_pictures_are_shown_from_its_own_folder() {
+        let b = picture_book(
+            "<img src=\"../Images/a.jpg\" alt=\"Кіт &amp; &quot;пес&quot; <x>\">\
+             <img src=\"../Images/b%20c.png\" alt=\"\">",
+            &[
+                ("OEBPS/Images/a.jpg", JPEG),
+                ("OEBPS/Images/b c.png", PNG),
+                // The same name beside the chapter: not the one `../` names.
+                ("OEBPS/Text/Images/a.jpg", PNG),
+            ],
+        );
+        let (html, _) = chapter_one(&b, vec![]);
+        assert_eq!(
+            shown(&html),
+            [
+                ("image/jpeg".to_string(), JPEG.to_vec()),
+                ("image/png".to_string(), PNG.to_vec())
+            ],
+            "{html}"
+        );
+        assert!(
+            html.contains("\" alt=\"Кіт &amp; &quot;пес&quot; &lt;x&gt;\">"),
+            "{html}"
+        );
+        assert!(!html.contains("img-alt"), "{html}");
+    }
+
+    #[test]
+    fn a_picture_is_its_type_by_its_bytes_not_its_name() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x()</script></svg>";
+        let b = picture_book(
+            "<img src=\"p.jpg\" alt=\"png\"><img src=\"s.png\" alt=\"svg\">\
+             <img src=\"t.png\" alt=\"text\"><img src=\"s.svg\" alt=\"svg file\">",
+            &[
+                ("OEBPS/Text/p.jpg", PNG),
+                ("OEBPS/Text/s.png", svg),
+                ("OEBPS/Text/t.png", b"just some text"),
+                ("OEBPS/Text/s.svg", svg),
+            ],
+        );
+        let (html, _) = chapter_one(&b, vec![]);
+        assert_eq!(
+            shown(&html),
+            [("image/png".to_string(), PNG.to_vec())],
+            "{html}"
+        );
+        for alt in ["svg", "text", "svg file"] {
+            assert!(
+                html.contains(&format!("<span class=\"img-alt\">{alt}</span>")),
+                "{alt}: {html}"
+            );
+        }
+        assert!(!html.contains("script"), "{html}");
+        assert_eq!(image_type(b"GIF89a.."), Some("image/gif"));
+        assert_eq!(image_type(b"GIF87a.."), Some("image/gif"));
+        assert_eq!(image_type(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        assert_eq!(image_type(b"RIFF\0\0\0\0WAVEfmt "), None);
+        assert_eq!(image_type(b"\xFF\xD8"), None);
+    }
+
+    #[test]
+    fn a_picture_outside_the_archive_or_not_in_it_is_its_alt() {
+        let b = picture_book(
+            "<img src=\"../../escape.png\" alt=\"вгору\">\
+             <img src=\"http://e.com/a.png\" alt=\"мережа\">\
+             <img src=\"HTTPS://e.com/a.png\" alt=\"мережа2\">\
+             <img src=\"data:image/png;base64,iVBO\" alt=\"дані\">\
+             <img src=\"#x\" alt=\"фрагмент\"><img src=\"\" alt=\"порожньо\">\
+             <img src=\"gone.png\" alt=\"нема\"><img alt=\"без src\">",
+            &[
+                // What `http://e.com/a.png` would name read as a path.
+                ("OEBPS/Text/http:/e.com/a.png", PNG),
+            ],
+        );
+        let (html, _) = chapter_one(&b, vec![]);
+        assert!(shown(&html).is_empty(), "{html}");
+        for alt in [
+            "вгору",
+            "мережа",
+            "мережа2",
+            "дані",
+            "фрагмент",
+            "порожньо",
+            "нема",
+            "без src",
+        ] {
+            assert!(
+                html.contains(&format!("<span class=\"img-alt\">{alt}</span>")),
+                "{alt}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_picture_past_its_cap_or_the_chapters_budget_is_its_alt() {
+        let b = picture_book(
+            "<img src=\"big.jpg\" alt=\"завелика\"><img src=\"a.jpg\" alt=\"перша\">\
+             <img src=\"b.jpg\" alt=\"друга\"><img src=\"c.jpg\" alt=\"третя\">",
+            &[
+                ("OEBPS/Text/big.jpg", &jpeg_of(101)),
+                ("OEBPS/Text/a.jpg", &jpeg_of(100)),
+                ("OEBPS/Text/b.jpg", &jpeg_of(100)),
+                ("OEBPS/Text/c.jpg", &jpeg_of(12)),
+            ],
+        );
+        let uri = |n: usize| format!("data:image/jpeg;base64,{}", STANDARD.encode(jpeg_of(n)));
+        // Room for the first and the third, not the second: the budget is
+        // spent in reading order, and once spent, it is spent.
+        let budget = uri(100).len() + uri(12).len();
+        let req = epub_req(&b, Some(1), vec![]);
+        let (html, _) = rendered(epub_within(&b, &req, MAX_HTML_BYTES, 100, budget));
+        assert_eq!(
+            shown(&html),
+            [("image/jpeg".to_string(), jpeg_of(100))],
+            "{html}"
+        );
+        for alt in ["завелика", "друга", "третя"] {
+            assert!(
+                html.contains(&format!("<span class=\"img-alt\">{alt}</span>")),
+                "{alt}: {html}"
+            );
+        }
+        // Control: with room, each is shown.
+        let (html, _) = rendered(epub_within(&b, &req, MAX_HTML_BYTES, 101, 1 << 20));
+        assert_eq!(shown(&html).len(), 4, "{html}");
+    }
+
+    #[test]
+    fn a_shown_picture_keeps_nothing_of_its_element_but_alt() {
+        let b = picture_book(
+            "<img src=\"a.jpg\" alt=\"кіт\" onerror=\"x()\" style=\"color:red\" \
+             width=\"9\" srcset=\"http://e.com/a.jpg 2x\" class=\"sx-k\" id=\"i\">",
+            &[("OEBPS/Text/a.jpg", JPEG)],
+        );
+        let (html, _) = chapter_one(&b, vec![]);
+        assert_eq!(shown(&html).len(), 1, "{html}");
+        let tag = html
+            .split("<img ")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert_eq!(
+            tag,
+            format!(
+                "src=\"data:image/jpeg;base64,{}\" alt=\"кіт\"",
+                STANDARD.encode(JPEG)
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_chapter_heavy_with_pictures_is_marked_and_not_too_large() {
+        // 9 MB of pictures: past the markup's limit, inside the pictures' own.
+        let big = jpeg_of(1_800_000);
+        let body: String = (0..5)
+            .map(|n| format!("<img src=\"../Images/{n}.jpg\" alt=\"{n}\">"))
+            .collect();
+        let names: Vec<String> = (0..5).map(|n| format!("OEBPS/Images/{n}.jpg")).collect();
+        let pictures: Vec<(&str, &[u8])> =
+            names.iter().map(|n| (n.as_str(), big.as_slice())).collect();
+        let b = picture_book(&body, &pictures);
+        let r = chapter_range(&b, 1, "біля", true);
+        let (html, text) = chapter_one(&b, vec![r]);
+        assert_eq!(text, TextMatch::Match);
+        assert_eq!(primary_marks(&html), ["біля"]);
+        assert_eq!(shown(&html).len(), 5);
+        assert!(html.len() > MAX_HTML_BYTES, "{}", html.len());
+    }
+
+    #[test]
+    fn an_html_files_picture_stays_its_alt() {
+        let b = "<p>Текст</p><img src=\"a.jpg\" alt=\"фото\">".as_bytes();
+        let (html, _) = rendered(render_html(b, &html_req(b, vec![])));
+        assert!(
+            html.contains("<span class=\"img-alt\">фото</span>"),
+            "{html}"
+        );
+        assert!(!html.contains("<img"), "{html}");
     }
 
     /// Every `.html`, `.htm` and `.epub` under `MNEMA_HTML_DIR`, each file or

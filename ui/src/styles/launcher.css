@@ -470,6 +470,7 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 .doc-body th { background: var(--surface-2); font-family: var(--sans); font-weight: 600; font-style: normal; }
 .doc-body [align="right"] { text-align: right; } .doc-body [align="center"] { text-align: center; }
 .doc-body .link { color: var(--accent); text-decoration: underline; text-decoration-color: var(--line-strong); }
+.doc-body img { max-width: 100%; height: auto; }
 .doc-body .img-alt { color: var(--ink-soft); }
 .doc-body .img-alt::before { content: "▣ "; }
 .doc-body mark {

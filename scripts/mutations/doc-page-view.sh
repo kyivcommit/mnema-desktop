@@ -307,22 +307,23 @@ case_ "html view: a chapter is hashed under page 1, so it never matches its own 
 # X3. A chapter's <title>, which the index holds no block for, reaches the view.
 case_ "html view: a chapter's <title>, which the index holds no block for, reaches the view" \
   $HD \
-  's~\Qrender(read, source.spine_len, req, names_the_document, limit)\E~render(read, source.spine_len, req, |_| false, limit)~' \
-  'render(read, source.spine_len, req, |_| false, limit)' \
+  's~\Qnames_the_document,\E(\s+limit,\s+&mut images,)~|_| false,$1~' \
+  'req,
+        |_| false,' \
   mnema-extract "${HT}a_chapter_title_is_not_shown_and_an_svg_title_is" --lib
 
 # X4. Every title is skipped, so an SVG title the index holds vanishes from the view.
 case_ "html view: every title is skipped, so an SVG title the index holds vanishes from the view" \
   $HD \
-  's~\Qrender(read, source.spine_len, req, names_the_document, limit)\E~render(read, source.spine_len, req, |e| e.name() == "title", limit)~' \
-  'render(read, source.spine_len, req, |e| e.name() == "title", limit)' \
+  's~\Qnames_the_document,\E(\s+limit,\s+&mut images,)~|e| e.name() == "title",$1~' \
+  '|e| e.name() == "title",' \
   mnema-extract "${HT}a_chapter_title_is_not_shown_and_an_svg_title_is" --lib
 
 # X5. An HTML file's <title>, a block of the index, is dropped from the view.
 case_ "html view: an HTML file's <title>, a block of the index, is dropped from the view" \
   $HD \
-  's~\Qrender(read, pages, req, |_| false, limit)\E~render(read, pages, req, names_the_document, limit)~' \
-  'render(read, pages, req, names_the_document, limit)' \
+  's~\Qrender(read, pages, req, |_| false, limit,\E~render(read, pages, req, names_the_document, limit,~' \
+  'render(read, pages, req, names_the_document, limit,' \
   mnema-extract "${HT}an_html_title_is_shown_and_can_be_cited" --lib
 
 # X6. A neighbouring citation is drawn as the clicked one.
@@ -377,8 +378,9 @@ case_ "html view: a file already holding a mark character is marked anyway" \
 # X13. An unmarked render draws the file's own mark characters.
 case_ "html view: an unmarked render draws the file's own mark characters" \
   $HD \
-  's~\Qtext == TextMatch::Match, skip)\E~true, skip)~' \
-  'true, skip)' \
+  's~\Qtext == TextMatch::Match,\E(\s+skip,)~true,$1~' \
+  'true,
+        skip,' \
   mnema-extract "${HT}a_file_holding_a_mark_character_is_not_marked" --lib
 
 # X14. The hash is never compared: a changed file is marked.
@@ -398,8 +400,8 @@ case_ "html view: a request with no hash is treated as a match" \
 # X16. HTML over the limit reaches the window.
 case_ "html view: HTML over the limit reaches the window" \
   $HD \
-  's~\Qif html.len() > limit {\E~if html.len() > limit + 1 {~' \
-  'if html.len() > limit + 1 {' \
+  's~\Qif html.len() - image_bytes > limit {\E~if html.len() - image_bytes > limit + 1 {~' \
+  'if html.len() - image_bytes > limit + 1 {' \
   mnema-extract "${HT}too_much_html_is_refused" --lib
 
 # X17. A chapter with no blocks is drawn as an empty page.
@@ -419,8 +421,9 @@ case_ "html view: an EPUB request naming no chapter draws chapter 1" \
 # X19. The page count is not the length of the spine.
 case_ "html view: the page count is not the length of the spine" \
   $HD \
-  's~\Qrender(read, source.spine_len,\E~render(read, 1,~' \
-  'render(read, 1,' \
+  's~(render\(\s+read,\s+)\Qsource.spine_len,\E~${1}1,~' \
+  'read,
+        1,' \
   mnema-extract "${HT}a_chapter_is_marked_with_its_own_hash_and_not_the_books" --lib
 
 # X20. The worker hands an HTML file to the Markdown renderer.
@@ -437,3 +440,91 @@ case_ "allow-list: an anchor without a target is drawn as a link" \
   's~\Qlet anchor = element.name() == "a" && element.attr("href").is_none();\E~let anchor = false;~' \
   'let anchor = false;' \
   mnema-extract "${ST}an_anchor_without_a_target_is_text_not_a_link" --lib
+
+# ── An EPUB chapter's pictures ───────────────────────────────────────────────
+
+EP=crates/mnema-extract/src/epub.rs
+
+# X22. Anything a chapter names is shown as a PNG: an SVG, which can carry
+# script, or a text file reaches the window as a picture.
+case_ "pictures: a member that is no known picture is shown anyway" \
+  $HD \
+  's~\Qlet mime = image_type(&data)?;\E~let mime = image_type(&data).unwrap_or("image/png");~' \
+  'let mime = image_type(&data).unwrap_or("image/png");' \
+  mnema-extract "${HT}a_picture_is_its_type_by_its_bytes_not_its_name" --lib
+
+# X23. A picture's type is taken from its name: a PNG called `.jpg` is sent
+# as a JPEG.
+case_ "pictures: the type is the file name's, not the bytes'" \
+  $HD \
+  's~\Qlet mime = image_type(&data)?;\E~let mime = if src.ends_with(".jpg") { "image/jpeg" } else { image_type(&data)? };~' \
+  'let mime = if src.ends_with(".jpg") { "image/jpeg" } else { image_type(&data)? };' \
+  mnema-extract "${HT}a_picture_is_its_type_by_its_bytes_not_its_name" --lib
+
+# X24. A chapter's pictures have no budget: every one is inlined, however many.
+case_ "pictures: the chapter's budget is not enforced" \
+  $HD \
+  's~\Qlet mut left = image_budget;\E~let mut left = usize::MAX;~' \
+  'let mut left = usize::MAX;' \
+  mnema-extract "${HT}a_picture_past_its_cap_or_the_chapters_budget_is_its_alt" --lib
+
+# X25. A spent budget is refunded: a smaller picture after the one that did not
+# fit is shown, out of reading order.
+case_ "pictures: a later, smaller picture is shown after the budget ran out" \
+  $HD \
+  's~\Qleft = 0;\E~left += 0;~' \
+  'left += 0;' \
+  mnema-extract "${HT}a_picture_past_its_cap_or_the_chapters_budget_is_its_alt" --lib
+
+# X26. One picture has no cap: a member of any size is read and inlined.
+case_ "pictures: the per-picture cap is ignored" \
+  $HD \
+  's~\Qchapter_image(bytes, &source.path, src, image_cap)\E~chapter_image(bytes, &source.path, src, usize::MAX)~' \
+  'chapter_image(bytes, &source.path, src, usize::MAX)' \
+  mnema-extract "${HT}a_picture_past_its_cap_or_the_chapters_budget_is_its_alt" --lib
+
+# X27. A shown picture keeps the file's own attributes: `onerror`, `srcset`.
+case_ "pictures: the element's attributes reach the window" \
+  $SA \
+  's~\Qlet _ = write!(out, "<img src=\"{uri}\" alt=\"{alt}\">");\E~let attrs: String = element.attrs().map(|(n, v)| format!(" {n}=\\"{v}\\"")).collect(); let _ = write!(out, "<img src=\\"{uri}\\" alt=\\"{alt}\\"{attrs}>");~' \
+  'let attrs: String = element.attrs()' \
+  mnema-extract "${HT}a_shown_picture_keeps_nothing_of_its_element_but_alt" --lib
+
+# X28. A quote in alt text closes the attribute: the rest of the alt is markup.
+case_ "pictures: a quote in alt text is not escaped" \
+  $SA \
+  's~\Qlet alt = text.replace('"'"'"'"'"', "&quot;");\E~let alt = text;~' \
+  'let alt = text;' \
+  mnema-extract "${HT}a_chapters_pictures_are_shown_from_its_own_folder" --lib
+
+# X29. The pictures count against the markup's limit: a chapter heavy with
+# pictures is refused as too large.
+case_ "pictures: picture bytes are counted in the markup limit" \
+  $HD \
+  's~\Qif html.len() - image_bytes > limit {\E~if html.len() > limit {~' \
+  'if html.len() > limit {' \
+  mnema-extract "${HT}a_chapter_heavy_with_pictures_is_marked_and_not_too_large" --lib
+
+# X30. An HTML file's `<img src>` is inlined: a file's src names the disk, and
+# the view would hand the window whatever the hook makes of it.
+case_ "pictures: an HTML file's picture is shown" \
+  $HD \
+  's~\Qrender(read, pages, req, |_| false, limit, &mut |_| None)\E~render(read, pages, req, |_| false, limit, &mut |s| Some(s.to_string()))~' \
+  'render(read, pages, req, |_| false, limit, &mut |s| Some(s.to_string()))' \
+  mnema-extract "${HT}an_html_files_picture_stays_its_alt" --lib
+
+# X31. A picture's src is resolved against the chapter's own path, not its
+# folder: `../Images/a.jpg` names a member beside the chapter.
+case_ "pictures: src resolves against the chapter file, not its folder" \
+  $EP \
+  's~\Qresolve(&parent_of(chapter_path), src)\E~resolve(chapter_path, src)~' \
+  'resolve(chapter_path, src)' \
+  mnema-extract "${HT}a_chapters_pictures_are_shown_from_its_own_folder" --lib
+
+# X32. A src with a scheme is read as a path: `http://…` names whatever member
+# happens to be spelled that way.
+case_ "pictures: a src with a URL scheme is read from the archive" \
+  $EP \
+  's~\Qif scheme {\E~if false && scheme {~' \
+  'if false && scheme {' \
+  mnema-extract "${HT}a_picture_outside_the_archive_or_not_in_it_is_its_alt" --lib

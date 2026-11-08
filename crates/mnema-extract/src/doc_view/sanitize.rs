@@ -216,7 +216,7 @@ fn write_text(out: &mut String, text: &str, mark: &mut Option<bool>) {
 /// a citation never runs out of the block it was counted in.
 pub(crate) fn sanitize(fragment: &str, marks: bool) -> String {
     let parsed = Html::parse_fragment(fragment);
-    sanitize_tree(parsed.tree.root(), marks, |_| false)
+    sanitize_tree(parsed.tree.root(), marks, |_| false, &mut |_| None)
 }
 
 /// [`sanitize`] over a tree the caller has already parsed — and, for an HTML
@@ -224,10 +224,15 @@ pub(crate) fn sanitize(fragment: &str, marks: bool) -> String {
 /// with their content on top of the seven [`gives_no_text`]: a chapter's
 /// `<title>`, which its reader stores no block for, so the view must not show
 /// it either.
+///
+/// `images` turns an `<img src>` into the `data:` URI the window may load, or
+/// `None`, and the image is its alt text as before. A shown image keeps its
+/// `alt` and nothing else of its element: the URI is the caller's, not the file's.
 pub(crate) fn sanitize_tree(
     root: NodeRef<'_, Node>,
     marks: bool,
     skip: impl Fn(&Element) -> bool,
+    images: &mut dyn FnMut(&str) -> Option<String>,
 ) -> String {
     let mut out = String::new();
     let mut mark: Option<bool> = None;
@@ -265,13 +270,20 @@ pub(crate) fn sanitize_tree(
                             owed.push(Some("span"));
                         }
                         None if element.name() == "img" => {
-                            let alt = element.attr("alt").unwrap_or("").trim();
-                            if !alt.is_empty() {
+                            let alt: String = element
+                                .attr("alt")
+                                .unwrap_or("")
+                                .trim()
+                                .chars()
+                                .filter(|&c| !matches!(c, MARK_PRIMARY | MARK_OTHER | MARK_END))
+                                .collect();
+                            if let Some(uri) = element.attr("src").and_then(&mut *images) {
+                                let mut text = String::new();
+                                escape_text(&mut text, &alt);
+                                let alt = text.replace('"', "&quot;");
+                                let _ = write!(out, "<img src=\"{uri}\" alt=\"{alt}\">");
+                            } else if !alt.is_empty() {
                                 out.push_str("<span class=\"img-alt\">");
-                                let alt: String = alt
-                                    .chars()
-                                    .filter(|&c| !matches!(c, MARK_PRIMARY | MARK_OTHER | MARK_END))
-                                    .collect();
                                 escape_text(&mut out, &alt);
                                 out.push_str("</span>");
                             }
@@ -325,7 +337,7 @@ mod tests {
             "<h1><a id=\"top\"/>Розділ</h1><p>Текст <a href=\"ch3.html\">розділу 3</a>.</p>",
         );
         assert_eq!(
-            sanitize_tree(document.tree.root(), true, |_| false),
+            sanitize_tree(document.tree.root(), true, |_| false, &mut |_| None),
             "<h1>Розділ</h1><p>Текст <span class=\"link\">розділу 3</span>.</p>"
         );
     }
@@ -346,11 +358,11 @@ mod tests {
         );
         let root = document.tree.root();
         assert_eq!(
-            sanitize_tree(root, true, |_| false),
+            sanitize_tree(root, true, |_| false, &mut |_| None),
             "Назва<p>текст <i>тут</i></p>"
         );
         assert_eq!(
-            sanitize_tree(root, true, |e| e.name() == "title"),
+            sanitize_tree(root, true, |e| e.name() == "title", &mut |_| None),
             "<p>текст <i>тут</i></p>"
         );
     }

@@ -211,7 +211,7 @@ fn extract(bytes: &[u8], budget: usize) -> Result<EpubBook, EpubError> {
         let page_no = index as u32 + 1;
 
         let chapter = match read_chapter(bytes, &package, &base, page_no, &mut budget) {
-            Ok(chapter) => chapter,
+            Ok((_, chapter)) => chapter,
             // The bomb, and the only failure inside a chapter that stops the
             // book. Continuing would mean inflating the next chapter of a file
             // that has already asked for more memory than the whole book may
@@ -335,9 +335,11 @@ pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<ChapterSource
         EpubError::Malformed(why) => ChapterError::Malformed(why),
         EpubError::NoReadableChapter => ChapterError::NotAChapter,
     })?;
+    let (path, bytes) = read_chapter(bytes, &package, &base, page_no, &mut budget)?;
     Ok(ChapterSource {
-        bytes: read_chapter(bytes, &package, &base, page_no, &mut budget)?,
+        bytes,
         spine_len: package.spine.len() as u32,
+        path,
     })
 }
 
@@ -347,6 +349,31 @@ pub(crate) fn chapter_source(bytes: &[u8], page_no: u32) -> Result<ChapterSource
 pub(crate) struct ChapterSource {
     pub bytes: Vec<u8>,
     pub spine_len: u32,
+    /// The chapter's member in the archive, which its own `src`s are relative to.
+    pub path: String,
+}
+
+/// The bytes of the member an `<img src>` of the chapter at `chapter_path`
+/// names, at most `cap` of them; `None` for a URL with a scheme (`http:`,
+/// `data:`), a fragment alone, an empty `src`, a member the archive does not
+/// hold, or one past `cap`. For the page view only: nothing here is indexed.
+pub(crate) fn chapter_image(
+    bytes: &[u8],
+    chapter_path: &str,
+    src: &str,
+    cap: usize,
+) -> Option<Vec<u8>> {
+    let src = src.trim();
+    let scheme = src.split_once(':').is_some_and(|(s, _)| {
+        s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if scheme {
+        return None;
+    }
+    let path = resolve(&parent_of(chapter_path), src)?;
+    zip_part::read_member(bytes, &path, cap).ok()
 }
 
 /// Which member spine position `page_no` is, read against the book's budget.
@@ -359,7 +386,7 @@ fn read_chapter(
     base: &str,
     page_no: u32,
     budget: &mut usize,
-) -> Result<Vec<u8>, ChapterError> {
+) -> Result<(String, Vec<u8>), ChapterError> {
     // Two ways to be here and one answer: a spine entry that names an id the
     // manifest does not declare, and one that names no id this reader could
     // read at all (`<itemref/>`, or an `idref` holding an entity no package
@@ -381,13 +408,14 @@ fn read_chapter(
     let Some(path) = resolve(base, &item.href) else {
         return Err(ChapterError::NotAChapter);
     };
-    read_member(bytes, &path, budget).map_err(|e| match e {
-        ZipPartError::TooLarge => ChapterError::TooLarge,
-        ZipPartError::Missing => ChapterError::NotAChapter,
-        ZipPartError::Malformed => {
-            ChapterError::Malformed(format!("{path} could not be decompressed"))
-        }
-    })
+    match read_member(bytes, &path, budget) {
+        Ok(member) => Ok((path, member)),
+        Err(ZipPartError::TooLarge) => Err(ChapterError::TooLarge),
+        Err(ZipPartError::Missing) => Err(ChapterError::NotAChapter),
+        Err(ZipPartError::Malformed) => Err(ChapterError::Malformed(format!(
+            "{path} could not be decompressed"
+        ))),
+    }
 }
 
 /// One chapter as the index stores it, and where its text nodes sit.
@@ -1063,6 +1091,15 @@ pub(crate) mod tests {
     /// A book whose spine names `items` in order: `(href, media type, member)`,
     /// with `None` for a member the archive does not hold.
     pub(crate) fn spine_book(items: &[(&str, &str, Option<&str>)]) -> Vec<u8> {
+        spine_book_with(items, &[])
+    }
+
+    /// [`spine_book`] with `extra` members the spine does not name — a
+    /// chapter's pictures, by their path in the archive.
+    pub(crate) fn spine_book_with(
+        items: &[(&str, &str, Option<&str>)],
+        extra: &[(&str, &[u8])],
+    ) -> Vec<u8> {
         use std::io::Write;
 
         let manifest: String = items
@@ -1098,6 +1135,10 @@ pub(crate) mod tests {
                     w.start_file(*href, options).unwrap();
                     w.write_all(member.as_bytes()).unwrap();
                 }
+            }
+            for (path, member) in extra {
+                w.start_file(*path, options).unwrap();
+                w.write_all(member).unwrap();
             }
             w.finish().unwrap();
         }
