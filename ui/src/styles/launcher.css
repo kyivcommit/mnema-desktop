@@ -435,6 +435,48 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 }
 .right-head .pdf-view button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
 
+/* A Markdown file as HTML (D199): the worker's allow-listed tags, drawn as a
+   document — the text mode's marks, its type, and code in the theme's colours. */
+.doc-page { display: flex; flex-direction: column; gap: 10px; }
+.doc-page > p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); }
+.doc-page [role="status"] { padding: 6px; background: var(--surface-2); border-radius: 5px; }
+.doc-page .page-show-text {
+  font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 5px; cursor: pointer; align-self: flex-start; padding: 3px 10px;
+}
+.doc-body { font-size: 13.5px; line-height: 1.65; color: var(--ink); overflow-wrap: anywhere; }
+.doc-body :is(p, ul, ol, blockquote, pre, table, dl, figure) { margin: 0 0 12px; }
+.doc-body :is(h1, h2, h3, h4, h5, h6) { margin: 18px 0 8px; line-height: 1.3; font-family: var(--sans); font-weight: 600; font-style: normal; }
+.doc-body h1 { font-size: 20px; } .doc-body h2 { font-size: 17px; } .doc-body h3 { font-size: 15px; }
+.doc-body :is(h4, h5, h6) { font-size: 13.5px; }
+.doc-body > div:first-child > :is(h1, h2, h3, h4, h5, h6) { margin-top: 0; }
+.doc-body :is(ul, ol) { padding-left: 22px; }
+.doc-body li > :is(ul, ol) { margin: 2px 0; }
+.doc-body blockquote { padding: 2px 12px; border-left: 3px solid var(--line-strong); color: var(--ink-soft); }
+.doc-body hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.doc-body code { font-family: var(--mono); font-weight: 400; font-style: normal; font-size: 12px; padding: 1px 4px; border-radius: 4px; background: var(--surface-2); }
+.doc-body pre { padding: 10px 12px; border-radius: 6px; background: var(--surface-2); overflow-x: auto; white-space: pre; }
+.doc-body pre code { padding: 0; background: none; font-size: 12px; line-height: 1.55; }
+.doc-body table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 12.5px; }
+.doc-body :is(th, td) { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.doc-body th { background: var(--surface-2); font-family: var(--sans); font-weight: 600; font-style: normal; }
+.doc-body [align="right"] { text-align: right; } .doc-body [align="center"] { text-align: center; }
+.doc-body .link { color: var(--accent); text-decoration: underline; text-decoration-color: var(--line-strong); }
+.doc-body .img-alt { color: var(--ink-soft); }
+.doc-body .img-alt::before { content: "▣ "; }
+.doc-body mark {
+  background: var(--cite-wash); color: inherit; padding: 1px 0; border-radius: 3px;
+  box-decoration-break: clone; -webkit-box-decoration-break: clone;
+}
+.doc-body mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
+/* syntect's scopes, prefixed `sx-` (D199): a handful of colours on the theme's
+   tokens rather than a generated sheet of hundreds of rules. */
+.doc-body .sx-comment { color: var(--code-comment); }
+.doc-body .sx-string { color: var(--code-string); }
+.doc-body :is(.sx-keyword, .sx-storage) { color: var(--code-keyword); }
+.doc-body :is(.sx-entity.sx-name, .sx-support.sx-function, .sx-support.sx-macro, .sx-support.sx-type) { color: var(--code-name); }
+.doc-body :is(.sx-constant, .sx-number) { color: var(--code-constant); }
+
 /* A PDF page as a picture, the cited passage boxed in the text mode's colours. */
 .pdf-page { display: flex; flex-direction: column; gap: 10px; outline: none; }
 .pdf-page p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); overflow-wrap: anywhere; }

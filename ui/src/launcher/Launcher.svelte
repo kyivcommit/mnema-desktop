@@ -42,9 +42,10 @@
   // The open file's path from its root, reported by the pane and drawn in the
   // right panel's head.
   let fileTitle = $state<string | null>(null);
-  // The open document's type, reported by the pane: a PDF offers the choice of
-  // its page or its text, anything else only text.
+  // The open document's type, reported by the pane: a PDF or a Markdown file
+  // offers the choice of its page or its text, anything else only text.
   let fileMime = $state<string | null>(null);
+  const PAGE_MIMES = new Set(['application/pdf', 'text/markdown']);
   // Remembered in the webview's own storage — a convenience, so a storage that
   // is missing, refuses, or holds something else is the default, the page.
   const PDF_VIEW_KEY = 'mnema.pdfView';
@@ -303,7 +304,7 @@
 
 <Shell bind:panels fileOpen={openFile !== null} {fileTitle}>
   {#snippet fileTools()}
-    {#if fileMime === 'application/pdf'}
+    {#if fileMime !== null && PAGE_MIMES.has(fileMime)}
       <span class="pdf-view" role="group" aria-label={pdfViewLabels.group} data-testid="pdf-view">
         {#each ['text', 'page'] as const as v (v)}
           <button type="button" data-testid="pdf-view-{v}" aria-pressed={pdfView === v}

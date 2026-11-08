@@ -74,6 +74,7 @@
   import { tick } from 'svelte';
   import { locale, t } from '../i18n';
   import { openDocument } from '../lib/ipc';
+  import DocPage from './DocPage.svelte';
   import PdfPage from './PdfPage.svelte';
   import { scrollWithin } from '../lib/scroll';
   import type { DocumentFocus, DocumentLocation, DocumentView, Freshness } from '../lib/ipc';
@@ -276,6 +277,11 @@
       <p role="status" data-testid="file-focus-gone">{focusGoneLabel}</p>
     {/if}
     <PdfPage {location} {view} onShowText={() => onShowText?.()} />
+  {:else if mode === 'page' && view.mime === 'text/markdown'}
+    {#if focusGone}
+      <p role="status" data-testid="file-focus-gone">{focusGoneLabel}</p>
+    {/if}
+    <DocPage {location} {view} onShowText={() => onShowText?.()} />
   {:else}
     {#if badge !== ''}
       <p role="status" data-testid="file-badge">{badge}</p>

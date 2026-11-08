@@ -42,6 +42,11 @@
   --cite: #8F5D05;
   --cite-wash: #FBEBC8;
   --cite-line: #E6CE93;
+  --code-keyword: #7A3E9D;
+  --code-string: #2C7A57;
+  --code-comment: #5F6878;
+  --code-name: #3B49A8;
+  --code-constant: #B5541C;
 
   --ok: #2C7A57;
   --err: #C2453B;
@@ -74,6 +79,11 @@
     --cite: #E6BC66;
     --cite-wash: #3A3320;
     --cite-line: #59492A;
+    --code-keyword: #C99BE8;
+    --code-string: #8FD1A8;
+    --code-comment: #6B7488;
+    --code-name: #93A0EE;
+    --code-constant: #F2A65A;
 
     --ok: #62C398;
     --err: #E8877C;
@@ -108,6 +118,11 @@
   --cite: #E6BC66;
   --cite-wash: #3A3320;
   --cite-line: #59492A;
+  --code-keyword: #C99BE8;
+  --code-string: #8FD1A8;
+  --code-comment: #6B7488;
+  --code-name: #93A0EE;
+  --code-constant: #F2A65A;
 
   --ok: #62C398;
   --err: #E8877C;
