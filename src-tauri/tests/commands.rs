@@ -6017,7 +6017,9 @@ fn cited_document_gone(
 /// The edited file's old document is gone and its path names the new one:
 /// the file at that path is shown, not "no longer in the index". The old
 /// citation is not laid on the new text — its chunk id now belongs to the new
-/// document — and the marker says the path names another document.
+/// document — and the freshness describes the text shown: the file on disk is
+/// the new document's, so `current`, and the pane's only warning is that the
+/// passage is gone.
 #[test]
 fn open_document_follows_the_path_when_the_cited_document_is_gone() {
     let dir = tempfile::tempdir().unwrap();
@@ -6055,7 +6057,7 @@ fn open_document_follows_the_path_when_the_cited_document_is_gone() {
     .expect("open_document was rejected");
 
     assert_eq!(v["kind"], json!("file"), "{v}");
-    assert_eq!(v["freshness"]["kind"], json!("reindexed"), "{v}");
+    assert_eq!(v["freshness"]["kind"], json!("current"), "{v}");
     assert_eq!(v["blocks"].as_array().map(Vec::len), Some(6), "{v}");
     assert_eq!(v["blocks"][5]["text"], json!("Додано абзац."), "{v}");
     assert_eq!(v["focusBlockIds"], json!([]), "{v}");

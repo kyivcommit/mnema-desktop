@@ -694,6 +694,9 @@ enum ComposedView {
     Pending {
         file: FileFields,
         occupant: Option<PathOccupant>,
+        /// The document whose blocks are in `file` — the cited one, or the
+        /// one now at its path when the cited one is gone.
+        shown: String,
     },
 }
 
@@ -722,10 +725,11 @@ fn build_document_view(
     // path names it (`forget_if_unnamed`), so the id the pane holds can be gone
     // while the file is still there. The person opened a file, not a version:
     // the document now at the cited place is shown. Everything about what is
-    // shown — status, size, blocks — is read for `shown`; the focus and the
-    // freshness stay with the cited id, so the old citation is never laid on
-    // the new text and the badge says the path names another document. No
-    // place, or nothing at it, is still `NoSuchDocument`.
+    // shown — status, size, blocks, and the freshness badge — is read for
+    // `shown`, so the badge describes the text on screen. The focus stays with
+    // the cited id, so the old citation is never laid on the new text: the
+    // pane says the passage is gone, one warning in either view. No place, or
+    // nothing at it, is still `NoSuchDocument`.
     let (shown, view, followed) = match db.document_view(document_id, limit)? {
         Some(view) => (document_id.to_string(), view, None),
         None => {
@@ -840,6 +844,7 @@ fn build_document_view(
             root_name: occupant.as_ref().map(|o| basename(&o.root_absolute_path)),
         },
         occupant,
+        shown,
     })
 }
 
@@ -894,8 +899,12 @@ pub(crate) fn document_view_in(
     })?;
     Ok(match composed {
         ComposedView::Settled(view) => view,
-        ComposedView::Pending { file, occupant } => {
-            let freshness = decide_freshness(occupant.as_ref(), document_id);
+        ComposedView::Pending {
+            file,
+            occupant,
+            shown,
+        } => {
+            let freshness = decide_freshness(occupant.as_ref(), &shown);
             file.with(freshness)
         }
     })

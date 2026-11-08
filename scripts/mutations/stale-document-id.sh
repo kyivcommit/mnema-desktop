@@ -36,10 +36,19 @@ case_ "follow: the focus is not checked against the cited document" \
   'if true' \
   mnema-desktop 'open_document_follows_the_path_when_the_cited_document_is_gone' --test commands
 
-# S4. The followed occupant is dropped: the badge cannot say the path names
-# another document.
+# S4. The followed occupant is dropped: the title loses its path and the
+# freshness reads `noPath` for a file that is right there.
 case_ "follow: the occupant found for the shown document is not used for freshness" \
   $TR \
   's~\Q(Some(occupant), ..) => Some(occupant),\E~(Some(_), ..) => None,~' \
   '(Some(_), ..) => None,' \
+  mnema-desktop 'open_document_follows_the_path_when_the_cited_document_is_gone' --test commands
+
+# S5. Freshness is decided for the cited document, not the one shown: a file
+# opened at its current text carries a "this path names another document"
+# badge beside the "passage is gone" note — two warnings for one fact.
+case_ "follow: freshness is decided against the cited document, not the shown one" \
+  $TR \
+  's~\Qlet freshness = decide_freshness(occupant.as_ref(), &shown);\E~let freshness = decide_freshness(occupant.as_ref(), document_id);~' \
+  'let freshness = decide_freshness(occupant.as_ref(), document_id);' \
   mnema-desktop 'open_document_follows_the_path_when_the_cited_document_is_gone' --test commands
