@@ -85,6 +85,8 @@ tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 # comment. On Windows it also brings `winreg`, and on Redox `redox_users`;
 # neither is in this host's graph.
 tauri-plugin-autostart = "2.5"
+# 2.5 needs tauri 2.12; held at 2.4 until tauri itself is bumped.
+tauri-plugin-window-state = "~2.4.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

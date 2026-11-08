@@ -174,3 +174,14 @@ test('opening another kind of file takes the choice away', async () => {
   await fireEvent.click(screen.getByTestId('tree-file-doc-1'));
   await waitFor(() => expect(screen.queryByTestId('pdf-view')).toBeNull());
 });
+
+test('«Show in folder» sits in the right head of any open file and names its root and path', async () => {
+  mime = 'text/plain';
+  render(Launcher);
+  await openFile();
+  expect(screen.queryByTestId('pdf-view')).toBeNull();
+  const reveal = screen.getByTestId('reveal-file');
+  expect(document.querySelector('.right-head')!.contains(reveal)).toBe(true);
+  await fireEvent.click(reveal);
+  expect(invoke).toHaveBeenCalledWith('reveal_document', { rootId: 1, relativePath: 'notes/a.md' });
+});

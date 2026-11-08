@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { locale, t } from '../i18n';
-  import { ask, conversationsOn, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
+  import { ask, conversationsOn, continueHistory, historyEntry, newChat, openSettings, modelSettings, providerStatus, revealDocument, type ProviderChoice, type ProviderStatus, type RoleStatuses } from '../lib/ipc';
   import { checkQuery, firstCard, roleReady, roleServed, stateFromAnswer, turnsAfter, type LauncherState, type Turn } from './state';
   import Toolbar from './Toolbar.svelte';
   import AddFolder from './AddFolder.svelte';
@@ -61,7 +61,7 @@
   }
   const pdfViewLabels = $derived.by(() => {
     void $locale;
-    return { group: t('page_view_label'), text: t('pdf_view_text'), page: t('pdf_view_page') };
+    return { group: t('page_view_label'), text: t('pdf_view_text'), page: t('pdf_view_page'), reveal: t('reveal_file') };
   });
   // The tree's mark is the (root, path) pair, never `documentId` (spec §3):
   // one document can sit at several paths, and a key on the id would mark
@@ -309,10 +309,23 @@
     {#if fileMime !== null && PAGE_MIMES.has(fileMime)}
       <span class="pdf-view" role="group" aria-label={pdfViewLabels.group} data-testid="pdf-view">
         {#each ['text', 'page'] as const as v (v)}
-          <button type="button" data-testid="pdf-view-{v}" aria-pressed={pdfView === v}
-            onclick={() => setPdfView(v)}>{pdfViewLabels[v]}</button>
+          <button type="button" class="tb" data-testid="pdf-view-{v}" aria-pressed={pdfView === v}
+            aria-label={pdfViewLabels[v]} title={pdfViewLabels[v]} onclick={() => setPdfView(v)}>
+            {#if v === 'text'}
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 4h10M3 7h10M3 10h10M3 13h6"/></svg>
+            {:else}
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>
+            {/if}
+          </button>
         {/each}
       </span>
+    {/if}
+    {#if openFile !== null}
+      {@const place = openFile}
+      <button type="button" class="tb" data-testid="reveal-file" aria-label={pdfViewLabels.reveal} title={pdfViewLabels.reveal}
+        onclick={() => revealDocument(place).catch((e) => console.error('reveal_document failed', e))}>
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5V12.5h12V6H7.5L6 4.5z"/></svg>
+      </button>
     {/if}
   {/snippet}
   {#snippet transcript()}

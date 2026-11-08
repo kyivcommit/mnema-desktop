@@ -427,13 +427,10 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 }
 .file-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
 
-/* The right head's Text / Page choice for a PDF. */
-.right-head .pdf-view { flex: none; display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--surface-2); }
-.right-head .pdf-view button {
-  font: inherit; font-size: 12px; color: var(--ink-soft); background: none;
-  border: 0; border-radius: 5px; padding: 2px 8px; cursor: pointer;
-}
-.right-head .pdf-view button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+/* The right head's Text / Page choice, as the toolbar's icons, and beside it
+   «Show in folder» on every open file. */
+.right-head .pdf-view { flex: none; display: inline-flex; gap: 2px; }
+.right-head .file-path ~ .tb { margin-left: -4px; }
 
 /* A Markdown file as HTML (D199): the worker's allow-listed tags, drawn as a
    document — the text mode's marks, its type, and code in the theme's colours. */
