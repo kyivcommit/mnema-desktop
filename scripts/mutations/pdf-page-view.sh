@@ -175,7 +175,7 @@ case_ "refusal: page zero is not refused" \
 # W1. A line that is not a request ends the worker instead of being answered.
 case_ "worker: a line that is not a request kills the process" \
   crates/mnema-extract/src/bin/worker.rs \
-  's~Err\(e\) => \(\s*RenderError::Unreadable,\s*format!\("not a render request: \{e\}"\),\s*\),~Err(e) => panic!("not a render request: {e}"),~' \
+  's~Err\(e\) => refuse\(\s*RenderError::Unreadable,\s*format!\("not a render request: \{e\}"\),\s*\),~Err(e) => panic!("not a render request: {e}"),~' \
   'panic!("not a render request: {e}")' \
   mnema-extract 'render_page_names_a_non_pdf_and_a_line_that_is_not_a_request' --test worker_cli
 

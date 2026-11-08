@@ -423,9 +423,9 @@ case_ "pane: the document's type is not reported" \
 # L1. The choice is offered for any file that has a type.
 case_ "launcher: the choice is offered for a file that is not a PDF" \
   $LA \
-  "s~\\{#if fileMime === 'application/pdf'\\}~{#if fileMime !== null}~" \
+  "s~\\{#if fileMime !== null && PAGE_MIMES\\.has\\(fileMime\\)\\}~{#if fileMime !== null}~" \
   '{#if fileMime !== null}' \
-  $LT 'the choice is not offered for anything but a PDF' runner=vitest
+  $LT 'the choice is not offered for anything but a PDF or Markdown' runner=vitest
 
 # L2. The choice is not written down.
 case_ "launcher: the choice is not remembered" \

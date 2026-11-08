@@ -11,8 +11,8 @@ case_ "launcher: current row loses its state selector" \
 
 case_ "launcher: primary source highlight loses its outline" \
   ui/src/styles/launcher.css \
-  's~mark\[data-primary="true"\]~mark[data-primary="never"]~' \
-  'mark[data-primary="never"]' \
+  's~\.file-card mark\[data-primary="true"\]~.file-card mark[data-primary="never"]~' \
+  '.file-card mark[data-primary="never"]' \
   src/launcher/styles.test.ts 'real file pane paints the cited span and keeps its badge on screen' runner=vitest
 
 case_ "launcher: the right area loses its own track" \
