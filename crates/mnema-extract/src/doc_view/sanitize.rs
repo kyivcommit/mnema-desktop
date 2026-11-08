@@ -243,7 +243,15 @@ pub(crate) fn sanitize_tree(
                         skipping += 1;
                         continue;
                     }
-                    match allowed(element.name()) {
+                    // An `<a>` without `href` is an anchor, not a link — and a book's
+                    // `<a id="…"/>` is not closed by the HTML parser, so drawn as a link
+                    // it would underline everything after it. It is unwrapped.
+                    let anchor = element.name() == "a" && element.attr("href").is_none();
+                    match if anchor {
+                        None
+                    } else {
+                        allowed(element.name())
+                    } {
                         Some(Out::Same(tag)) => {
                             open_tag(&mut out, tag, element);
                             owed.push(Some(tag));
@@ -309,6 +317,17 @@ mod tests {
     /// The caller placed the marks: the case every test below but one is about.
     fn sanitize(fragment: &str) -> String {
         super::sanitize(fragment, true)
+    }
+
+    #[test]
+    fn an_anchor_without_a_target_is_text_not_a_link() {
+        let document = Html::parse_document(
+            "<h1><a id=\"top\"/>Розділ</h1><p>Текст <a href=\"ch3.html\">розділу 3</a>.</p>",
+        );
+        assert_eq!(
+            sanitize_tree(document.tree.root(), true, |_| false),
+            "<h1>Розділ</h1><p>Текст <span class=\"link\">розділу 3</span>.</p>"
+        );
     }
 
     #[test]

@@ -171,25 +171,27 @@ async function openEpub() {
   await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2'));
 }
 
-test('an EPUB opens on the cited chapter with both neighbours offered, above and below', async () => {
+test('an EPUB opens on the cited chapter with both neighbours offered, once, at the top', async () => {
   await openEpub();
   expect(docCalls()[0].pageNo).toBeNull();
   expect(label()).toBe('Chapter 2 of 3');
-  expect(screen.getAllByTestId('doc-chapter-prev')).toHaveLength(2);
-  expect(screen.getAllByTestId('doc-chapter-next')).toHaveLength(2);
+  expect(screen.getAllByTestId('doc-chapter-prev')).toHaveLength(1);
+  expect(screen.getAllByTestId('doc-chapter-next')).toHaveLength(1);
+  // The buttons read `<` and `>`; their names are the words.
+  expect(screen.getByRole('button', { name: 'Previous chapter' })).toBe(button('prev'));
+  expect(screen.getByRole('button', { name: 'Next chapter' })).toBe(button('next'));
   expect(button('prev').disabled).toBe(false);
   expect(button('next').disabled).toBe(false);
 });
 
 test('next and previous ask for the neighbour chapter; there is no next after the last', async () => {
   await openEpub();
-  await fireEvent.click(button('next', 1));
+  await fireEvent.click(button('next'));
   await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 3'));
   expect(docCalls().at(-1)!.pageNo).toBe(3);
   expect(docCalls().at(-1)!.spans).toEqual(spans);
   expect(label()).toBe('Chapter 3 of 3');
   expect(button('next').disabled).toBe(true);
-  expect(button('next', 1).disabled).toBe(true);
   await fireEvent.click(button('prev'));
   await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2'));
   expect(docCalls().at(-1)!.pageNo).toBe(2);
@@ -202,7 +204,6 @@ test('there is no previous chapter on the first', async () => {
   await screen.findByTestId('doc-body');
   expect(label()).toBe('Chapter 1 of 3');
   expect(button('prev').disabled).toBe(true);
-  expect(button('prev', 1).disabled).toBe(true);
   expect(button('next').disabled).toBe(false);
 });
 

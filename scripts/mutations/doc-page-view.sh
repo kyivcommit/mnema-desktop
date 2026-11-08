@@ -429,3 +429,11 @@ case_ "html view: the worker hands an HTML file to the Markdown renderer" \
   's~\QDocReader::Html => html_doc::render_html(&bytes, req),\E~DocReader::Html => markdown::render_markdown(&bytes, req),~' \
   'DocReader::Html => markdown::render_markdown(&bytes, req),' \
   mnema-extract "render_doc_answers_an_html_file_with_its_citation_marked" --test worker_cli
+
+# X21. A book's `<a id="…"/>` anchor is drawn as a link: the parser leaves it
+# open, so everything after it reads as one underlined link.
+case_ "allow-list: an anchor without a target is drawn as a link" \
+  $SA \
+  's~\Qlet anchor = element.name() == "a" && element.attr("href").is_none();\E~let anchor = false;~' \
+  'let anchor = false;' \
+  mnema-extract "${ST}an_anchor_without_a_target_is_text_not_a_link" --lib

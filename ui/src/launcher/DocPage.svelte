@@ -134,11 +134,11 @@
 
 {#snippet chapterBar()}
   <nav class="doc-chapters" aria-label={L.chapter}>
-    <button type="button" class="page-show-text" data-testid="doc-chapter-prev"
-      disabled={at <= 0} onclick={() => go(-1)}>{L.prev}</button>
+    <button type="button" class="page-show-text" data-testid="doc-chapter-prev" aria-label={L.prev}
+      title={L.prev} disabled={at <= 0} onclick={() => go(-1)}>&lt;</button>
     <span data-testid="doc-chapter-label">{L.chapter}</span>
-    <button type="button" class="page-show-text" data-testid="doc-chapter-next"
-      disabled={at >= chapters.length - 1} onclick={() => go(1)}>{L.next}</button>
+    <button type="button" class="page-show-text" data-testid="doc-chapter-next" aria-label={L.next}
+      title={L.next} disabled={at >= chapters.length - 1} onclick={() => go(1)}>&gt;</button>
   </nav>
 {/snippet}
 
@@ -157,6 +157,5 @@
     {/if}
     <!-- Allow-listed by the worker (`doc_view/sanitize.rs`); the CSP is the second line. -->
     <div class="doc-body" data-testid="doc-body">{@html got.html}</div>
-    {#if at >= 0}{@render chapterBar()}{/if}
   {/if}
 </section>

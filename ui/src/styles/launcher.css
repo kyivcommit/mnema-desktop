@@ -445,7 +445,11 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
   border-radius: 5px; cursor: pointer; align-self: flex-start; padding: 3px 10px;
 }
 /* An EPUB's chapters: the show-text button's look, the PDF page line's type. */
-.doc-chapters { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-soft); }
+/* Over the chapter while it scrolls by, as the PDF's page line. */
+.doc-chapters {
+  position: sticky; top: 0; z-index: 1; padding: 6px 0; display: flex; align-items: center;
+  justify-content: center; gap: 10px; font-size: 12px; color: var(--ink-soft); background: var(--surface);
+}
 .doc-chapters .page-show-text:disabled { cursor: default; opacity: 0.5; }
 .doc-body { font-size: 13.5px; line-height: 1.65; color: var(--ink); overflow-wrap: anywhere; }
 .doc-body :is(p, ul, ol, blockquote, pre, table, dl, figure) { margin: 0 0 12px; }
