@@ -453,10 +453,14 @@ pub enum Error {
         source: mnema_index::Error,
     },
     /// `reveal_document` was asked about a path the index holds no row for
-    /// — removed by a scan, or a citation that names no single path.
+    /// — removed by a scan.
     #[error("this file is not in the index any more")]
     NothingToReveal,
-    /// The file manager could not be started to show the file.
+    /// `reveal_document` was given a path with no root, and more than one
+    /// watched folder holds a file at that path.
+    #[error("more than one watched folder holds this file, so which one to show is not known")]
+    AmbiguousReveal,
+    /// The file manager could not be started, or ran and showed nothing.
     #[error("could not show the file: {0}")]
     Reveal(std::io::Error),
 }

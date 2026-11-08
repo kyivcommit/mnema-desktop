@@ -934,12 +934,41 @@ pub fn reveal_document(
     root_id: Option<i64>,
     relative_path: Option<String>,
 ) -> Result<(), Error> {
-    let occupant = state.with_index(|db| {
-        db.read_snapshot(|db| cited_occupant(db, root_id, relative_path.as_deref()))
+    let path = relative_path.as_deref();
+    let (occupant, roots) = state.with_index(|db| {
+        db.read_snapshot(|db| {
+            let occupant = cited_occupant(db, root_id, path)?;
+            // `cited_occupant`'s None without a root is either no row or
+            // several roots holding the path; the second is not "gone".
+            let roots = match (&occupant, root_id, path) {
+                (None, None, Some(p)) => db.roots_holding_path(p)?.len(),
+                _ => 0,
+            };
+            Ok((occupant, roots))
+        })
     })?;
-    let occupant = occupant.ok_or(Error::NothingToReveal)?;
+    let Some(occupant) = occupant else {
+        return Err(if roots > 1 {
+            Error::AmbiguousReveal
+        } else {
+            Error::NothingToReveal
+        });
+    };
     let full = Path::new(&occupant.root_absolute_path).join(&occupant.relative_path);
     reveal(&full).map_err(Error::Reveal)
+}
+
+/// A file manager that ran but showed nothing (`open -R` on a missing file
+/// exits 1) is a failure, not a success.
+#[cfg(not(target_os = "windows"))]
+fn succeeded(status: std::process::ExitStatus) -> std::io::Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "the file manager exited with {status}"
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -948,13 +977,14 @@ fn reveal(path: &Path) -> std::io::Result<()> {
         .arg("-R")
         .arg(path)
         .status()
-        .map(drop)
+        .and_then(succeeded)
 }
 
 #[cfg(target_os = "windows")]
 fn reveal(path: &Path) -> std::io::Result<()> {
     let mut select = std::ffi::OsString::from("/select,");
     select.push(path);
+    // Exit code ignored: explorer exits non-zero even when it showed the file.
     std::process::Command::new("explorer")
         .arg(select)
         .status()
@@ -969,7 +999,7 @@ fn reveal(path: &Path) -> std::io::Result<()> {
     std::process::Command::new("xdg-open")
         .arg(dir)
         .status()
-        .map(drop)
+        .and_then(succeeded)
 }
 
 /// One level of a watched folder's tree as the exclusion screen needs it.
@@ -1951,5 +1981,15 @@ mod tests {
     #[test]
     fn the_block_ceiling_is_fifty_thousand() {
         assert_eq!(MAX_BLOCKS, 50_000);
+    }
+
+    // `open -R` on a file that is gone exits 1 and shows nothing; that must
+    // reach the caller as an error, not as a reveal that happened.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn revealing_a_missing_file_is_an_error() {
+        let gone = std::env::temp_dir().join("mnema-reveal-test-missing-file.pdf");
+        let _ = std::fs::remove_file(&gone);
+        assert!(super::reveal(&gone).is_err());
     }
 }

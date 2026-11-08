@@ -175,7 +175,7 @@ test('opening another kind of file takes the choice away', async () => {
   await waitFor(() => expect(screen.queryByTestId('pdf-view')).toBeNull());
 });
 
-test('«Show in Finder» sits in the right head of any open file and names its root and path', async () => {
+test('«Show in folder» sits in the right head of any open file and names its root and path', async () => {
   mime = 'text/plain';
   render(Launcher);
   await openFile();

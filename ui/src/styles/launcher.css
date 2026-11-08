@@ -428,9 +428,9 @@ main.shell[data-docs="true"] .header-add-folder { display: none; }
 .file-card mark[data-primary="true"] { outline: 1px solid var(--cite-line); }
 
 /* The right head's Text / Page choice, as the toolbar's icons, and beside it
-   «Show in Finder» on every open file. */
+   «Show in folder» on every open file. */
 .right-head .pdf-view { flex: none; display: inline-flex; gap: 2px; }
-.right-head > .tb { margin-left: -4px; }
+.right-head .file-path ~ .tb { margin-left: -4px; }
 
 /* A Markdown file as HTML (D199): the worker's allow-listed tags, drawn as a
    document — the text mode's marks, its type, and code in the theme's colours. */
