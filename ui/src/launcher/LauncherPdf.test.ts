@@ -57,7 +57,7 @@ beforeEach(() => {
       case 'list_history': return Promise.resolve([]);
       case 'open_document': return Promise.resolve(document_());
       case 'render_pdf_page': return Promise.resolve(pageReply);
-      case 'render_doc': return Promise.resolve({ kind: 'page', html: '<p>drawn</p>', pages: 1, highlight: 'shown' });
+      case 'render_doc': return Promise.resolve({ kind: 'page', html: '<p>drawn</p>', pages: 1, highlight: 'shown', pageNo: null });
       default: return Promise.resolve();
     }
   });
@@ -95,6 +95,19 @@ test('a Markdown file is offered the choice too, and its page is the HTML view',
   expect(await screen.findByTestId('file-block')).toBeTruthy();
   expect(screen.queryByTestId('doc-body')).toBeNull();
 });
+
+async function drawnAsHtml(m: string) {
+  mime = m;
+  render(Launcher);
+  await openFile();
+  await screen.findByTestId('doc-body');
+  expect(pressed('page')).toBe('true');
+  expect(screen.queryByTestId('file-block')).toBeNull();
+  await fireEvent.click(screen.getByTestId('pdf-view-text'));
+  expect(await screen.findByTestId('file-block')).toBeTruthy();
+}
+test('an HTML file is offered the choice, and its page is the HTML view', () => drawnAsHtml('text/html'));
+test('an EPUB is offered the choice, and its page is the HTML view', () => drawnAsHtml('application/epub+zip'));
 
 test('the choice is not offered for anything but a PDF or Markdown', async () => {
   mime = 'text/plain';

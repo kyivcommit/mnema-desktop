@@ -2653,6 +2653,47 @@ fn render_doc_answers_a_markdown_file_with_its_citation_marked() {
 }
 
 #[test]
+fn render_doc_answers_an_html_file_with_its_citation_marked() {
+    use mnema_core::render::{
+        DocRange, DocReader, DocRenderReply, DocRenderRequest, TextMatch, doc_text_sha256,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("page.html");
+    let doc = "<html><body><h1>Нотатки</h1><p>Абзац про <b>важливе</b> слово.</p></body></html>";
+    std::fs::write(&path, doc).unwrap();
+    let pages = mnema_extract::extract_html(doc.as_bytes());
+    let hash = doc_text_sha256(pages.iter().flat_map(|p| {
+        p.blocks
+            .iter()
+            .map(move |b| (p.page_no, b.block_type.as_str(), b.text.as_str()))
+    }));
+    let request = DocRenderRequest {
+        path: path.display().to_string(),
+        reader: DocReader::Html,
+        page_no: None,
+        text_sha256: Some(hash),
+        ranges: vec![DocRange {
+            page_no: 1,
+            reading_order: 1,
+            start: "Абзац про ".chars().count() as u32,
+            len: "важливе".chars().count() as u32,
+            primary: true,
+        }],
+    };
+    let line = serde_json::to_string(&request).unwrap() + "\n";
+    match render_doc_run(&line) {
+        DocRenderReply::Rendered { html, pages, text } => {
+            assert_eq!((pages, text), (1, TextMatch::Match));
+            assert!(
+                html.contains("<b><mark data-primary=\"true\">важливе</mark></b>"),
+                "{html}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn render_doc_refuses_a_missing_file_and_a_line_that_is_not_a_request() {
     use mnema_core::render::{DocRenderReply, RenderError};
     let missing = r#"{"path":"/nonexistent/a.md","reader":"markdown","page_no":null,"text_sha256":null,"ranges":[]}"#;

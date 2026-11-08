@@ -2,6 +2,7 @@
 //! D199): read again from disk, marked only when its blocks still hash to the
 //! index's, and passed through one allow-list on the way out.
 
+pub(crate) mod html_doc;
 pub(crate) mod markdown;
 pub(crate) mod sanitize;
 
@@ -25,5 +26,7 @@ pub fn render_doc(req: &DocRenderRequest) -> DocRenderReply {
     };
     match req.reader {
         DocReader::Markdown => markdown::render_markdown(&bytes, req),
+        DocReader::Html => html_doc::render_html(&bytes, req),
+        DocReader::Epub => html_doc::render_epub(&bytes, req),
     }
 }

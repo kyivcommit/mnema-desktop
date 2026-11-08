@@ -59,6 +59,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'page_of' | 'page_image_alt'
   | 'page_note_changed' | 'page_note_scan' | 'page_note_unplaced'
   | 'page_unavailable' | 'page_unavailable_missing' | 'page_unavailable_too_large' | 'page_show_text'
+  | 'page_prev_chapter' | 'page_next_chapter' | 'page_chapter_of' | 'page_unavailable_no_chapter'
   | 'card_passages'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
@@ -478,6 +479,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_unavailable_missing: 'Файла немає на диску.',
     page_unavailable_too_large: 'Файл завеликий, щоб показати його сторінкою.',
     page_show_text: 'Показати текст',
+    page_prev_chapter: 'Попередній розділ',
+    page_next_chapter: 'Наступний розділ',
+    page_chapter_of: 'Розділ {n} з {m}',
+    page_unavailable_no_chapter: 'У цьому розділі немає проіндексованого тексту.',
     // 🔴 Ruling AF: `bridge.rs:536-540` opens state E for any non-`Ready`
     // readiness, `bridge.rs:293-302` gives that three variants, and the wire
     // shape at `bridge.rs:476-480` carries none of them. So this sentence says
@@ -1406,6 +1411,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     page_unavailable_missing: 'The file is missing from disk.',
     page_unavailable_too_large: 'The file is too large to show as a page.',
     page_show_text: 'Show text',
+    page_prev_chapter: 'Previous chapter',
+    page_next_chapter: 'Next chapter',
+    page_chapter_of: 'Chapter {n} of {m}',
+    page_unavailable_no_chapter: 'This chapter has no indexed text.',
     citations_only_banner: 'Generation is unavailable. The search found {count, plural, one {# passage} other {# passages}}.',
     citations_only_banner_empty: 'Generation is unavailable.',
     citations_only_empty: 'No passages matched this query.',

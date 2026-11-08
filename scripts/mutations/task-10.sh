@@ -199,8 +199,8 @@ case_ "reader: an element nobody enumerated ends a run rather than joining one" 
 # missing: the document is there, shorter.
 case_ "reader: a run ending at a closing tag becomes a block" \
   crates/mnema-extract/src/html.rs \
-  's{                    flush\(&mut run, &flow, &mut pages\);\n                    flow\.pop\(\);}{                    run.clear();\n                    flow.pop();}' \
-  'run.clear();
+  's{                    flush\(&mut run, &flow, &mut out\);\n                    flow\.pop\(\);}{                    run = Run::default();\n                    flow.pop();}' \
+  'run = Run::default();
                     flow.pop();' \
   mnema-extract 'every_word_the_page_would_show_lands_in_exactly_one_block' --test html
 
@@ -208,8 +208,8 @@ case_ "reader: a run ending at a closing tag becomes a block" \
 # directly under `<body>` or `<section>` before its first child element is lost.
 case_ "reader: a run ending at an opening tag becomes a block" \
   crates/mnema-extract/src/html.rs \
-  's{                        flush\(&mut run, &flow, &mut pages\);\n                        flow\.push\(block_type\(element\)\);}{                        run.clear();\n                        flow.push(block_type(element));}' \
-  'run.clear();
+  's{                        flush\(&mut run, &flow, &mut out\);\n                        flow\.push\(block_type\(element\)\);}{                        run = Run::default();\n                        flow.push(block_type(element));}' \
+  'run = Run::default();
                         flow.push(block_type(element));' \
   mnema-extract 'every_word_the_page_would_show_lands_in_exactly_one_block' --test html
 
@@ -242,8 +242,8 @@ case_ "reader: inline markup inside a sentence stays one block" \
 # one nothing downstream can undo.
 case_ "reader: the text is not folded on its way into a block" \
   crates/mnema-extract/src/html.rs \
-  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");}' \
-  'let text = nfc::normalise(run).split_whitespace().collect::<Vec<_>>().join(" ");' \
+  's{    let text = nfc::normalise\(&run\.text\)\.into_owned\(\);}{    let text = nfc::normalise(\&run.text).split_whitespace().collect::<Vec<_>>().join(" ");}' \
+  'let text = nfc::normalise(&run.text).split_whitespace().collect::<Vec<_>>().join(" ");' \
   mnema-extract 'the_text_is_verbatim_after_nfc_and_nothing_else' --test html
 
 # C21. NFC dropped. A Ukrainian `й` written decomposed and one written composed
@@ -251,8 +251,8 @@ case_ "reader: the text is not folded on its way into a block" \
 # own spelling — and macOS hands over decomposed text.
 case_ "reader: a block's text is normalised at all" \
   crates/mnema-extract/src/html.rs \
-  's{    let text = nfc::normalise\(run\)\.into_owned\(\);}{    let text = run.clone();}' \
-  'let text = run.clone();' \
+  's{    let text = nfc::normalise\(&run\.text\)\.into_owned\(\);}{    let text = run.text.clone();}' \
+  'let text = run.text.clone();' \
   mnema-extract 'the_text_is_verbatim_after_nfc_and_nothing_else' --test html
 
 # C22. Line numbers invented for a format that has none. `pages_of` gives this
@@ -270,8 +270,8 @@ case_ "reader: an html block carries no line numbers" \
 # so a page whose blocks all claim position 0 is a page with no reading order.
 case_ "reader: reading order counts the blocks of its page" \
   crates/mnema-extract/src/html.rs \
-  's{        reading_order: page\.blocks\.len\(\) as i64,}{        reading_order: 0,}' \
-  'reading_order: 0,' \
+  's{    let reading_order = page\.blocks\.len\(\) as u32;}{    let reading_order = 0u32;}' \
+  'let reading_order = 0u32;' \
   mnema-extract 'reading_order_restarts_on_every_page' --test html
 
 # ------------------------------- the rebuild a changed reader has to force
@@ -364,7 +364,7 @@ case_ "ingest: only the path that already named this document can call it stale"
 # tokenized apart, which is the harm D32 exists to prevent.
 case_ "reader: the text is normalised after the parse, not before it" \
   crates/mnema-extract/src/html.rs \
-  's{    let document = Html::parse_document\(&decoded\);}{    let source = nfc::normalise(\&decoded);\n    let document = Html::parse_document(\&source);};s{    let text = nfc::normalise\(run\)\.into_owned\(\);\n    run\.clear\(\);}{    let text = std::mem::take(run);}' \
+  's{    Html::parse_document\(&decoded\)}{    let source = nfc::normalise(\&decoded);\n    Html::parse_document(\&source)};s{    let text = nfc::normalise\(&run\.text\)\.into_owned\(\);}{    let text = run.text.clone();}' \
   'let source = nfc::normalise(&decoded);' \
   mnema-extract 'a_combining_mark_written_as_a_character_reference_is_composed_too' --test html
 
@@ -382,7 +382,7 @@ case_ "reader: the text is normalised after the parse, not before it" \
 # grows, this still finds it.
 case_ "reader: a box on the page ends the run around it" \
   crates/mnema-extract/src/html.rs \
-  's{if renders_a_box\(element\)[^\{]*\{\n\s*flush\(&mut run, &flow, &mut pages\);\n\s*\}}{/* the box does not end the run */}' \
+  's{if renders_a_box\(element\)[^\{]*\{\n\s*flush\(&mut run, &flow, &mut out\);\n\s*\}}{/* the box does not end the run */}' \
   '/* the box does not end the run */' \
   mnema-extract 'a_box_on_the_page_ends_a_run_and_something_invisible_does_not' --test html
 

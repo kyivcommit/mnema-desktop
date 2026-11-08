@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import FilePane from './FilePane.svelte';
 import { setLocale } from '../i18n';
@@ -31,10 +31,10 @@ function md(over: Partial<Extract<DocumentView, { kind: 'file' }>> = {}): Docume
 const HTML = '<div data-block="1:0"><h1>Нотатки</h1></div>'
   + '<div data-block="1:1"><p><mark>Абзац</mark> про <mark data-primary="true">важливе</mark>.</p></div>';
 const page = (over: Partial<Extract<DocPageView, { kind: 'page' }>> = {}): DocPageView =>
-  ({ kind: 'page', html: HTML, pages: 1, highlight: 'shown', ...over });
+  ({ kind: 'page', html: HTML, pages: 1, highlight: 'shown', pageNo: null, ...over });
 
 let view: DocumentView;
-let docReply: () => Promise<unknown>;
+let docReply: (args: Record<string, unknown>) => Promise<unknown>;
 const docCalls = () => invoke.mock.calls.filter(([c]) => c === 'render_doc').map(([, a]) => a as Record<string, unknown>);
 
 beforeEach(() => {
@@ -42,9 +42,9 @@ beforeEach(() => {
   scrollWithin.mockReset();
   view = md();
   docReply = () => Promise.resolve(page());
-  invoke.mockImplementation((cmd: string) => {
+  invoke.mockImplementation((cmd: string, args: Record<string, unknown>) => {
     if (cmd === 'open_document') return Promise.resolve(view);
-    if (cmd === 'render_doc') return docReply();
+    if (cmd === 'render_doc') return docReply(args);
     return Promise.resolve();
   });
 });
@@ -65,7 +65,7 @@ test('the HTML the backend answers is the page, asked with the pane\'s spans', a
   const body = await screen.findByTestId('doc-body');
   expect(body.querySelector('h1')!.textContent).toBe('Нотатки');
   expect(docCalls()).toEqual([
-    { documentId: 'md-1', rootId: 1, relativePath: 'notes/a.md', spans },
+    { documentId: 'md-1', rootId: 1, relativePath: 'notes/a.md', spans, pageNo: null },
   ]);
   expect(screen.queryByTestId('file-block')).toBeNull();
 });
@@ -140,4 +140,147 @@ test('a failed draw is not final: a later answer replaces the failure', async ()
   window.dispatchEvent(new Event('focus'));
   expect((await screen.findByTestId('doc-body')).querySelector('h1')).toBeTruthy();
   expect(screen.queryByTestId('page-unavailable')).toBeNull();
+});
+
+// ── An EPUB, one chapter at a time ──────────────────────────────────────────
+
+// Three chapters (pages 1–3), the citation in the second.
+function epub(): DocumentView {
+  return md({
+    mime: 'application/epub+zip',
+    blocks: [
+      { blockId: 1, kind: 'paragraph', text: 'Перший.', pageNo: 1, sectionTitle: null },
+      { blockId: 2, kind: 'paragraph', text: 'Абзац про важливе.', pageNo: 2, sectionTitle: null },
+      { blockId: 4, kind: 'paragraph', text: 'Ще другий.', pageNo: 2, sectionTitle: null },
+      { blockId: 3, kind: 'paragraph', text: 'Третій.', pageNo: 3, sectionTitle: null },
+    ],
+  });
+}
+// The backend's choice: the cited chapter when none is asked for.
+const chapterReply = (args: Record<string, unknown>) => {
+  const no = (args.pageNo as number | null) ?? 2;
+  return Promise.resolve(page({ pageNo: no, html: `<p>розділ ${no}</p>` }));
+};
+const button = (which: 'prev' | 'next', n = 0) =>
+  screen.getAllByTestId(`doc-chapter-${which}`)[n] as HTMLButtonElement;
+const label = () => screen.getAllByTestId('doc-chapter-label')[0].textContent;
+async function openEpub() {
+  view = epub();
+  docReply = chapterReply;
+  mount();
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2'));
+}
+
+test('an EPUB opens on the cited chapter with both neighbours offered, once, at the top', async () => {
+  await openEpub();
+  expect(docCalls()[0].pageNo).toBeNull();
+  expect(label()).toBe('Chapter 2 of 3');
+  expect(screen.getAllByTestId('doc-chapter-prev')).toHaveLength(1);
+  expect(screen.getAllByTestId('doc-chapter-next')).toHaveLength(1);
+  // The buttons read `<` and `>`; their names are the words.
+  expect(screen.getByRole('button', { name: 'Previous chapter' })).toBe(button('prev'));
+  expect(screen.getByRole('button', { name: 'Next chapter' })).toBe(button('next'));
+  expect(button('prev').disabled).toBe(false);
+  expect(button('next').disabled).toBe(false);
+});
+
+test('next and previous ask for the neighbour chapter; there is no next after the last', async () => {
+  await openEpub();
+  await fireEvent.click(button('next'));
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 3'));
+  expect(docCalls().at(-1)!.pageNo).toBe(3);
+  expect(docCalls().at(-1)!.spans).toEqual(spans);
+  expect(label()).toBe('Chapter 3 of 3');
+  expect(button('next').disabled).toBe(true);
+  await fireEvent.click(button('prev'));
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2'));
+  expect(docCalls().at(-1)!.pageNo).toBe(2);
+});
+
+test('a chapter with no text is not counted and is stepped over', async () => {
+  // Spine 2 is a cover: the index holds no block on it.
+  view = md({
+    mime: 'application/epub+zip',
+    blocks: [
+      { blockId: 1, kind: 'paragraph', text: 'Перший.', pageNo: 1, sectionTitle: null },
+      { blockId: 2, kind: 'paragraph', text: 'Абзац про важливе.', pageNo: 3, sectionTitle: null },
+      { blockId: 3, kind: 'paragraph', text: 'Останній.', pageNo: 4, sectionTitle: null },
+    ],
+  });
+  docReply = (args) => Promise.resolve(page({ pageNo: (args.pageNo as number | null) ?? 3, html: '<p>x</p>', pages: 4 }));
+  mount();
+  await screen.findByTestId('doc-body');
+  expect(label()).toBe('Chapter 2 of 3');
+  await fireEvent.click(button('prev'));
+  await waitFor(() => expect(label()).toBe('Chapter 1 of 3'));
+  expect(docCalls().at(-1)!.pageNo).toBe(1);
+});
+
+test('there is no previous chapter on the first', async () => {
+  view = epub();
+  docReply = (args) => Promise.resolve(page({ pageNo: (args.pageNo as number | null) ?? 1, html: '<p>перший</p>' }));
+  mount();
+  await screen.findByTestId('doc-body');
+  expect(label()).toBe('Chapter 1 of 3');
+  expect(button('prev').disabled).toBe(true);
+  expect(button('next').disabled).toBe(false);
+});
+
+test('a chapter without the citation is shown from its top', async () => {
+  await openEpub();
+  const scroller = screen.getByTestId('doc-page').parentElement!.parentElement!;
+  scroller.scrollTop = 120;
+  await fireEvent.click(button('next'));
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 3'));
+  await waitFor(() => expect(scroller.scrollTop).toBe(0));
+});
+
+test('a Markdown or HTML file has no chapters', async () => {
+  const first = mount();
+  await screen.findByTestId('doc-body');
+  expect(screen.queryAllByTestId('doc-chapter-next')).toHaveLength(0);
+  first.unmount();
+  view = md({ mime: 'text/html' });
+  // Even an answer that names a page draws no chapter bar for a whole file.
+  docReply = () => Promise.resolve(page({ pageNo: 1 }));
+  mount();
+  await screen.findByTestId('doc-body');
+  expect(screen.queryAllByTestId('doc-chapter-next')).toHaveLength(0);
+  expect(screen.queryAllByTestId('doc-chapter-label')).toHaveLength(0);
+});
+
+test('a slow chapter is not painted once the person has moved on', async () => {
+  await openEpub();
+  let release!: (v: unknown) => void;
+  docReply = (args) => args.pageNo === 3
+    ? new Promise((r) => { release = r; })
+    : chapterReply(args);
+  await fireEvent.click(button('next'));
+  await waitFor(() => expect(docCalls().at(-1)!.pageNo).toBe(3));
+  await fireEvent.click(button('prev'));
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2'));
+  release(page({ pageNo: 3, html: '<p>розділ 3</p>' }));
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByTestId('doc-body').textContent).toBe('розділ 2');
+  expect(label()).toBe('Chapter 2 of 3');
+});
+
+test('the window coming back draws the chapter on the page, not the cited one', async () => {
+  await openEpub();
+  await fireEvent.click(button('next'));
+  await waitFor(() => expect(screen.getByTestId('doc-body').textContent).toBe('розділ 3'));
+  const before = docCalls().length;
+  window.dispatchEvent(new Event('focus'));
+  await waitFor(() => expect(docCalls().length).toBe(before + 1));
+  expect(docCalls().at(-1)!.pageNo).toBe(3);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.getByTestId('doc-body').textContent).toBe('розділ 3');
+});
+
+test('a chapter with no indexed text says so and offers the text', async () => {
+  view = epub();
+  docReply = () => Promise.resolve({ kind: 'unavailable', reason: 'noChapter' });
+  mount();
+  expect((await screen.findByTestId('page-unavailable')).textContent).toBe('This chapter has no indexed text.');
+  expect(screen.getByTestId('page-show-text')).toBeTruthy();
 });

@@ -151,20 +151,14 @@ pub(crate) enum HeadTitle {
 /// mojibaked. One detector also keeps the promise `text.rs` makes: the same
 /// bytes read as `.txt`, `.md` and `.html` are decoded the same way.
 pub fn extract_html(bytes: &[u8]) -> Vec<HtmlPage> {
-    read(bytes, HeadTitle::IsText)
+    walk(&parse(bytes), HeadTitle::IsText).pages
 }
 
-/// The same read, for a document that is one chapter of a book rather than a
-/// file of its own: its `<title>` names the chapter and is not stored as text.
+/// Decodes and parses a file into the tree [`walk`] reads.
 ///
-/// Everything else is identical, deliberately — an EPUB chapter is an XHTML
-/// document, and `epub.rs`'s module doc records why it is parsed by the HTML
-/// parsing algorithm rather than as XML.
-pub(crate) fn extract_html_chapter(bytes: &[u8]) -> Vec<HtmlPage> {
-    read(bytes, HeadTitle::NamesOnly)
-}
-
-fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
+/// Separate from the walk so that a caller drawing the page can keep the tree
+/// and find, through [`TextAt::node`], the text node a stored offset falls in.
+pub(crate) fn parse(bytes: &[u8]) -> Html {
     let decoded = crate::text::decode(bytes);
     // **Not normalised here**, unlike `markdown.rs` and `text.rs`, and the
     // difference is measured rather than stylistic. A character reference is
@@ -175,19 +169,61 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
     // spellings of one word tokenizing apart. Normalisation therefore runs on
     // the text taken *out* of the tree — in `flush` and in `section_title` —
     // where every character exists that ever will.
-    let document = Html::parse_document(&decoded);
+    Html::parse_document(&decoded)
+}
 
-    let mut pages = vec![HtmlPage {
-        page_no: 1,
-        section_title: None,
-        blocks: Vec::new(),
-    }];
+/// What one walk of the tree produced: the pages, and where each block's text
+/// came from in that tree.
+#[derive(Debug)]
+pub(crate) struct Walk {
+    pub pages: Vec<HtmlPage>,
+    /// One entry per text node that ended up inside a stored block, in document
+    /// order. A text node of a whitespace-only run that [`flush`] drops has
+    /// none: it belongs to no block.
+    pub texts: Vec<TextAt>,
+    /// `(page_no, reading_order)` of every block whose stored text is not the
+    /// raw run — NFC changed it, so [`TextAt::start`] counts characters of the
+    /// raw run and does not index the stored text. Measured empty on 153,484
+    /// real text nodes; a reader of `texts` must still check it.
+    pub unverbatim: Vec<(u32, u32)>,
+}
+
+/// Where one text node sits in the blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextAt {
+    pub node: ego_tree::NodeId,
+    pub page_no: u32,
+    pub reading_order: u32,
+    /// Offset of this node's text within the block's raw run, in `char`s.
+    pub start: u32,
+}
+
+/// The text between two block boundaries, and the text nodes it was built
+/// from. The block's page and reading order are not known until it is
+/// flushed, so the nodes wait here with their offsets.
+#[derive(Default)]
+struct Run {
+    text: String,
+    chars: u32,
+    nodes: Vec<(ego_tree::NodeId, u32)>,
+}
+
+pub(crate) fn walk(document: &Html, head_title: HeadTitle) -> Walk {
+    let mut out = Walk {
+        pages: vec![HtmlPage {
+            page_no: 1,
+            section_title: None,
+            blocks: Vec::new(),
+        }],
+        texts: Vec::new(),
+        unverbatim: Vec::new(),
+    };
 
     // The text between two block boundaries, and the boundary elements
     // currently open. `flow` holds a block type per open non-inline element, so
     // the run's type is whatever encloses it at the moment it is flushed —
     // which is why every flush below happens *before* the matching push or pop.
-    let mut run = String::new();
+    let mut run = Run::default();
     let mut flow: Vec<BlockType> = Vec::new();
     // Non-zero while inside a subtree that gives no text. A depth rather than a
     // node id: `traverse` emits `Close` for every `Open`, including for text
@@ -232,16 +268,16 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
                             // `title`). Keeping them apart is what lets the
                             // guard for the defect above go on measuring it.
                             if renders_a_box(element) {
-                                flush(&mut run, &flow, &mut pages);
+                                flush(&mut run, &flow, &mut out);
                             }
                             // A head title flushes for its own reason: what
                             // follows it opens a page, and a run left pending
                             // here would be flushed into that new page instead
                             // of the one it belongs to.
                             if head_matter {
-                                flush(&mut run, &flow, &mut pages);
+                                flush(&mut run, &flow, &mut out);
                                 if let Some(title) = section_title(node) {
-                                    open_page(&mut pages, title);
+                                    open_page(&mut out.pages, title);
                                 }
                             }
                             skipping = 1;
@@ -252,13 +288,17 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
                         if is_inline(element) {
                             continue;
                         }
-                        flush(&mut run, &flow, &mut pages);
+                        flush(&mut run, &flow, &mut out);
                         flow.push(block_type(element));
                         if let Some(title) = section_title(node) {
-                            open_page(&mut pages, title);
+                            open_page(&mut out.pages, title);
                         }
                     }
-                    Node::Text(text) => run.push_str(&text.text),
+                    Node::Text(text) => {
+                        run.nodes.push((node.id(), run.chars));
+                        run.chars += text.text.chars().count() as u32;
+                        run.text.push_str(&text.text);
+                    }
                     // A comment, the doctype, a processing instruction, the
                     // document root and a template's content fragment. None of
                     // them is text and none of them is an element, so none of
@@ -274,7 +314,7 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
                 if let Node::Element(element) = node.value()
                     && !is_inline(element)
                 {
-                    flush(&mut run, &flow, &mut pages);
+                    flush(&mut run, &flow, &mut out);
                     flow.pop();
                 }
             }
@@ -285,37 +325,49 @@ fn read(bytes: &[u8], head_title: HeadTitle) -> Vec<HtmlPage> {
     // algorithm does not produce. Kept because "the loop always flushes last"
     // is a claim about html5ever, and losing the tail of a document to it
     // would be silent.
-    flush(&mut run, &flow, &mut pages);
+    flush(&mut run, &flow, &mut out);
 
-    pages
+    out
 }
 
-/// Closes the run in progress as a block of the page currently open.
+/// Closes the run in progress as a block of the page currently open, and
+/// files the run's text nodes under that block.
 ///
 /// A run that is nothing but whitespace produces no block: it is the
 /// indentation between two tags, and a block holding `"\n            "` is
 /// searchable, citable and empty of content — the same argument `markdown.rs`
 /// makes for dropping a thematic break. It is also the only text this function
-/// drops, and it drops no characters that any block would have shown.
-fn flush(run: &mut String, flow: &[BlockType], pages: &mut [HtmlPage]) {
-    if run.trim().is_empty() {
-        run.clear();
+/// drops, and it drops no characters that any block would have shown. Its text
+/// nodes are dropped with it: they are in no block, so no coordinate names them.
+fn flush(run: &mut Run, flow: &[BlockType], out: &mut Walk) {
+    let run = std::mem::take(run);
+    if run.text.trim().is_empty() {
         return;
     }
     // Here rather than over the source, because a combining mark written as a
     // character reference does not exist until the parser has decoded it — see
-    // `extract_html`. Once per block, before the text is stored and before
-    // anything downstream takes an offset or a hash from it (D32, D38).
-    let text = nfc::normalise(run).into_owned();
-    run.clear();
+    // `parse`. Once per block, before the text is stored and before anything
+    // downstream takes an offset or a hash from it (D32, D38).
+    let text = nfc::normalise(&run.text).into_owned();
     let block_type = flow.last().copied().unwrap_or(BlockType::Paragraph);
-    let page = pages.last_mut().expect("a page is always open");
+    let page = out.pages.last_mut().expect("a page is always open");
+    // Restarts on every page: the schema's uniqueness is on
+    // `(page_id, reading_order)`, because reading order is what reconstructs a
+    // page rather than a document.
+    let reading_order = page.blocks.len() as u32;
+    if text != run.text {
+        out.unverbatim.push((page.page_no, reading_order));
+    }
+    out.texts
+        .extend(run.nodes.into_iter().map(|(node, start)| TextAt {
+            node,
+            page_no: page.page_no,
+            reading_order,
+            start,
+        }));
     page.blocks.push(Block {
         block_type,
-        // Restarts on every page: the schema's uniqueness is on
-        // `(page_id, reading_order)`, because reading order is what
-        // reconstructs a page rather than a document.
-        reading_order: page.blocks.len() as i64,
+        reading_order: i64::from(reading_order),
         // Nothing here detects language; a per-block guess is the extraction
         // spec's subject, as in every other reader.
         language: None,
@@ -408,7 +460,7 @@ fn section_title<'a>(element: NodeRef<'a, Node>) -> Option<String> {
 /// reason: under [`HeadTitle::NamesOnly`] this decides which subtree is skipped,
 /// and skipping `<svg><title>` would be right by accident while skipping a
 /// diagram's `<text>` would not.
-fn names_the_document(element: &Element) -> bool {
+pub(crate) fn names_the_document(element: &Element) -> bool {
     element.name.ns == ns!(html) && element.name() == "title"
 }
 
@@ -549,4 +601,105 @@ fn is_inline(element: &Element) -> bool {
             | "var"
             | "wbr"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn node_text(document: &Html, at: &TextAt) -> String {
+        let node = document.tree.get(at.node).expect("a node of this tree");
+        node.value()
+            .as_text()
+            .expect("a text node")
+            .text
+            .to_string()
+    }
+
+    fn block_keys(walk: &Walk) -> BTreeSet<(u32, u32)> {
+        walk.pages
+            .iter()
+            .flat_map(|page| {
+                page.blocks
+                    .iter()
+                    .map(|block| (page.page_no, block.reading_order as u32))
+            })
+            .collect()
+    }
+
+    const MIXED: &str = "<html><head><title>Назва</title>\n  <script>var x = 1;</script>\n</head>\n<body>\n  <h1>Перший</h1>\n  <p>Речення з <b>жирним</b> словом &amp; знаком.</p>\n  <p>перед<iframe>ігнор</iframe>після</p>\n  <h2>Другий</h2>\n  <p>\n    Відступ <i>і</i> кінець\n  </p>\n</body></html>";
+
+    #[test]
+    fn every_char_of_every_block_comes_from_exactly_one_text_node() {
+        let document = parse(MIXED.as_bytes());
+        let walk = walk(&document, HeadTitle::IsText);
+        assert!(walk.pages.len() >= 3, "{:?}", walk.pages);
+        for page in &walk.pages {
+            for block in &page.blocks {
+                let mut nodes: Vec<&TextAt> = walk
+                    .texts
+                    .iter()
+                    .filter(|at| {
+                        (at.page_no, at.reading_order) == (page.page_no, block.reading_order as u32)
+                    })
+                    .collect();
+                nodes.sort_by_key(|at| at.start);
+                let mut expected_start = 0u32;
+                let mut joined = String::new();
+                for at in nodes {
+                    assert_eq!(at.start, expected_start, "{:?} in {:?}", at, block.text);
+                    let text = node_text(&document, at);
+                    expected_start += text.chars().count() as u32;
+                    joined.push_str(&text);
+                }
+                assert_eq!(joined, block.text);
+            }
+        }
+        let keyed: BTreeSet<(u32, u32)> = walk
+            .texts
+            .iter()
+            .map(|at| (at.page_no, at.reading_order))
+            .collect();
+        assert_eq!(keyed, block_keys(&walk));
+        // The sentence crossing `<b>` is three nodes in one block.
+        assert!(
+            walk.pages
+                .iter()
+                .flat_map(|page| &page.blocks)
+                .any(|block| block.text == "Речення з жирним словом & знаком.")
+        );
+    }
+
+    #[test]
+    fn a_block_changed_by_nfc_is_named_and_a_plain_one_is_not() {
+        let document = parse("<p>и&#774;</p><p>просто</p>".as_bytes());
+        let walk = walk(&document, HeadTitle::IsText);
+        let blocks = &walk.pages[0].blocks;
+        assert_eq!(blocks[0].text, "й");
+        assert_eq!(blocks[1].text, "просто");
+        assert_eq!(walk.unverbatim, vec![(1, 0)]);
+    }
+
+    #[test]
+    fn indentation_between_tags_is_in_no_block_and_has_no_coordinate() {
+        let source = "<body>\n  <div>\n    <p>один</p>\n    <p>два</p>\n  </div>\n</body>";
+        let document = parse(source.as_bytes());
+        let walk = walk(&document, HeadTitle::IsText);
+        assert_eq!(walk.texts.len(), 2, "{:?}", walk.texts);
+        for at in &walk.texts {
+            assert!(!node_text(&document, at).trim().is_empty());
+        }
+        let whitespace_nodes = document
+            .tree
+            .nodes()
+            .filter(|node| {
+                node.value()
+                    .as_text()
+                    .is_some_and(|text| text.trim().is_empty())
+            })
+            .count();
+        assert!(whitespace_nodes > 0, "the fixture must hold indentation");
+    }
 }

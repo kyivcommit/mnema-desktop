@@ -1,5 +1,5 @@
 //! A document drawn as HTML for the window's page view (D199), the cited
-//! passage marked — today Markdown.
+//! passage marked — Markdown, HTML, and one EPUB chapter at a time.
 //!
 //! The same shape as `page_view.rs`: the HTML comes from
 //! `mnema-extract-worker --render-doc` (the application may not link `comrak`
@@ -48,6 +48,8 @@ pub enum DocUnavailable {
     TooLarge,
     /// The worker could not render it. The reason is logged, not shown.
     Failed,
+    /// The book has no indexed text in the chapter asked for.
+    NoChapter,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -62,6 +64,8 @@ pub enum DocPageView {
         html: String,
         pages: u32,
         highlight: Highlight,
+        /// The EPUB chapter shown (its spine position); `None` for a whole file.
+        page_no: Option<u32>,
     },
     Unavailable {
         reason: DocUnavailable,
@@ -73,6 +77,8 @@ pub enum DocPageView {
 fn reader_for(mime: &str) -> Option<DocReader> {
     match mime {
         "text/markdown" => Some(DocReader::Markdown),
+        "text/html" => Some(DocReader::Html),
+        "application/epub+zip" => Some(DocReader::Epub),
         _ => None,
     }
 }
@@ -84,6 +90,7 @@ pub fn render_doc(
     root_id: Option<i64>,
     relative_path: Option<String>,
     spans: Vec<DocSpanArg>,
+    page_no: Option<u32>,
 ) -> Result<DocPageView, Error> {
     render_doc_in(
         &state,
@@ -92,12 +99,14 @@ pub fn render_doc(
         root_id,
         relative_path.as_deref(),
         &spans,
+        page_no,
         RENDER_TIMEOUT,
     )
 }
 
 /// [`render_doc`] with the worker and its deadline given, which is what lets a
 /// test point it at a stand-in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_doc_in(
     state: &AppState,
     worker: &Path,
@@ -105,6 +114,7 @@ pub(crate) fn render_doc_in(
     root_id: Option<i64>,
     relative_path: Option<&str>,
     spans: &[DocSpanArg],
+    page_no: Option<u32>,
     timeout: Duration,
 ) -> Result<DocPageView, Error> {
     let unavailable = |reason| Ok(DocPageView::Unavailable { reason });
@@ -156,11 +166,33 @@ pub(crate) fn render_doc_in(
         return unavailable(DocUnavailable::Failed);
     };
 
+    // A book is drawn one chapter at a time: the one asked for, else the
+    // clicked citation's, else the first. The worker hashes only that
+    // chapter's blocks, so only they are hashed and marked here.
+    let page = if reader == DocReader::Epub {
+        let cited = || {
+            spans
+                .iter()
+                .filter(|s| ours && s.primary)
+                .find_map(|s| view.blocks.iter().find(|b| b.block_id == s.block_id))
+                .map(|b| b.page_no as u32)
+        };
+        let first = || view.blocks.first().map(|b| b.page_no as u32);
+        match page_no.or_else(cited).or_else(first) {
+            Some(p) if view.blocks.iter().any(|b| b.page_no as u32 == p) => Some(p),
+            _ => return unavailable(DocUnavailable::NoChapter),
+        }
+    } else {
+        None
+    };
+    let shown = |page_no: i64| page.is_none_or(|p| page_no as u32 == p);
+
     // Another document at this path: nothing of ours to compare or mark.
     let (text_sha256, ranges) = if ours {
         let hash = doc_text_sha256(
             view.blocks
                 .iter()
+                .filter(|b| shown(b.page_no))
                 .map(|b| (b.page_no as u32, b.kind.as_str(), b.text.as_str())),
         );
         // A span is sent only for a block of this document: an id the window
@@ -169,6 +201,9 @@ pub(crate) fn render_doc_in(
             .iter()
             .filter_map(|s| {
                 let block = view.blocks.iter().find(|b| b.block_id == s.block_id)?;
+                if !shown(block.page_no) {
+                    return None;
+                }
                 Some(DocRange {
                     page_no: block.page_no as u32,
                     reading_order: block.reading_order as u32,
@@ -185,7 +220,7 @@ pub(crate) fn render_doc_in(
     let request = DocRenderRequest {
         path: path.to_string(),
         reader,
-        page_no: None,
+        page_no: page,
         text_sha256,
         ranges,
     };
@@ -201,6 +236,7 @@ pub(crate) fn render_doc_in(
                 // No hash was sent: the path names another document now.
                 TextMatch::None => Highlight::Changed,
             },
+            page_no: page,
         }),
         Ok(DocRenderReply::Refused {
             error: RenderError::TooLarge,
@@ -234,17 +270,22 @@ mod tests {
         /// Block ids of `m1`, in reading order, and one of `m2`.
         ids: Vec<i64>,
         other_id: i64,
+        /// Block ids of the book `e1`: one on page 2, then two on page 5.
+        book: Vec<i64>,
     }
 
     /// One root holding `notes.md` (on disk, indexed as document `m1`: two
     /// blocks on page 1, one on page 2) and a second document `m2` the path
-    /// can be repointed to.
+    /// can be repointed to; and `book.epub`, indexed as `e1` with text in
+    /// chapters 2 and 5 only.
     fn stand() -> Stand {
         let data = tempfile::tempdir().unwrap();
         let root_dir = tempfile::tempdir().unwrap();
         let scripts = tempfile::tempdir().unwrap();
         std::fs::write(root_dir.path().join("notes.md"), "# a\n").unwrap();
+        std::fs::write(root_dir.path().join("book.epub"), "zip").unwrap();
         let disk = mnema_walk::stat(&root_dir.path().join("notes.md")).unwrap();
+        let book_disk = mnema_walk::stat(&root_dir.path().join("book.epub")).unwrap();
         let state = AppState::new(
             data.path().to_path_buf(),
             PathBuf::new(),
@@ -260,7 +301,7 @@ mod tests {
             line_start: None,
             line_end: None,
         };
-        let (root, ids, other_id) = state
+        let (root, ids, other_id, book) = state
             .with_index(|db| {
                 let root = db.insert_watched_root(root_dir.path().to_str().unwrap())?;
                 db.insert_document("m1", "text/markdown", 1, SourceKind::Document)?;
@@ -287,7 +328,27 @@ mod tests {
                     "md",
                     1,
                 )?;
-                Ok((root, ids, other_id))
+                db.insert_document("e1", "application/epub+zip", 1, SourceKind::Document)?;
+                let c2 = db.insert_page("e1", 2, "native:epub", None)?;
+                let c5 = db.insert_page("e1", 5, "native:epub", None)?;
+                let book = vec![
+                    db.insert_block(c2, &block(0, BlockType::Paragraph, "two"))?,
+                    db.insert_block(c5, &block(0, BlockType::Headline, "five"))?,
+                    db.insert_block(c5, &block(1, BlockType::Paragraph, "more"))?,
+                ];
+                db.set_document_status("e1", DocumentStatus::Indexed)?;
+                db.insert_path(
+                    root,
+                    "book.epub",
+                    "e1",
+                    OnDisk {
+                        size_bytes: book_disk.size_bytes,
+                        mtime: book_disk.mtime,
+                    },
+                    "epub",
+                    1,
+                )?;
+                Ok((root, ids, other_id, book))
             })
             .unwrap();
         let log = scripts.path().join("request.json");
@@ -300,6 +361,7 @@ mod tests {
             log,
             ids,
             other_id,
+            book,
         }
     }
 
@@ -323,13 +385,34 @@ mod tests {
         }
 
         fn render(&self, worker: &Path, spans: &[DocSpanArg]) -> DocPageView {
+            self.render_at(worker, "m1", "notes.md", spans, None)
+        }
+
+        fn render_book(
+            &self,
+            worker: &Path,
+            spans: &[DocSpanArg],
+            page_no: Option<u32>,
+        ) -> DocPageView {
+            self.render_at(worker, "e1", "book.epub", spans, page_no)
+        }
+
+        fn render_at(
+            &self,
+            worker: &Path,
+            document_id: &str,
+            relative_path: &str,
+            spans: &[DocSpanArg],
+            page_no: Option<u32>,
+        ) -> DocPageView {
             render_doc_in(
                 &self.state,
                 worker,
-                "m1",
+                document_id,
                 Some(self.root),
-                Some("notes.md"),
+                Some(relative_path),
                 spans,
+                page_no,
                 Duration::from_secs(10),
             )
             .unwrap()
@@ -374,7 +457,8 @@ mod tests {
             DocPageView::Page {
                 html: "<p>x</p>".into(),
                 pages: 2,
-                highlight: Highlight::Shown
+                highlight: Highlight::Shown,
+                page_no: None,
             }
         );
         let sent = s.request();
@@ -486,6 +570,7 @@ mod tests {
             Some(s.root),
             Some("elsewhere.md"),
             &[],
+            None,
             Duration::from_secs(10),
         )
         .unwrap();
@@ -516,5 +601,139 @@ mod tests {
             }
         );
         assert!(!s.log.exists(), "the worker was asked");
+    }
+    fn neighbour(block_id: i64) -> DocSpanArg {
+        DocSpanArg {
+            primary: false,
+            ..span(block_id)
+        }
+    }
+
+    fn chapter_five() -> String {
+        doc_text_sha256([(5, "headline", "five"), (5, "paragraph", "more")])
+    }
+
+    #[test]
+    fn a_book_is_drawn_at_the_chapter_of_its_citation_hashed_and_marked_alone() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        let view = s.render_book(&worker, &[neighbour(s.book[0]), span(s.book[2])], None);
+        assert!(
+            matches!(
+                view,
+                DocPageView::Page {
+                    page_no: Some(5),
+                    ..
+                }
+            ),
+            "{view:?}"
+        );
+        let sent = s.request();
+        assert_eq!(sent.reader, DocReader::Epub);
+        assert_eq!(sent.page_no, Some(5));
+        assert_eq!(sent.text_sha256, Some(chapter_five()));
+        assert_eq!(
+            sent.ranges,
+            [DocRange {
+                page_no: 5,
+                reading_order: 1,
+                start: 1,
+                len: 3,
+                primary: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_book_with_no_citation_opens_at_its_first_chapter_with_text() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        s.render_book(&worker, &[], None);
+        let sent = s.request();
+        assert_eq!(sent.page_no, Some(2));
+        assert_eq!(
+            sent.text_sha256,
+            Some(doc_text_sha256([(2, "paragraph", "two")]))
+        );
+    }
+
+    #[test]
+    fn a_chapter_asked_for_wins_over_the_citation_s_and_its_spans_stay_home() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Unplaced));
+        let view = s.render_book(&worker, &[span(s.book[2])], Some(2));
+        assert!(
+            matches!(
+                view,
+                DocPageView::Page {
+                    page_no: Some(2),
+                    ..
+                }
+            ),
+            "{view:?}"
+        );
+        let sent = s.request();
+        assert_eq!(sent.page_no, Some(2));
+        assert_eq!(
+            sent.text_sha256,
+            Some(doc_text_sha256([(2, "paragraph", "two")]))
+        );
+        assert!(sent.ranges.is_empty(), "{:?}", sent.ranges);
+    }
+
+    #[test]
+    fn a_chapter_with_no_indexed_text_is_not_sent_to_the_worker() {
+        let s = stand();
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        assert_eq!(
+            s.render_book(&worker, &[span(s.book[2])], Some(3)),
+            DocPageView::Unavailable {
+                reason: DocUnavailable::NoChapter
+            }
+        );
+        assert!(!s.log.exists(), "the worker was asked");
+    }
+
+    #[test]
+    fn an_html_file_is_drawn_whole_with_the_hash_of_all_its_blocks() {
+        let s = stand();
+        s.sql("UPDATE document SET mime = 'text/html' WHERE id = 'm1'");
+        let worker = s.worker_answering(&rendered(TextMatch::Match));
+        let view = s.render_at(&worker, "m1", "notes.md", &[span(s.ids[2])], Some(1));
+        assert!(
+            matches!(view, DocPageView::Page { page_no: None, .. }),
+            "{view:?}"
+        );
+        let sent = s.request();
+        assert_eq!(sent.reader, DocReader::Html);
+        assert_eq!(sent.page_no, None);
+        assert_eq!(
+            sent.text_sha256.as_deref(),
+            Some(
+                doc_text_sha256([
+                    (1, "headline", "# a"),
+                    (1, "paragraph", "text"),
+                    (2, "code", "```\nx\n```"),
+                ])
+                .as_str()
+            )
+        );
+        assert_eq!(sent.ranges.len(), 1, "{:?}", sent.ranges);
+    }
+
+    #[test]
+    fn the_new_wire_names_are_the_window_s() {
+        assert_eq!(
+            serde_json::to_value(DocUnavailable::NoChapter).unwrap(),
+            "noChapter"
+        );
+        let page = serde_json::to_value(DocPageView::Page {
+            html: String::new(),
+            pages: 7,
+            highlight: Highlight::Shown,
+            page_no: Some(5),
+        })
+        .unwrap();
+        assert_eq!(page["pageNo"], 5, "{page}");
     }
 }
