@@ -14752,3 +14752,82 @@ fn an_unreachable_embed_provider_does_not_stop_another_chat_provider() {
     assert_eq!(answer["content"]["kind"], json!("failed"), "{answer}");
     assert_eq!(answer["kind"], json!("generated"), "{answer}");
 }
+
+/// D202: the roots of one scan, one confirmed and the rest added unconfirmed
+/// straight into the index — the scan body is what decides, so nothing here
+/// goes through the window.
+fn roots_for_confirmation(
+    app: &tauri::App<MockRuntime>,
+    confirmed: &std::path::Path,
+    unconfirmed: &[&std::path::Path],
+) -> (i64, Vec<i64>) {
+    app.state::<AppState>()
+        .with_index(|db| {
+            let a = db.insert_watched_root(&confirmed.display().to_string())?;
+            let rest = unconfirmed
+                .iter()
+                .map(|p| db.insert_unconfirmed_watched_root(&p.display().to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((a, rest))
+        })
+        .unwrap()
+}
+
+#[test]
+fn an_unconfirmed_folder_is_not_scanned() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let a = dir_holding(&["a.txt"]);
+    let b = dir_holding(&["b.txt"]);
+    let (a_id, rest) = roots_for_confirmation(&app, a.path(), &[b.path()]);
+
+    run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    assert_eq!(indexed_paths(&app, a_id), vec!["a.txt".to_string()]);
+    assert!(
+        indexed_paths(&app, rest[0]).is_empty(),
+        "a folder nobody confirmed was read by the scan"
+    );
+}
+
+#[test]
+fn a_confirmed_folder_is_scanned_on_the_next_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let a = dir_holding(&["a.txt"]);
+    let b = dir_holding(&["b.txt"]);
+    let (_, rest) = roots_for_confirmation(&app, a.path(), &[b.path()]);
+    run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+    assert!(indexed_paths(&app, rest[0]).is_empty());
+
+    app.state::<AppState>()
+        .with_index(|db| db.confirm_watched_root(rest[0]))
+        .unwrap();
+    run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    assert_eq!(indexed_paths(&app, rest[0]), vec!["b.txt".to_string()]);
+}
+
+#[test]
+fn confirming_one_of_two_unconfirmed_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let a = dir_holding(&["a.txt"]);
+    let b = dir_holding(&["b.txt"]);
+    let c = dir_holding(&["c.txt"]);
+    let (_, rest) = roots_for_confirmation(&app, a.path(), &[b.path(), c.path()]);
+    app.state::<AppState>()
+        .with_index(|db| db.confirm_watched_root(rest[0]))
+        .unwrap();
+
+    run_scan_capturing_snapshots(app.handle(), Entry::Full, Duration::from_secs(60));
+
+    assert_eq!(indexed_paths(&app, rest[0]), vec!["b.txt".to_string()]);
+    assert!(indexed_paths(&app, rest[1]).is_empty());
+}

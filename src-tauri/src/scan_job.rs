@@ -445,6 +445,12 @@ pub(crate) fn read_roots(state: &AppState) -> Result<Roots, Error> {
         let masks = db.list_masks()?;
         let mut rows = Vec::new();
         for root in db.list_watched_roots()? {
+            // D202: every scan comes through here — a press, the watcher, the
+            // launcher — so a folder the person has not confirmed yet is read
+            // by none of them.
+            if !root.confirmed {
+                continue;
+            }
             let prefixes = db.list_path_exclusions(root.id)?;
             rows.push((root.id, root.absolute_path, prefixes));
         }
