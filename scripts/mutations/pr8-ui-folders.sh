@@ -160,12 +160,8 @@ case_ "an excluded folder must still open, or nothing inside it can be looked at
 # notices: the sentence renders, the button works, and it is in the wrong
 # language only for somebody who switched. One anchor per case, because a single
 # case removing both would be killed by either.
-case_ "the expand label must read the locale, or it freezes at the first render" \
-  ui/src/settings/Folders.svelte \
-  "s{const expandLabel = \\\$derived\.by\(\(\) => \{ void \\\$locale; return t\('settings_folders_expand'\); \}\);}{const expandLabel = \\\$derived.by(() => t('settings_folders_expand'));}" \
-  "const expandLabel = \$derived.by(() => t('settings_folders_expand'));" \
-  src/settings/Folders.test.ts 'the expanded panel switches language with everything else on screen' runner=vitest
-
+# The expand label's case is gone with the label: since the folders-tree PR 1
+# the chevron carries only an aria-label, built inside `rows`.
 case_ "the remove-rule label must read the locale, or it freezes at the first render" \
   ui/src/settings/Folders.svelte \
   "s{const removeRuleLabel = \\\$derived\.by\(\(\) => \{ void \\\$locale; return t\('settings_folders_rule_remove'\); \}\);}{const removeRuleLabel = \\\$derived.by(() => t('settings_folders_rule_remove'));}" \
