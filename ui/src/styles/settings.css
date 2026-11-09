@@ -509,7 +509,7 @@ main select:focus-visible {
   background: var(--err);
 }
 
-/* The folders panel (spec 2026-11-09, prototype `ui/dev/FoldersProto.svelte`):
+/* The folders panel (spec 2026-11-09, folders as a tree):
  * one box holding the tree, the notes about it, and a macOS-style +/− bar.
  * The tree has a fixed height and its own scroll, so its contents never
  * stretch the window. */
