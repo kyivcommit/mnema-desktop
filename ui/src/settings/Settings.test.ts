@@ -1031,6 +1031,7 @@ const ONE_ROOT = {
     absolutePath: '/synthetic/root',
     name: 'root',
     files: [{ relativePath: 'drop/x.md', documentId: 'doc-1' }],
+    confirmed: true,
   }],
 };
 const ONE_SUBFOLDER = {

@@ -91,6 +91,10 @@ beforeEach(() => {
   open.mockReset();
   listSubfolders.mockReset();
   listExclusions.mockReset();
+  // Selecting a root opens it (spec), so every test that presses «Remove» also
+  // reads a listing; an empty one unless the test says otherwise.
+  listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
+  listExclusions.mockResolvedValue([]);
   excludeSubfolder.mockReset();
   includeSubfolder.mockReset();
   // Defaults for the tests that never expand a row: an empty listing and no
@@ -191,7 +195,7 @@ test('a successful add shows the note and no row offers to scan; it follows a la
 
   expect(screen.getByTestId('folders-added-note')).toBeTruthy();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.',
+    'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
   );
   // No row offers to scan any more: the only control this row carries besides
   // Subfolders is Remove.
@@ -201,14 +205,14 @@ test('a successful add shows the note and no row offers to scan; it follows a la
   setLocale('uk');
   await tick();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Почати індексацію» в її рядку.',
+    'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Почати індексацію».',
   );
-  expect(screen.queryByText('Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.'))
+  expect(screen.queryByText('Folder added. Untick what should stay out, set masks, then press “Start indexing”.'))
     .toBeNull();
   setLocale('en');
   await tick();
   expect(visibleText(screen.getByTestId('folders-added-note'))).toBe(
-    'Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.',
+    'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
   );
 
   // A job ending changes nothing about what this note is telling a person to
@@ -221,7 +225,7 @@ test('a successful add shows the note and no row offers to scan; it follows a la
   // Task 9: the press asks first, and it is the press — not the answer — that
   // takes this note away, for the rule the note itself is written under: what
   // the last press led to stands until the next one.
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/reports' }));
+  await fireEvent.click((await removeButton('/synthetic/reports')));
   expect(screen.queryByTestId('folders-added-note')).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/reports' }));
   await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
@@ -265,7 +269,7 @@ test('removing targets that row\'s rootId, not a position, with two roots in the
   // (always the 0th root) would call removeWatchedFolder(3) here instead.
   // Named by its own path (P2-5 review): two "Remove" buttons on screen share
   // no other accessible name, so the query has to be the qualified one.
-  await fireEvent.click(within(screen.getByTestId('folder-row-9')).getByRole('button', { name: 'Remove /synthetic/beta' }));
+  await fireEvent.click((await removeButton('/synthetic/beta')));
   // Task 9: and the confirmation is the second row's own, named by that row's
   // path for the same reason the Remove button is.
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/beta' }));
@@ -336,7 +340,7 @@ test('a rejected remove shows the backend sentence verbatim, and the row stays',
   await waitFor(() => expect(screen.getByText('/synthetic/stuck')).toBeTruthy());
 
   // P2-5: the button's accessible name carries its row's path.
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/stuck' }));
+  await fireEvent.click((await removeButton('/synthetic/stuck')));
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/stuck' }));
 
   await waitFor(() => expect(screen.getByText('The index is busy right now.')).toBeTruthy());
@@ -413,7 +417,7 @@ test('a successful remove whose re-read fails reports the read failure, not an a
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/stuck')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/stuck' }));
+  await fireEvent.click((await removeButton('/synthetic/stuck')));
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/stuck' }));
 
   await waitFor(() => expect(screen.getByText('The list of folders could not be read.')).toBeTruthy());
@@ -447,14 +451,15 @@ test('labels and the per-row count stay correct across a language switch after m
   expect(screen.getByRole('button', { name: 'Додати теку' })).toBeTruthy();
   // P2-5: the accessible name carries the path, so it switches with the
   // locale-prefix word ("Видалити") too, not just the visible label.
-  const removeButton = screen.getByRole('button', { name: 'Видалити /synthetic/only' });
-  expect(removeButton).toBeTruthy();
+  const minus = (await removeButton('/synthetic/only'));
+  expect(minus.getAttribute('aria-label')).toBe('Видалити /synthetic/only');
   // `aria-label` overrides the accessible name entirely, so the query above
   // finds this button by the path alone. Task 6: its own VISIBLE text is now
   // the mockup's trailing ✕, a glyph with no language of its own — checked
   // here so a later revert to a translated label would fail this line rather
   // than pass it by accident.
-  expect(removeButton.textContent).toBe('✕');
+  expect(minus.textContent).toBe('');
+  expect(minus.querySelector('svg')).toBeTruthy();
   expect(screen.getByText(t('settings_folders_indexed', { count: 1 }))).toBeTruthy();
   expect(screen.getByText('Проіндексовано: 1 документ')).toBeTruthy();
 });
@@ -969,9 +974,8 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
   await screen.findByTestId('subfolder-1-Archive/Held');
 
   expect(visibleText(screen.getByTestId('folder-row-1'))).toBe([
-    '/synthetic/root',
+    '–', '/synthetic/root',
     'Indexed: 0 documents',
-    'Subfolders', '✕',
     // The tree. `Archive` carries the conditional sentence, because a rule of
     // the person's own remains under it.
     'Archive', RULE_COST.held,
@@ -1410,7 +1414,7 @@ test('a root that disappears from the list takes its expansion with it', async (
   await fireEvent.click(screen.getByTestId('folder-expand-9'));
   await waitFor(() => expect(screen.getByText('OnlyUnderBeta')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove /synthetic/beta' }));
+  await fireEvent.click((await removeButton('/synthetic/beta')));
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/beta' }));
 
   await waitFor(() => expect(screen.queryByText('/synthetic/beta')).toBeNull());
@@ -1761,10 +1765,8 @@ test('the expanded panel switches language with everything else on screen', asyn
   // still caches an English value here and the read after the switch is a
   // genuinely later one.
   expect(screen.getByTitle('No rule excludes this folder.')).toBeTruthy();
-  // `expandLabel` and `removeRuleLabel` are each their own `$derived.by`,
-  // outside `rows` — read their visible button text (not the aria-labels
-  // `rows` already covers below) before the switch too.
-  expect(screen.getAllByText('Subfolders').length).toBeGreaterThan(0);
+  // `removeRuleLabel` is its own `$derived.by`, outside `rows` — read its
+  // visible button text before the switch too.
   expect(screen.getByText('Remove the rule')).toBeTruthy();
 
   setLocale('uk');
@@ -1784,10 +1786,8 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(within(screen.getByTestId('subfolder-1-Archive/secret')).queryAllByRole('button')).toHaveLength(0);
   expect(screen.getByRole('button', { name: 'Прибрати правило на Old notes' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
-  // The visible button text, not just its aria-label — `expandLabel` and
-  // `removeRuleLabel` each guard their own `void $locale` at
-  // Folders.svelte:855-856, outside `rows`.
-  expect(screen.getAllByText('Підтеки').length).toBeGreaterThan(0);
+  // The visible button text, not just its aria-label — `removeRuleLabel`
+  // guards its own `void $locale`, outside `rows`.
   expect(screen.getByText('Прибрати правило')).toBeTruthy();
 });
 
@@ -1819,9 +1819,8 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
   const text = visibleText(screen.getByTestId('folder-row-1'));
 
   expect(text).toBe([
-    '/synthetic/root',
+    '–', '/synthetic/root',
     'Indexed: 2 documents',
-    'Subfolders', '✕',
     '1 subfolder is not listed: its name could not be read as text.',
     'Archive', cost,
     'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
@@ -3165,8 +3164,12 @@ async function renderAfterAReading() {
   return { jobs, ...rendered };
 }
 
-function removeButton(path: string): HTMLButtonElement {
-  return screen.getByRole('button', { name: `Remove ${path}` }) as HTMLButtonElement;
+// The `−` in the bar acts on the selected root, so a press on «Remove» for a
+// folder is: select that folder's row, then take the bar's button.
+async function removeButton(path: string): Promise<HTMLButtonElement> {
+  const select = screen.getByText(path).closest('button') as HTMLButtonElement;
+  await fireEvent.click(select);
+  return screen.getByTestId('folders-remove') as HTMLButtonElement;
 }
 
 // The states separated: "the press has been made" and "the removal has been
@@ -3178,7 +3181,7 @@ test('«Remove» asks a question naming the folder and counting its files, and c
   // screen until the press.
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
 
   expect(visibleText(await screen.findByTestId('folder-remove-confirm-1')))
     .toBe([REMOVE_QUESTION_EN, 'Confirm', 'Cancel'].join(' '));
@@ -3196,8 +3199,9 @@ test('«Remove» asks a question naming the folder and counting its files, and c
 // `removeWatchedFolder` still waits for the Confirm that follows.
 test('the remove control is drawn as an icon, and still keeps its named confirmation', async () => {
   await showTwoRoots();
-  const button = removeButton('/synthetic/root');
-  expect(button.textContent?.trim()).toBe('✕');
+  const button = (await removeButton('/synthetic/root'));
+  expect(button.querySelector('svg')).toBeTruthy();
+  expect(button.getAttribute('aria-label')).toBe('Remove /synthetic/root');
   expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull();
 
   await fireEvent.click(button);
@@ -3217,10 +3221,10 @@ test('the remove control is drawn as an icon, and still keeps its named confirma
 test('a second row\'s «Remove» replaces the question rather than putting a second one on screen', async () => {
   await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
-  await fireEvent.click(removeButton('/synthetic/other'));
+  await fireEvent.click((await removeButton('/synthetic/other')));
 
   expect(visibleText(await screen.findByTestId('folder-remove-confirm-2'))).toBe([
     'Remove folder /synthetic/other from the index? 5 files from this folder will disappear from search.',
@@ -3235,7 +3239,7 @@ test('a second row\'s «Remove» replaces the question rather than putting a sec
 test('«Cancel» takes the removal question away and removes nothing', async () => {
   await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   await fireEvent.click(screen.getByRole('button', { name: 'Leave /synthetic/root as it is' }));
@@ -3244,7 +3248,7 @@ test('«Cancel» takes the removal question away and removes nothing', async () 
   expect(removeWatchedFolder).not.toHaveBeenCalled();
   // The row is still there and still offers to remove it: a cancelled question
   // leaves the list exactly as it found it.
-  expect(removeButton('/synthetic/root').disabled).toBe(false);
+  expect((await removeButton('/synthetic/root')).disabled).toBe(false);
 });
 
 // 🔴 The states separated: "the question was answered" and "the list re-read
@@ -3261,7 +3265,7 @@ test('«Confirm» sends the frozen id and path while the list re-read behind it 
   const { jobs } = await showTwoRoots();
   removeWatchedFolder.mockResolvedValue(1);
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   // The ending's own re-read, held open: nothing has been compared against a
@@ -3302,7 +3306,7 @@ test('«Confirm» sends the frozen id and path while the list re-read behind it 
 test('a re-read that keeps this row\'s identity leaves the removal question standing; one that moves it withdraws it by name', async () => {
   const { jobs } = await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   // Same id, same path, a DIFFERENT count: the identity is intact, so the
@@ -3354,7 +3358,7 @@ test('a re-read that keeps this row\'s identity leaves the removal question stan
 test('a removal question about a root that leaves the listing is withdrawn by name, not in silence', async () => {
   const { jobs } = await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   listTree.mockResolvedValue(listing([THREE_AND_FIVE[1]])); // root 1 is gone
@@ -3380,16 +3384,16 @@ test('a removal in flight says so in that row, and every other row\'s «Remove»
   removeWatchedFolder.mockReturnValueOnce(new Promise<number>((r) => { settle = r; }));
   const readsBefore = listTree.mock.calls.length;
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
-  expect(removeButton('/synthetic/other').disabled).toBe(false); // the direction before
+  expect((await removeButton('/synthetic/other')).disabled).toBe(false); // the direction before
 
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/root' }));
 
   expect(visibleText(await screen.findByTestId('folder-removing-1'))).toBe('Removing…');
   // In place of that row's buttons, not beside them.
   expect(screen.queryByRole('button', { name: 'Remove /synthetic/root' })).toBeNull();
-  expect(removeButton('/synthetic/other').disabled).toBe(true);
+  expect((await removeButton('/synthetic/other')).disabled).toBe(true);
   expect(listTree.mock.calls.length).toBe(readsBefore); // nothing re-read yet
 
   // Its own `$derived` with its own `void $locale` guard, so it owes its own
@@ -3406,7 +3410,7 @@ test('a removal in flight says so in that row, and every other row\'s «Remove»
   settle(1);
 
   await waitFor(() => expect(screen.queryByTestId('folder-removing-1')).toBeNull());
-  expect(removeButton('/synthetic/other').disabled).toBe(false);
+  expect((await removeButton('/synthetic/other')).disabled).toBe(false);
   // The list is re-read on success — the row's disappearance is the listing's
   // doing, never a local patch.
   expect(listTree.mock.calls.length).toBe(readsBefore + 1);
@@ -3425,7 +3429,7 @@ test('a refused removal shows the backend sentence verbatim and re-reads the lis
   // What the list holds now: the row the person confirmed is not in it.
   listTree.mockResolvedValue(listing([THREE_AND_FIVE[1]]));
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
   await fireEvent.click(screen.getByRole('button', { name: 'Confirm removing /synthetic/root' }));
 
@@ -3442,7 +3446,7 @@ test('a refused removal shows the backend sentence verbatim and re-reads the lis
   // the rule `rootChanged` and the added-folder note are both written under,
   // now that the press that starts a removal is `askRemove` and not the
   // confirmation behind it.
-  await fireEvent.click(removeButton('/synthetic/other'));
+  await fireEvent.click((await removeButton('/synthetic/other')));
 
   expect(screen.queryByTestId('folders-action-error')).toBeNull();
 });
@@ -3457,7 +3461,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   await showTwoRoots();
   expect(screen.queryByTestId('folders-remove-blocked')).toBeNull(); // the direction before
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
   const confirm = () =>
     screen.getByRole('button', { name: 'Confirm removing /synthetic/root' }) as HTMLButtonElement;
@@ -3467,8 +3471,8 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   await tick();
 
   expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
-  expect(removeButton('/synthetic/root').disabled).toBe(true);
-  expect(removeButton('/synthetic/other').disabled).toBe(true);
+  expect((await removeButton('/synthetic/root')).disabled).toBe(true);
+  expect((await removeButton('/synthetic/other')).disabled).toBe(true);
   expect(confirm().disabled).toBe(true);
 
   // This sentence's own switch, for the reason every other one on this screen
@@ -3483,7 +3487,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   // question still on screen.
   await endScan();
   await waitFor(() => expect(screen.queryByTestId('folders-remove-blocked')).toBeNull());
-  expect(removeButton('/synthetic/root').disabled).toBe(false);
+  expect((await removeButton('/synthetic/root')).disabled).toBe(false);
   expect(confirm().disabled).toBe(false);
 
   // And so is idle, which is a different snapshot and a different row of the
@@ -3492,7 +3496,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
   await waitFor(() => expect(screen.getByTestId('folders-remove-blocked')).toBeTruthy());
   await goIdle();
   await waitFor(() => expect(screen.queryByTestId('folders-remove-blocked')).toBeNull());
-  expect(removeButton('/synthetic/root').disabled).toBe(false);
+  expect((await removeButton('/synthetic/root')).disabled).toBe(false);
 });
 
 // 🔴 The states separated: "a reading pass has ended since this question was
@@ -3502,7 +3506,7 @@ test('while a job runs every «Remove» is disabled with one sentence, and an op
 test('the removal question is withdrawn when a reading pass ends, and says which folder it was about', async () => {
   const { jobs } = await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   void jobs.scan('full');
@@ -3540,7 +3544,7 @@ test('the removal question is withdrawn when a reading pass ends, and says which
 
   // The note stands until the next press, then goes: a note left beside a live
   // question about the same folder says two things at once.
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
   expect(screen.queryByTestId('folders-remove-withdrawn')).toBeNull();
 });
@@ -3552,7 +3556,7 @@ test('the removal question is withdrawn when a reading pass ends, and says which
 test('the removal question switches language and keeps the number it was asked with', async () => {
   await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   expect(visibleText(await screen.findByTestId('folder-remove-confirm-1')))
     .toBe([REMOVE_QUESTION_EN, 'Confirm', 'Cancel'].join(' '));
 
@@ -3577,9 +3581,9 @@ test('a press elsewhere in this list abandons the removal question', async () =>
   listExclusions.mockResolvedValue([{ prefix: 'Archive', existsOnDisk: true }]);
   await showTwoRoots();
 
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
-  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  // Selecting the root for «Remove» opened it already.
   await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
 
   await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
@@ -3590,7 +3594,7 @@ test('a press elsewhere in this list abandons the removal question', async () =>
   // 🔴 And the include press, which is a different function with its own copy
   // of the call — `askInclude`, the one that takes a person's rule away. An
   // exclude fixture alone leaves that site's deletion silent.
-  await fireEvent.click(removeButton('/synthetic/root'));
+  await fireEvent.click((await removeButton('/synthetic/root')));
   await screen.findByTestId('folder-remove-confirm-1');
 
   await fireEvent.click(screen.getByRole('button', { name: 'Remove the rule on Archive' }));
@@ -3600,7 +3604,7 @@ test('a press elsewhere in this list abandons the removal question', async () =>
   expect(includeSubfolder).not.toHaveBeenCalled(); // the question was abandoned, not answered
 
   // And an add, which is the other press this list carries.
-  await fireEvent.click(removeButton('/synthetic/other'));
+  await fireEvent.click((await removeButton('/synthetic/other')));
   await screen.findByTestId('folder-remove-confirm-2');
   open.mockResolvedValue(null); // the dialog is cancelled: nothing else moves
   await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
@@ -3635,7 +3639,7 @@ test('the blocked sentence is drawn only where there is a «Remove» for it to e
   await tick();
 
   expect(visibleText(screen.getByTestId('folders-remove-blocked'))).toBe('The Remove button works again once the scan is stopped.');
-  expect(removeButton('/synthetic/root').disabled).toBe(true);
+  expect((await removeButton('/synthetic/root')).disabled).toBe(true);
 
   // And the third state, which `roots.length` alone cannot tell from the
   // second: the list is unreadable, so it is off the screen entirely while
@@ -3674,7 +3678,7 @@ test('the rendered removal question reaches the singular and the Ukrainian many 
     }),
   ], '/synthetic/one');
 
-  await fireEvent.click(removeButton('/synthetic/one'));
+  await fireEvent.click((await removeButton('/synthetic/one')));
 
   expect(visibleText(await screen.findByTestId('folder-remove-confirm-1'))).toBe([
     'Remove folder /synthetic/one from the index? 1 file from this folder will disappear from search.',
@@ -3690,7 +3694,7 @@ test('the rendered removal question reaches the singular and the Ukrainian many 
 
   // The `many` arm, which no rendered question has reached before: 5 is not 5
   // of anything the other fixtures count.
-  await fireEvent.click(screen.getByRole('button', { name: 'Видалити /synthetic/many' }));
+  await fireEvent.click((await removeButton('/synthetic/many')));
   expect(visibleText(await screen.findByTestId('folder-remove-confirm-2'))).toBe([
     'Видалити теку /synthetic/many з індексу? 5 файлів цієї теки зникнуть з пошуку.',
     'Підтвердити', 'Скасувати',
@@ -3745,7 +3749,10 @@ test('an unconfirmed folder shows Start in place of its count; a confirmed one d
   await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
   const unconfirmed = screen.getByTestId('folder-row-3');
   expect(within(unconfirmed).getByText(t('settings_folders_unconfirmed'))).toBeTruthy();
-  expect(within(unconfirmed).getByRole('button', { name: 'Start indexing' })).toBeTruthy();
+  // Start sits under the tree, for the selected root — and an unconfirmed
+  // folder is selected on its own when nothing else is.
+  expect(screen.getByTestId('folder-start-3').textContent).toBe('Start indexing');
+  expect(screen.getByTestId('folder-select-3').getAttribute('aria-pressed')).toBe('true');
   expect(within(unconfirmed).queryByText(/Indexed:/)).toBeNull();
 
   const confirmed = screen.getByTestId('folder-row-4');
@@ -3886,4 +3893,138 @@ test('Start stays disabled until the list has re-read', async () => {
 
   release(listing([root({ rootId: 3, confirmed: true })]));
   await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+});
+
+// ── Folders as one tree panel (PR 1 of the folders-tree spec) ────────────────
+
+test('a click on a root selects and opens it, and only then is «−» live', async () => {
+  await showTwoRoots();
+  const minus = screen.getByTestId('folders-remove') as HTMLButtonElement;
+  expect(minus.disabled).toBe(true);
+  expect(minus.getAttribute('aria-label')).toBe('Remove the selected folder');
+
+  await fireEvent.click(screen.getByTestId('folder-select-2'));
+
+  expect(screen.getByTestId('folder-select-2').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByTestId('folder-select-1').getAttribute('aria-pressed')).toBe('false');
+  expect(minus.disabled).toBe(false);
+  expect(minus.getAttribute('aria-label')).toBe('Remove /synthetic/other');
+  await waitFor(() => expect(screen.getByTestId('folder-panel-2')).toBeTruthy());
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+
+  // A second click selects again; it does not shut what it opened.
+  await fireEvent.click(screen.getByTestId('folder-select-2'));
+  expect(screen.getByTestId('folder-panel-2')).toBeTruthy();
+});
+
+test('the removal question stays about the folder it was asked for when another is selected', async () => {
+  await showTwoRoots();
+  await fireEvent.click(await removeButton('/synthetic/root'));
+  await screen.findByTestId('folder-remove-confirm-1');
+
+  await fireEvent.click(screen.getByTestId('folder-select-2'));
+
+  expect(screen.getByTestId('folder-remove-confirm-1')).toBeTruthy();
+  expect(screen.queryByTestId('folder-remove-confirm-2')).toBeNull();
+});
+
+test('a selected folder that leaves the list on a re-read takes the selection with it', async () => {
+  await showTwoRoots();
+  await fireEvent.click(screen.getByTestId('folder-select-1'));
+  expect((screen.getByTestId('folders-remove') as HTMLButtonElement).disabled).toBe(false);
+
+  listTree.mockResolvedValue(listing([root({ rootId: 2, absolutePath: '/synthetic/other' })]));
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-row-1')).toBeNull());
+  expect((screen.getByTestId('folders-remove') as HTMLButtonElement).disabled).toBe(true);
+
+  // And the choice is really gone, not merely hidden: a folder waiting for
+  // Start that arrives next is selected for the person.
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+    root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false }),
+  ]));
+  window.dispatchEvent(new Event('focus'));
+  await waitFor(() => expect(screen.getByTestId('folder-select-3').getAttribute('aria-pressed')).toBe('true'));
+});
+
+test('adding a folder selects and opens the folder it added', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 7, absolutePath: '/synthetic/fresh' }),
+  ]));
+  open.mockResolvedValue('/synthetic/fresh');
+  addWatchedFolder.mockResolvedValue(7);
+  render(Folders, { props: { jobs: createJobController() } });
+  await screen.findByText('/synthetic/root');
+
+  await fireEvent.click(screen.getByTestId('folders-add'));
+
+  await waitFor(() => expect(screen.getByTestId('folder-select-7').getAttribute('aria-pressed')).toBe('true'));
+  await waitFor(() => expect(screen.getByTestId('folder-panel-7')).toBeTruthy());
+  expect(listSubfolders).toHaveBeenCalledWith(7, '');
+});
+
+test('with nothing selected, a re-read selects the first unconfirmed folder and nothing else', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await screen.findByText('/synthetic/other');
+  // All confirmed: nothing is chosen for the person.
+  expect(screen.getByTestId('folder-select-1').getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByTestId('folder-select-2').getAttribute('aria-pressed')).toBe('false');
+
+  // A folder added from the launcher arrives with the next focus.
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+    root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false }),
+  ]));
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(screen.getByTestId('folder-select-3').getAttribute('aria-pressed')).toBe('true'));
+  await waitFor(() => expect(screen.getByTestId('folder-panel-3')).toBeTruthy());
+});
+
+test('the root mark is blank until its rules are read, then ✓ or –, and stays when shut', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 2, absolutePath: '/synthetic/other' }),
+  ]));
+  listExclusions.mockImplementation((rootId: number) => Promise.resolve(
+    rootId === 1 ? [{ prefix: 'Work', existsOnDisk: true }] : [{ prefix: 'Gone', existsOnDisk: false }],
+  ));
+  render(Folders, { props: { jobs: createJobController() } });
+  await screen.findByText('/synthetic/other');
+  const mark = (id: number) => screen.getByTestId(`folder-root-mark-${id}`);
+  expect(mark(1).textContent).toBe('');
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await fireEvent.click(screen.getByTestId('folder-expand-2'));
+
+  await waitFor(() => expect(mark(1).textContent).toBe('–'));
+  expect(mark(1).getAttribute('aria-label')).toBe('Some of it is excluded');
+  // A rule whose folder is gone excludes nothing.
+  await waitFor(() => expect(mark(2).textContent).toBe('✓'));
+  expect(mark(2).getAttribute('aria-label')).toBe('Everything is indexed');
+  expect(mark(1).tagName).toBe('SPAN'); // not a control
+
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  expect(screen.queryByTestId('folder-panel-1')).toBeNull();
+  expect(mark(1).textContent).toBe('–');
+});
+
+test('the tree has its own box, with the hint under it', async () => {
+  await showTwoRoots();
+  const box = screen.getByTestId('folders-tree');
+  expect(within(box).getByText('/synthetic/root')).toBeTruthy();
+  expect(within(box).queryByTestId('folders-add')).toBeNull(); // the bar is outside the scroll
+  expect(screen.getByText('Untick a folder to keep it out of the index.')).toBeTruthy();
 });

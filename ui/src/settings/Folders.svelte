@@ -109,6 +109,15 @@
   let removing = $state<number | null>(null);
   // D202: the folder whose Start is on the wire, so its button cannot be pressed twice.
   let starting = $state<number | null>(null);
+  // The root the `−` acts on, by id AND path: `watched_root.id` is a rowid
+  // alias SQLite hands out again, so an id alone could select another folder.
+  let chosen = $state<{ rootId: number; path: string } | null>(null);
+  // Whether a root holds any rule of the person's own whose folder is there,
+  // as last read for that path. Kept after its panel is shut, so a collapsed
+  // root still shows `–` (spec, owner's ruling 5). Only this window writes
+  // rules, and it re-reads the panel when it does, so the record is current
+  // for as long as nothing else can move it.
+  let marks = $state<Record<number, { path: string; some: boolean }>>({});
   // The PATH the removal question was about when a reading pass withdrew it, or
   // `null` — the path and not the sentence, for `Panel.withdrawn`'s reason: a
   // `t()` frozen here would keep its language through a switch.
@@ -246,6 +255,15 @@
     const panel = panels[rootId];
     if (panel === undefined) return; // the row was shut while this was running
     panels = { ...panels, [rootId]: { ...panel, ...fields } };
+    if (fields.rules) {
+      marks = { ...marks, [rootId]: { path: panel.rootPath, some: fields.rules.some((r) => r.existsOnDisk) } };
+    }
+  }
+
+  // A click on a root selects it for `−` and opens it; it never shuts it.
+  function selectRoot(root: TreeRoot) {
+    chosen = { rootId: root.rootId, path: root.absolutePath };
+    if (panels[root.rootId] === undefined) toggleRoot(root);
   }
 
   function openPathsOf(node: SubTree | null): Set<string> {
@@ -901,6 +919,13 @@
     }
     if (Object.keys(kept).length !== Object.keys(panels).length) panels = kept;
     loadError = null; // a successful read is proof the earlier one is stale
+    if (chosen !== null && !namesFolder(listing, chosen.rootId, chosen.path)) chosen = null;
+    // D202: a folder added from the launcher arrives here unconfirmed. Nothing
+    // chosen yet — open it, so its ticks and Start are what the window shows.
+    if (chosen === null) {
+      const waiting = listing.roots.find((r) => !r.confirmed);
+      if (waiting !== undefined) selectRoot(waiting);
+    }
   }
 
   // ── PR 8a, Task 8. Live run, finding 1: what a finished scan leaves behind ─
@@ -1153,8 +1178,9 @@
     abandonRemoveQuestion();
     const selected = await open({ directory: true });
     if (selected === null) return; // cancelled dialog — calls nothing further
+    let added: number;
     try {
-      await addWatchedFolder(selected);
+      added = await addWatchedFolder(selected);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       return;
@@ -1171,7 +1197,11 @@
       await refresh();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
+      return;
     }
+    // The folder just added is the one to set up: selected and open.
+    const fresh = roots.find((r) => r.rootId === added);
+    if (fresh !== undefined) selectRoot(fresh);
   }
 
   // 🔴 Task 9. The press asks; it removes nothing. The whole row is captured
@@ -1499,8 +1529,15 @@
     void $locale;
     return roots.map((root) => {
       const panel = panels[root.rootId];
+      const mark = marks[root.rootId];
+      const known = mark !== undefined && mark.path === root.absolutePath;
       return {
         root,
+        selected: chosen !== null && chosen.rootId === root.rootId && chosen.path === root.absolutePath,
+        // Unknown until the rules for this path have been read once: no mark
+        // rather than a `✓` that could be false.
+        rootMark: known ? (mark.some ? '–' : '✓') : null,
+        rootMarkLabel: known ? t(mark.some ? 'settings_folders_root_some' : 'settings_folders_root_all') : null,
         countLabel: t('settings_folders_indexed', { count: root.files.length }),
         removeAriaLabel: t('settings_folders_remove_named', { path: root.absolutePath }),
         expandAriaLabel: t('settings_folders_expand_named', { path: root.absolutePath }),
@@ -1567,7 +1604,11 @@
     });
   });
 
-  const expandLabel = $derived.by(() => { void $locale; return t('settings_folders_expand'); });
+  // Read from `rows`, so it follows the same rebuild (and the same language) as
+  // the list it is a row of; null when nothing is chosen or the choice is gone.
+  const chosenRow = $derived(rows.find((row) => row.selected) ?? null);
+  const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_folders_remove_selected'); });
+  const treeHintLabel = $derived.by(() => { void $locale; return t('settings_folders_tree_hint'); });
   const removeRuleLabel = $derived.by(() => { void $locale; return t('settings_folders_rule_remove'); });
   // 🔴 PR 8a, fix round 5. Words derived from the boolean `rootChanged` holds,
   // under `void $locale` like every other sentence on this screen.
@@ -1658,6 +1699,14 @@
   <svg class="chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
 {/snippet}
 
+{#snippet plus()}
+  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+{/snippet}
+
+{#snippet minus()}
+  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10"/></svg>
+{/snippet}
+
 {#snippet folderIcon()}
   <svg class="ico" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5a1 1 0 0 1 1-1h3.6l1.4 1.5h6a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>
 {/snippet}
@@ -1670,196 +1719,181 @@
   {#if rootChangedLabel}
     <p data-testid="folders-root-changed">{rootChangedLabel}</p>
   {/if}
-  {#if loadError}
-    <p>{loadFailedLabel}</p>
-    <p data-testid="folders-load-reason">{loadError}</p>
-  {:else if rows.length === 0}
-    <p>{emptyLabel}</p>
-  {:else}
-    <ul>
-      {#each rows as { root, countLabel, removeAriaLabel, expandAriaLabel, expanded, panel, removeConfirm } (root.rootId)}
-        <li data-testid={`folder-row-${root.rootId}`}>
-          <!-- Task 6: the top line only — disclosure, path, count, the
-               trailing ✕. The confirmation and the child subtree below are
-               SIBLING blocks of this line, not flex items squeezed into its
-               row: `.folders > ul > li` stacks its children in a column now,
-               and only this inner `.row` lays its own children out in one
-               line (mockup .frow). -->
-          <div class="row">
-            <span class="fp">{root.absolutePath}</span>
-            {#if root.confirmed}
-              <span class="fc">{countLabel}</span>
-            {:else}
-              <span class="fc" data-testid={`folder-unconfirmed-${root.rootId}`}>{unconfirmedLabel}</span>
-              <button
-                type="button"
-                data-testid={`folder-start-${root.rootId}`}
-                disabled={starting === root.rootId}
-                onclick={() => startIndexing(root)}>{startLabel}</button>
-            {/if}
-            <!-- Task 9: while THIS row's removal is in flight the row says so
-                 in place of its buttons. Not beside them: there is nothing
-                 left to press here, and a button that does nothing reads as a
-                 button nobody heard. -->
-            {#if removing === root.rootId}
-              <span data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>
-            {:else}
-              <button
-                type="button"
-                data-testid={`folder-expand-${root.rootId}`}
-                aria-expanded={expanded}
-                aria-label={expandAriaLabel}
-                onclick={() => toggleRoot(root)}>{expandLabel}</button>
-              <!-- The per-folder scan button's funeral, Task 8: a scan is ONE
-                   job over every watched folder now (`scan_state::Entry`),
-                   and the single Scan control lives in the Scanning section
-                   instead (`Scanning.svelte`) — this row starts nothing any
-                   more.
-
-                   Task 9: it asks before it removes, and it is disabled
-                   while ANOTHER row's removal is in flight or while a job
-                   holds the slot — the backend refuses in the second case,
-                   and would race the re-read in the first.
-
-                   Task 6: drawn as the mockup's own trailing ✕ (`.frow .rm`)
-                   rather than the word — the aria-label is what still
-                   carries the path (`removeAriaLabel`), exactly as before,
-                   so a screen reader hears the same name it always did and
-                   `removeButton()` in the test file keeps finding it by that
-                   name. `.rm` is what gives it the mockup's 24×24 icon
-                   shape and `flex: none` beside `.fp`'s own
-                   `flex: 1 1 auto`, so it cannot be squeezed by a long
-                   path. -->
-              <button
-                type="button"
-                class="rm"
-                aria-label={removeAriaLabel}
-                disabled={removing !== null || scanRunning}
-                onclick={() => askRemove(root)}>✕</button>
-            {/if}
+  <div class="tbox">
+    <!-- Fixed height with its own scroll (spec): what is inside never stretches
+         the window. -->
+    <div class="ttree" data-testid="folders-tree">
+      {#if loadError}
+        <p class="tnote">{loadFailedLabel}</p>
+        <p class="tnote" data-testid="folders-load-reason">{loadError}</p>
+      {:else if rows.length === 0}
+        <p class="tnote">{emptyLabel}</p>
+      {:else}
+        <ul>
+          {#each rows as { root, selected, rootMark, rootMarkLabel, countLabel, expandAriaLabel, expanded, panel } (root.rootId)}
+            <li class="root" data-testid={`folder-row-${root.rootId}`}>
+              <div class="trow" class:selected class:unconfirmed={!root.confirmed}>
+                <button
+                  type="button"
+                  class="chevb"
+                  data-testid={`folder-expand-${root.rootId}`}
+                  aria-expanded={expanded}
+                  aria-label={expandAriaLabel}
+                  onclick={() => toggleRoot(root)}>{@render chevron()}</button>
+                <!-- Not a control: the root's tick is the sum of what is below. -->
+                <span
+                  class="check-slot rmark"
+                  data-testid={`folder-root-mark-${root.rootId}`}
+                  role={rootMark === null ? undefined : 'img'}
+                  aria-label={rootMarkLabel ?? undefined}>{rootMark ?? ''}</span>
+                {@render folderIcon()}
+                <button
+                  type="button"
+                  class="rsel"
+                  data-testid={`folder-select-${root.rootId}`}
+                  aria-pressed={selected}
+                  onclick={() => selectRoot(root)}><span class="fp">{root.absolutePath}</span></button>
+                <span class="tags">
+                  {#if removing === root.rootId}
+                    <span class="tag" data-testid={`folder-removing-${root.rootId}`}>{removingLabel}</span>
+                  {:else if root.confirmed}
+                    <span class="tag">{countLabel}</span>
+                  {:else}
+                    <span class="tag" data-testid={`folder-unconfirmed-${root.rootId}`}>{unconfirmedLabel}</span>
+                  {/if}
+                </span>
+              </div>
+              {#if panel}
+                <div class="fsubs" data-testid={`folder-panel-${root.rootId}`}>
+                  {#if panel.loadError}
+                    <p class="tnote">{panel.failedLabel}</p>
+                    <p class="tnote" data-testid={`folder-subfolders-reason-${root.rootId}`}>{panel.loadError}</p>
+                  {/if}
+                  {#if panel.loadingLabel}<p class="tnote">{panel.loadingLabel}</p>{/if}
+                  {#if panel.level}{@render subfolders(panel.level, root.rootId)}{/if}
+                  {#if panel.rules}
+                    <div class="rules" data-testid={`folder-rules-${root.rootId}`}>
+                      {#if panel.rules.length === 0}
+                        <p class="tnote">{panel.rulesEmptyLabel}</p>
+                      {:else}
+                        <p class="tnote">{panel.rulesHeading}</p>
+                        <ul>
+                          <!-- `rule.existsOnDisk` goes to the question the same way
+                               `goneLabel` is drawn from it, so the two sentences in
+                               this panel cannot disagree about one folder. -->
+                          {#each panel.rules as { rule, goneLabel, costLabel, removeAriaLabel: ruleAria } (rule.prefix)}
+                            <li data-testid={`folder-rule-${root.rootId}-${rule.prefix}`}>
+                              <span>{rule.prefix}</span>
+                              {#if goneLabel}<span>{goneLabel}</span>{/if}
+                              <span>{costLabel}</span>
+                              <button
+                                type="button"
+                                aria-label={ruleAria}
+                                onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk)}>{removeRuleLabel}</button>
+                            </li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+    <!-- Between the tree and the bar, outside the scroll: a question about a row
+         at the foot of a long tree must not be scrolled out of sight. Each is
+         still tagged with the root it is about. -->
+    <div class="tnotes">
+      {#each rows as { root, panel, removeConfirm, selected } (root.rootId)}
+        {#if selected && !root.confirmed}
+          <div class="tstart">
+            <button
+              type="button"
+              data-testid={`folder-start-${root.rootId}`}
+              disabled={starting === root.rootId}
+              onclick={() => startIndexing(root)}>{startLabel}</button>
           </div>
-          <!-- Directly under the row it is about, and that is true by
-               construction rather than by hope: the question is drawn only
-               while `refresh` still finds its id naming its frozen path, and
-               it is taken away with a note the moment either half moves (see
-               the `namesFolder` check in `refresh`). Without that check this
-               sentence was false in exactly one state — a re-read handing this
-               id to another folder — and quietly false in another, where the
-               row is gone and nothing renders the question at all. -->
-          {#if removeConfirm}
-            <div data-testid={`folder-remove-confirm-${root.rootId}`}>
-              <p>{removeConfirm.question}</p>
-              <button
-                type="button"
-                aria-label={removeConfirm.confirmAriaLabel}
-                disabled={scanRunning}
-                onclick={confirmRemove}>{removeConfirm.confirmLabel}</button>
-              <button
-                type="button"
-                aria-label={removeConfirm.cancelAriaLabel}
-                onclick={cancelRemove}>{removeConfirm.cancelLabel}</button>
-            </div>
+        {/if}
+        {#if removeConfirm}
+          <div data-testid={`folder-remove-confirm-${root.rootId}`}>
+            <p>{removeConfirm.question}</p>
+            <button
+              type="button"
+              aria-label={removeConfirm.confirmAriaLabel}
+              disabled={scanRunning}
+              onclick={confirmRemove}>{removeConfirm.confirmLabel}</button>
+            <button
+              type="button"
+              aria-label={removeConfirm.cancelAriaLabel}
+              onclick={cancelRemove}>{removeConfirm.cancelLabel}</button>
+          </div>
+        {/if}
+        {#if panel}
+          {#if panel.actionError}
+            <p data-testid={`folder-subfolder-error-${root.rootId}`}>{panel.actionError}</p>
           {/if}
-          {#if panel}
-            <div class="fsubs" data-testid={`folder-panel-${root.rootId}`}>
-              {#if panel.loadError}
-                <p>{panel.failedLabel}</p>
-                <p data-testid={`folder-subfolders-reason-${root.rootId}`}>{panel.loadError}</p>
-              {/if}
-              {#if panel.actionError}
-                <p data-testid={`folder-subfolder-error-${root.rootId}`}>{panel.actionError}</p>
-              {/if}
-              {#if panel.note}<p data-testid={`folder-rule-note-${root.rootId}`}>{panel.note}</p>{/if}
-              {#if panel.withdrawnNote}
-                <p data-testid={`folder-question-withdrawn-${root.rootId}`}>{panel.withdrawnNote}</p>
-              {/if}
-              <!-- The question, and nothing stored until it is answered. Placed
-                   above the listing rather than inside the row that was
-                   pressed: the re-read behind it can redraw that row, and a
-                   question drawn inside a row that has moved is a question
-                   about an unclear subject. The heading names the path. -->
-              {#if panel.confirm}
-                {@const confirm = panel.confirm}
-                <div data-testid={`folder-confirm-${root.rootId}`}>
-                  {#if confirm.kind === 'checking'}
-                    <p>{confirm.checkingLabel}</p>
-                  {:else}
-                    <p>{confirm.heading}</p>
-                    <p data-testid={`folder-confirm-cost-${root.rootId}`}>{confirm.cost}</p>
-                    <button
-                      type="button"
-                      aria-label={confirm.confirmAriaLabel}
-                      onclick={() => answer(root.rootId)}>{confirm.confirmLabel}</button>
-                    <button
-                      type="button"
-                      aria-label={confirm.cancelAriaLabel}
-                      onclick={() => dismiss(root.rootId)}>{confirm.cancelLabel}</button>
-                  {/if}
-                </div>
-              {/if}
-              {#if panel.loadingLabel}<p>{panel.loadingLabel}</p>{/if}
-              {#if panel.level}{@render subfolders(panel.level, root.rootId)}{/if}
-              {#if panel.rules}
-                <div data-testid={`folder-rules-${root.rootId}`}>
-                  {#if panel.rules.length === 0}
-                    <p>{panel.rulesEmptyLabel}</p>
-                  {:else}
-                    <p>{panel.rulesHeading}</p>
-                    <ul>
-                      <!-- `rule.existsOnDisk` goes to the question the same way
-                           `goneLabel` is drawn from it, so the two sentences in
-                           this panel cannot disagree about one folder. -->
-                      {#each panel.rules as { rule, goneLabel, costLabel, removeAriaLabel: ruleAria } (rule.prefix)}
-                        <li data-testid={`folder-rule-${root.rootId}-${rule.prefix}`}>
-                          <span>{rule.prefix}</span>
-                          {#if goneLabel}<span>{goneLabel}</span>{/if}
-                          <span>{costLabel}</span>
-                          <button
-                            type="button"
-                            aria-label={ruleAria}
-                            onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk)}>{removeRuleLabel}</button>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                </div>
+          {#if panel.note}<p data-testid={`folder-rule-note-${root.rootId}`}>{panel.note}</p>{/if}
+          {#if panel.withdrawnNote}
+            <p data-testid={`folder-question-withdrawn-${root.rootId}`}>{panel.withdrawnNote}</p>
+          {/if}
+          <!-- The question, and nothing stored until it is answered. The heading
+               names the path, since it is not drawn inside the row it is about. -->
+          {#if panel.confirm}
+            {@const confirm = panel.confirm}
+            <div data-testid={`folder-confirm-${root.rootId}`}>
+              {#if confirm.kind === 'checking'}
+                <p>{confirm.checkingLabel}</p>
+              {:else}
+                <p>{confirm.heading}</p>
+                <p data-testid={`folder-confirm-cost-${root.rootId}`}>{confirm.cost}</p>
+                <button
+                  type="button"
+                  aria-label={confirm.confirmAriaLabel}
+                  onclick={() => answer(root.rootId)}>{confirm.confirmLabel}</button>
+                <button
+                  type="button"
+                  aria-label={confirm.cancelAriaLabel}
+                  onclick={() => dismiss(root.rootId)}>{confirm.cancelLabel}</button>
               {/if}
             </div>
           {/if}
-        </li>
+        {/if}
       {/each}
-    </ul>
-  {/if}
-  <!-- Under the list, Task 8: adding a folder starts no scan (owner's ruling —
-       excluding subfolders is still a move a person may want to make first),
-       so this is what stands where the old per-row Scan button's implicit
-       promise used to be. Stands until the next add or remove, never a job
-       ending: nothing about a scan changes what this sentence is telling a
-       person to go and do next. -->
-  <!-- Task 9, both under the list and both OUTSIDE the load-failure branch
-       above, which is the placement fix round 1 (I1) paid for once already: a
-       re-read that fails takes the whole list off the screen, and a withdrawal
-       notice that went with it would leave a press looking like a press that
-       did nothing. One sentence for the whole list, not one per row: every
-       "Remove" is disabled by the same fact. -->
-  <!-- Fix round 1, m2: only where there is a disabled button to explain. The
-       sentence says why every «Remove» is refused, so with no «Remove» on
-       screen it names a control the person cannot see.
-
-       BOTH halves of "on screen", because the list above is drawn on both: a
-       `loadError` replaces the whole list with its own two lines while `roots`
-       still holds the previous listing, so `roots.length > 0` alone would
-       leave this sentence standing over a list that is not there. The two
-       conditions are the same ones the `<ul>` above is gated on. -->
-  {#if removeBlockedLabel && loadError === null && roots.length > 0}
-    <p data-testid="folders-remove-blocked">{removeBlockedLabel}</p>
-  {/if}
-  {#if removeWithdrawnLabel}
-    <p data-testid="folders-remove-withdrawn">{removeWithdrawnLabel}</p>
-  {/if}
-  {#if folderAdded}
-    <p data-testid="folders-added-note">{addedNoteLabel}</p>
-  {/if}
-  <button type="button" onclick={addFolder}>{addLabel}</button>
-  {#if actionError}<p data-testid="folders-action-error">{actionError}</p>{/if}
+      <!-- Task 9, OUTSIDE the load-failure branch, which is the placement fix
+           round 1 (I1) paid for: a re-read that fails takes the whole list off
+           the screen, and a withdrawal notice that went with it would leave a
+           press looking like a press that did nothing. `removeBlocked` only
+           where there is a list whose `−` it explains. -->
+      {#if removeBlockedLabel && loadError === null && roots.length > 0}
+        <p data-testid="folders-remove-blocked">{removeBlockedLabel}</p>
+      {/if}
+      {#if removeWithdrawnLabel}
+        <p data-testid="folders-remove-withdrawn">{removeWithdrawnLabel}</p>
+      {/if}
+      {#if folderAdded}
+        <p data-testid="folders-added-note">{addedNoteLabel}</p>
+      {/if}
+      {#if actionError}<p data-testid="folders-action-error">{actionError}</p>{/if}
+    </div>
+    <div class="bar">
+      <button
+        type="button"
+        data-testid="folders-add"
+        aria-label={addLabel}
+        title={addLabel}
+        onclick={addFolder}>{@render plus()}</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button
+        type="button"
+        data-testid="folders-remove"
+        aria-label={chosenRow?.removeAriaLabel ?? removeSelectedLabel}
+        title={chosenRow?.removeAriaLabel ?? removeSelectedLabel}
+        disabled={chosenRow === null || removing !== null || scanRunning}
+        onclick={() => { if (chosenRow !== null) askRemove(chosenRow.root); }}>{@render minus()}</button>
+    </div>
+  </div>
+  <p class="hint">{treeHintLabel}</p>
 </div>

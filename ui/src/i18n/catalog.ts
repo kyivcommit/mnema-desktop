@@ -7,6 +7,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
+  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint'
+  | 'settings_folders_root_all' | 'settings_folders_root_some'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
@@ -64,7 +66,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
-  | 'settings_folders_expand' | 'settings_folders_expand_named'
+  | 'settings_folders_expand_named'
   | 'settings_subfolders_loading' | 'settings_subfolders_none'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
@@ -211,6 +213,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // key, before or after this commit; P3-7 review.)
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
+    settings_folders_remove_selected: 'Видалити виділену теку',
+    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку.',
+    settings_folders_root_all: 'Усе індексується',
+    settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
@@ -538,7 +544,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // and shut, and a button whose label flips is a second place for the same
     // fact — the two can disagree, and only one of them is what a screen
     // reader announces.
-    settings_folders_expand: 'Підтеки',
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
     settings_subfolders_none: 'У цій теці немає підтек.',
@@ -730,7 +735,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
     // implicit promise used to be, and names the one place a scan now starts.
-    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Почати індексацію» в її рядку.',
+    settings_folders_added_note: 'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Почати індексацію».',
     settings_folders_unconfirmed: 'Ще не індексується. Налаштуйте виключення й маски, потім почніть.',
     settings_folders_start: 'Почати індексацію',
     settings_masks_heading: 'Маски файлів',
@@ -1258,6 +1263,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_op_rescan: 'rescan',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
+    settings_folders_remove_selected: 'Remove the selected folder',
+    settings_folders_tree_hint: 'Untick a folder to keep it out of the index.',
+    settings_folders_root_all: 'Everything is indexed',
+    settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
     settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
     settings_folders_remove_named: 'Remove {path}',
@@ -1431,7 +1440,6 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
-    settings_folders_expand: 'Subfolders',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
     settings_subfolders_none: 'This folder has no subfolders.',
@@ -1479,7 +1487,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_removing: 'Removing…',
     settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
     settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
-    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.',
+    settings_folders_added_note: 'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
     settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then start.',
     settings_folders_start: 'Start indexing',
     settings_masks_heading: 'File masks',
