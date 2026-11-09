@@ -672,6 +672,9 @@ test('a state this build has never heard of offers no control, and the rule stay
   const row = within(screen.getByTestId('subfolder-1-Vault'));
   expect(row.getByText('Vault')).toBeTruthy(); // still listed, never silently dropped
   expect(row.queryAllByRole('button')).toHaveLength(0);
+  // The control is a tick now, not a button: an undescribed state must draw
+  // neither, or an unnamed box would ask to include the person's rule.
+  expect(row.queryAllByRole('checkbox')).toHaveLength(0);
   expect(includeSubfolder).not.toHaveBeenCalled();
   expect(excludeSubfolder).not.toHaveBeenCalled();
   // And the protection is still reachable, by the control that names it.
