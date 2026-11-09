@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/svelte';
 import { expect, test, vi, beforeEach, afterEach } from 'vitest';
 import Masks from './Masks.svelte';
 // A real controller, the way `Folders.test.ts` builds one: nothing here mounts
@@ -79,9 +79,16 @@ async function mount(masks: string[] = []) {
 // Types a mask and presses the add control. The two are one move: a draft that
 // never reaches the field is a draft the button reads as blank.
 async function type(mask: string) {
+  // The field opens from `+`; once open, `+` is the add press itself.
+  if (screen.queryByRole('textbox') === null) await fireEvent.click(addButton());
   await fireEvent.input(screen.getByRole('textbox'), { target: { value: mask } });
 }
-const addButton = () => screen.getByRole('button', { name: 'Add a mask' });
+function addButton() { return screen.getByRole('button', { name: 'Add a mask' }); }
+// «−» acts on the selected mask: select its row, then take the bar's button.
+async function removeMask_(mask: string): Promise<HTMLElement> {
+  await fireEvent.click(within(screen.getByTestId(`mask-row-${mask}`)).getByRole('button'));
+  return screen.getByTestId('masks-remove');
+}
 // Named by the mask, never by the word on the face: `Confirm` and `Cancel` are
 // the same two words for every question this section can ask, and only the
 // accessible name says which mask the press is about. The visible word is
@@ -174,7 +181,7 @@ test('a late add-preview must not replace a standing removal question', async ()
   await fireEvent.click(addButton());
   await waitFor(() => expect(screen.getByText('Checking what this mask removes…')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.tmp' }));
+  await fireEvent.click((await removeMask_('*.tmp')));
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
   expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Remove the mask *.tmp?');
   expect(confirmRemove('*.tmp')).toBeTruthy();
@@ -368,8 +375,12 @@ test('confirming stores the mask as typed and re-reads the list', async () => {
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
   expect(addMask).toHaveBeenCalledWith('*.pdf');
   expect(listMasks).toHaveBeenCalledTimes(2);
-  // The field is emptied, so the next press cannot re-add what was just added.
+  // The field closes and is emptied, so the next press cannot re-add what was
+  // just added; the new mask is the one selected.
+  expect(screen.queryByRole('textbox')).toBeNull();
+  await fireEvent.click(addButton());
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('');
+  expect(within(screen.getByTestId('mask-row-*.pdf')).getByRole('button').getAttribute('aria-pressed')).toBe('true');
 });
 
 test('cancelling stores nothing, and the question goes with the press', async () => {
@@ -463,7 +474,7 @@ test('a refusal from removing a mask names the removal, not the add, and carries
   await mount(['*.pdf']);
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
+  await fireEvent.click((await removeMask_('*.pdf')));
   await fireEvent.click(confirmRemove('*.pdf'));
 
   await waitFor(() => expect(screen.getByTestId('mask-refused-reason')).toBeTruthy());
@@ -516,7 +527,7 @@ test('a rule that is already stored under another spelling is not added, and the
   // Exactly one row, by count and not by "the one we know about is there": a
   // second row would leave the first assertion green.
   expect(screen.getAllByRole('button', { name: /^Remove the mask/ }).length).toBe(1);
-  expect(screen.getByRole('button', { name: 'Remove the mask *.pdf' })).toBeTruthy();
+  expect((await removeMask_('*.pdf'))).toBeTruthy();
   expect(screen.queryByText('*.PDF')).toBeNull();
 
   // The other direction, on a mask that really is new: the sentence must not
@@ -627,7 +638,7 @@ test('removing states the inverse cost before it removes anything, in both local
   await mount(['*.pdf']);
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
+  await fireEvent.click((await removeMask_('*.pdf')));
 
   expect(visibleText(screen.getByTestId('mask-confirm-cost'))).toBe(
     'From the next scan of each folder on, this mask stops holding anything back: each file it'
@@ -660,7 +671,7 @@ test('removing re-reads the list rather than editing the array on screen', async
   // directions: `*.pdf` is gone and `*.log` is there, and no local edit could
   // have invented `*.log`.
   listMasks.mockResolvedValue(['*.tmp', '*.log']);
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
+  await fireEvent.click((await removeMask_('*.pdf')));
   await fireEvent.click(confirmRemove('*.pdf'));
 
   await waitFor(() => expect(screen.getByText('*.log')).toBeTruthy());
@@ -676,7 +687,7 @@ test('a mask another window removed first says so, and one this window removed d
   await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
 
   listMasks.mockResolvedValue([]);
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.pdf' }));
+  await fireEvent.click((await removeMask_('*.pdf')));
   await fireEvent.click(confirmRemove('*.pdf'));
 
   await waitFor(() => expect(screen.getByTestId('mask-already-gone')).toBeTruthy());
@@ -690,7 +701,7 @@ test('a mask another window removed first says so, and one this window removed d
   await mount(['*.tmp']);
   await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
   listMasks.mockResolvedValue([]);
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.tmp' }));
+  await fireEvent.click((await removeMask_('*.tmp')));
   await fireEvent.click(confirmRemove('*.tmp'));
 
   await waitFor(() => expect(screen.queryByText('*.tmp')).toBeNull());
@@ -704,6 +715,7 @@ test('a mask another window removed first says so, and one this window removed d
 // finds it by the LABEL, which only works if the association is real.
 test('the mask input is really named by its own label, not just found by being the only textbox', async () => {
   await mount([]);
+  await fireEvent.click(addButton());
   expect(screen.getByLabelText('New mask:')).toBe(screen.getByRole('textbox'));
 });
 
@@ -715,6 +727,7 @@ test('the mask input is really named by its own label, not just found by being t
 test('the blank row cannot be pressed, and whitespace is not blank', async () => {
   await mount([]);
 
+  await fireEvent.click(addButton()); // opens the field, empty
   expect((addButton() as HTMLButtonElement).disabled).toBe(true);
   await fireEvent.click(addButton());
   expect(maskPreview).not.toHaveBeenCalled();
@@ -818,9 +831,10 @@ test('the whole section reads as one screen', async () => {
 
   expect(visibleText(container)).toBe(
     'File masks'
-    + ' *.pdf Remove'
-    + ' *.tmp Remove'
-    + ' New mask: Add a mask ⓘ'
+    + ' *.pdf'
+    + ' *.tmp'
+    + ' ⓘ'
+    + ' Masks apply in every folder and match the file name, e.g. *.log.'
     + ' A mask applies to every watched folder at once: it is compared with a file name, at any'
     + ' depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF'
     + ' and *.pdf are one and the same rule; neither does the way a name happens to store its'
@@ -891,7 +905,7 @@ test('every sentence on the section follows a language switch, the standing ques
   // otherwise identical controls apart.
   expect(screen.getByRole('button', { name: 'Підтвердити додавання маски *.tmp' }).textContent)
     .toBe('Підтвердити');
-  expect(screen.getByRole('button', { name: 'Видалити маску *.pdf' })).toBeTruthy();
+  expect((await removeMask_('*.pdf'))).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Додати маску' })).toBeTruthy();
   expect(text).not.toContain('As of now');
 });
@@ -927,7 +941,7 @@ test('the refusal frame and the already-gone note also follow a language switch'
   const { container: container2 } = await mount(['*.tmp']);
   await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove the mask *.tmp' }));
+  await fireEvent.click((await removeMask_('*.tmp')));
   await fireEvent.click(confirmRemove('*.tmp'));
   await waitFor(() => expect(screen.getByTestId('mask-already-gone')).toBeTruthy());
   expect(visibleText(container2)).toContain(t('settings_masks_already_gone'));
@@ -974,4 +988,48 @@ test('keeps the explainer in a popover the ⓘ right of Add opens', async () => 
   expect(target!.getAttribute('popover')).toBe('auto');
   const explainer = screen.getByText(t('settings_masks_explainer'));
   expect(explainer.closest('[popover]')).toBe(target);
+});
+
+// ── Masks as a list with a +/− bar (PR 1 of the folders-tree spec) ───────────
+
+test('plus opens the field and focuses it; Enter asks to add', async () => {
+  maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
+  await mount([]);
+  expect(screen.queryByRole('textbox')).toBeNull();
+
+  await fireEvent.click(addButton());
+  const field = screen.getByRole('textbox') as HTMLInputElement;
+  await waitFor(() => expect(document.activeElement).toBe(field));
+  await fireEvent.input(field, { target: { value: '*.log' } });
+  await fireEvent.keyDown(field, { key: 'Enter' });
+
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  expect(maskPreview).toHaveBeenCalledWith('*.log');
+});
+
+test('Escape closes the field and keeps no draft', async () => {
+  await mount([]);
+  await type('*.log');
+
+  await fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+
+  expect(screen.queryByRole('textbox')).toBeNull();
+  await fireEvent.click(addButton());
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('');
+  expect(maskPreview).not.toHaveBeenCalled();
+});
+
+test('minus is dead until a mask is selected, then asks about that mask', async () => {
+  await mount(['*.pdf', '*.tmp']);
+  await waitFor(() => expect(screen.getByText('*.tmp')).toBeTruthy());
+  const minus = screen.getByTestId('masks-remove') as HTMLButtonElement;
+  expect(minus.disabled).toBe(true);
+  expect(minus.getAttribute('aria-label')).toBe('Remove the selected mask');
+
+  await fireEvent.click(within(screen.getByTestId('mask-row-*.tmp')).getByRole('button'));
+  expect(minus.disabled).toBe(false);
+  expect(minus.getAttribute('aria-label')).toBe('Remove the mask *.tmp');
+  await fireEvent.click(minus);
+
+  expect(screen.getByRole('button', { name: 'Confirm removing the mask *.tmp' })).toBeTruthy();
 });

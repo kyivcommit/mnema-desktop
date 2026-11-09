@@ -92,6 +92,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_added_note' | 'settings_folders_unconfirmed' | 'settings_folders_start'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
+  | 'settings_masks_hint' | 'settings_masks_remove_selected'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
   | 'settings_masks_confirm_add_heading' | 'settings_masks_confirm_remove_heading'
@@ -762,6 +763,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило; так само не має значення, як саме записані на диску літери з діакритичними знаками. А «?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба ставити кілька: «?.txt» не збігається з «й.txt», а «??.txt» збігається.',
     settings_masks_none: 'Жодної маски ще не додано.',
     settings_masks_add: 'Додати маску',
+    settings_masks_hint: 'Маски діють у всіх теках і порівнюються з назвою файлу, напр. *.log.',
+    settings_masks_remove_selected: 'Видалити виділену маску',
     settings_masks_input_label: 'Нова маска:',
     settings_masks_remove: 'Видалити',
     settings_masks_remove_named: 'Видалити маску {mask}',
@@ -1495,6 +1498,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',
+    settings_masks_hint: 'Masks apply in every folder and match the file name, e.g. *.log.',
+    settings_masks_remove_selected: 'Remove the selected mask',
     settings_masks_input_label: 'New mask:',
     settings_masks_remove: 'Remove',
     settings_masks_remove_named: 'Remove the mask {mask}',
