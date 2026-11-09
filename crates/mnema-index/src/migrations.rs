@@ -4,7 +4,7 @@ use rusqlite_migration::{M, Migrations};
 use crate::Error;
 
 /// Bumped whenever the DDL changes. Stored in PRAGMA user_version.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Which reader made the document at each path, and which version of it.
 ///
@@ -210,6 +210,14 @@ UPDATE skipped SET size_bytes = NULL WHERE page_no IS NULL AND rule = 'no_text_l
 /// Its own migration for the reason `ADD_FILE_MASK` states.
 const ADD_PAGE_OCR_CONFIDENCE: &str = "ALTER TABLE page ADD COLUMN ocr_confidence REAL;";
 
+/// D202: whether a person has confirmed a watched folder for indexing. A
+/// folder added through the window waits unconfirmed, and no scan reads it,
+/// until the person has set its exclusions and masks and pressed Start.
+/// `DEFAULT 1` so every folder watched before this migration stays indexed.
+///
+/// Its own migration for the reason `ADD_FILE_MASK` states.
+const ADD_WATCHED_ROOT_CONFIRMED: &str = "ALTER TABLE watched_root ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1 CHECK (confirmed IN (0, 1));";
+
 /// The migrations in order; the index of each is the `user_version` it produces.
 ///
 /// **`schema.sql` is migration 1 and is now frozen.** It is not a description of
@@ -229,6 +237,7 @@ fn migrations() -> Migrations<'static> {
         M::up(ADD_SEARCH_FOLDER),
         M::up(ADD_SKIP_READER),
         M::up(ADD_PAGE_OCR_CONFIDENCE),
+        M::up(ADD_WATCHED_ROOT_CONFIRMED),
     ])
 }
 
@@ -480,11 +489,11 @@ mod tests {
 
         apply(&mut conn).expect("a version-4 database migrates to the current version");
 
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         let value: String = conn
             .query_row("SELECT value FROM meta WHERE key = 'chat_model'", [], |r| {
@@ -565,7 +574,7 @@ mod tests {
         .expect("the six-column statements a version-6 database could have written");
 
         apply(&mut conn).expect("a version-6 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
 
         let (reason, size, reader, reader_version): (
             String,
@@ -661,7 +670,7 @@ mod tests {
         .expect("the statement a version-7 database could have run");
 
         apply(&mut conn).expect("a version-7 database migrates to the current version");
-        assert_eq!(SCHEMA_VERSION, 8);
+        assert_eq!(SCHEMA_VERSION, 9);
         assert!(
             has_column(&conn),
             "the upgrade must add `page.ocr_confidence`"
@@ -758,5 +767,46 @@ mod tests {
              SCHEMA_VERSION — editing this file in place leaves every database \
              already on disk with the old rule and nothing to say so."
         );
+    }
+
+    /// D202: a folder already watched before this migration stays confirmed —
+    /// an upgrade must not stop indexing anything a person already had. Asserted
+    /// absent at version 8 first, so an edit that folded the column into an
+    /// earlier migration fails here rather than skipping real databases.
+    #[test]
+    fn a_folder_watched_before_version_nine_stays_confirmed() {
+        register_vector_extension().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 8).unwrap();
+        let before: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('watched_root') WHERE name = 'confirmed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            before, 0,
+            "`confirmed` must arrive in a migration of its own"
+        );
+        conn.execute(
+            "INSERT INTO watched_root (id, absolute_path) VALUES (1, '/tmp/root')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn).unwrap();
+
+        let confirmed: i64 = conn
+            .query_row("SELECT confirmed FROM watched_root WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(confirmed, 1);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 9);
     }
 }

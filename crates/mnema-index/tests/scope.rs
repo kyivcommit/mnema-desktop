@@ -76,7 +76,7 @@ fn a_dead_root_id_writes_nothing_and_does_not_fail() {
 /// module, and this line is what says the numbering moved.
 #[test]
 fn search_folder_arrives_as_the_sixth_migration() {
-    assert_eq!(SCHEMA_VERSION, 8);
+    assert_eq!(SCHEMA_VERSION, 9);
     let db = temp_db();
     assert_eq!(rows(&db), 0, "a fresh database has the table, empty");
 }
