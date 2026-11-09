@@ -1124,25 +1124,25 @@
   // shows its count instead of the button.
   async function startIndexing(root: TreeRoot) {
     actionError = null;
+    // The note asked for this press; once it is made the note is stale, even
+    // when the scan behind it is refused — the folder is confirmed by then.
+    folderAdded = false;
     starting = root.rootId;
-    let confirmed = true;
     try {
       await confirmWatchedFolder(root.rootId);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
-      confirmed = false;
-    } finally {
-      starting = null;
     }
-    // The note asked for this press; once it is made, the note is stale.
-    if (confirmed) folderAdded = false;
     // Re-read on a refusal too: the backend confirms before it starts the scan,
     // so a scan that would not start leaves a confirmed folder, and the row
-    // must show it as the backend has it rather than a stale Start.
+    // must show it as the backend has it rather than a stale Start. The button
+    // stays disabled until then, or a second press queues a second scan.
     try {
       await refresh();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      starting = null;
     }
   }
 
@@ -1588,8 +1588,9 @@
 
 <!-- D202: the settings window is created hidden at start and never unmounted,
      so a folder added from the launcher reaches this list when the window is
-     shown and focused, not through any job ending. -->
-<svelte:window onfocus={() => reread(false)} />
+     shown and focused, not through any job ending. The roots only: an expanded
+     panel is re-walked when a scan ends, not on every focus. -->
+<svelte:window onfocus={() => refresh().catch((e) => { loadError = e instanceof Error ? e.message : String(e); })} />
 
 {#snippet subfolders(level: Level, rootId: number)}
   {#if level.unnameableLabel}<p>{level.unnameableLabel}</p>{/if}

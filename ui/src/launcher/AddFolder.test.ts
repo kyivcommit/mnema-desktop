@@ -20,12 +20,10 @@ const state = (over: Partial<ScanState> = {}): ScanState => ({
 
 // One reply per command name; an unexpected command fails the test.
 let addReply: () => Promise<number>;
-let startReply: () => Promise<void>;
 let openSettingsReply: () => Promise<void>;
 let statusReply: () => Promise<ScanState>;
 function route(cmd: string): Promise<unknown> {
   if (cmd === 'add_watched_folder') return addReply();
-  if (cmd === 'start_scan_job') return startReply();
   if (cmd === 'open_settings') return openSettingsReply();
   if (cmd === 'job_status') return statusReply();
   throw new Error(`unexpected command ${cmd}`);
@@ -55,7 +53,6 @@ beforeEach(() => {
   listen.mockReset().mockResolvedValue(() => {});
   addReply = () => Promise.resolve(7);
   openSettingsReply = () => Promise.resolve();
-  startReply = () => Promise.resolve();
   statusReply = () => Promise.resolve(state());
   onChanged = vi.fn<() => void>();
 });
@@ -330,9 +327,3 @@ test('a failed job_status read is logged', async () => {
   mountButton();
   await waitFor(() => expect(err).toHaveBeenCalledWith('job_status failed', expect.any(Error)));
 });
-
-// 3: the blocker ended inside the refusal's round trip — `job_status` says idle,
-// but `jobsDone` grew past what was known before the start, so the slot was
-// busy: the scan is started again, and no failure is shown.
-// 4: one start on the wire at a time, even when a press lands while a queued
-// start is still waiting for its answer.

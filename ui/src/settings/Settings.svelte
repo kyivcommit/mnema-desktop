@@ -28,14 +28,19 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
     let destroyed = false;
-    // D202: a window opened fresh may have missed the event below; the section
-    // it was opened for waits in the backend until asked for, once.
-    void takeSettingsSection().then((asked) => {
-      if (!destroyed && asked !== null && (SECTIONS as string[]).includes(asked)) section = asked as SectionId;
-    }, (e) => console.error('take_settings_section failed', e));
     void listen<string>('settings-section', (e) => {
       if ((SECTIONS as string[]).includes(e.payload)) section = e.payload as SectionId;
-    }).then((un) => (destroyed ? un() : (unlisten = un)));
+    }).then((un) => {
+      if (destroyed) { un(); return; }
+      unlisten = un;
+      // D202: a window opened fresh may have missed the event; the section it
+      // was opened for waits in the backend until asked for, once. Asked only
+      // once listening, so an `open_settings` landing in between reaches one
+      // of the two.
+      void takeSettingsSection().then((asked) => {
+        if (!destroyed && asked !== null && (SECTIONS as string[]).includes(asked)) section = asked as SectionId;
+      }, (e) => console.error('take_settings_section failed', e));
+    });
     return () => {
       destroyed = true;
       unlisten?.();

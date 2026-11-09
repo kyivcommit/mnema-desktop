@@ -101,6 +101,7 @@ let deliver: ((state: ScanState) => void) | null = null;
 let sectionHandler: ((e: { payload: unknown }) => void) | null = null;
 // D202: what `take_settings_section` answers a window opening fresh.
 let pendingSection: string | null = null;
+let listeningWhenAsked: boolean | null = null;
 const unlistenSection = vi.fn();
 vi.mock('@tauri-apps/api/event', () => ({
   listen: (name: string, cb: (e: { payload: unknown }) => void) => {
@@ -110,7 +111,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 vi.mock('../lib/ipc', () => ({
   memoryIsLow: () => Promise.resolve(false),
-  takeSettingsSection: () => Promise.resolve(pendingSection),
+  takeSettingsSection: () => { listeningWhenAsked = sectionHandler !== null; return Promise.resolve(pendingSection); },
   LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.
@@ -1715,4 +1716,14 @@ test('a fresh window asked for no section, or for an unknown one, opens on Model
       cleanup();
     }
   }
+});
+
+// External review 2: asked before listening, an `open_settings` landing between
+// the two is lost to both. Listening first, the two cover each other.
+test('a window listens for its section before it asks for the one it was opened for', async () => {
+  sectionHandler = null;
+  listeningWhenAsked = null;
+  render(Settings);
+  await waitFor(() => expect(listeningWhenAsked).not.toBeNull());
+  expect(listeningWhenAsked).toBe(true);
 });

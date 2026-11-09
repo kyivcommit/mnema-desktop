@@ -3795,3 +3795,59 @@ test('a refused Start still re-reads the list', async () => {
   await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
   expect(screen.getByTestId('folders-action-error').textContent).toBe('a stored exclusion is invalid');
 });
+
+// External review 3: the focus re-read is for the roots; an expanded folder's
+// panel is not walked again from disk on every alt-tab.
+test('a focus re-reads the roots, not an expanded panel', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([root({ rootId: 1 })]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await fireEvent.click(await screen.findByTestId('folder-expand-1'));
+  await waitFor(() => expect(listSubfolders).toHaveBeenCalledTimes(1));
+
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(listTree).toHaveBeenCalledTimes(2));
+  await tick();
+  expect(listSubfolders).toHaveBeenCalledTimes(1);
+});
+
+// External review 4: the note asked for a press; once pressed it goes, even
+// when the scan behind it was refused (the folder is confirmed by then).
+test('a refused Start also takes away the note that asked for it', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: true })]));
+  open.mockResolvedValue('/synthetic/root');
+  addWatchedFolder.mockResolvedValue(3);
+  confirmWatchedFolder.mockRejectedValueOnce(new Error('a stored exclusion is invalid'));
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  expect(screen.queryByTestId('folders-added-note')).toBeNull();
+  expect(screen.getByTestId('folders-action-error').textContent).toBe('a stored exclusion is invalid');
+});
+
+// External review 5: the button stays disabled until the list says the folder
+// is confirmed; a second press in between would queue a second full scan.
+test('Start stays disabled until the list has re-read', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
+  let release!: (l: TreeListing) => void;
+  listTree.mockReturnValueOnce(new Promise<TreeListing>((r) => (release = r)));
+  confirmWatchedFolder.mockResolvedValue(undefined);
+  render(Folders, { props: { jobs: createJobController() } });
+  const start = await screen.findByTestId('folder-start-3');
+
+  await fireEvent.click(start);
+  await waitFor(() => expect(confirmWatchedFolder).toHaveBeenCalledTimes(1));
+  await tick();
+  expect((screen.getByTestId('folder-start-3') as HTMLButtonElement).disabled).toBe(true);
+
+  release(listing([root({ rootId: 3, confirmed: true })]));
+  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+});
