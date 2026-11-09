@@ -730,10 +730,9 @@ test('built-in and symlinked subfolders are not listed, an open one beside them 
   expect(screen.getByTestId('subfolder-1-Work')).toBeTruthy();
 });
 
-// A folder holding only what is never indexed reads as holding nothing to
-// decide — the same sentence a folder with no subfolders gives.
-test('a folder whose only subfolder is built in says it has none to show', async () => {
-  await expand([sub('node_modules', { kind: 'builtIn' })]);
+// A folder that really has no subfolders keeps its own sentence.
+test('a folder with no subfolders at all says so', async () => {
+  await expand([]);
 
   expect(screen.getByText('This folder has no subfolders.')).toBeTruthy();
 });
@@ -4052,4 +4051,30 @@ test('every unconfirmed folder has its Start, whatever is selected', async () =>
   expect(screen.getByTestId('folder-select-1').getAttribute('aria-pressed')).toBe('true');
   expect(screen.queryByTestId('folder-start-1')).toBeNull();
   expect(screen.getByRole('button', { name: 'Start indexing /synthetic/new' })).toBeTruthy();
+});
+
+// PR #100 review 1. A failed re-read takes the list off the screen, and every
+// per-root control under the tree goes with it. A Start drawn from the last
+// good listing confirms by id alone (`confirm_watched_folder`), and an id can
+// name another folder by then.
+test('a failed re-read takes Start and the per-root questions off the screen with the list', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false })]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
+
+  listTree.mockRejectedValueOnce(new Error('boom'));
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(screen.getByTestId('folders-load-reason').textContent).toBe('boom'));
+  expect(screen.queryByTestId('folder-start-3')).toBeNull();
+});
+
+// PR #100 review 4. Built-in folders and symlinks are hidden, so a folder that
+// holds only those must not claim to hold no subfolders at all.
+test('a folder holding only hidden subfolders says nothing here can be indexed, not that it is empty', async () => {
+  await expand([sub('node_modules', { kind: 'builtIn' }), sub('Link', { kind: 'symlink' })]);
+
+  expect(screen.queryByText('This folder has no subfolders.')).toBeNull();
+  expect(screen.getByText('No subfolder here can be indexed: the scan never reads the ones this folder holds.')).toBeTruthy();
 });

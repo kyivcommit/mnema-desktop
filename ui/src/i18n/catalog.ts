@@ -68,11 +68,10 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
   | 'settings_folders_expand_named'
-  | 'settings_subfolders_loading' | 'settings_subfolders_none'
+  | 'settings_subfolders_loading' | 'settings_subfolders_none' | 'settings_subfolders_none_indexable'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
-  | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_built_in'
-  | 'settings_subfolder_symlink' | 'settings_subfolder_unusable_name'
+  | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
   | 'settings_subfolder_index_named'
   | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
   | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
@@ -549,6 +548,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
     settings_subfolders_none: 'У цій теці немає підтек.',
+    settings_subfolders_none_indexable: 'Тут немає підтек для індексації: ті, що є, сканування ніколи не читає.',
     // `unnameable` (tree.rs): записи, чиї назви не є коректним UTF-8, лічать і
     // не показують — назва, зіпсована при показі, більше не відкриває ту теку,
     // з якої походить, і правило з неї не виключило б нічого. Речення існує,
@@ -577,11 +577,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // одному екрані — те, що цей раунд і лагодить. Хто змінює це речення,
     // змінює всі три місця; `Folders.test.ts` читає їх поруч в одному рядку.
     settings_subfolder_excluded_by_ancestor: 'Утримується вашим правилом на {prefix}. Спершу приберіть те правило — теку може утримувати ще одне.',
-    // `built_in` і `unusable_name` — протилежні факти, і речення НЕ мають
-    // читатись однаково: вміст першої не потрапляє до провайдера ніколи,
-    // вміст другої потрапляє, і людина не може захистити її звідси.
-    settings_subfolder_built_in: 'Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.',
-    settings_subfolder_symlink: 'Посилання на іншу теку. Сканування ніколи не переходить за посиланнями, тож усередині нічого не індексується.',
+    // Вміст такої теки сканується й потрапляє до провайдера, а захистити її
+    // звідси не можна — речення каже саме це, не «застосунок її пропускає».
     settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
     // Назва галки, не дії: «Індексувати Work, позначено» — правда в обох станах.
     settings_subfolder_index_named: 'Індексувати {path}',
@@ -1448,13 +1445,12 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
     settings_subfolders_none: 'This folder has no subfolders.',
+    settings_subfolders_none_indexable: 'No subfolder here can be indexed: the scan never reads the ones this folder holds.',
     settings_subfolders_unnameable: '{count, plural, one {# subfolder is not listed: its name could not be read as text.} other {# subfolders are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
     settings_subfolder_excluded: 'Excluded by your rule.',
     settings_subfolder_excluded_by_ancestor: 'Held by your rule on {prefix}. Remove that rule first — another rule may still hold this folder.',
-    settings_subfolder_built_in: 'The application never indexes this folder, so there is no rule to add or remove.',
-    settings_subfolder_symlink: 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     // The tick's name, not an action: "Index Work, checked" is true in both states.
     settings_subfolder_index_named: 'Index {path}',

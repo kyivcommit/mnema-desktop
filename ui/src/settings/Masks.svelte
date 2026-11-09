@@ -325,11 +325,16 @@
   function onFieldKey(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      void askAdd();
+      // The same press as `+`, held to the same rule: no second `mask_preview`
+      // while the first is still being checked.
+      if (pending?.kind !== 'checking') void askAdd();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       fieldOpen = false;
       draft = '';
+      // A withdrawal, like Cancel: a preview still on the wire must not raise
+      // the question after the person closed the field.
+      if (pending?.kind === 'checking') dismiss();
     }
   }
 

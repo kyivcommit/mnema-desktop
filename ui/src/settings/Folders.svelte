@@ -1303,12 +1303,11 @@
   // contents ARE walked, and its name is one no rule can carry — which is why
   // its sentence says something different rather than something similar.
   //
-  // **`open` and `excluded` can be expanded; the other four cannot, and
-  // `symlink` is the load-bearing case.** `subfolder_state` asks `is_symlink`
-  // about the entry itself, so a directory INSIDE a symlinked one comes back
-  // `open` — offering "exclude" there would write a rule that excludes
-  // nothing, over a subtree the walk never enters. `builtIn` and
-  // `unusableName` are shut because there is nothing below them to decide
+  // **`open` and `excluded` can be expanded; the other four cannot.**
+  // `builtIn` and `symlink` are not drawn at all since the folders-tree PR 1;
+  // `symlink` must still never open, because `subfolder_state` asks
+  // `is_symlink` about the entry itself, so a directory INSIDE a symlinked one
+  // would come back `open`. `builtIn` and `unusableName` are shut because there is nothing below them to decide
   // either: both questions are asked about the WHOLE relative path
   // (`layers.prunes` and `check_prefix`, `tree.rs:823` and `:844`), so every
   // child of such a folder comes back in the same state its parent is in.
@@ -1346,10 +1345,11 @@
           expandable: false,
           excluded: true,
         };
+      // Never drawn: `buildLevel` drops both (spec, owner's ruling 4). The arms
+      // stay so the switch is exhaustive and neither can be opened.
       case 'builtIn':
-        return { sentence: t('settings_subfolder_built_in'), control: 'none', expandable: false, excluded: false };
       case 'symlink':
-        return { sentence: t('settings_subfolder_symlink'), control: 'none', expandable: false, excluded: false };
+        return { sentence: '', control: 'none', expandable: false, excluded: false };
       case 'unusableName':
         return { sentence: t('settings_subfolder_unusable_name'), control: 'none', expandable: false, excluded: false };
       // 🔴 A compile-time arm with a run-time consequence, and the two are
@@ -1454,8 +1454,13 @@
       // Only when there is genuinely nothing: a folder holding entries this
       // listing cannot name says how many instead, and must not also claim to
       // hold no subfolders.
+      // Two sentences, because hiding built-in folders and symlinks makes "no
+      // rows" mean two things: really nothing here, or only folders the scan
+      // never reads. The first would be false about the second.
       emptyLabel:
-        rows.length === 0 && node.listing.unnameable === 0 ? t('settings_subfolders_none') : null,
+        rows.length > 0 || node.listing.unnameable > 0 ? null
+        : node.listing.entries.length === 0 ? t('settings_subfolders_none')
+        : t('settings_subfolders_none_indexable'),
       rows,
     };
   }
@@ -1812,7 +1817,11 @@
          at the foot of a long tree must not be scrolled out of sight. Each is
          still tagged with the root it is about. -->
     <div class="tnotes">
-      {#each rows as { root, panel, removeConfirm } (root.rootId)}
+      <!-- Only over a list that is on screen: a failed re-read takes the rows
+           away, and a Start drawn from the last good listing confirms by id
+           alone (`confirm_watched_folder`), which may name another folder by
+           then. The questions go with it, as they did inside the rows. -->
+      {#each loadError === null ? rows : [] as { root, panel, removeConfirm } (root.rootId)}
         <!-- Every unconfirmed root, not only the selected one: a folder added
              from the launcher while another root is selected would otherwise
              have no Start on screen and stay unindexed with nothing to press. -->

@@ -1033,3 +1033,33 @@ test('minus is dead until a mask is selected, then asks about that mask', async 
 
   expect(screen.getByRole('button', { name: 'Confirm removing the mask *.tmp' })).toBeTruthy();
 });
+
+// PR #100 review 2. Escape is a withdrawal like Cancel: a preview still on the
+// wire must not raise the question after the person closed the field.
+test('Escape while the preview is in flight raises no question when it lands', async () => {
+  let land: (v: { paths: number; documents: number }) => void = () => {};
+  maskPreview.mockImplementation(() => new Promise((r) => { land = r; }));
+  await mount([]);
+  await type('*.log');
+  await fireEvent.click(addButton());
+  expect(maskPreview).toHaveBeenCalledTimes(1);
+
+  await fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+  land({ paths: 3, documents: 1 });
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(screen.queryByTestId('mask-confirm')).toBeNull();
+});
+
+// PR #100 review 3. Enter is the same press as `+`, so it obeys the same rule:
+// no second `mask_preview` while the first is still being checked.
+test('Enter while a preview is being checked asks nothing more', async () => {
+  maskPreview.mockImplementation(() => new Promise(() => {}));
+  await mount([]);
+  await type('*.log');
+  const field = screen.getByRole('textbox');
+  await fireEvent.keyDown(field, { key: 'Enter' });
+  await fireEvent.keyDown(field, { key: 'Enter' });
+
+  expect(maskPreview).toHaveBeenCalledTimes(1);
+});
