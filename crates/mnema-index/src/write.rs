@@ -147,6 +147,8 @@ pub struct PathEntry {
 pub struct WatchedRootRow {
     pub id: i64,
     pub absolute_path: String,
+    /// D202: `false` until the person presses Start; no scan reads it before.
+    pub confirmed: bool,
 }
 
 pub struct IndexedFileRow {
@@ -196,14 +198,15 @@ pub struct PathOccupant {
 impl Db {
     /// Every watched folder, in the order the user added them.
     pub fn list_watched_roots(&self) -> Result<Vec<WatchedRootRow>, Error> {
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT id, absolute_path FROM watched_root ORDER BY added_at, id")?;
+        let mut stmt = self.conn().prepare(
+            "SELECT id, absolute_path, confirmed FROM watched_root ORDER BY added_at, id",
+        )?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(WatchedRootRow {
                     id: r.get(0)?,
                     absolute_path: r.get(1)?,
+                    confirmed: r.get(2)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -432,6 +435,26 @@ impl Db {
             params![absolute_path],
         )?;
         Ok(self.conn().last_insert_rowid())
+    }
+
+    /// D202: a folder a person just added. It waits unconfirmed — no scan reads
+    /// it — until [`Db::confirm_watched_root`].
+    pub fn insert_unconfirmed_watched_root(&self, absolute_path: &str) -> Result<i64, Error> {
+        self.conn().execute(
+            "INSERT INTO watched_root (absolute_path, confirmed) VALUES (?1, 0)",
+            params![absolute_path],
+        )?;
+        Ok(self.conn().last_insert_rowid())
+    }
+
+    /// D202: lets scans read the folder. `false` when no root has this id;
+    /// `true` for an existing one, already confirmed or not.
+    pub fn confirm_watched_root(&self, root_id: i64) -> Result<bool, Error> {
+        let changed = self.conn().execute(
+            "UPDATE watched_root SET confirmed = 1 WHERE id = ?1",
+            params![root_id],
+        )?;
+        Ok(changed == 1)
     }
 
     /// The absolute path a watched root was added under, or `None` if no root

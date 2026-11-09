@@ -39,6 +39,7 @@ function route(cmd: string, args?: unknown): Promise<unknown> {
   if (cmd === 'job_status') return Promise.resolve({ revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
   if (cmd === 'add_watched_folder') return Promise.resolve(9);
   if (cmd === 'start_scan_job') return Promise.resolve();
+  if (cmd === 'open_settings') return Promise.resolve();
   throw new Error(`unexpected command ${cmd}`);
 }
 
@@ -295,7 +296,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
   mockTree({
     roots: [
       {
-        rootId: 9,
+        rootId: 9, confirmed: true,
         absolutePath: '/home/u/ua', searched: [],
         name: 'ua',
         files: [{ relativePath: 'Договори/dohov-01.md', documentId: 'doc-u' }],
@@ -331,8 +332,8 @@ test('two roots holding a folder of the same name open and shut independently', 
   // Local, like `mockTree` (Ruling L): nothing else consumes this shape.
   mockTree({
     roots: [
-      { rootId: 1, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
-      { rootId: 2, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
+      { rootId: 1, confirmed: true, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
+      { rootId: 2, confirmed: true, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
     ],
   });
   mount(null);
@@ -1179,7 +1180,7 @@ test('a tree pane that is hidden is not scrolled', async () => {
 
 const LIB: TreeListing = {
   roots: [{
-    rootId: 1, absolutePath: '/home/u/lib', name: 'lib',
+    rootId: 1, confirmed: true, absolutePath: '/home/u/lib', name: 'lib',
     searched: [{ folderPath: 'Books/novels', searched: false }],
     files: [
       { relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' },
@@ -1525,4 +1526,34 @@ test('without a controller the tree draws no add-folder button', async () => {
   render(Tree, { selected: null, onPick: pick });
   await screen.findByTestId('tree-title');
   expect(screen.queryByTestId('tree-add-folder')).toBeNull();
+});
+
+// D202: a folder added but not yet started is marked, and a click takes the
+// person to Settings to start it rather than folding an empty row.
+test('an unconfirmed root is marked, has no search check, and opens Settings on Folders', async () => {
+  setLocale('en');
+  mockTree({
+    roots: [
+      { rootId: 5, confirmed: false, absolutePath: '/home/u/new', searched: [], name: 'new', files: [] },
+      { rootId: 6, confirmed: true, absolutePath: '/home/u/old', searched: [], name: 'old',
+        files: [{ relativePath: 'a.md', documentId: 'doc-a' }] },
+    ],
+  });
+  mount(null);
+  const pending = await screen.findByTestId('tree-root-toggle-5');
+  expect(pending.classList.contains('unconfirmed')).toBe(true);
+  expect(pending.getAttribute('aria-label')).toBe('new — Not indexed yet — set up');
+  expect(pending.getAttribute('title')).toBe('Not indexed yet — set up');
+  expect(screen.queryByTestId('tree-check-5-')).toBeNull();
+
+  const started = screen.getByTestId('tree-root-toggle-6');
+  expect(started.classList.contains('unconfirmed')).toBe(false);
+  expect(started.getAttribute('title')).toBeNull();
+  expect(screen.getByTestId('tree-check-6-')).toBeTruthy();
+
+  await fireEvent.click(pending);
+  const opens = invoke.mock.calls.filter(([c]) => c === 'open_settings');
+  expect(opens).toHaveLength(1);
+  expect(opens[0][1]).toEqual({ section: 'folders' });
+  expect(pending.getAttribute('aria-expanded')).not.toBe('true');
 });

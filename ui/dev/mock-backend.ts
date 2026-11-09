@@ -146,7 +146,7 @@ const standTree: TreeListing = {
       ],
     },
     {
-      rootId: 2, absolutePath: '/home/u/papers', searched: [], name: 'papers',
+      rootId: 2, confirmed: true, absolutePath: '/home/u/papers', searched: [], name: 'papers',
       files: [
         { relativePath: '2024/survey.pdf', documentId: 'doc-8' },
         { relativePath: 'index.md', documentId: 'doc-9' },
@@ -293,9 +293,15 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     add_watched_folder: (a) => {
       const rootId = s.nextRootId++;
       const path = a.path as string;
-      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, files: [], searched: [] }] };
+      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, confirmed: false, files: [], searched: [] }] };
       return rootId;
     },
+    confirm_watched_folder: (a) => {
+      const id = a.rootId as number;
+      if (!s.tree.roots.some((r) => r.rootId === id)) throw new Error(`no watched folder with id ${id}`);
+      s.tree = { ...s.tree, roots: s.tree.roots.map((r) => (r.rootId === id ? { ...r, confirmed: true } : r)) };
+    },
+    take_settings_section: () => null,
     remove_watched_folder: (a) => {
       const before = s.tree.roots.length;
       s.tree = { ...s.tree, roots: s.tree.roots.filter((r) => r.rootId !== a.rootId) };

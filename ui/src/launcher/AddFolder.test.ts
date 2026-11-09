@@ -17,16 +17,14 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: (...a: unknown[]) => listen(..
 const state = (over: Partial<ScanState> = {}): ScanState => ({
   revision: 0, files: 0, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' }, ...over,
 });
-const RUNNING: ScanSnapshot = { kind: 'running', cancellable: true, phase: { kind: 'embedding',
-  counts: { done: 0, total: 0, skipped: 0, refused: 0, contended: 0, secondsLeft: null } } };
 
 // One reply per command name; an unexpected command fails the test.
 let addReply: () => Promise<number>;
-let startReply: () => Promise<void>;
+let openSettingsReply: () => Promise<void>;
 let statusReply: () => Promise<ScanState>;
 function route(cmd: string): Promise<unknown> {
   if (cmd === 'add_watched_folder') return addReply();
-  if (cmd === 'start_scan_job') return startReply();
+  if (cmd === 'open_settings') return openSettingsReply();
   if (cmd === 'job_status') return statusReply();
   throw new Error(`unexpected command ${cmd}`);
 }
@@ -54,7 +52,7 @@ beforeEach(() => {
   open.mockReset().mockResolvedValue('/Users/me/Books');
   listen.mockReset().mockResolvedValue(() => {});
   addReply = () => Promise.resolve(7);
-  startReply = () => Promise.resolve();
+  openSettingsReply = () => Promise.resolve();
   statusReply = () => Promise.resolve(state());
   onChanged = vi.fn<() => void>();
 });
@@ -71,19 +69,31 @@ test('cancelled dialog calls nothing', async () => {
   await new Promise((r) => setTimeout(r, 0));
   expect(calls('add_watched_folder')).toHaveLength(0);
   expect(calls('start_scan_job')).toHaveLength(0);
+  expect(calls('open_settings')).toHaveLength(0);
   expect(onChanged).not.toHaveBeenCalled();
 });
 
-test('idle press adds the folder, reloads the tree, then starts a full scan', async () => {
+// D202: a folder added from the launcher waits for the person's Start in
+// Settings, so the press opens Settings on it and starts no scan.
+test('a press adds the folder, reloads the tree, then opens Settings on Folders and starts no scan', async () => {
   const order: string[] = [];
-  invoke.mockImplementation((cmd: string, args: unknown) => { order.push(cmd); return route(cmd); });
+  invoke.mockImplementation((cmd: string) => { order.push(cmd); return route(cmd); });
   onChanged.mockImplementation(() => order.push('reload'));
   mountButton();
   await press();
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
+  await waitFor(() => expect(calls('open_settings')).toHaveLength(1));
   expect(calls('add_watched_folder')[0][1]).toEqual({ path: '/Users/me/Books' });
-  expect(calls('start_scan_job')[0][1]).toEqual({ entry: 'full' });
-  expect(order.filter((c) => c !== 'job_status')).toEqual(['add_watched_folder', 'reload', 'start_scan_job']);
+  expect(calls('open_settings')[0][1]).toEqual({ section: 'folders' });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(calls('start_scan_job')).toHaveLength(0);
+  expect(order.filter((c) => c !== 'job_status')).toEqual(['add_watched_folder', 'reload', 'open_settings']);
+});
+
+test('Settings that cannot be opened says so', async () => {
+  openSettingsReply = () => Promise.reject('no settings window');
+  mountButton();
+  await press();
+  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('no settings window'));
 });
 
 test('a refused add shows the sentence and starts nothing', async () => {
@@ -92,23 +102,7 @@ test('a refused add shows the sentence and starts nothing', async () => {
   await press();
   await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('folder already watched'));
   expect(calls('start_scan_job')).toHaveLength(0);
-});
-
-test('a scan refused while another runs shows nothing', async () => {
-  startReply = () => Promise.reject('a job is already running');
-  statusReply = () => Promise.resolve(state({ revision: 3, snapshot: RUNNING }));
-  mountButton();
-  await press();
-  await waitFor(() => expect(calls('job_status').length).toBeGreaterThan(0));
-  await new Promise((r) => setTimeout(r, 0));
-  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
-});
-
-test('a scan refused with nothing running shows the sentence', async () => {
-  startReply = () => Promise.reject('x');
-  mountButton();
-  await press();
-  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error').textContent).toBe('x'));
+  expect(calls('open_settings')).toHaveLength(0);
 });
 
 test('a second press while the first is busy does nothing', async () => {
@@ -160,49 +154,10 @@ async function emit(s: ScanState) {
 const ring = () => screen.queryByTestId('tree-add-folder-ring');
 
 // Mounted, pressed, refused because a scan runs: the press is queued.
-async function queued() {
-  startReply = () => Promise.reject('a job is already running');
-  statusReply = () => Promise.resolve(state({ revision: 1, snapshot: RUNNING }));
-  mountButton();
-  await press();
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
-  await new Promise((r) => setTimeout(r, 0));
-}
-
-test('a queued scan starts once when jobsDone grows', async () => {
-  await queued();
-  startReply = () => Promise.resolve();
-  await emit(state({ revision: 2, jobsDone: 1 }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  await emit(state({ revision: 3, jobsDone: 2 }));
-  expect(calls('start_scan_job')).toHaveLength(2);
-  expect(calls('start_scan_job')[1][1]).toEqual({ entry: 'full' });
-});
-
-test('a queued scan tries again after a second refusal while running', async () => {
-  await queued();
-  statusReply = () => Promise.resolve(state({ revision: 3, jobsDone: 1, snapshot: RUNNING }));
-  await emit(state({ revision: 2, jobsDone: 1 }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  startReply = () => Promise.resolve();
-  await emit(state({ revision: 4, jobsDone: 2 }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
-});
-
-test('a refusal with nothing running does not queue', async () => {
-  startReply = () => Promise.reject('x');
-  mountButton();
-  await press();
-  await waitFor(() => expect(screen.getByTestId('tree-add-folder-error')).toBeTruthy());
-  await emit(state({ revision: 5, jobsDone: 1 }));
-  expect(calls('start_scan_job')).toHaveLength(1);
-});
-
 test('an older revision is ignored', async () => {
-  await queued();
+  mountButton();
   await emit(state({ revision: 9, snapshot: reading(5, 10) }));
   await emit(state({ revision: 8, jobsDone: 1 }));
-  expect(calls('start_scan_job')).toHaveLength(1);
   expect(ring()?.getAttribute('data-fraction')).toBe('0.25');
 });
 
@@ -314,51 +269,6 @@ test('a subscription that fails after unmount says nothing and throws nothing', 
 // ---------------------------------------------------------------------------
 // Final review: the queue must not be lost (findings 1, 3, 4).
 // ---------------------------------------------------------------------------
-test('a queued scan starts when a later press ends without starting one', async () => {
-  await queued();
-  let answer!: (p: string | null) => void;
-  open.mockReturnValue(new Promise((r) => { answer = r; }));
-  await press();
-  startReply = () => Promise.resolve();
-  await emit(state({ revision: 2, jobsDone: 1 }));
-  expect(calls('start_scan_job')).toHaveLength(1);
-  answer(null);
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-});
-
-test('a refusal judged on a stale job_status still starts the queued scan', async () => {
-  startReply = () => Promise.reject('a job is already running');
-  mountButton();
-  await waitFor(() => expect(calls('job_status')).toHaveLength(2));
-  let reply!: (s: ScanState) => void;
-  statusReply = () => new Promise((r) => { reply = r; });
-  await press();
-  await waitFor(() => expect(calls('job_status')).toHaveLength(3));
-  await emit(state({ revision: 5, jobsDone: 1 }));
-  startReply = () => Promise.resolve();
-  reply(state({ revision: 1, snapshot: RUNNING }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
-});
-
-test('a queued start refused as the blocker ends starts once and shows nothing', async () => {
-  await queued();
-  let reply!: (s: ScanState) => void;
-  statusReply = () => new Promise((r) => { reply = r; });
-  await emit(state({ revision: 2, jobsDone: 1, snapshot: RUNNING }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(1));
-  await emit(state({ revision: 3, jobsDone: 1 }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  await emit(state({ revision: 4, jobsDone: 2 }));
-  expect(calls('start_scan_job')).toHaveLength(2);
-  startReply = () => Promise.resolve();
-  reply(state({ revision: 2, jobsDone: 1, snapshot: RUNNING }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
-  await new Promise((r) => setTimeout(r, 0));
-  expect(calls('start_scan_job')).toHaveLength(3);
-  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
-});
-
 // Live run, D182: a refused folder dialog must say so, not vanish.
 test('a dialog that fails says so', async () => {
   open.mockRejectedValue('dialog.open not allowed');
@@ -416,39 +326,4 @@ test('a failed job_status read is logged', async () => {
   statusReply = () => Promise.reject(new Error('index locked'));
   mountButton();
   await waitFor(() => expect(err).toHaveBeenCalledWith('job_status failed', expect.any(Error)));
-});
-
-// 3: the blocker ended inside the refusal's round trip — `job_status` says idle,
-// but `jobsDone` grew past what was known before the start, so the slot was
-// busy: the scan is started again, and no failure is shown.
-test('a refusal whose blocker ended meanwhile starts again and shows nothing', async () => {
-  startReply = () => Promise.reject('a job is already running');
-  statusReply = () => Promise.resolve(state({ revision: 1, snapshot: RUNNING }));
-  mountButton();
-  await waitFor(() => expect(calls('job_status').length).toBeGreaterThan(0));
-  await new Promise((r) => setTimeout(r, 0));
-  statusReply = () => {
-    startReply = () => Promise.resolve();
-    return Promise.resolve(state({ revision: 2, jobsDone: 1 }));
-  };
-  await press();
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  expect(screen.queryByTestId('tree-add-folder-error')).toBeNull();
-});
-
-// 4: one start on the wire at a time, even when a press lands while a queued
-// start is still waiting for its answer.
-test('a press during a start in flight does not send a second start', async () => {
-  await queued();
-  let answer!: () => void;
-  startReply = () => new Promise<void>((r) => { answer = r; });
-  await emit(state({ revision: 2, jobsDone: 1 }));
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(2));
-  await press();
-  await waitFor(() => expect(calls('add_watched_folder')).toHaveLength(2));
-  await new Promise((r) => setTimeout(r, 0));
-  expect(calls('start_scan_job')).toHaveLength(2);
-  startReply = () => Promise.resolve();
-  answer();
-  await waitFor(() => expect(calls('start_scan_job')).toHaveLength(3));
 });

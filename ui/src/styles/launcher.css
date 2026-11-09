@@ -172,6 +172,10 @@ main.shell[data-left="false"] .head { padding-left: 78px; }
 .tree [aria-expanded="true"] > .chev { transform: rotate(90deg); }
 .tree .check-slot { flex: none; width: 16px; }
 .tree .ico { flex: none; color: var(--ink-soft); margin-right: 2px; }
+/* D202: a watched folder not started yet. Colour plus a tooltip and label (`Tree.svelte`). */
+.tree .unconfirmed .label, .tree .unconfirmed .ico { color: var(--pending); }
+/* Nothing to fold under it: the click opens Settings. Hidden, not removed, so the name lines up. */
+.tree .unconfirmed .chev { visibility: hidden; }
 .tree .search-check {
   position: absolute; left: 23px; top: 50%; transform: translateY(-50%);
   appearance: none; width: 16px; height: 16px; margin: 0; border-radius: 4px;

@@ -97,7 +97,7 @@ mod app;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use app::{app_in, call, main_webview};
+use app::{add_folder, app_in, call, main_webview};
 use mnema_desktop::job::EndReason;
 use mnema_desktop::scan_state::Entry;
 use mnema_desktop::state::AppState;
@@ -630,9 +630,8 @@ fn materialise(world: &World) -> Built {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, &f.bytes).unwrap();
         }
-        let id = call(
+        let id = add_folder(
             &webview,
-            "add_watched_folder",
             json!({ "path": dir.path().display().to_string() }),
         )
         .expect("add_watched_folder was rejected")

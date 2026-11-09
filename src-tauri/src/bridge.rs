@@ -73,12 +73,32 @@ pub fn open_index(state: State<'_, AppState>) -> Result<IndexInfo, Error> {
 /// Off the main thread for the reason given on [`open_index`].
 #[tauri::command(async)]
 pub fn add_watched_folder(state: State<'_, AppState>, path: String) -> Result<i64, Error> {
-    let id = state.with_index(|db| db.insert_watched_root(&path))?;
+    // D202: added unconfirmed. No scan of any origin reads it until the person
+    // has set its exclusions and masks and pressed Start
+    // ([`confirm_watched_folder`]).
+    let id = state.with_index(|db| db.insert_unconfirmed_watched_root(&path))?;
     // Ask the watcher thread to re-read the folders. Subscribing is its job,
-    // not this command's (one owner); adding a folder starts no scan
-    // (Task 8 PR 9, owner's ruling) — the next scan for any reason reads it.
+    // not this command's (one owner).
     state.watch().request_rewatch();
     Ok(id)
+}
+
+/// D202: the person's Start for a folder added through the window. Lets scans
+/// read it and starts one. A scan already running read the folders before
+/// this, so the watcher is woken instead: its trigger waits for the slot and
+/// then runs a full scan, which now includes the folder.
+#[tauri::command(async)]
+pub fn confirm_watched_folder(state: State<'_, AppState>, root_id: i64) -> Result<(), Error> {
+    if !state.with_index(|db| db.confirm_watched_root(root_id))? {
+        return Err(Error::UnknownWatchedRoot(root_id));
+    }
+    match crate::scan_job::start(&state, crate::scan_state::Entry::Full) {
+        Err(Error::JobAlreadyRunning) => {
+            state.watch().wake();
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 /// Off the main thread for the reason given on [`open_index`].

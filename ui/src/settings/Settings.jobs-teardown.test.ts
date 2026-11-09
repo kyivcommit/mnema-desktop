@@ -55,6 +55,7 @@ const modelSettings = vi.fn();
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
   memoryIsLow: () => Promise.resolve(false),
+  takeSettingsSection: () => Promise.resolve(null),
   LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   chatTools: () => Promise.resolve(true),
   setChatTools: () => Promise.resolve(true),
