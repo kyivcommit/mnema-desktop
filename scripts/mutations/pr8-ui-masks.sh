@@ -217,8 +217,8 @@ case_ "a read that succeeds must clear an earlier read's failure" \
 # going stale.
 case_ "the mask input's label must really point at the field" \
   ui/src/settings/Masks.svelte \
-  's{<label class="fl" for="mask-draft-input">}{<label class="fl" for="mask-draft-inpuXX">}' \
-  '<label class="fl" for="mask-draft-inpuXX">' \
+  's{<label class="sr-only" for="mask-draft-input">}{<label class="sr-only" for="mask-draft-inpuXX">}' \
+  '<label class="sr-only" for="mask-draft-inpuXX">' \
   src/settings/Masks.test.ts 'the mask input is really named by its own label, not just found by being the only textbox' runner=vitest
 
 # F3. `refusal.heading` picks one of three catalogue keys from `r.of`; nothing

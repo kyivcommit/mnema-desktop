@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { locale, t } from '../i18n';
   import { listMasks, maskPreview, addMask, removeMask } from '../lib/ipc';
@@ -40,6 +40,12 @@
   let masks = $state<string[] | null>(null);
   let loadError = $state<string | null>(null);
   let draft = $state('');
+  // The field opens from `+` and closes on Esc or once a mask is added.
+  let fieldOpen = $state(false);
+  let field = $state<HTMLInputElement | null>(null);
+  // The mask `−` acts on. A mask that leaves the list leaves the choice with it
+  // (`chosenRow` below finds nothing).
+  let chosen = $state<string | null>(null);
   let pending = $state<Pending | null>(null);
   // 🔴 The mask AS TYPED, held beside the sentence rather than taken from the
   // sentence. `RulesError::InvalidMask`'s `reason` is `globset`'s own text and
@@ -252,6 +258,10 @@
         const added = await addMask(p.mask);
         alreadyStored = added.kind === 'alreadyStored' ? added.stored : null;
         draft = '';
+        fieldOpen = false;
+        // The rule as the list will hold it: an already-stored one may be spelt
+        // differently from what was typed.
+        chosen = added.kind === 'alreadyStored' ? added.stored : p.mask;
       } else {
         // `remove_mask` answers whether a row actually went: a second window may
         // have removed the same mask first, and that is a different sentence.
@@ -300,6 +310,37 @@
     return stored === null ? null : t('settings_masks_already_stored', { stored });
   });
 
+  // `+` opens the field first; with the field open and something typed it asks
+  // to add, so the button and Enter are one press.
+  async function plus() {
+    if (!fieldOpen) {
+      fieldOpen = true;
+      await tick();
+      field?.focus();
+      return;
+    }
+    await askAdd();
+  }
+
+  function onFieldKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // The same press as `+`, held to the same rule: no second `mask_preview`
+      // while the first is still being checked.
+      if (pending?.kind !== 'checking') void askAdd();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      fieldOpen = false;
+      draft = '';
+      // A withdrawal, like Cancel: a preview still on the wire must not raise
+      // the question after the person closed the field.
+      if (pending?.kind === 'checking') dismiss();
+    }
+  }
+
+  const hintLabel = $derived.by(() => { void $locale; return t('settings_masks_hint'); });
+  const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_masks_remove_selected'); });
+
   const rows = $derived.by(() => {
     void $locale;
     return (masks ?? []).map((mask) => ({
@@ -310,6 +351,8 @@
       removeAriaLabel: t('settings_masks_remove_named', { mask }),
     }));
   });
+
+  const chosenRow = $derived(rows.find((row) => row.mask === chosen) ?? null);
 
   // 🔴 Whether `answer` spells `mask` some way other than the way it was typed
   // — the question `settings_masks_refused_case_note` exists to explain, asked
@@ -442,62 +485,94 @@
 
 <div class="masks">
   <h3>{heading}</h3>
-  {#if loadError}
-    <p>{loadFailedLabel}</p>
-    <p data-testid="masks-load-reason">{loadError}</p>
-  {:else if masks !== null && rows.length === 0}
-    <p>{emptyLabel}</p>
-  {:else}
-    <ul>
-      {#each rows as { mask, removeAriaLabel } (mask)}
-        <li data-testid={`mask-row-${mask}`}>
-          <span>{mask}</span>
-          <button type="button" aria-label={removeAriaLabel} onclick={() => askRemove(mask)}>{removeLabel}</button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
-  <!-- The question, and nothing stored until it is answered. -->
-  {#if question}
-    {@const q = question}
-    <div data-testid="mask-confirm">
-      {#if q.kind === 'checking'}
-        <p>{q.label}</p>
+  <div class="tbox">
+    <div class="mlist" data-testid="masks-list">
+      {#if loadError}
+        <p class="tnote">{loadFailedLabel}</p>
+        <p class="tnote" data-testid="masks-load-reason">{loadError}</p>
+      {:else if masks !== null && rows.length === 0}
+        <p class="tnote">{emptyLabel}</p>
       {:else}
-        <p>{q.heading}</p>
-        <p data-testid="mask-confirm-cost">{q.cost}</p>
-        <button type="button" aria-label={q.confirmAriaLabel} onclick={answer}>{q.confirmLabel}</button>
-        <button type="button" aria-label={q.cancelAriaLabel} onclick={dismiss}>{q.cancelLabel}</button>
+        <ul>
+          {#each rows as { mask } (mask)}
+            <li data-testid={`mask-row-${mask}`}>
+              <button
+                type="button"
+                class="mrow"
+                class:selected={chosen === mask}
+                aria-pressed={chosen === mask}
+                onclick={() => (chosen = mask)}>{mask}</button>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </div>
-  {/if}
-  <!-- Where the question was, so a person coming back to this panel reads the
-       withdrawal in the place they left the press. -->
-  {#if withdrawnLabel}<p data-testid="mask-question-withdrawn">{withdrawnLabel}</p>{/if}
-  {#if alreadyGoneLabel}<p data-testid="mask-already-gone">{alreadyGoneLabel}</p>{/if}
-  {#if alreadyStoredLabel}<p data-testid="mask-already-stored">{alreadyStoredLabel}</p>{/if}
-  {#if refusal}
-    <p data-testid="mask-refused-heading">{refusal.heading}</p>
-    <!-- Verbatim, and it is the whole of the rejection: nothing here branches on
-         an error kind, so this sentence is the only thing that can say which
-         rule was refused and why. -->
-    <p data-testid="mask-refused-reason">{actionError}</p>
-    {#if refusal.note}<p>{refusal.note}</p>{/if}
-  {/if}
-  <div class="row">
-    <label class="fl" for="mask-draft-input">{inputLabel}</label>
-    <input id="mask-draft-input" type="text" bind:value={draft} />
-    <!-- Also disabled while `checking`: closes the OTHER route to the same guard
-         — nothing stopped a second Add before the first reply landed, queuing
-         two `mask_preview` calls on the mutex with no order guarantee between
-         them. The generation guard above is what makes either route safe; this
-         is what keeps the second call from being placed at all. -->
-    <button type="button" disabled={draft === '' || pending?.kind === 'checking'} onclick={askAdd}>{addLabel}</button>
-    <!-- The explainer sits behind an ⓘ right of Add, the same button and
-         popover as the model picker's notes (owner, 2026-09-25): a paragraph
-         that long, always on screen above the list, was hard to read past. -->
-    <button type="button" class="info" data-testid="masks-info" popovertarget="masks-notes" aria-label={infoLabel}>ⓘ</button>
+    <div class="tnotes">
+      <!-- The question, and nothing stored until it is answered. -->
+      {#if question}
+        {@const q = question}
+        <div data-testid="mask-confirm">
+          {#if q.kind === 'checking'}
+            <p>{q.label}</p>
+          {:else}
+            <p>{q.heading}</p>
+            <p data-testid="mask-confirm-cost">{q.cost}</p>
+            <button type="button" aria-label={q.confirmAriaLabel} onclick={answer}>{q.confirmLabel}</button>
+            <button type="button" aria-label={q.cancelAriaLabel} onclick={dismiss}>{q.cancelLabel}</button>
+          {/if}
+        </div>
+      {/if}
+      <!-- Where the question was, so a person coming back to this panel reads the
+           withdrawal in the place they left the press. -->
+      {#if withdrawnLabel}<p data-testid="mask-question-withdrawn">{withdrawnLabel}</p>{/if}
+      {#if alreadyGoneLabel}<p data-testid="mask-already-gone">{alreadyGoneLabel}</p>{/if}
+      {#if alreadyStoredLabel}<p data-testid="mask-already-stored">{alreadyStoredLabel}</p>{/if}
+      {#if refusal}
+        <p data-testid="mask-refused-heading">{refusal.heading}</p>
+        <!-- Verbatim, and it is the whole of the rejection: nothing here branches on
+             an error kind, so this sentence is the only thing that can say which
+             rule was refused and why. -->
+        <p data-testid="mask-refused-reason">{actionError}</p>
+        {#if refusal.note}<p>{refusal.note}</p>{/if}
+      {/if}
+    </div>
+    {#if fieldOpen}
+      <div class="mfield">
+        <label class="sr-only" for="mask-draft-input">{inputLabel}</label>
+        <input
+          id="mask-draft-input"
+          type="text"
+          bind:this={field}
+          bind:value={draft}
+          onkeydown={onFieldKey} />
+      </div>
+    {/if}
+    <div class="bar">
+      <!-- Also disabled while `checking`: nothing else stops a second press
+           before the first reply lands, queuing two `mask_preview` calls with
+           no order between them. With the field open and empty there is
+           nothing to add, so the press waits for a mask. -->
+      <button
+        type="button"
+        data-testid="masks-add"
+        aria-label={addLabel}
+        title={addLabel}
+        disabled={pending?.kind === 'checking' || (fieldOpen && draft === '')}
+        onclick={plus}><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button
+        type="button"
+        data-testid="masks-remove"
+        aria-label={chosenRow?.removeAriaLabel ?? removeSelectedLabel}
+        title={chosenRow?.removeAriaLabel ?? removeSelectedLabel}
+        disabled={chosenRow === null}
+        onclick={() => { if (chosenRow !== null) askRemove(chosenRow.mask); }}><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+      <!-- The explainer behind an ⓘ, the same button and popover as the model
+           picker's notes (owner, 2026-09-25). -->
+      <button type="button" class="info" data-testid="masks-info" popovertarget="masks-notes" aria-label={infoLabel}>ⓘ</button>
+    </div>
   </div>
+  <p class="hint">{hintLabel}</p>
   <div id="masks-notes" class="notes" popover="auto" data-testid="masks-notes">
     <p>{explainer}</p>
   </div>

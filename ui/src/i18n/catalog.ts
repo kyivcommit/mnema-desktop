@@ -7,6 +7,9 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'agents_log_heading' | 'agents_log_empty' | 'agents_log_passages' | 'agents_log_client'
   | 'agents_op_search' | 'agents_op_passage' | 'agents_op_status' | 'agents_op_rescan'
   | 'settings_folders_empty' | 'settings_folders_add'
+  | 'settings_folders_remove_selected' | 'settings_folders_tree_hint'
+  | 'settings_folders_start_named'
+  | 'settings_folders_root_all' | 'settings_folders_root_some'
   | 'settings_folders_load_failed' | 'settings_folders_indexed' | 'settings_folders_remove_named'
   | 'models_provider_label' | 'models_provider_name'
   | 'models_key_label' | 'models_key_saved' | 'models_key_absent_hint'
@@ -64,14 +67,12 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'citations_only_banner' | 'citations_only_banner_empty' | 'citations_only_empty'
   | 'citations_only_found' | 'no_answer_offline' | 'no_answer_no_reply' | 'no_answer_embedding_no_reply' | 'no_answer_failed'
   | 'no_answer_local_loading' | 'no_answer_no_tool_use' | 'new_conversation'
-  | 'settings_folders_expand' | 'settings_folders_expand_named'
-  | 'settings_subfolders_loading' | 'settings_subfolders_none'
+  | 'settings_folders_expand_named'
+  | 'settings_subfolders_loading' | 'settings_subfolders_none' | 'settings_subfolders_none_indexable'
   | 'settings_subfolders_unnameable' | 'settings_subfolders_failed'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
-  | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_built_in'
-  | 'settings_subfolder_symlink' | 'settings_subfolder_unusable_name'
-  | 'settings_subfolder_exclude' | 'settings_subfolder_exclude_named'
-  | 'settings_subfolder_include' | 'settings_subfolder_include_named'
+  | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_unusable_name'
+  | 'settings_subfolder_index_named'
   | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
   | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
   | 'settings_folders_rule_cost_held_below'
@@ -91,6 +92,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_added_note' | 'settings_folders_unconfirmed' | 'settings_folders_start'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
+  | 'settings_masks_hint' | 'settings_masks_remove_selected'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
   | 'settings_masks_checking' | 'settings_masks_load_failed'
   | 'settings_masks_confirm_add_heading' | 'settings_masks_confirm_remove_heading'
@@ -212,6 +214,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // key, before or after this commit; P3-7 review.)
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
+    settings_folders_remove_selected: 'Видалити виділену теку',
+    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку.',
+    settings_folders_root_all: 'Усе індексується',
+    settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
     // shown verbatim beside this, never branched on).
     settings_folders_load_failed: 'Не вдалося прочитати список тек.',
@@ -539,10 +545,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // and shut, and a button whose label flips is a second place for the same
     // fact — the two can disagree, and only one of them is what a screen
     // reader announces.
-    settings_folders_expand: 'Підтеки',
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
     settings_subfolders_none: 'У цій теці немає підтек.',
+    settings_subfolders_none_indexable: 'Тут немає підтек для індексації: ті, що є, сканування ніколи не читає.',
     // `unnameable` (tree.rs): записи, чиї назви не є коректним UTF-8, лічать і
     // не показують — назва, зіпсована при показі, більше не відкриває ту теку,
     // з якої походить, і правило з неї не виключило б нічого. Речення існує,
@@ -571,16 +577,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // одному екрані — те, що цей раунд і лагодить. Хто змінює це речення,
     // змінює всі три місця; `Folders.test.ts` читає їх поруч в одному рядку.
     settings_subfolder_excluded_by_ancestor: 'Утримується вашим правилом на {prefix}. Спершу приберіть те правило — теку може утримувати ще одне.',
-    // `built_in` і `unusable_name` — протилежні факти, і речення НЕ мають
-    // читатись однаково: вміст першої не потрапляє до провайдера ніколи,
-    // вміст другої потрапляє, і людина не може захистити її звідси.
-    settings_subfolder_built_in: 'Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.',
-    settings_subfolder_symlink: 'Посилання на іншу теку. Сканування ніколи не переходить за посиланнями, тож усередині нічого не індексується.',
+    // Вміст такої теки сканується й потрапляє до провайдера, а захистити її
+    // звідси не можна — речення каже саме це, не «застосунок її пропускає».
     settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
-    settings_subfolder_exclude: 'Виключити',
-    settings_subfolder_exclude_named: 'Виключити {path}',
-    settings_subfolder_include: 'Не виключати',
-    settings_subfolder_include_named: 'Не виключати {path}',
+    // Назва галки, не дії: «Індексувати Work, позначено» — правда в обох станах.
+    settings_subfolder_index_named: 'Індексувати {path}',
     settings_folders_rules_heading: 'Ваші правила виключення для цієї теки:',
     settings_folders_rules_none: 'Ви нічого не виключили в цій теці.',
     // Єдине джерело відповіді «чи тека ще на диску» — `existsOnDisk` самого
@@ -733,9 +734,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
     // implicit promise used to be, and names the one place a scan now starts.
-    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Почати індексацію» в її рядку.',
+    settings_folders_added_note: 'Теку додано. Зніміть галки з того, що не треба індексувати, задайте маски, тоді натисніть «Почати індексацію».',
     settings_folders_unconfirmed: 'Ще не індексується. Налаштуйте виключення й маски, потім почніть.',
     settings_folders_start: 'Почати індексацію',
+    settings_folders_start_named: 'Почати індексацію {path}',
     settings_masks_heading: 'Маски файлів',
     settings_masks_info_label: 'Як працюють маски',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
@@ -760,6 +762,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_masks_explainer: 'Маска стосується одразу всіх ваших тек: вона порівнюється з іменем файлу на будь-якій глибині. Кожна тека застосує її під час свого наступного сканування. Регістр літер не має значення, тож «*.PDF» і «*.pdf» — це одне й те саме правило; так само не має значення, як саме записані на диску літери з діакритичними знаками. А «?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба ставити кілька: «?.txt» не збігається з «й.txt», а «??.txt» збігається.',
     settings_masks_none: 'Жодної маски ще не додано.',
     settings_masks_add: 'Додати маску',
+    settings_masks_hint: 'Маски діють у всіх теках і порівнюються з назвою файлу, напр. *.log.',
+    settings_masks_remove_selected: 'Видалити виділену маску',
     settings_masks_input_label: 'Нова маска:',
     settings_masks_remove: 'Видалити',
     settings_masks_remove_named: 'Видалити маску {mask}',
@@ -1261,6 +1265,10 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     agents_op_rescan: 'rescan',
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
+    settings_folders_remove_selected: 'Remove the selected folder',
+    settings_folders_tree_hint: 'Untick a folder to keep it out of the index.',
+    settings_folders_root_all: 'Everything is indexed',
+    settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
     settings_folders_indexed: '{count, plural, one {Indexed: # document} other {Indexed: # documents}}',
     settings_folders_remove_named: 'Remove {path}',
@@ -1434,22 +1442,18 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_minutes: '{count, plural, one {# minute} other {# minutes}} ago',
     recent_hours: '{count, plural, one {# hour} other {# hours}} ago',
     recent_days: '{count, plural, one {# day} other {# days}} ago',
-    settings_folders_expand: 'Subfolders',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
     settings_subfolders_none: 'This folder has no subfolders.',
+    settings_subfolders_none_indexable: 'No subfolder here can be indexed: the scan never reads the ones this folder holds.',
     settings_subfolders_unnameable: '{count, plural, one {# subfolder is not listed: its name could not be read as text.} other {# subfolders are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
     settings_subfolder_excluded: 'Excluded by your rule.',
     settings_subfolder_excluded_by_ancestor: 'Held by your rule on {prefix}. Remove that rule first — another rule may still hold this folder.',
-    settings_subfolder_built_in: 'The application never indexes this folder, so there is no rule to add or remove.',
-    settings_subfolder_symlink: 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
-    settings_subfolder_exclude: 'Exclude',
-    settings_subfolder_exclude_named: 'Exclude {path}',
-    settings_subfolder_include: 'Do not exclude',
-    settings_subfolder_include_named: 'Do not exclude {path}',
+    // The tick's name, not an action: "Index Work, checked" is true in both states.
+    settings_subfolder_index_named: 'Index {path}',
     settings_folders_rules_heading: 'Your exclusion rules for this folder:',
     settings_folders_rules_none: 'You have not excluded anything in this folder.',
     settings_folders_rule_gone: 'There is no folder at this path right now.',
@@ -1484,14 +1488,17 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_removing: 'Removing…',
     settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
     settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
-    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.',
+    settings_folders_added_note: 'Folder added. Untick what should stay out, set masks, then press “Start indexing”.',
     settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then start.',
     settings_folders_start: 'Start indexing',
+    settings_folders_start_named: 'Start indexing {path}',
     settings_masks_heading: 'File masks',
     settings_masks_info_label: 'How masks work',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',
     settings_masks_none: 'No file mask has been added yet.',
     settings_masks_add: 'Add a mask',
+    settings_masks_hint: 'Masks apply in every folder and match the file name, e.g. *.log.',
+    settings_masks_remove_selected: 'Remove the selected mask',
     settings_masks_input_label: 'New mask:',
     settings_masks_remove: 'Remove',
     settings_masks_remove_named: 'Remove the mask {mask}',

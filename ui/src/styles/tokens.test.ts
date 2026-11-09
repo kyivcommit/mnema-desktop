@@ -968,12 +968,13 @@ describe('settings.css gives the DOM-only states a visual form', () => {
   });
 
   it('dims an excluded folder', () => {
-    mount(`<main><div class="spane"><div class="folders"><ul><li><div class="fsubs"><ul>
-      <li class="sub">a</li>
-      <li class="sub excl">b</li>
-    </ul></div></li></ul></div></div></main>`);
-    const [open, excluded] = document.querySelectorAll('.sub');
+    mount(`<main><div class="spane"><div class="folders"><div class="ttree"><ul><li><div class="fsubs"><ul>
+      <li class="sub"><div class="trow"><span class="label">a</span></div></li>
+      <li class="sub excl"><div class="trow"><span class="label">b</span></div></li>
+    </ul></div></li></ul></div></div></div></main>`);
+    const [open, excluded] = document.querySelectorAll('.sub .label');
     differ(excluded, open, 'color');
+    differ(excluded, open, 'font-style');
   });
 
   it('marks the chosen theme', () => {
@@ -1004,15 +1005,41 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     differ(card, plain, 'padding-top');
   });
 
-  // The mockup's `.frow .rm`: a 24×24 icon, never a bordered `main button`.
-  it('draws the folder remove control as a small icon, not a bordered button', () => {
-    mount(`<main><div class="folders"><ul><li><div class="row">
-      <button type="button">plain</button>
-      <button type="button" class="rm">✕</button>
-    </div></li></ul></div></main>`);
-    const [plain, rm] = document.querySelectorAll('.row button');
-    differ(rm, plain, 'border-top-width');
-    differ(rm, plain, 'width');
+  // The folders bar's + and −: small borderless icons, never a bordered
+  // `main button`.
+  it('draws the folders bar buttons as small icons, not bordered buttons', () => {
+    mount(`<main><div class="folders"><div class="tnotes"><button type="button">plain</button></div>
+      <div class="bar"><button type="button">+</button></div>
+    </div></main>`);
+    const plain = document.querySelector('.tnotes button')!;
+    const icon = document.querySelector('.bar button')!;
+    differ(icon, plain, 'border-top-width');
+    differ(icon, plain, 'width');
+  });
+
+  // The tree is a fixed-height box with its own scroll (spec): its contents
+  // must never stretch the settings window.
+  // Final review, Important 1: a long root path was painted under the tags and
+  // its button collapsed to a few pixels. The path clips with an ellipsis
+  // inside its own button instead.
+  it('clips a long root path inside its button rather than under the tags', () => {
+    mount(`<main><div class="folders"><div class="ttree"><div class="trow">
+      <button type="button" class="rsel"><span class="fp">/a/very/long/path</span></button>
+      <span class="tags"><span class="tag">x</span></span>
+    </div></div></div></main>`);
+    const button = getComputedStyle(document.querySelector('.rsel')!);
+    const path = getComputedStyle(document.querySelector('.fp')!);
+    expect(button.overflow).toBe('hidden');
+    expect(path.textOverflow).toBe('ellipsis');
+    expect(path.whiteSpace).toBe('nowrap');
+    expect(getComputedStyle(document.querySelector('.tags')!).flexShrink).toBe('0');
+  });
+
+  it('gives the folders tree a fixed height and its own scroll', () => {
+    mount(`<main><div class="folders"><div class="tbox"><div class="ttree">x</div></div></div></main>`);
+    const tree = getComputedStyle(document.querySelector('.ttree')!);
+    expect(tree.height).toBe('340px');
+    expect(tree.overflow).toBe('auto');
   });
 
   // Whole-branch review, Important 2. `list-style: none` plus the

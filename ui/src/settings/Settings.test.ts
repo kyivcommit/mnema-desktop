@@ -1025,12 +1025,20 @@ test('an older read that is refused last does not overwrite the newer numbers', 
 // One watched folder holding one indexed file under `drop/`, which is what
 // gives the exclude question its two numbers to freeze. The shape
 // `Folders.test.ts` builds its own fixtures in.
+// The mask field opens from the masks bar's `+`; open it unless it already is.
+async function openMaskField() {
+  if (screen.queryByLabelText('New mask:') === null) {
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
+  }
+}
+
 const ONE_ROOT = {
   roots: [{
     rootId: 1,
     absolutePath: '/synthetic/root',
     name: 'root',
     files: [{ relativePath: 'drop/x.md', documentId: 'doc-1' }],
+    confirmed: true,
   }],
 };
 const ONE_SUBFOLDER = {
@@ -1052,8 +1060,8 @@ async function raiseQuestionInFolders() {
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 }
 
@@ -1093,7 +1101,7 @@ test('an expanded panel and a pending question survive a switch to another secti
   // the accessibility tree, which is what `queryByRole` is asking here.
   expect(foldersShown()).toBe(false);
   expect(screen.queryByRole('heading', { name: 'Folders' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Exclude drop' })).toBeNull();
+  expect(screen.queryByRole('checkbox', { name: 'Index drop' })).toBeNull();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
 
@@ -1212,6 +1220,7 @@ test('a mask draft and its pending question survive a switch to another section 
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
   const draft = () => screen.getByLabelText('New mask:') as HTMLInputElement;
+  await openMaskField();
   await fireEvent.input(draft(), { target: { value: '*.pdf' } });
   // And a question standing over it, which is the other thing a nav click used
   // to discard: this press has already cost a `mask_preview` over every
@@ -1264,6 +1273,7 @@ test('a reading pass ending while the folders section is hidden withdraws the ma
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
   const draft = () => screen.getByLabelText('New mask:') as HTMLInputElement;
+  await openMaskField();
   await fireEvent.input(draft(), { target: { value: '*.txt' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
@@ -1323,6 +1333,7 @@ test('a mask preview that answers after the reading pass ended raises nothing', 
   await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
   const reply = deferredPromise<{ paths: number; documents: number }>();
   maskPreview.mockReturnValueOnce(reply.promise);
+  await openMaskField();
   await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.md' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
   // In flight, not answered: the question on screen is the «checking» one.
@@ -1354,6 +1365,7 @@ test('an ending that read no folder leaves the mask question standing', async ()
 
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   await waitFor(() => expect(screen.getByText('No file mask has been added yet.')).toBeTruthy());
+  await openMaskField();
   await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.rtf' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
@@ -1396,6 +1408,7 @@ test('a removal that dropped the index file count withdraws the mask question, a
   await emit({ revision: 29, files: 3, readSeq: 0, jobsDone: 0, lastReading: null, snapshot: { kind: 'idle' } });
   await tick();
 
+  await openMaskField();
   await fireEvent.input(screen.getByLabelText('New mask:'), { target: { value: '*.doc' } });
   await fireEvent.click(screen.getByRole('button', { name: 'Add a mask' }));
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());

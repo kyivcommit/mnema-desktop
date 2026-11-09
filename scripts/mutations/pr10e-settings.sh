@@ -88,8 +88,8 @@ case_ "settings.css: the active navigation item looks like the rest" \
 
 case_ "settings.css: an excluded folder looks like an open one" \
   ui/src/styles/settings.css \
-  's~\.sub\.excl \{~.sub.exc {~' \
-  '.sub.exc {' \
+  's~\.sub\.excl > \.trow \.label \{~.sub.exc > .trow .label {~' \
+  '.sub.exc > .trow .label {' \
   src/styles/tokens.test.ts 'dims an excluded folder' runner=vitest
 
 case_ "settings.css: the chosen theme looks like the others" \
