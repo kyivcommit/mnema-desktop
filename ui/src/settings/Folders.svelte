@@ -1133,6 +1133,8 @@
     } finally {
       starting = null;
     }
+    // The note asked for this press; once it is made, the note is stale.
+    folderAdded = false;
     try {
       await refresh();
     } catch (e) {

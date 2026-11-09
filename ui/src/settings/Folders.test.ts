@@ -3745,3 +3745,22 @@ test('a refused Start says why and can be pressed again', async () => {
     expect(screen.getByTestId('folders-action-error').textContent).toBe('no watched folder with id 3'));
   expect((screen.getByTestId('folder-start-3') as HTMLButtonElement).disabled).toBe(false);
 });
+
+test('Start takes away the note that told the person to press it', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: true })]));
+  open.mockResolvedValue('/synthetic/root');
+  addWatchedFolder.mockResolvedValue(3);
+  confirmWatchedFolder.mockResolvedValue(undefined);
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+  await fireEvent.click(screen.getByRole('button', { name: 'Add a folder' }));
+  await waitFor(() => expect(screen.getByTestId('folders-added-note')).toBeTruthy());
+
+  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  expect(screen.queryByTestId('folders-added-note')).toBeNull();
+});
