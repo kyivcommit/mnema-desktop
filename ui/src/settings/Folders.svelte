@@ -1355,8 +1355,14 @@
     entry: Subfolder;
     sentence: string;
     control: 'exclude' | 'include' | 'none';
-    controlLabel: string | null;
     controlAriaLabel: string | null;
+    // The folder is on and a rule of the person's own holds something deeper:
+    // the tick shows `–`. Read off the stored rules, not the expanded rows, so a
+    // collapsed folder says it too.
+    mixed: boolean;
+    // A sentence drawn beside the name: only for the two states with no tick,
+    // where it is the one thing that says why.
+    tag: string | null;
     costLabel: string | null;
     expandable: boolean;
     excluded: boolean;
@@ -1370,21 +1376,24 @@
   // panel at each level, because it is one fact about one panel and a second
   // reading of it is a second answer that can disagree.
   function buildLevel(node: SubTree, rules: StoredExclusion[] | null): Level {
-    const rows = node.listing.entries.map((entry) => {
+    // Built-in folders and symlinks are not drawn at all (spec, owner's ruling
+    // 4): the walk never reads them, so a row would offer nothing to decide.
+    const shown = node.listing.entries.filter(
+      (entry) => entry.state.kind !== 'builtIn' && entry.state.kind !== 'symlink',
+    );
+    const rows = shown.map((entry) => {
       const { sentence, control, expandable, excluded } = describe(entry.state);
       const child = node.children[entry.relativePath];
       return {
         entry,
         sentence,
         control,
-        controlLabel:
-          control === 'exclude' ? t('settings_subfolder_exclude')
-          : control === 'include' ? t('settings_subfolder_include')
-          : null,
         controlAriaLabel:
-          control === 'exclude' ? t('settings_subfolder_exclude_named', { path: entry.relativePath })
-          : control === 'include' ? t('settings_subfolder_include_named', { path: entry.relativePath })
-          : null,
+          control === 'exclude' || control === 'include'
+            ? t('settings_subfolder_index_named', { path: entry.relativePath })
+            : null,
+        mixed: control === 'exclude' && heldBelow(rules, entry.relativePath),
+        tag: control === 'none' ? sentence : null,
         // The disclosure sits beside the control BEFORE it is pressed: taking a
         // rule away is not a tidy-up, it puts a subtree back in front of the
         // next scan.
@@ -1593,37 +1602,64 @@
 <svelte:window onfocus={() => refresh().catch((e) => { loadError = e instanceof Error ? e.message : String(e); })} />
 
 {#snippet subfolders(level: Level, rootId: number)}
-  {#if level.unnameableLabel}<p>{level.unnameableLabel}</p>{/if}
-  {#if level.emptyLabel}<p>{level.emptyLabel}</p>{/if}
+  {#if level.unnameableLabel}<p class="tnote">{level.unnameableLabel}</p>{/if}
+  {#if level.emptyLabel}<p class="tnote">{level.emptyLabel}</p>{/if}
   <ul>
     {#each level.rows as row (row.entry.relativePath)}
       <li class="sub" class:excl={row.excluded} data-testid={`subfolder-${rootId}-${row.entry.relativePath}`}>
-        <span>{row.entry.name}</span>
-        <span>{row.sentence}</span>
-        {#if row.costLabel}<span>{row.costLabel}</span>{/if}
-        <!-- Named, never `!== 'none'` — see `describe`'s default arm. -->
-        {#if row.control === 'exclude' || row.control === 'include'}
-          <button
-            type="button"
-            aria-label={row.controlAriaLabel}
-            onclick={() => (row.control === 'exclude'
-              ? askExclude(rootId, row.entry.relativePath)
-              // `true`: this row is a directory entry `list_subfolders` read off
-              // the disk, so the folder is there. See `askInclude`.
-              : askInclude(rootId, row.entry.relativePath, true))}>{row.controlLabel}</button>
-        {/if}
-        {#if row.expandable}
-          <button
-            type="button"
-            data-testid={`subfolder-expand-${rootId}-${row.entry.relativePath}`}
-            aria-expanded={row.open}
-            aria-label={row.expandAriaLabel}
-            onclick={() => toggleSubfolder(rootId, row.entry.relativePath)}>{expandLabel}</button>
-        {/if}
+        <div class="trow" title={row.tag === null ? row.sentence : undefined}>
+          {#if row.expandable}
+            <button
+              type="button"
+              class="chevb"
+              data-testid={`subfolder-expand-${rootId}-${row.entry.relativePath}`}
+              aria-expanded={row.open}
+              aria-label={row.expandAriaLabel}
+              onclick={() => toggleSubfolder(rootId, row.entry.relativePath)}>{@render chevron()}</button>
+          {:else}
+            <span class="chevb leaf"></span>
+          {/if}
+          <!-- Named, never `!== 'none'` — see `describe`'s default arm. -->
+          {#if row.control === 'exclude' || row.control === 'include'}
+            <input
+              type="checkbox"
+              class="search-check"
+              data-testid={`subfolder-check-${rootId}-${row.entry.relativePath}`}
+              aria-label={row.controlAriaLabel}
+              checked={row.control === 'exclude'}
+              indeterminate={row.mixed}
+              onchange={(e) => {
+                // Back to what the data says: the click only asks. What the box
+                // shows next is decided by the re-read after the answer.
+                e.currentTarget.checked = row.control === 'exclude';
+                e.currentTarget.indeterminate = row.mixed;
+                if (row.control === 'exclude') askExclude(rootId, row.entry.relativePath);
+                // `true`: this row is a directory entry `list_subfolders` read off
+                // the disk, so the folder is there. See `askInclude`.
+                else askInclude(rootId, row.entry.relativePath, true);
+              }} />
+          {:else}
+            <span class="check-slot"></span>
+          {/if}
+          {@render folderIcon()}
+          <span class="label">{row.entry.name}</span>
+          <span class="tags">
+            {#if row.tag}<span class="tag">{row.tag}</span>{/if}
+            {#if row.costLabel}<span class="tag">{row.costLabel}</span>{/if}
+          </span>
+        </div>
         {#if row.children}{@render subfolders(row.children, rootId)}{/if}
       </li>
     {/each}
   </ul>
+{/snippet}
+
+{#snippet chevron()}
+  <svg class="chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg>
+{/snippet}
+
+{#snippet folderIcon()}
+  <svg class="ico" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 4.5a1 1 0 0 1 1-1h3.6l1.4 1.5h6a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></svg>
 {/snippet}
 
 <div class="folders">

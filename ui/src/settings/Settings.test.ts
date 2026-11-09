@@ -1052,8 +1052,8 @@ async function raiseQuestionInFolders() {
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 }
 
@@ -1093,7 +1093,7 @@ test('an expanded panel and a pending question survive a switch to another secti
   // the accessibility tree, which is what `queryByRole` is asking here.
   expect(foldersShown()).toBe(false);
   expect(screen.queryByRole('heading', { name: 'Folders' })).toBeNull();
-  expect(screen.queryByRole('button', { name: 'Exclude drop' })).toBeNull();
+  expect(screen.queryByRole('checkbox', { name: 'Index drop' })).toBeNull();
 
   await fireEvent.click(screen.getByRole('button', { name: 'Folders' }));
 

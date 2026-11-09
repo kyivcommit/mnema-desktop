@@ -70,8 +70,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_subfolder_open' | 'settings_subfolder_excluded'
   | 'settings_subfolder_excluded_by_ancestor' | 'settings_subfolder_built_in'
   | 'settings_subfolder_symlink' | 'settings_subfolder_unusable_name'
-  | 'settings_subfolder_exclude' | 'settings_subfolder_exclude_named'
-  | 'settings_subfolder_include' | 'settings_subfolder_include_named'
+  | 'settings_subfolder_index_named'
   | 'settings_folders_rules_heading' | 'settings_folders_rules_none'
   | 'settings_folders_rule_gone' | 'settings_folders_rule_cost'
   | 'settings_folders_rule_cost_held_below'
@@ -577,10 +576,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_built_in: 'Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.',
     settings_subfolder_symlink: 'Посилання на іншу теку. Сканування ніколи не переходить за посиланнями, тож усередині нічого не індексується.',
     settings_subfolder_unusable_name: 'Ця тека індексується, а її назву не можна записати як правило — перейменуйте теку, якщо хочете її виключити.',
-    settings_subfolder_exclude: 'Виключити',
-    settings_subfolder_exclude_named: 'Виключити {path}',
-    settings_subfolder_include: 'Не виключати',
-    settings_subfolder_include_named: 'Не виключати {path}',
+    // Назва галки, не дії: «Індексувати Work, позначено» — правда в обох станах.
+    settings_subfolder_index_named: 'Індексувати {path}',
     settings_folders_rules_heading: 'Ваші правила виключення для цієї теки:',
     settings_folders_rules_none: 'Ви нічого не виключили в цій теці.',
     // Єдине джерело відповіді «чи тека ще на диску» — `existsOnDisk` самого
@@ -1446,10 +1443,8 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_subfolder_built_in: 'The application never indexes this folder, so there is no rule to add or remove.',
     settings_subfolder_symlink: 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     settings_subfolder_unusable_name: 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
-    settings_subfolder_exclude: 'Exclude',
-    settings_subfolder_exclude_named: 'Exclude {path}',
-    settings_subfolder_include: 'Do not exclude',
-    settings_subfolder_include_named: 'Do not exclude {path}',
+    // The tick's name, not an action: "Index Work, checked" is true in both states.
+    settings_subfolder_index_named: 'Index {path}',
     settings_folders_rules_heading: 'Your exclusion rules for this folder:',
     settings_folders_rules_none: 'You have not excluded anything in this folder.',
     settings_folders_rule_gone: 'There is no folder at this path right now.',

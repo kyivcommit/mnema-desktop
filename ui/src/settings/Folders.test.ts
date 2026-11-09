@@ -600,19 +600,24 @@ test('an open subfolder is the one state that offers to exclude it', async () =>
   await expand([sub('Work')]);
 
   const row = within(screen.getByTestId('subfolder-1-Work'));
-  expect(row.getByText('No rule excludes this folder.')).toBeTruthy();
-  expect(row.getByRole('button', { name: 'Exclude Work' })).toBeTruthy();
+  // The state sentence is the row's tooltip now; the tick carries the state.
+  expect(row.getByTitle('No rule excludes this folder.')).toBeTruthy();
+  const check = row.getByRole('checkbox', { name: 'Index Work' }) as HTMLInputElement;
+  expect(check.checked).toBe(true);
+  expect(check.indeterminate).toBe(false);
 });
 
 test('an excluded subfolder offers to include it and says what that costs first', async () => {
   await expand([sub('Archive', { kind: 'excluded' })], [{ prefix: 'Archive', existsOnDisk: true }]);
 
   const row = within(screen.getByTestId('subfolder-1-Archive'));
-  expect(row.getByText('Excluded by your rule.')).toBeTruthy();
+  expect(row.getByTitle('Excluded by your rule.')).toBeTruthy();
   // The disclosure is on screen BEFORE the press, not after it.
   expect(row.getByText('Without this rule, anything at this path is indexed again from the next scan on.')).toBeTruthy();
-  expect(row.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy();
-  expect(row.queryByRole('button', { name: 'Exclude Archive' })).toBeNull();
+  // One tick, empty: the excluded state is the unchecked box, not a second control.
+  const checks = row.getAllByRole('checkbox', { name: 'Index Archive' }) as HTMLInputElement[];
+  expect(checks).toHaveLength(1);
+  expect(checks[0].checked).toBe(false);
 });
 
 // 🔴 Review finding I1. An excluded folder opens, and the reason is not
@@ -702,29 +707,69 @@ test('an excluded subfolder and one held from above are marked as excluded, an o
   expect(screen.getByTestId('subfolder-1-Archive').classList.contains('sub')).toBe(true);
 });
 
-test('a built-in subfolder says the application made the rule, and offers no control', async () => {
+// Spec, owner's ruling 4: built-in folders and symlinks are not drawn at all.
+// The walk never reads either, so a row would offer nothing to decide; both
+// directions, so a filter that drops everything fails too.
+test('built-in and symlinked subfolders are not listed, an open one beside them is', async () => {
+  await expand([
+    sub('node_modules', { kind: 'builtIn' }),
+    sub('Link', { kind: 'symlink' }),
+    sub('Work'),
+  ]);
+
+  expect(screen.queryByTestId('subfolder-1-node_modules')).toBeNull();
+  expect(screen.queryByTestId('subfolder-1-Link')).toBeNull();
+  expect(screen.getByTestId('subfolder-1-Work')).toBeTruthy();
+});
+
+// A folder holding only what is never indexed reads as holding nothing to
+// decide — the same sentence a folder with no subfolders gives.
+test('a folder whose only subfolder is built in says it has none to show', async () => {
   await expand([sub('node_modules', { kind: 'builtIn' })]);
 
-  const row = within(screen.getByTestId('subfolder-1-node_modules'));
-  expect(row.getByText('The application never indexes this folder, so there is no rule to add or remove.')).toBeTruthy();
-  expect(row.queryAllByRole('button')).toHaveLength(0);
+  expect(screen.getByText('This folder has no subfolders.')).toBeTruthy();
 });
 
-// 🔴 The acceptance criterion, at the place it is easiest to break. A child of
-// a symlinked directory comes back `Open` from `list_subfolders`
-// (`subfolder_state` asks `is_symlink` about the entry itself), so a row that
-// could be expanded here would offer "Exclude" over a subtree the walk never
-// enters — a rule that excludes nothing, on a folder nothing indexes.
-test('a symlinked subfolder offers neither a toggle nor a way to open it', async () => {
-  await expand([sub('Link', { kind: 'symlink' })]);
+// The `–` is read off the stored rules, so a collapsed folder says it too, and
+// a rule whose folder is gone excludes nothing and must not make it.
+test('a folder with a rule deeper down shows a mixed tick while collapsed', async () => {
+  await expand(
+    [sub('Work'), sub('Notes'), sub('Old'), sub('Archive', { kind: 'excluded' })],
+    [
+      { prefix: 'Work/private', existsOnDisk: true },
+      { prefix: 'Old/gone', existsOnDisk: false },
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix: 'Archive/Held', existsOnDisk: true },
+    ],
+  );
 
-  const row = within(screen.getByTestId('subfolder-1-Link'));
-  expect(row.getByText('A link to another folder. The scan never follows links, so nothing inside it is indexed.')).toBeTruthy();
-  expect(row.queryAllByRole('button')).toHaveLength(0);
+  const check = (name: string) => screen.getByRole('checkbox', { name: `Index ${name}` }) as HTMLInputElement;
+  expect(check('Work').indeterminate).toBe(true);
+  expect(check('Work').checked).toBe(true);
+  expect(check('Notes').indeterminate).toBe(false);
+  expect(check('Old').indeterminate).toBe(false);
+  // An excluded folder is off whatever is held below it: an empty box, not `–`.
+  expect(check('Archive').indeterminate).toBe(false);
+  expect(screen.queryByTestId('subfolder-1-Work/private')).toBeNull(); // still collapsed
 });
 
-test('an unusable name says the opposite fact from a built-in folder, not the same one', async () => {
-  await expand([sub('node_modules', { kind: 'builtIn' }), sub('Trailing ', { kind: 'unusableName' })]);
+// A click asks; it does not tick. The box goes back to what the data says
+// until the answer and the re-read behind it.
+test('clicking a tick asks about the folder and leaves the box as the data has it', async () => {
+  await expand([sub('Work')]);
+
+  const check = screen.getByRole('checkbox', { name: 'Index Work' }) as HTMLInputElement;
+  await fireEvent.click(check);
+
+  // Straight after the click, before any answer: still the data's state.
+  expect(check.checked).toBe(true);
+  // No indexed path under it, so it is stored with no question (see
+  // `excluding a folder holding no indexed path …`) — the click reached askExclude.
+  await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'Work'));
+});
+
+test('an unusable name has no tick and says why beside the name', async () => {
+  await expand([sub('Trailing ', { kind: 'unusableName' })]);
 
   // The trailing space is the defect this state is ABOUT, so the query keeps
   // it: testing-library trims an attribute value before comparing it, and the
@@ -732,12 +777,7 @@ test('an unusable name says the opposite fact from a built-in folder, not the sa
   const row = within(screen.getByTestId('subfolder-1-Trailing ', { normalizer: (v) => v }));
   expect(row.getByText('This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.')).toBeTruthy();
   expect(row.queryAllByRole('button')).toHaveLength(0);
-  // Both are non-toggleable, and for opposite reasons: one folder's contents
-  // never reach a provider, this one's do. Two sentences that read alike would
-  // pass every assertion above.
-  const builtIn = screen.getByTestId('subfolder-1-node_modules').textContent;
-  expect(screen.getByTestId('subfolder-1-Trailing ', { normalizer: (v) => v }).textContent)
-    .not.toBe(builtIn);
+  expect(row.queryAllByRole('checkbox')).toHaveLength(0);
 });
 
 test('expanding a subfolder asks for that subfolder\'s own path', async () => {
@@ -874,11 +914,11 @@ test('a rule with another of your rules under it says what removing it does not 
   // sentence at its own site (`buildLevel`), so a fix applied only to the rule
   // list would leave these two rows disagreeing about one path.
   expect(visibleText(screen.getByTestId('subfolder-1-Archive')))
-    .toBe(['Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders'].join(' '));
+    .toBe(['Archive', RULE_COST.held].join(' '));
   // And the row no rule names carries no disclosure at all — the sentence
   // belongs to the control that takes protection away, not to every row.
   expect(visibleText(screen.getByTestId('subfolder-1-Work')))
-    .toBe(['Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders'].join(' '));
+    .toBe(['Work'].join(' '));
 
   // D130: a new string is a string in both locales, and both arms of the new
   // condition are read in the second one too.
@@ -934,7 +974,7 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
     'Subfolders', '✕',
     // The tree. `Archive` carries the conditional sentence, because a rule of
     // the person's own remains under it.
-    'Archive', 'Excluded by your rule.', RULE_COST.held, 'Do not exclude', 'Subfolders',
+    'Archive', RULE_COST.held,
     // And its child names the OUTERMOST rule, never its own — so on this line
     // alone the rule on `Archive/Held` is invisible.
     'Held', heldBy('Archive'),
@@ -982,7 +1022,7 @@ test('the include question names the rules further down that removing this one l
     ],
   );
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Archive' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Stop excluding Archive?',
@@ -1194,7 +1234,7 @@ test('the include question does not soften on the strength of a rule whose folde
     ],
   );
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Archive' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Stop excluding Archive?',
@@ -1222,14 +1262,14 @@ test('excluding a subfolder sends its path and re-reads the listing from disk', 
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude Work' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index Work' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Work' }));
 
   expect(excludeSubfolder).toHaveBeenCalledWith(1, 'Work');
   // The state on screen comes from the re-read, never from a local patch: the
-  // row now offers the opposite control, and the rule appears in the list.
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Work' })).toBeTruthy());
+  // row's tick is now empty, and the rule appears in the list.
+  await waitFor(() => expect((screen.getByRole('checkbox', { name: 'Index Work' }) as HTMLInputElement).checked).toBe(false));
   expect(screen.getByTestId('folder-rule-1-Work')).toBeTruthy();
   expect(listSubfolders).toHaveBeenCalledTimes(2);
 });
@@ -1342,17 +1382,17 @@ test('a rejected exclude shows the backend sentence and re-reads the state', asy
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude .git' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index .git' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude .git' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index .git' }));
 
   await waitFor(() => expect(screen.getByText(
     'The application already skips ".git" in /synthetic/root, so a rule for it would change nothing.',
   )).toBeTruthy());
   // The re-read is what decides what the row says next — not the rejection,
   // which nothing here parses.
-  await waitFor(() => expect(screen.queryByRole('button', { name: 'Exclude .git' })).toBeNull());
-  expect(screen.getByText('The application never indexes this folder, so there is no rule to add or remove.')).toBeTruthy();
+  // Built in after the re-read, so the row is not drawn at all.
+  await waitFor(() => expect(screen.queryByTestId('subfolder-1-.git')).toBeNull());
 });
 
 test('a root that disappears from the list takes its expansion with it', async () => {
@@ -1570,7 +1610,7 @@ test('a row shut while an exclude is in flight is not re-opened by the re-read b
   await waitFor(() => expect(screen.getByText('Work')).toBeTruthy());
   expect(listSubfolders).toHaveBeenCalledTimes(1);
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' })); // in flight
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Work' })); // in flight
   await fireEvent.click(screen.getByTestId('folder-expand-1')); // the person shuts the row
   expect(screen.queryByTestId('folder-panel-1')).toBeNull(); // and it is shut
 
@@ -1694,9 +1734,9 @@ test('excluding an open folder keeps that folder open and takes the level under 
   await fireEvent.click(screen.getByTestId('subfolder-expand-1-Work/notes'));
   await waitFor(() => expect(screen.getByText('drafts')).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Work' }));
 
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Work' })).toBeTruthy());
+  await waitFor(() => expect((screen.getByRole('checkbox', { name: 'Index Work' }) as HTMLInputElement).checked).toBe(false));
   // The folder the person just protected is still open, and still openable.
   expect(screen.getByText('notes')).toBeTruthy();
   expect(screen.getByTestId('subfolder-expand-1-Work').getAttribute('aria-expanded')).toBe('true');
@@ -1720,7 +1760,7 @@ test('the expanded panel switches language with everything else on screen', asyn
   // Read under 'en' BEFORE the switch, so a $derived missing `void $locale`
   // still caches an English value here and the read after the switch is a
   // genuinely later one.
-  expect(screen.getByText('No rule excludes this folder.')).toBeTruthy();
+  expect(screen.getByTitle('No rule excludes this folder.')).toBeTruthy();
   // `expandLabel` and `removeRuleLabel` are each their own `$derived.by`,
   // outside `rows` — read their visible button text (not the aria-labels
   // `rows` already covers below) before the switch too.
@@ -1730,15 +1770,14 @@ test('the expanded panel switches language with everything else on screen', asyn
   setLocale('uk');
   await Promise.resolve();
 
-  expect(screen.getByText('Жодне правило не виключає цю теку.')).toBeTruthy();
-  expect(screen.getByText('Застосунок ніколи не індексує цю теку, тож тут немає правила, яке можна додати чи прибрати.')).toBeTruthy();
+  expect(screen.getByTitle('Жодне правило не виключає цю теку.')).toBeTruthy();
   expect(screen.getByText('Наразі за цим шляхом теки немає.')).toBeTruthy();
   expect(screen.getByText('1 підтеку не показано: її назву не вдалося прочитати як текст.')).toBeTruthy();
   // The sentence that names the outermost rule, in the language it is read in:
   // "спершу", not a promise that removing that rule changes this folder.
   expect(screen.getByText('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
-  expect(screen.getByRole('button', { name: 'Виключити Work' })).toBeTruthy();
-  expect(screen.getByRole('button', { name: 'Не виключати Archive' })).toBeTruthy();
+  expect(screen.getByRole('checkbox', { name: 'Індексувати Work' })).toBeTruthy();
+  expect(screen.getByRole('checkbox', { name: 'Індексувати Archive' })).toBeTruthy();
   // An excluded folder opens here too — the control exists in both locales, and
   // the row held by the rule below it still offers none.
   expect(screen.getByRole('button', { name: 'Підтеки теки Archive' })).toBeTruthy();
@@ -1784,12 +1823,10 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
     'Indexed: 2 documents',
     'Subfolders', '✕',
     '1 subfolder is not listed: its name could not be read as text.',
-    'Archive', 'Excluded by your rule.', cost, 'Do not exclude', 'Subfolders',
+    'Archive', cost,
     'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
-    'Link', 'A link to another folder. The scan never follows links, so nothing inside it is indexed.',
     'Trailing', 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
-    'Work', 'No rule excludes this folder.', 'Exclude', 'Subfolders',
-    'node_modules', 'The application never indexes this folder, so there is no rule to add or remove.',
+    'Work',
     'Your exclusion rules for this folder:',
     'Archive', cost, 'Remove the rule',
     'Work/private', cost, 'Remove the rule',
@@ -1830,8 +1867,8 @@ async function askExclude(name: string, before: TreeRoot[], after: TreeRoot[] | 
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: `Exclude ${name}` })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: `Exclude ${name}` }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: `Index ${name}` })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: `Index ${name}` }));
 }
 
 const EMPTY_ROOTS = [
@@ -1970,18 +2007,17 @@ test('excluding a folder holding no indexed path stores it with no question and 
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude empty' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index empty' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude empty' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index empty' }));
 
   await waitFor(() => expect(excludeSubfolder).toHaveBeenCalledWith(1, 'empty'));
   expect(screen.queryByTestId('folder-confirm-1')).toBeNull();
   // "Says so plainly" is the row itself, after the re-read: no loss sentence,
   // and the state a person came to set.
   await waitFor(() => expect(visibleText(screen.getByTestId('subfolder-1-empty'))).toBe(
-    'empty Excluded by your rule.'
-    + ' Without this rule, anything at this path is indexed again from the next scan on.'
-    + ' Do not exclude Subfolders',
+    'empty'
+    + ' Without this rule, anything at this path is indexed again from the next scan on.',
   ));
 });
 
@@ -2003,8 +2039,8 @@ test('cancelling stores nothing and leaves the row saying the folder is not excl
   // Not only "nothing was sent": the row still SAYS the folder is open, and
   // still offers the control that would exclude it.
   const row = within(screen.getByTestId('subfolder-1-drop'));
-  expect(row.getByText('No rule excludes this folder.')).toBeTruthy();
-  expect(row.getByRole('button', { name: 'Exclude drop' })).toBeTruthy();
+  expect(row.getByTitle('No rule excludes this folder.')).toBeTruthy();
+  expect((row.getByRole('checkbox', { name: 'Index drop' }) as HTMLInputElement).checked).toBe(true);
 });
 
 test('confirming stores the rule that was asked about, and the question goes', async () => {
@@ -2037,9 +2073,9 @@ test('taking a rule away asks first, and names the provider rather than a number
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index Archive' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Archive' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Stop excluding Archive?',
@@ -2180,9 +2216,9 @@ test('a subfolder row asks about the folder it is a listing of, not about the ru
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Do not exclude Archive' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index Archive' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Do not exclude Archive' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Archive' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1'))).toBe([
     'Stop excluding Archive?',
@@ -2289,8 +2325,8 @@ test('the wait for the fresh reply says what is being checked', async () => {
   render(Folders, { props: { jobs: createJobController() } });
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-1')))
     .toBe('Checking what this exclusion removes…');
@@ -2333,14 +2369,14 @@ test('a row shut while the check is in flight raises no question when the reply 
   renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   // Shut, then open again: the panel under key 1 is a new one.
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
 
   release(listing([
     root({ rootId: 1, absolutePath: '/synthetic/root', files: [file('drop/x.md', 'doc-1')] }),
@@ -2510,8 +2546,8 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
   // Both directions: the question is on screen and unwithdrawn until the ending.
   expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
@@ -2537,7 +2573,7 @@ test('a question standing when a reading pass ends is withdrawn by name, and not
 
   // And asking again clears the note rather than leaving it beside a live
   // question about the same folder.
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
   expect(screen.queryByTestId('folder-question-withdrawn-1')).toBeNull();
 });
@@ -2563,8 +2599,8 @@ test('a job ending that moves no reading counter leaves the question standing, a
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   void jobs.scan('full');
@@ -2602,8 +2638,8 @@ test('the embedding phase of a run withdraws the question once the reading count
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   void jobs.scan('full');
@@ -2648,17 +2684,17 @@ test('a question raised after the reading counter last moved survives the job en
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
 
   void jobs.scan('full');
   await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'start_scan_job')).toBe(true));
   // The reading pass ends first, with no question on screen to withdraw.
   await runEmbeddingAt(1);
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
 
   // Only now is the question asked — its numbers come from a listing read after
   // that pass landed.
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   await endScanAt(1); // the job ends; the reading counter does not move again
@@ -2688,8 +2724,8 @@ test('an embedding-only run withdraws nothing, and re-reads the counts once', as
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   void jobs.scan('embedOnly');
@@ -2720,8 +2756,8 @@ test('a check still in flight when a job ends raises no question when its reply 
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   expect(visibleText(await screen.findByTestId('folder-confirm-1')))
     .toBe('Checking what this exclusion removes…');
 
@@ -2787,8 +2823,8 @@ test('a reading pass ending withdraws the question even when the re-read that fo
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   void jobs.scan('full');
@@ -2840,8 +2876,8 @@ test('the withdrawn-question note switches language with everything else', async
   const { jobs } = renderWatching();
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   void jobs.scan('full');
@@ -2922,7 +2958,7 @@ test('an exclude question is not asked when the id now names another folder, and
   listTree.mockResolvedValue(listing(REUSED_ID));
   excludeSubfolder.mockResolvedValue(undefined);
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Work' }));
 
   await waitFor(() => expect(screen.getByTestId('folders-root-changed')).toBeTruthy());
   expect(visibleText(screen.getByTestId('folders-root-changed'))).toBe(CHANGED_NOTE_EN);
@@ -2959,7 +2995,7 @@ test('an exclude question is asked as before when this folder\'s id and path sti
   ]));
   excludeSubfolder.mockResolvedValue(undefined);
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude Work' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index Work' }));
 
   expect(visibleText(await screen.findByTestId('folder-confirm-9'))).toBe([
     'Exclude Work?',
@@ -3544,9 +3580,9 @@ test('a press elsewhere in this list abandons the removal question', async () =>
   await fireEvent.click(removeButton('/synthetic/root'));
   await screen.findByTestId('folder-remove-confirm-1');
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
 
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
 
   await waitFor(() => expect(screen.queryByTestId('folder-remove-confirm-1')).toBeNull());
   expect(removeWatchedFolder).not.toHaveBeenCalled();
@@ -3680,8 +3716,8 @@ test('the rendered removal question reaches the singular and the Ukrainian many 
 test('a window opened after a reading pass has already ended does not withdraw on the next ending', async () => {
   const { jobs } = await renderAfterAReading();
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Exclude drop' })).toBeTruthy());
-  await fireEvent.click(screen.getByRole('button', { name: 'Exclude drop' }));
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index drop' })).toBeTruthy());
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index drop' }));
   await screen.findByTestId('folder-confirm-1');
 
   // The job whose reading pass ended BEFORE this component existed now ends.
