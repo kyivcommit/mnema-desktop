@@ -252,5 +252,6 @@ case_ "index: migration 8 is registered" \
   crates/mnema-index/src/migrations.rs \
   's#        M::up\(ADD_PAGE_OCR_CONFIDENCE\),\n##' \
   '        M::up(ADD_SKIP_READER),
+        M::up(ADD_WATCHED_ROOT_CONFIRMED),
     ])' \
   mnema-index 'migrations::tests::a_v7_index_gains_page_ocr_confidence_and_keeps_its_pages' --lib
