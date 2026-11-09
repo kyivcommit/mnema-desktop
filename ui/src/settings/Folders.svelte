@@ -1125,16 +1125,20 @@
   async function startIndexing(root: TreeRoot) {
     actionError = null;
     starting = root.rootId;
+    let confirmed = true;
     try {
       await confirmWatchedFolder(root.rootId);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
-      return;
+      confirmed = false;
     } finally {
       starting = null;
     }
     // The note asked for this press; once it is made, the note is stale.
-    folderAdded = false;
+    if (confirmed) folderAdded = false;
+    // Re-read on a refusal too: the backend confirms before it starts the scan,
+    // so a scan that would not start leaves a confirmed folder, and the row
+    // must show it as the backend has it rather than a stale Start.
     try {
       await refresh();
     } catch (e) {
@@ -1581,6 +1585,11 @@
       : t('settings_folders_remove_question_withdrawn', { path: removeWithdrawn });
   });
 </script>
+
+<!-- D202: the settings window is created hidden at start and never unmounted,
+     so a folder added from the launcher reaches this list when the window is
+     shown and focused, not through any job ending. -->
+<svelte:window onfocus={() => reread(false)} />
 
 {#snippet subfolders(level: Level, rootId: number)}
   {#if level.unnameableLabel}<p>{level.unnameableLabel}</p>{/if}

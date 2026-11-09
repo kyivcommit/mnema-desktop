@@ -3764,3 +3764,34 @@ test('Start takes away the note that told the person to press it', async () => {
   await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
   expect(screen.queryByTestId('folders-added-note')).toBeNull();
 });
+
+// D202 final review, Critical 1: the settings window is created hidden at start
+// and never unmounted, so a folder added from the launcher's + reaches this list
+// only if showing the window re-reads it.
+test('the list re-reads when the window comes to the front', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 8, absolutePath: '/synthetic/added', confirmed: false })]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('No folder has been added yet.')).toBeTruthy());
+
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(screen.getByTestId('folder-start-8')).toBeTruthy());
+  expect(listTree).toHaveBeenCalledTimes(2);
+});
+
+// D202 final review, Important 3: a Start the backend confirmed but whose scan
+// would not start leaves the row as the backend now has it, not with a stale Start.
+test('a refused Start still re-reads the list', async () => {
+  setLocale('en');
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: false })]));
+  listTree.mockResolvedValueOnce(listing([root({ rootId: 3, confirmed: true })]));
+  confirmWatchedFolder.mockRejectedValueOnce(new Error('a stored exclusion is invalid'));
+  render(Folders, { props: { jobs: createJobController() } });
+
+  await fireEvent.click(await screen.findByTestId('folder-start-3'));
+
+  await waitFor(() => expect(screen.queryByTestId('folder-start-3')).toBeNull());
+  expect(screen.getByTestId('folders-action-error').textContent).toBe('a stored exclusion is invalid');
+});

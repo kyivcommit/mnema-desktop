@@ -910,8 +910,6 @@ impl AppState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The folder watcher's shared state — commands call
-    /// [`crate::watch::Shared::request_rewatch`] on it and nothing else.
     pub fn set_settings_section(&self, section: Option<String>) {
         *self
             .settings_section
@@ -927,6 +925,8 @@ impl AppState {
             .take()
     }
 
+    /// The folder watcher's shared state — commands call
+    /// [`crate::watch::Shared::request_rewatch`] on it and nothing else.
     pub fn watch(&self) -> &std::sync::Arc<crate::watch::Shared> {
         &self.watch
     }
