@@ -31,6 +31,9 @@ pub struct TreeRoot {
     pub root_id: i64,
     pub absolute_path: String,
     pub name: String,
+    /// D202: `false` while the folder waits for the person's Start; no scan
+    /// reads it until then, and the launcher marks it.
+    pub confirmed: bool,
     pub files: Vec<TreeFile>,
     /// The root's folder search entries, by folder path ascending; a folder
     /// with no entry follows its nearest entered ancestor (the spec's §3).
@@ -91,6 +94,7 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
                 name: basename(&r.absolute_path),
                 root_id: r.id,
                 absolute_path: r.absolute_path,
+                confirmed: r.confirmed,
                 files,
                 searched,
             })
@@ -1767,6 +1771,7 @@ mod tests {
                 root_id: 7,
                 absolute_path: "/tmp/alpha".into(),
                 name: "alpha".into(),
+                confirmed: true,
                 files: vec![TreeFile {
                     relative_path: "a.txt".into(),
                     document_id: "d".repeat(64),

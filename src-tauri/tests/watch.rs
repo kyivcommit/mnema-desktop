@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use app::{app_in, call, main_webview};
+use app::{add_folder, app_in, call, main_webview};
 use mnema_desktop::job::EndReason;
 use mnema_desktop::scan_state::{Entry, ScanSnapshot};
 use mnema_desktop::state::AppState;
@@ -47,9 +47,8 @@ fn measure_full_scan_on_unchanged_corpus() {
     let app = app_in(dir.path());
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).unwrap();
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": corpus.path().display().to_string() }),
     )
     .unwrap();
@@ -133,12 +132,7 @@ fn app_watching(
     let webview = main_webview(&app);
     call(&webview, "open_index", json!({})).unwrap();
     for r in roots {
-        call(
-            &webview,
-            "add_watched_folder",
-            json!({ "path": r.display().to_string() }),
-        )
-        .unwrap();
+        add_folder(&webview, json!({ "path": r.display().to_string() })).unwrap();
     }
     let ended = count_ended(&app);
     mnema_desktop::watch::install(app.handle());
@@ -453,12 +447,8 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
 
     let c = tempfile::tempdir().unwrap();
     std::fs::write(c.path().join("c.txt"), "c").unwrap();
-    call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": c.path().display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected");
+    add_folder(&webview, json!({ "path": c.path().display().to_string() }))
+        .expect("add_watched_folder was rejected");
     let c_plain = mnema_desktop::watch::plain(c.path());
     assert!(
         wait_until(Duration::from_secs(60), || app

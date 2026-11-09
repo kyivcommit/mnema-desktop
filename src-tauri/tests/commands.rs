@@ -11,7 +11,9 @@ mod support;
 /// for why a shared module cannot hold something only one binary uses.
 #[path = "support/app.rs"]
 mod app;
-use app::{NO_CREDENTIAL, NO_PROVIDER, app_in, call, indexed_paths, job_channel, main_webview};
+use app::{
+    NO_CREDENTIAL, NO_PROVIDER, add_folder, app_in, call, indexed_paths, job_channel, main_webview,
+};
 use support::scan::{
     reading_of, report_of, run_scan_capturing_snapshots, run_scan_watching, scan_to_completion,
     scan_with,
@@ -1216,9 +1218,8 @@ fn search_returns_citations_not_ids() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -1312,9 +1313,8 @@ fn an_index_failure_inside_the_content_arm_stays_local_to_it() {
 
     let text_dir = fixture_dir();
     let webview = main_webview(&app);
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -1412,9 +1412,8 @@ fn the_content_arm_embeds_the_query_before_it_locks_the_index() {
 
     let text_dir = fixture_dir();
     let webview = main_webview(&app);
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -1750,9 +1749,8 @@ fn a_broken_credential_store_does_not_take_the_text_arm_down_with_it() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = fixture_dir();
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -1856,9 +1854,8 @@ fn ask_without_a_chat_model_returns_citations_only_and_makes_no_chat_call() {
         json!({ "text": true, "content": true }),
     )
     .expect("set_search_arms was rejected");
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": text_dir.path().display().to_string() }),
     )
     .unwrap()
@@ -2660,9 +2657,8 @@ fn a_walk_that_meets_a_busy_index_says_so_on_the_wire() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected");
@@ -2704,9 +2700,8 @@ fn an_uncontended_walk_reports_no_contention_on_any_event() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected");
@@ -2767,9 +2762,8 @@ fn removing_a_watched_folder_takes_its_documents_with_it() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -2822,14 +2816,10 @@ fn a_deletion_while_the_slot_is_held_is_refused_without_a_transaction() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
     let path = fixture.path().display().to_string();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": path.clone() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    let root = add_folder(&webview, json!({ "path": path.clone() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id");
 
     let (channel, _events) = job_channel();
     bridge::start_probe_job(state.clone(), channel).expect("the probe would not start");
@@ -2869,14 +2859,10 @@ fn removing_a_folder_through_the_ipc_needs_the_path_and_answers_with_the_doomed_
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
     let path = fixture.path().display().to_string();
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": path.clone() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    let root = add_folder(&webview, json!({ "path": path.clone() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id");
     scan_to_completion(app.handle());
 
     let missing_path = call(&webview, "remove_watched_folder", json!({ "rootId": root }))
@@ -2922,9 +2908,8 @@ fn list_exclusions_reports_whether_each_stored_prefix_is_still_on_disk() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = exclusion_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3024,9 +3009,8 @@ fn a_prefix_that_only_matches_the_folders_name_by_case_reports_not_on_disk() {
     std::fs::create_dir_all(fixture.path().join("Private")).expect("creating Private");
     std::fs::write(fixture.path().join("Private/secret.txt"), "secret")
         .expect("writing Private/secret.txt");
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3063,9 +3047,8 @@ fn list_exclusions_refuses_when_the_root_itself_is_unreachable() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3118,9 +3101,8 @@ fn excluding_when_the_root_itself_is_unreachable_is_refused_and_stores_nothing()
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3182,14 +3164,10 @@ fn excluding_when_the_root_is_a_dangling_symlink_is_refused() {
     let link_path = link_parent.path().join("root_link");
     std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
 
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": link_path.display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    let root = add_folder(&webview, json!({ "path": link_path.display().to_string() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id");
 
     // Both directions: while the target is there the rule stores, so the
     // refusal below is about the dangling link and not about this command
@@ -3243,14 +3221,10 @@ fn list_exclusions_refuses_when_the_root_is_a_dangling_symlink() {
     let link_path = link_parent.path().join("root_link");
     std::os::unix::fs::symlink(target.path(), &link_path).expect("creating the root symlink");
 
-    let root = call(
-        &webview,
-        "add_watched_folder",
-        json!({ "path": link_path.display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id");
+    let root = add_folder(&webview, json!({ "path": link_path.display().to_string() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id");
 
     call(
         &webview,
@@ -3294,9 +3268,8 @@ fn a_rule_under_an_unreadable_root_reports_present_not_stale() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3344,9 +3317,8 @@ fn a_rule_under_an_unreadable_ancestor_reports_present_not_stale() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = exclusion_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3393,9 +3365,8 @@ fn a_rule_under_an_ancestor_that_became_a_file_reports_not_on_disk() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = exclusion_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3445,9 +3416,8 @@ fn a_rule_whose_final_stat_needs_a_non_traversable_ancestor_reports_present_not_
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = exclusion_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3518,9 +3488,8 @@ fn excluding_the_same_subfolder_twice_is_idempotent() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3560,9 +3529,8 @@ fn excluding_dotdot_is_refused_and_stores_nothing() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3607,9 +3575,8 @@ fn excluding_the_empty_string_is_refused_and_does_not_change_the_row_count() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3695,9 +3662,8 @@ fn including_a_subfolder_removes_the_rule_and_reports_whether_a_row_went() {
 
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3767,9 +3733,8 @@ fn skips_reports_what_the_walk_could_not_read() {
     )
     .expect("creating the dangling symlink");
 
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3829,9 +3794,8 @@ fn an_unreadable_subdirectory_tells_the_window_reconciliation_did_not_run() {
         return;
     }
 
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3874,9 +3838,8 @@ fn a_walk_applies_a_stored_exclusion_and_removes_what_it_now_covers() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = keep_and_drop_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -3941,9 +3904,8 @@ fn a_walk_applies_every_stored_exclusion_not_only_the_first() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = two_dropped_and_one_kept_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -4013,9 +3975,8 @@ fn a_walk_with_no_exclusion_stored_removes_nothing() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = keep_and_drop_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -4103,9 +4064,8 @@ fn a_blank_stored_exclusion_neither_refuses_the_walk_nor_excludes_anything() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = keep_and_drop_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -4179,9 +4139,8 @@ fn an_excluded_subfolder_that_still_holds_its_files_is_reconciled_not_frozen() {
     std::fs::write(fixture.path().join("keep/kept.txt"), "the kept note")
         .expect("writing keep/kept.txt");
 
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -4257,9 +4216,8 @@ fn progress_events_are_throttled_and_the_last_one_is_exact() {
         )
         .expect("writing a fixture file");
     }
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected");
@@ -6441,14 +6399,10 @@ fn open_document_uses_the_cited_root_to_resolve_the_occupant_when_two_roots_hold
 /// section are about `open_index` or `add_watched_folder`.
 fn root_for(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
     call(webview, "open_index", json!({})).expect("open_index was rejected");
-    call(
-        webview,
-        "add_watched_folder",
-        json!({ "path": path.display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id")
+    add_folder(webview, json!({ "path": path.display().to_string() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id")
 }
 
 /// One listing as `(name, relativePath, state kind)` triples, in the order it
@@ -8220,9 +8174,8 @@ fn mask_preview_counts_paths_and_documents_apart() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8277,9 +8230,8 @@ fn mask_preview_counts_the_index_and_not_the_disk() {
 
     let fixture = tempfile::tempdir().unwrap();
     std::fs::write(fixture.path().join("ghost.pdf"), "never indexed").unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8341,9 +8293,8 @@ fn mask_preview_counts_across_every_watched_root() {
     let mut roots = Vec::new();
     for fixture in [&first, &second] {
         roots.push(
-            call(
+            add_folder(
                 &webview,
-                "add_watched_folder",
                 json!({ "path": fixture.path().display().to_string() }),
             )
             .expect("add_watched_folder was rejected")
@@ -8402,9 +8353,8 @@ fn mask_preview_answers_the_difference_against_the_stored_masks() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8496,9 +8446,8 @@ fn mask_preview_understates_documents_behind_an_in_tree_gitignore() {
     std::fs::write(fixture.path().join(".gitignore"), "copy.txt\n").unwrap();
     std::fs::write(fixture.path().join("report.pdf"), "a").unwrap();
     std::fs::write(fixture.path().join("copy.txt"), "a").unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8591,9 +8540,8 @@ fn mask_preview_counts_a_roots_stored_path_exclusions_too() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8653,9 +8601,8 @@ fn mask_preview_does_not_charge_this_press_for_what_a_stored_rule_already_takes(
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8705,9 +8652,8 @@ fn mask_preview_does_not_let_a_stored_mask_prune_a_directory() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8765,9 +8711,8 @@ fn mask_preview_does_not_treat_a_file_named_like_a_build_directory_as_pruned() {
 
     let fixture = tempfile::tempdir().unwrap();
     std::fs::write(fixture.path().join("Cargo.toml"), b"[package]").unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8813,9 +8758,8 @@ fn mask_preview_refuses_when_a_stored_rule_no_longer_validates() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = tempfile::tempdir().unwrap();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -8939,9 +8883,8 @@ fn a_walk_applies_a_stored_mask_and_keeps_the_folder_that_shares_its_name() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = mask_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -9005,9 +8948,8 @@ fn a_mask_removes_matching_files_under_every_watched_root_on_that_roots_next_sca
     let second = mask_fixture_dir();
     let mut roots = Vec::new();
     for fixture in [&first, &second] {
-        let root = call(
+        let root = add_folder(
             &webview,
-            "add_watched_folder",
             json!({ "path": fixture.path().display().to_string() }),
         )
         .expect("add_watched_folder was rejected")
@@ -9055,9 +8997,8 @@ fn a_stored_mask_that_no_longer_validates_refuses_the_walk() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
 
     let fixture = mask_fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -9128,9 +9069,8 @@ fn a_walk_applies_every_stored_mask_not_only_the_first() {
         "the second masked file mentions herons",
     )
     .expect("writing draft.tmp");
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -10206,9 +10146,8 @@ fn the_settings_carry_the_whole_index_file_count_and_its_last_indexed_moment() {
     assert_eq!(before["index"]["lastIndexedAt"], json!(null));
 
     let fixture = two_file_fixture_dir();
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -10313,14 +10252,10 @@ fn dir_holding(names: &[&str]) -> tempfile::TempDir {
 /// Adds `path` as a watched folder through the command the window uses, and
 /// answers with the id the index gave it.
 fn watch(webview: &WebviewWindow<MockRuntime>, path: &std::path::Path) -> i64 {
-    call(
-        webview,
-        "add_watched_folder",
-        json!({ "path": path.display().to_string() }),
-    )
-    .expect("add_watched_folder was rejected")
-    .as_i64()
-    .expect("add_watched_folder did not return an id")
+    add_folder(webview, json!({ "path": path.display().to_string() }))
+        .expect("add_watched_folder was rejected")
+        .as_i64()
+        .expect("add_watched_folder did not return an id")
 }
 
 /// Which folder each `Reading` announcement was about, in the order they were
@@ -11478,9 +11413,8 @@ fn mnema_app_on(dir: &std::path::Path, files: usize, env: &[(&str, &str)], base:
         .unwrap();
     }
     let webview = main_webview(&app);
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": folder.path().display().to_string() }),
     )
     .unwrap();
@@ -11926,9 +11860,8 @@ fn scan_batches_are_small_under_mnema() {
         .unwrap();
     }
     let webview = main_webview(&app);
-    call(
+    add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": folder.path().display().to_string() }),
     )
     .unwrap();
@@ -13068,9 +13001,8 @@ fn history_survives_removing_the_watched_folder() {
     call(&webview, "open_index", json!({})).expect("open_index was rejected");
     text_arm_only(&webview);
     let fixture = fixture_dir();
-    let root = call(
+    let root = add_folder(
         &webview,
-        "add_watched_folder",
         json!({ "path": fixture.path().display().to_string() }),
     )
     .expect("add_watched_folder was rejected")
@@ -14830,4 +14762,134 @@ fn confirming_one_of_two_unconfirmed_folders() {
 
     assert_eq!(indexed_paths(&app, rest[0]), vec!["b.txt".to_string()]);
     assert!(indexed_paths(&app, rest[1]).is_empty());
+}
+
+#[test]
+fn adding_a_folder_leaves_it_unconfirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a.txt"]);
+    let id = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap()
+    .as_i64()
+    .unwrap();
+
+    let tree = call(&webview, "list_tree", json!({})).unwrap();
+    let root = tree["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rootId"] == json!(id))
+        .expect("the added folder is listed");
+    assert_eq!(root["confirmed"], json!(false));
+}
+
+#[test]
+fn a_folder_watched_without_the_window_is_listed_confirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a.txt"]);
+    let (id, _) = roots_for_confirmation(&app, folder.path(), &[]);
+    let tree = call(&webview, "list_tree", json!({})).unwrap();
+    let root = tree["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rootId"] == json!(id))
+        .unwrap();
+    assert_eq!(root["confirmed"], json!(true));
+}
+
+#[test]
+fn confirming_an_unknown_folder_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let refusal = call(&webview, "confirm_watched_folder", json!({ "rootId": 999 }))
+        .expect_err("an unknown folder was confirmed");
+    assert_eq!(refusal, json!("no watched folder with id 999"));
+}
+
+#[test]
+fn confirming_starts_a_scan_that_reads_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a.txt"]);
+    let id = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap()
+    .as_i64()
+    .unwrap();
+
+    call(&webview, "confirm_watched_folder", json!({ "rootId": id }))
+        .expect("confirming was refused");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while indexed_paths(&app, id).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "confirming started no scan that read the folder"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(indexed_paths(&app, id), vec!["a.txt".to_string()]);
+}
+
+#[test]
+fn confirming_while_a_job_runs_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_index", json!({})).expect("open_index was rejected");
+    let folder = dir_holding(&["a.txt"]);
+    let id = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .unwrap()
+    .as_i64()
+    .unwrap();
+    let state = app.state::<AppState>();
+    let (channel, events) = job_channel();
+    bridge::start_probe_job(state.clone(), channel).expect("the probe job would not start");
+    next_progress(&events, Duration::from_secs(10)).expect("the probe job never reported");
+
+    let answer = call(&webview, "confirm_watched_folder", json!({ "rootId": id }));
+    bridge::cancel_job(state.clone());
+
+    answer.expect("a busy slot refused the confirmation");
+    let tree = call(&webview, "list_tree", json!({})).unwrap();
+    assert_eq!(tree["roots"][0]["confirmed"], json!(true));
+}
+
+#[test]
+fn take_settings_section_returns_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    call(&webview, "open_settings", json!({ "section": "folders" }))
+        .expect("open_settings was rejected");
+    assert_eq!(
+        call(&webview, "take_settings_section", json!({})).unwrap(),
+        json!("folders")
+    );
+    assert_eq!(
+        call(&webview, "take_settings_section", json!({})).unwrap(),
+        Value::Null
+    );
 }

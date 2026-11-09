@@ -63,6 +63,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
     tauri::generate_handler![
         bridge::open_index,
         bridge::add_watched_folder,
+        bridge::confirm_watched_folder,
         bridge::remove_watched_folder,
         bridge::list_exclusions,
         bridge::exclude_subfolder,
@@ -125,6 +126,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         agent_clients::agent_clients,
         agent_clients::apply_agent_clients,
         open_settings,
+        take_settings_section,
     ]
 }
 
@@ -490,8 +492,17 @@ pub fn hide_focused_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
 /// show, so an already-open window moves to it; a fresh one starts on Models,
 /// which is the only section named today, so an event sent before its listener
 /// is up loses nothing.
+/// D202: the section the settings window should open on, asked once on mount.
+#[tauri::command]
+fn take_settings_section(state: tauri::State<'_, state::AppState>) -> Option<String> {
+    state.take_settings_section()
+}
+
 #[tauri::command]
 fn open_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, section: Option<String>) {
+    // Kept before the show, for a window that is not listening yet (D202).
+    app.state::<state::AppState>()
+        .set_settings_section(section.clone());
     show_settings(&app, true);
     if let Some(section) = section {
         let _ = app.emit_to("settings", "settings-section", section);

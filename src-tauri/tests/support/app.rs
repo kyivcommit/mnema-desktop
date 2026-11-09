@@ -130,6 +130,25 @@ pub fn call(webview: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Res
     .map(|body| body.deserialize::<Value>().expect("non-JSON response"))
 }
 
+/// `add_watched_folder`, then the person's Start — but without the scan Start
+/// begins. D202 made the command add a folder unconfirmed, which no scan reads;
+/// every test written before that adds a folder in order to scan it, and goes
+/// through here. A test about confirmation itself calls the command directly.
+#[allow(dead_code)]
+pub fn add_folder(webview: &WebviewWindow<MockRuntime>, args: Value) -> Result<Value, Value> {
+    let added = call(webview, "add_watched_folder", args);
+    if let Ok(id) = &added {
+        let id = id
+            .as_i64()
+            .expect("add_watched_folder did not return an id");
+        webview
+            .state::<AppState>()
+            .with_index(|db| db.confirm_watched_root(id))
+            .expect("confirming the folder just added");
+    }
+    added
+}
+
 /// Collects what the webview would receive on a job channel.
 ///
 /// `#[allow(dead_code)]` for this module's own reason: `mask_differential.rs`

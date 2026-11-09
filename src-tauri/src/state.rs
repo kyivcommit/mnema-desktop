@@ -108,6 +108,10 @@ pub struct AppState {
     /// ever call [`crate::watch::Shared::request_rewatch`] on it; the thread
     /// `watch::install` spawns is the sole writer of the OS subscriptions.
     watch: std::sync::Arc<crate::watch::Shared>,
+    /// D202: the section `open_settings` last asked for, kept until the
+    /// settings window takes it. A window opened fresh may not be listening
+    /// yet when the event goes out; this is what it reads on mount instead.
+    settings_section: Mutex<Option<String>>,
     /// The interface locale (§D129): the persisted choice and what it resolves
     /// to. Set once at start-up by `resolve_effective` (Task 6) and again by
     /// `locale::apply_choice` on every change; read by `get_locale` and by
@@ -206,6 +210,7 @@ impl AppState {
             cancel: Arc::new(AtomicBool::new(false)),
             stopped_at: Mutex::new(None),
             watch: std::sync::Arc::new(crate::watch::Shared::new()),
+            settings_section: Mutex::new(None),
             // Safe default; overwritten at startup by `resolve_effective`
             // before any window draws (Task 6).
             locale: Mutex::new(crate::locale::LocaleState {
@@ -907,6 +912,21 @@ impl AppState {
 
     /// The folder watcher's shared state — commands call
     /// [`crate::watch::Shared::request_rewatch`] on it and nothing else.
+    pub fn set_settings_section(&self, section: Option<String>) {
+        *self
+            .settings_section
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = section;
+    }
+
+    /// The section asked for since the last call, once.
+    pub fn take_settings_section(&self) -> Option<String> {
+        self.settings_section
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     pub fn watch(&self) -> &std::sync::Arc<crate::watch::Shared> {
         &self.watch
     }
