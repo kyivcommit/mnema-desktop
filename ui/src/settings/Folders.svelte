@@ -1607,6 +1607,10 @@
   // Read from `rows`, so it follows the same rebuild (and the same language) as
   // the list it is a row of; null when nothing is chosen or the choice is gone.
   const chosenRow = $derived(rows.find((row) => row.selected) ?? null);
+  // Named by the path: with two folders waiting, two «Start» buttons must be
+  // told apart by more than their place on screen. A function read in the
+  // template, so `$locale` is tracked where it is called.
+  const startNamedLabel = (path: string) => { void $locale; return t('settings_folders_start_named', { path }); };
   const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_folders_remove_selected'); });
   const treeHintLabel = $derived.by(() => { void $locale; return t('settings_folders_tree_hint'); });
   const removeRuleLabel = $derived.by(() => { void $locale; return t('settings_folders_rule_remove'); });
@@ -1752,6 +1756,7 @@
                   class="rsel"
                   data-testid={`folder-select-${root.rootId}`}
                   aria-pressed={selected}
+                  title={root.absolutePath}
                   onclick={() => selectRoot(root)}><span class="fp">{root.absolutePath}</span></button>
                 <span class="tags">
                   {#if removing === root.rootId}
@@ -1807,12 +1812,16 @@
          at the foot of a long tree must not be scrolled out of sight. Each is
          still tagged with the root it is about. -->
     <div class="tnotes">
-      {#each rows as { root, panel, removeConfirm, selected } (root.rootId)}
-        {#if selected && !root.confirmed}
+      {#each rows as { root, panel, removeConfirm } (root.rootId)}
+        <!-- Every unconfirmed root, not only the selected one: a folder added
+             from the launcher while another root is selected would otherwise
+             have no Start on screen and stay unindexed with nothing to press. -->
+        {#if !root.confirmed}
           <div class="tstart">
             <button
               type="button"
               data-testid={`folder-start-${root.rootId}`}
+              aria-label={startNamedLabel(root.absolutePath)}
               disabled={starting === root.rootId}
               onclick={() => startIndexing(root)}>{startLabel}</button>
           </div>

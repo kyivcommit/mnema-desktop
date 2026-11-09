@@ -4028,3 +4028,25 @@ test('the tree has its own box, with the hint under it', async () => {
   expect(within(box).queryByTestId('folders-add')).toBeNull(); // the bar is outside the scroll
   expect(screen.getByText('Untick a folder to keep it out of the index.')).toBeTruthy();
 });
+
+// Final review, Important 2: Start was drawn only for the selected root, so a
+// folder added from the launcher while another root was selected had no Start
+// anywhere on screen and stayed unindexed with nothing to press.
+test('every unconfirmed folder has its Start, whatever is selected', async () => {
+  setLocale('en');
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  render(Folders, { props: { jobs: createJobController() } });
+  await screen.findByText('/synthetic/root');
+  await fireEvent.click(screen.getByTestId('folder-select-1'));
+
+  listTree.mockResolvedValue(listing([
+    root({ rootId: 1, absolutePath: '/synthetic/root' }),
+    root({ rootId: 3, absolutePath: '/synthetic/new', confirmed: false }),
+  ]));
+  window.dispatchEvent(new Event('focus'));
+
+  await waitFor(() => expect(screen.getByTestId('folder-start-3')).toBeTruthy());
+  expect(screen.getByTestId('folder-select-1').getAttribute('aria-pressed')).toBe('true');
+  expect(screen.queryByTestId('folder-start-1')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Start indexing /synthetic/new' })).toBeTruthy();
+});

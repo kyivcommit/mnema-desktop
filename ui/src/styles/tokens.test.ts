@@ -1019,6 +1019,22 @@ describe('settings.css gives the DOM-only states a visual form', () => {
 
   // The tree is a fixed-height box with its own scroll (spec): its contents
   // must never stretch the settings window.
+  // Final review, Important 1: a long root path was painted under the tags and
+  // its button collapsed to a few pixels. The path clips with an ellipsis
+  // inside its own button instead.
+  it('clips a long root path inside its button rather than under the tags', () => {
+    mount(`<main><div class="folders"><div class="ttree"><div class="trow">
+      <button type="button" class="rsel"><span class="fp">/a/very/long/path</span></button>
+      <span class="tags"><span class="tag">x</span></span>
+    </div></div></div></main>`);
+    const button = getComputedStyle(document.querySelector('.rsel')!);
+    const path = getComputedStyle(document.querySelector('.fp')!);
+    expect(button.overflow).toBe('hidden');
+    expect(path.textOverflow).toBe('ellipsis');
+    expect(path.whiteSpace).toBe('nowrap');
+    expect(getComputedStyle(document.querySelector('.tags')!).flexShrink).toBe('0');
+  });
+
   it('gives the folders tree a fixed height and its own scroll', () => {
     mount(`<main><div class="folders"><div class="tbox"><div class="ttree">x</div></div></div></main>`);
     const tree = getComputedStyle(document.querySelector('.ttree')!);

@@ -606,6 +606,7 @@ main select:focus-visible {
 .ttree button.rsel {
   flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
   height: 22px;
   padding: 0 4px;
   border: 0;
@@ -615,6 +616,10 @@ main select:focus-visible {
 }
 
 .fp {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono);
   font-weight: 400;
   font-style: normal;
@@ -625,6 +630,7 @@ main select:focus-visible {
 .label { white-space: nowrap; }
 
 .tags {
+  flex-shrink: 0;
   margin-left: auto;
   padding-left: 16px;
   display: flex;
