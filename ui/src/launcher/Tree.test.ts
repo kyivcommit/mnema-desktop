@@ -295,7 +295,7 @@ test('a non-ASCII folder name survives the split and its own test id', async () 
   mockTree({
     roots: [
       {
-        rootId: 9,
+        rootId: 9, confirmed: true,
         absolutePath: '/home/u/ua', searched: [],
         name: 'ua',
         files: [{ relativePath: 'Договори/dohov-01.md', documentId: 'doc-u' }],
@@ -331,8 +331,8 @@ test('two roots holding a folder of the same name open and shut independently', 
   // Local, like `mockTree` (Ruling L): nothing else consumes this shape.
   mockTree({
     roots: [
-      { rootId: 1, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
-      { rootId: 2, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
+      { rootId: 1, confirmed: true, absolutePath: '/home/u/one', searched: [], name: 'one', files: [{ relativePath: 'notes/x.md', documentId: 'doc-one' }] },
+      { rootId: 2, confirmed: true, absolutePath: '/home/u/two', searched: [], name: 'two', files: [{ relativePath: 'notes/y.md', documentId: 'doc-two' }] },
     ],
   });
   mount(null);
@@ -1179,7 +1179,7 @@ test('a tree pane that is hidden is not scrolled', async () => {
 
 const LIB: TreeListing = {
   roots: [{
-    rootId: 1, absolutePath: '/home/u/lib', name: 'lib',
+    rootId: 1, confirmed: true, absolutePath: '/home/u/lib', name: 'lib',
     searched: [{ folderPath: 'Books/novels', searched: false }],
     files: [
       { relativePath: 'Books/command/tlcl.pdf', documentId: 'doc-tlcl' },

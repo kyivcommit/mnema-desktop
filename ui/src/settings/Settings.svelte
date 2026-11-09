@@ -12,7 +12,7 @@
   import Application from './Application.svelte';
   import Agents from './Agents.svelte';
   import { createJobController } from './jobs';
-  import { modelSettings, type ModelSettings } from '../lib/ipc';
+  import { modelSettings, takeSettingsSection, type ModelSettings } from '../lib/ipc';
 
   // All four sections render; hiding one not yet built would make the window
   // claim the product has fewer sections than the spec does. Order matches the
@@ -28,6 +28,11 @@
   onMount(() => {
     let unlisten: (() => void) | undefined;
     let destroyed = false;
+    // D202: a window opened fresh may have missed the event below; the section
+    // it was opened for waits in the backend until asked for, once.
+    void takeSettingsSection().then((asked) => {
+      if (!destroyed && asked !== null && (SECTIONS as string[]).includes(asked)) section = asked as SectionId;
+    }, (e) => console.error('take_settings_section failed', e));
     void listen<string>('settings-section', (e) => {
       if ((SECTIONS as string[]).includes(e.payload)) section = e.payload as SectionId;
     }).then((un) => (destroyed ? un() : (unlisten = un)));

@@ -84,7 +84,9 @@ export type SearchAnswer = { hits: Hit[]; text: TextArmReport; content: ContentA
 
 export type TreeFile = { relativePath: string; documentId: string };
 export type SearchedFolder = { folderPath: string; searched: boolean };
-export type TreeRoot = { rootId: number; absolutePath: string; name: string; files: TreeFile[]; searched: SearchedFolder[] };
+// `confirmed`: D202 — false while a folder added through the window waits for
+// the person's Start; no scan reads it until then.
+export type TreeRoot = { rootId: number; absolutePath: string; name: string; confirmed: boolean; files: TreeFile[]; searched: SearchedFolder[] };
 export type TreeListing = { roots: TreeRoot[] };
 
 // One question the person asked, as the sidebar's conversation list shows it
@@ -268,6 +270,8 @@ export const historyEntry = (id: number) => invoke<HistoryOpen>('history_entry',
 export const continueHistory = (id: number) => invoke<boolean>('continue_history', { id });
 export const deleteHistoryEntry = (id: number) => invoke<void>('delete_history_entry', { id });
 export const addWatchedFolder = (path: string) => invoke<number>('add_watched_folder', { path });
+// D202: the person's Start — lets scans read the folder and starts one.
+export const confirmWatchedFolder = (rootId: number) => invoke<void>('confirm_watched_folder', { rootId });
 // The path is sent BESIDE the id, and it is not redundant: `bridge.rs` deletes
 // the row only while that id still names that path, so a folder swapped out
 // from under a stale window is refused instead of silently removed for the
@@ -1087,8 +1091,11 @@ export const applyAgentClients = (changes: Change[]) =>
 // Shows and focuses the settings window (`show_settings`); with a section, an
 // already-open window moves to it too. The literal, not `SectionId`, which is
 // local to `Settings.svelte`.
-export const openSettings = (section?: 'models') =>
+export const openSettings = (section?: 'models' | 'folders') =>
   invoke<void>('open_settings', section ? { section } : {});
+// D202: the section `open_settings` asked for, once — what a window opened
+// fresh reads on mount, since it may not have been listening for the event.
+export const takeSettingsSection = () => invoke<string | null>('take_settings_section');
 
 // PR 10b. The three values the Rust side writes (`theme.rs`); anything else on
 // the wire is read as `system` at both ends, so the two cannot disagree.

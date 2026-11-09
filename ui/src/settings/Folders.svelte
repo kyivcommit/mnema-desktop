@@ -4,7 +4,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { locale, t } from '../i18n';
   import {
-    listTree, addWatchedFolder, removeWatchedFolder,
+    listTree, addWatchedFolder, removeWatchedFolder, confirmWatchedFolder,
     listSubfolders, listExclusions, excludeSubfolder, includeSubfolder,
     type StoredExclusion, type Subfolder, type SubfolderListing, type SubfolderState,
     type ScanSnapshot, type TreeListing, type TreeRoot,
@@ -107,6 +107,8 @@
   // second press during the wait sends `remove_watched_folder` twice for one
   // folder, and the second one races the re-read behind the first.
   let removing = $state<number | null>(null);
+  // D202: the folder whose Start is on the wire, so its button cannot be pressed twice.
+  let starting = $state<number | null>(null);
   // The PATH the removal question was about when a reading pass withdrew it, or
   // `null` — the path and not the sentence, for `Panel.withdrawn`'s reason: a
   // `t()` frozen here would keep its language through a switch.
@@ -1117,6 +1119,27 @@
     removeWithdrawn = null;
   }
 
+  // D202: the person's Start for a folder added through this window. The
+  // backend lets scans read it and starts one; the list re-reads so the row
+  // shows its count instead of the button.
+  async function startIndexing(root: TreeRoot) {
+    actionError = null;
+    starting = root.rootId;
+    try {
+      await confirmWatchedFolder(root.rootId);
+    } catch (e) {
+      actionError = e instanceof Error ? e.message : String(e);
+      return;
+    } finally {
+      starting = null;
+    }
+    try {
+      await refresh();
+    } catch (e) {
+      loadError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   async function addFolder() {
     actionError = null;
     rootChanged = false; // what the last press led to stands until the next one
@@ -1213,6 +1236,8 @@
   // inside the `void $locale` rebuild — so a language switch while it is
   // showing moves it too.
   const addedNoteLabel = $derived.by(() => { void $locale; return t('settings_folders_added_note'); });
+  const unconfirmedLabel = $derived.by(() => { void $locale; return t('settings_folders_unconfirmed'); });
+  const startLabel = $derived.by(() => { void $locale; return t('settings_folders_start'); });
 
   // Rows carry their own count label, not a bare `t()` call in the markup —
   // a call inside `{#each}` reads `get(locale)` non-reactively (`i18n/index.ts:11`)
@@ -1614,7 +1639,16 @@
                line (mockup .frow). -->
           <div class="row">
             <span class="fp">{root.absolutePath}</span>
-            <span class="fc">{countLabel}</span>
+            {#if root.confirmed}
+              <span class="fc">{countLabel}</span>
+            {:else}
+              <span class="fc" data-testid={`folder-unconfirmed-${root.rootId}`}>{unconfirmedLabel}</span>
+              <button
+                type="button"
+                data-testid={`folder-start-${root.rootId}`}
+                disabled={starting === root.rootId}
+                onclick={() => startIndexing(root)}>{startLabel}</button>
+            {/if}
             <!-- Task 9: while THIS row's removal is in flight the row says so
                  in place of its buttons. Not beside them: there is nothing
                  left to press here, and a button that does nothing reads as a

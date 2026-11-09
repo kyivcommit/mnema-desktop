@@ -88,7 +88,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_confirm_remove' | 'settings_folders_confirm_remove_named'
   | 'settings_folders_removing' | 'settings_folders_remove_blocked'
   | 'settings_folders_remove_question_withdrawn'
-  | 'settings_folders_added_note'
+  | 'settings_folders_added_note' | 'settings_folders_unconfirmed' | 'settings_folders_start'
   | 'settings_masks_heading' | 'settings_masks_explainer' | 'settings_masks_info_label' | 'settings_masks_none'
   | 'settings_masks_add' | 'settings_masks_input_label'
   | 'settings_masks_remove' | 'settings_masks_remove_named'
@@ -733,7 +733,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // subfolders and setting masks are moves a person may still want to make
     // first — so this sentence stands where the old per-row Scan button's
     // implicit promise used to be, and names the one place a scan now starts.
-    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Сканувати» у розділі «Сканування».',
+    settings_folders_added_note: 'Теку додано. Виключіть підтеки й задайте маски, тоді натисніть «Почати індексацію» в її рядку.',
+    settings_folders_unconfirmed: 'Ще не індексується. Налаштуйте виключення й маски, потім почніть.',
+    settings_folders_start: 'Почати індексацію',
     settings_masks_heading: 'Маски файлів',
     settings_masks_info_label: 'Як працюють маски',
     // Три факти в одному абзаці, і жоден із них не виводиться з решти екрана:
@@ -1482,7 +1484,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_removing: 'Removing…',
     settings_folders_remove_blocked: 'The Remove button works again once the scan is stopped.',
     settings_folders_remove_question_withdrawn: 'The question about folder “{path}” has been withdrawn: indexing has finished and the list was read again. Press again if you still want to.',
-    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Scan” in the Scanning section.',
+    settings_folders_added_note: 'Folder added. Exclude subfolders and set masks, then press “Start indexing” on its row.',
+    settings_folders_unconfirmed: 'Not indexed yet. Set exclusions and masks, then start.',
+    settings_folders_start: 'Start indexing',
     settings_masks_heading: 'File masks',
     settings_masks_info_label: 'How masks work',
     settings_masks_explainer: 'A mask applies to every watched folder at once: it is compared with a file name, at any depth. Each folder applies it on its own next scan. Letter case does not matter, so *.PDF and *.pdf are one and the same rule; neither does the way a name happens to store its accents. And ? stands for a single byte rather than a single letter, so a letter outside the basic Latin alphabet needs more than one of them: ?.txt does not match й.txt, and ??.txt does.',

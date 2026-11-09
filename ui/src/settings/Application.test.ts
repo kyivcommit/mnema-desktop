@@ -31,6 +31,7 @@ const jobStatus = vi.fn();
 vi.mock('@tauri-apps/api/event', () => ({ listen: () => Promise.resolve(() => {}) }));
 vi.mock('../lib/ipc', () => ({
   memoryIsLow: () => Promise.resolve(false),
+  takeSettingsSection: () => Promise.resolve(null),
   LOCAL_CHAT_TOOLS_MODEL: 'gemma-4-e4b-it',
   // `Settings.svelte` mounts `Provider`, which reads these on mount; Mnema is
   // unavailable here, so the section renders `Models` alone.

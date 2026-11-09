@@ -513,7 +513,7 @@ test('a tree pick without focus opens at the start', async () => {
 // move. This listing holds the same files under the root the fixtures use.
 const TREE_AT_SEVEN: TreeListing = {
   roots: [{
-    rootId: 7,
+    rootId: 7, confirmed: true,
     absolutePath: '/home/u/docs', searched: [],
     name: 'docs',
     files: [
