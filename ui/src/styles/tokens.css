@@ -40,6 +40,7 @@
   --accent: #3B49A8;
   --accent-soft: #E7EAF7;
   --cite: #8F5D05;
+  --pending: #6E6000; /* D202: a folder waiting for its Start — not --cite, which means a citation */
   --cite-wash: #FBEBC8;
   --cite-line: #E6CE93;
   --code-keyword: #7A3E9D;
@@ -77,6 +78,7 @@
     --accent: #93A0EE;
     --accent-soft: #23283A;
     --cite: #E6BC66;
+    --pending: #E8D04A; /* D202: a folder waiting for its Start — not --cite, which means a citation */
     --cite-wash: #3A3320;
     --cite-line: #59492A;
     --code-keyword: #C99BE8;
@@ -116,6 +118,7 @@
   --accent: #93A0EE;
   --accent-soft: #23283A;
   --cite: #E6BC66;
+  --pending: #E8D04A; /* D202: a folder waiting for its Start — not --cite, which means a citation */
   --cite-wash: #3A3320;
   --cite-line: #59492A;
   --code-keyword: #C99BE8;

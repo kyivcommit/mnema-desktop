@@ -66,7 +66,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { locale, t } from '../i18n';
-  import { findInFiles, listTree, setFolderSearched } from '../lib/ipc';
+  import { findInFiles, listTree, openSettings, setFolderSearched } from '../lib/ipc';
   import AddFolder from './AddFolder.svelte';
   import type { AddFolderController } from './addFolder';
   import { get } from 'svelte/store';
@@ -275,6 +275,7 @@
   }
 
   const titleLabel = $derived.by(() => { void $locale; return t('tree_title'); });
+  const unconfirmedLabel = $derived.by(() => { void $locale; return t('tree_root_unconfirmed'); });
   const emptyLabel = $derived.by(() => { void $locale; return t('tree_empty'); });
   const failedLabel = $derived.by(() => { void $locale; return t('tree_failed'); });
   const searchLabel = $derived.by(() => { void $locale; return t('files_search_label'); });
@@ -639,13 +640,27 @@
                  2026-10-20): a flat list under a bare heading read as a pile
                  with no way to fold it. -->
             <div class="folder-row">
-              <button
-                type="button"
-                data-testid={`tree-root-toggle-${root.rootId}`}
-                aria-expanded={isOpen(root.rootId, '')}
-                onclick={() => toggle(root.rootId, '')}
-                >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(root.rootId, ''))}<span class="label">{root.name}</span></button>
-              {@render check(root.rootId, '', root.name, full)}
+              <!-- D202: a folder added but not started yet is marked by more
+                   than its colour, and a click goes to Settings to start it;
+                   it holds nothing to fold or to search in. -->
+              {#if root.confirmed}
+                <button
+                  type="button"
+                  data-testid={`tree-root-toggle-${root.rootId}`}
+                  aria-expanded={isOpen(root.rootId, '')}
+                  onclick={() => toggle(root.rootId, '')}
+                  >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(isOpen(root.rootId, ''))}<span class="label">{root.name}</span></button>
+                {@render check(root.rootId, '', root.name, full)}
+              {:else}
+                <button
+                  type="button"
+                  class="unconfirmed"
+                  data-testid={`tree-root-toggle-${root.rootId}`}
+                  aria-label={`${root.name} — ${unconfirmedLabel}`}
+                  title={unconfirmedLabel}
+                  onclick={() => openSettings('folders').catch((e) => console.error('open_settings failed', e))}
+                  >{@render chevron()}<span class="check-slot"></span>{@render folderIcon(false)}<span class="label">{root.name}</span></button>
+              {/if}
             </div>
           </li>
         </ul>

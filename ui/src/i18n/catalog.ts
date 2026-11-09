@@ -46,7 +46,7 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'provider_ok' | 'provider_ok_mnema' | 'provider_unreachable_mnema' | 'provider_unreachable' | 'provider_missing_key' | 'provider_missing_model' | 'provider_missing_chat_model' | 'provider_missing_role'
   | 'no_path_on_disk' | 'answer_heading' | 'citations_heading'
   | 'grounding_no_citations' | 'grounding_unsupported' | 'grounding_citation_unsupported'
-  | 'tree_empty' | 'tree_failed' | 'tree_search_in' | 'tree_add_folder'
+  | 'tree_empty' | 'tree_failed' | 'tree_search_in' | 'tree_add_folder' | 'tree_root_unconfirmed'
   | 'files_search_placeholder' | 'files_search_label' | 'files_nothing_found' | 'files_truncated' | 'files_search_failed'
   | 'history_empty' | 'history_remove' | 'history_unreadable' | 'history_open_failed' | 'recents_failed'
   | 'history_search_placeholder' | 'history_search_label' | 'history_nothing_found'
@@ -433,7 +433,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     grounding_no_citations: 'Відповідь не посилається на жоден знайдений уривок — звір її з документами.',
     grounding_unsupported: 'Деякі цитати не підтверджують речення, біля яких стоять.',
     grounding_citation_unsupported: 'не підтверджує речення',
-    tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.', tree_add_folder: 'Додати теку',
+    tree_empty: 'Ще нічого не проіндексовано.', tree_failed: 'Не вдалося завантажити дерево.', tree_add_folder: 'Додати теку', tree_root_unconfirmed: 'Не індексується — налаштувати',
     tree_search_in: 'Шукати в «{name}»',
     files_search_placeholder: 'Пошук слів у файлах',
     files_search_label: 'Пошук слів у файлах',
@@ -1373,7 +1373,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     grounding_no_citations: 'This answer cites none of the passages found — check it against your documents.',
     grounding_unsupported: 'Some citations do not support the sentences they stand beside.',
     grounding_citation_unsupported: 'does not support its sentence',
-    tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.', tree_add_folder: 'Add folder',
+    tree_empty: 'Nothing is indexed yet.', tree_failed: 'The tree could not be loaded.', tree_add_folder: 'Add folder', tree_root_unconfirmed: 'Not indexed yet — set up',
     tree_search_in: 'Search in “{name}”',
     files_search_placeholder: 'Find words in files',
     files_search_label: 'Find words in files',
