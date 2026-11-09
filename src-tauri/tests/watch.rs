@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use app::{add_folder, app_in, call, main_webview};
+use app::{add_folder, app_in, call, job_channel, main_webview};
 use mnema_desktop::job::EndReason;
 use mnema_desktop::scan_state::{Entry, ScanSnapshot};
 use mnema_desktop::state::AppState;
@@ -488,5 +488,48 @@ fn adding_a_folder_through_the_command_starts_no_scan_but_its_own_write_does() {
         wait_until(Duration::from_secs(60), || ended.load(Ordering::SeqCst)
             >= 1),
         "positive control: a write under the newly added root never triggered a scan"
+    );
+}
+
+/// D202, external review 1: Start pressed while another job holds the slot is
+/// answered Ok on the promise that the watcher runs a scan once the slot is
+/// free. Only an app with the watcher installed can keep that promise, so it is
+/// pinned here: a probe job holds the slot and ends on its own (not by Stop,
+/// whose rule would rightly drop a wake that came before it).
+#[test]
+fn start_pressed_during_a_job_indexes_the_folder_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, webview, _) = app_watching(dir.path(), &[]);
+    let _close = CloseOnDrop(app.handle().clone());
+
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join("late.txt"), "a marmalade pelican").unwrap();
+    let id = call(
+        &webview,
+        "add_watched_folder",
+        json!({ "path": folder.path().display().to_string() }),
+    )
+    .expect("add_watched_folder was rejected")
+    .as_i64()
+    .unwrap();
+    // FSEvents may replay the fresh directory's creation as an event; let any
+    // scan that causes run and end before the slot is taken, so the scan this
+    // test waits for can only come from the wake.
+    std::thread::sleep(QUIET + Duration::from_secs(1));
+    assert!(wait_until(Duration::from_secs(60), || matches!(
+        app.state::<AppState>().scan_state().snapshot,
+        ScanSnapshot::Idle | ScanSnapshot::Ended { .. }
+    )));
+    assert!(!hits(&webview, "pelican"), "an unconfirmed folder was read");
+
+    let (channel, _events) = job_channel();
+    mnema_desktop::bridge::start_probe_job(app.state::<AppState>(), channel)
+        .expect("the probe job would not start");
+    call(&webview, "confirm_watched_folder", json!({ "rootId": id }))
+        .expect("Start was refused while a job ran");
+
+    assert!(
+        wait_until(Duration::from_secs(90), || hits(&webview, "pelican")),
+        "Start answered Ok during a job, and nothing indexed the folder after it"
     );
 }
