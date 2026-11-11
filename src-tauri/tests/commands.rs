@@ -6443,11 +6443,11 @@ fn subfolder_rows(listing: &Value) -> Vec<(String, String, String)> {
 /// the brief's minimum of two: with two entries a listing that never sorts
 /// has an even chance of looking sorted, and the claim here is about an order
 /// the window relies on being the same on every machine (`rules.rs:387` makes
-/// the same choice for the walk). The file is the other direction — a
-/// listing that returned every directory entry would pass the order
-/// assertion and put `c.txt` in a folder tree.
+/// the same choice for the walk). Since the folders tree PR 2 the file is
+/// listed too, in its sorted place and with `isDir: false` — the field the
+/// window draws a chevron from.
 #[test]
-fn list_subfolders_answers_the_directories_sorted_and_not_the_files() {
+fn list_subfolders_answers_folders_and_files_sorted() {
     let dir = tempfile::tempdir().unwrap();
     let app = app_in(dir.path());
     let webview = main_webview(&app);
@@ -6471,13 +6471,20 @@ fn list_subfolders_answers_the_directories_sorted_and_not_the_files() {
         vec![
             ("a".to_string(), "a".to_string(), "open".to_string()),
             ("b".to_string(), "b".to_string(), "open".to_string()),
+            ("c.txt".to_string(), "c.txt".to_string(), "open".to_string()),
             ("k".to_string(), "k".to_string(), "open".to_string()),
             ("m".to_string(), "m".to_string(), "open".to_string()),
             ("z".to_string(), "z".to_string(), "open".to_string()),
         ],
-        "the five folders must come back sorted by name, and the file must not come back at \
-         all: {listing}"
+        "the five folders and the file must come back sorted by name: {listing}"
     );
+    let kinds: Vec<bool> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["isDir"].as_bool().expect("isDir is a boolean"))
+        .collect();
+    assert_eq!(kinds, [true, true, false, true, true, true], "{listing}");
     assert_eq!(
         listing["unnameable"],
         json!(0),
@@ -7168,6 +7175,21 @@ fn a_symlinked_directory_is_its_own_state_and_a_link_to_no_directory_is_not_list
         subfolder_rows(&listing),
         vec![
             (
+                "dangling".to_string(),
+                "dangling".to_string(),
+                "symlink".to_string()
+            ),
+            (
+                "file.txt".to_string(),
+                "file.txt".to_string(),
+                "open".to_string()
+            ),
+            (
+                "filelink".to_string(),
+                "filelink".to_string(),
+                "symlink".to_string()
+            ),
+            (
                 "link".to_string(),
                 "link".to_string(),
                 "symlink".to_string()
@@ -7175,8 +7197,8 @@ fn a_symlinked_directory_is_its_own_state_and_a_link_to_no_directory_is_not_list
             ("plain".to_string(), "plain".to_string(), "open".to_string()),
             ("real".to_string(), "real".to_string(), "open".to_string()),
         ],
-        "the link to a directory is its own state, the ordinary folders stay open, and the \
-         dangling link and the link to a file are not folders: {listing}"
+        "every link is the symlink state — the walk follows none of them (`follow_links(false)`) \
+         — and the ordinary file and folders stay open: {listing}"
     );
 }
 
@@ -7394,11 +7416,18 @@ fn an_anchored_build_directory_is_built_in_only_beside_its_marker() {
     .expect("listing crate was rejected");
     assert_eq!(
         subfolder_rows(&anchored),
-        vec![(
-            "target".to_string(),
-            "crate/target".to_string(),
-            "builtIn".to_string()
-        )],
+        vec![
+            (
+                "Cargo.toml".to_string(),
+                "crate/Cargo.toml".to_string(),
+                "open".to_string()
+            ),
+            (
+                "target".to_string(),
+                "crate/target".to_string(),
+                "builtIn".to_string()
+            )
+        ],
         "target beside Cargo.toml is pruned by the anchored layer: {anchored}"
     );
 
@@ -14892,4 +14921,99 @@ fn take_settings_section_returns_once() {
         call(&webview, "take_settings_section", json!({})).unwrap(),
         Value::Null
     );
+}
+
+// ── Folders tree PR 2: files, masks and scan failures through the IPC ──────
+
+/// Records a whole-file verdict the way a scan would, on a second connection.
+fn record_failure(dir: &std::path::Path, root: i64, path: &str, rule: mnema_index::SkipRule) {
+    let db = mnema_index::open(&dir.join("index.sqlite")).unwrap();
+    db.record_skip(root, path, None, "the reason", rule, None, None)
+        .unwrap();
+}
+
+#[test]
+fn list_subfolders_reports_files_masks_and_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let fixture = tempfile::tempdir().unwrap();
+    for name in ["a.log", "b.pdf", "c.xyz", "d.pdf"] {
+        std::fs::write(fixture.path().join(name), "x").unwrap();
+    }
+    let root = root_for(&webview, fixture.path());
+    call(&webview, "add_mask", json!({ "pattern": "*.log" })).expect("add_mask was rejected");
+    record_failure(dir.path(), root, "b.pdf", mnema_index::SkipRule::Timeout);
+    record_failure(
+        dir.path(),
+        root,
+        "c.xyz",
+        mnema_index::SkipRule::Unsupported,
+    );
+
+    let listing = call(
+        &webview,
+        "list_subfolders",
+        json!({ "rootId": root, "relativePath": "" }),
+    )
+    .expect("list_subfolders was rejected");
+
+    assert_eq!(
+        subfolder_rows(&listing),
+        vec![
+            (
+                "a.log".to_string(),
+                "a.log".to_string(),
+                "masked".to_string()
+            ),
+            ("b.pdf".to_string(), "b.pdf".to_string(), "open".to_string()),
+            (
+                "c.xyz".to_string(),
+                "c.xyz".to_string(),
+                "notRead".to_string()
+            ),
+            ("d.pdf".to_string(), "d.pdf".to_string(), "open".to_string()),
+        ],
+        "{listing}"
+    );
+    let rows = listing["entries"].as_array().unwrap();
+    assert_eq!(rows[0]["state"]["mask"], "*.log", "{listing}");
+    assert_eq!(rows[1]["failure"]["rule"], "timeout", "{listing}");
+    assert_eq!(rows[1]["failure"]["reason"], "the reason", "{listing}");
+    assert!(rows[3]["failure"].is_null(), "{listing}");
+}
+
+#[test]
+fn list_tree_counts_failures_per_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let one = root_for(&webview, first.path());
+    let two = root_for(&webview, second.path());
+    record_failure(dir.path(), one, "x/a.pdf", mnema_index::SkipRule::Timeout);
+    record_failure(dir.path(), one, "b.pdf", mnema_index::SkipRule::Crash);
+    record_failure(dir.path(), one, "p.jpg", mnema_index::SkipRule::NotText);
+    record_failure(dir.path(), two, "c.pdf", mnema_index::SkipRule::Timeout);
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": two, "relativePath": "c.pdf" }),
+    )
+    .expect("excluding c.pdf was rejected");
+
+    let tree = call(&webview, "list_tree", json!({})).expect("list_tree was rejected");
+    let failed = |id: i64| {
+        tree["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["rootId"] == id)
+            .map(|r| r["failed"].clone())
+    };
+    assert_eq!(failed(one), Some(json!(2)), "{tree}");
+    assert_eq!(failed(two), Some(json!(0)), "{tree}");
 }

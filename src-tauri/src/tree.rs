@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::state::AppState;
 use mnema_core::Segment;
 use mnema_index::{Db, DocumentStatus, PathOccupant};
-use mnema_walk::{BuiltinLayers, WalkRules};
+use mnema_walk::{BuiltinLayers, MaskLayer, WalkRules};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -38,6 +38,10 @@ pub struct TreeRoot {
     /// The root's folder search entries, by folder path ascending; a folder
     /// with no entry follows its nearest entered ancestor (the spec's §3).
     pub searched: Vec<SearchedFolder>,
+    /// How many files under this root the last scans could not read, counted
+    /// the way the folders tree marks them ([`shown_failure`]) — the `⚠ N`
+    /// beside a collapsed root.
+    pub failed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -90,7 +94,21 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
                     searched,
                 })
                 .collect();
+            // A stored mask that does not compile is counted as no mask: the
+            // launcher's tree must not fail over it, and counting more
+            // failures than the tree marks is the visible direction.
+            let mask_names = db.list_masks()?;
+            let walk = WalkRules::none()
+                .with_masks(mask_names.clone())
+                .unwrap_or_else(|_| WalkRules::none());
+            let prefixes = db.list_path_exclusions(r.id)?;
+            let skips = whole_file_skips(db.skips_for_root(r.id)?);
+            let failed = skips
+                .iter()
+                .filter(|skip| shown_failure(skip, &prefixes, walk.masks()))
+                .count() as u64;
             Ok(TreeRoot {
+                failed,
                 name: basename(&r.absolute_path),
                 root_id: r.id,
                 absolute_path: r.absolute_path,
@@ -1033,7 +1051,25 @@ pub struct Subfolder {
     /// [`Subfolder::name`]. Never normalised: a prefix is a path the user
     /// chose from disk, not a pattern (`rules.rs:505-522`).
     pub relative_path: String,
+    /// Whether the entry is a folder (after following a symlink). Files are
+    /// listed since the folders tree PR 2; a rule may name either.
+    pub is_dir: bool,
     pub state: SubfolderState,
+    /// The last scan could not read this file — only on a row that is
+    /// indexed (`Open`, `UnusableName`), decided by [`shown_failure`].
+    pub failure: Option<ScanFailure>,
+    /// For a folder: how many files strictly under it carry a shown failure,
+    /// so a collapsed level does not hide one. `0` for a file.
+    pub failed_below: u64,
+}
+
+/// One whole-file verdict from the `skipped` table, as the tree shows it: the
+/// rule for the mark and the reason for its tooltip.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFailure {
+    pub rule: String,
+    pub reason: String,
 }
 
 /// What holds a subfolder, as one tagged state rather than three booleans.
@@ -1127,6 +1163,12 @@ pub struct Subfolder {
 ///    reaches it too.)
 /// 6. `Open` — none of the above.
 ///
+/// **Since the folders tree PR 2 files are listed too**, and two states slot in
+/// after `Symlink`: `NotRead` (a whole-file skip under `unsupported` or
+/// `not_text`) and then `Masked` (files only). Both are ahead of the rule
+/// states because neither row has a tick: the scan result or the mask decides,
+/// whatever rule also names the path.
+///
 /// ⚠️ `rename_all_fields`, for the reason [`DocumentView`] needed it: on an
 /// *enum*, `rename_all` renames the variants only, and the fields inside a
 /// struct variant keep their snake_case names without this second attribute.
@@ -1185,6 +1227,14 @@ pub enum SubfolderState {
     /// under D29 that is the difference between "protected" and "you cannot
     /// protect this from here".
     UnusableName,
+    /// A FILE a stored mask removes. Carries the mask as it is stored, so the
+    /// row can name it; there is no tick, because the mask is what decides
+    /// (spec, rule 5). Never a folder: a mask never prunes one (D-c).
+    Masked { mask: String },
+    /// A file the last scan recorded as a format this product does not read —
+    /// `unsupported` or `not_text`. Not drawn: the spec hides formats Mnema
+    /// cannot read rather than marking every photo as a failure.
+    NotRead,
 }
 
 /// Whether `prefix` is a **strict ancestor** of `path`.
@@ -1211,18 +1261,24 @@ fn is_ancestor_of(prefix: &str, path: &str) -> bool {
 /// anchored layer needs: `ANCHORED_DIRS` prunes a name only when a marker file
 /// sits in that directory's own parent, a question about the disk rather than
 /// about the path.
-fn subfolder_state(
-    layers: &BuiltinLayers,
-    relative_path: &str,
-    is_symlink: bool,
-    prefixes: &[String],
-) -> SubfolderState {
-    if layers.prunes(relative_path) {
+fn subfolder_state(rules: &LevelRules<'_>, relative_path: &str, entry: &Entry) -> SubfolderState {
+    if rules.layers.prunes_entry(relative_path, entry.is_dir) {
         return SubfolderState::BuiltIn;
     }
-    if is_symlink {
+    if entry.is_symlink {
         return SubfolderState::Symlink;
     }
+    if !entry.is_dir && rules.not_read(relative_path) {
+        return SubfolderState::NotRead;
+    }
+    if !entry.is_dir
+        && let Some(index) = rules.masks.matching(relative_path)
+    {
+        return SubfolderState::Masked {
+            mask: rules.mask_names[index].clone(),
+        };
+    }
+    let prefixes = rules.prefixes;
     if let Some(prefix) = prefixes
         .iter()
         .find(|prefix| is_ancestor_of(prefix, relative_path))
@@ -1242,6 +1298,78 @@ fn subfolder_state(
         return SubfolderState::UnusableName;
     }
     SubfolderState::Open
+}
+
+/// Everything one level's rows are decided by, gathered once per listing:
+/// the built-in layers (a globset), the person's prefixes, the masks with the
+/// names they are stored under, and the root's whole-file scan verdicts.
+pub(crate) struct LevelRules<'a> {
+    layers: &'a BuiltinLayers,
+    prefixes: &'a [String],
+    masks: &'a MaskLayer,
+    /// `masks`' patterns as stored, in the order `masks` was compiled from:
+    /// [`MaskLayer::matching`] answers an index into this.
+    mask_names: &'a [String],
+    /// Whole-file rows only — see [`whole_file_skips`].
+    skips: &'a [mnema_index::SkippedFile],
+}
+
+impl<'a> LevelRules<'a> {
+    pub(crate) fn new(
+        layers: &'a BuiltinLayers,
+        prefixes: &'a [String],
+        masks: &'a MaskLayer,
+        mask_names: &'a [String],
+        skips: &'a [mnema_index::SkippedFile],
+    ) -> Self {
+        Self {
+            layers,
+            prefixes,
+            masks,
+            mask_names,
+            skips,
+        }
+    }
+
+    fn skip_at(&self, relative_path: &str) -> Option<&'a mnema_index::SkippedFile> {
+        self.skips.iter().find(|s| s.relative_path == relative_path)
+    }
+
+    fn not_read(&self, relative_path: &str) -> bool {
+        self.skip_at(relative_path)
+            .is_some_and(|s| hides_the_file(&s.rule))
+    }
+}
+
+/// The scan verdicts that HIDE a file rather than mark it: a format this
+/// product does not read (`unsupported`, `not_text` — the plan's ruling 2).
+fn hides_the_file(rule: &str) -> bool {
+    matches!(
+        mnema_index::SkipRule::parse(rule),
+        Some(mnema_index::SkipRule::Unsupported | mnema_index::SkipRule::NotText)
+    )
+}
+
+/// Only whole-file verdicts (`page_no IS NULL`): a skipped page belongs to a
+/// document that IS indexed, the same boundary `Db::forget_skip` keeps
+/// (`journal.rs:745-752`).
+pub(crate) fn whole_file_skips(
+    skips: Vec<mnema_index::SkippedFile>,
+) -> Vec<mnema_index::SkippedFile> {
+    skips.into_iter().filter(|s| s.page_no.is_none()).collect()
+}
+
+/// 🔴 The ONE answer to "does the tree show ⚠ for this verdict", asked by the
+/// row ([`Subfolder::failure`]), by the collapsed folder
+/// ([`Subfolder::failed_below`]) and by the root ([`TreeRoot::failed`]) — so the
+/// three cannot disagree. Shown when the file is indexed: not a hiding rule,
+/// not under one of the person's rules, not under a mask.
+fn shown_failure(skip: &mnema_index::SkippedFile, prefixes: &[String], masks: &MaskLayer) -> bool {
+    !hides_the_file(&skip.rule)
+        && !prefixes
+            .iter()
+            .any(|p| p == &skip.relative_path || is_ancestor_of(p, &skip.relative_path))
+        && !masks.matches(&skip.relative_path)
 }
 
 /// One filesystem error about a **path**, split by
@@ -1343,7 +1471,7 @@ fn subfolder_dir(
 /// (measured on macOS 26.6.2 / APFS, first on the fixture the brief asked for
 /// and again on a standalone probe). A guard whose only test needs a filesystem
 /// that cannot host it is a guard half this project's machines never check.
-struct Entry {
+pub(crate) struct Entry {
     name: std::ffi::OsString,
     /// Whether the entry is a directory **after following**, which a
     /// `DirEntry`'s own `file_type` does not say for a symlink.
@@ -1413,20 +1541,16 @@ fn directory_entries(
 /// Only directories are counted in `unnameable`, because only directories would
 /// have been listed: an unnameable *file* is no more missing from this answer
 /// than a nameable one.
-fn read_subfolders(
-    layers: &BuiltinLayers,
+pub(crate) fn read_subfolders(
+    rules: &LevelRules<'_>,
     entries: &[Entry],
     parent: &str,
-    prefixes: &[String],
 ) -> SubfolderListing {
     let mut listed: Vec<Subfolder> = Vec::new();
     let mut unnameable: u64 = 0;
     for entry in entries {
-        if !entry.is_dir {
-            continue;
-        }
         // Omitted and counted, never `to_string_lossy`: a lossy name no longer
-        // opens the folder it came from, and a rule saved from one would
+        // opens the entry it came from, and a rule saved from one would
         // exclude nothing. The walk refuses such entries for the same reason
         // (`PreSkipRule::UnrepresentableName`, `mnema-walk/src/lib.rs:52-54`).
         let Some(name) = entry.name.to_str() else {
@@ -1438,11 +1562,36 @@ fn read_subfolders(
         } else {
             format!("{parent}/{name}")
         };
-        let state = subfolder_state(layers, &relative_path, entry.is_symlink, prefixes);
+        let state = subfolder_state(rules, &relative_path, entry);
+        // `shown_failure` is the whole gate: a hiding rule, a rule of the
+        // person's and a mask are exactly the states with no ⚠, and the walk
+        // records nothing for a built-in or symlinked entry.
+        let failure = rules
+            .skip_at(&relative_path)
+            .filter(|skip| shown_failure(skip, rules.prefixes, rules.masks))
+            .map(|skip| ScanFailure {
+                rule: skip.rule.clone(),
+                reason: skip.reason.clone(),
+            });
+        let failed_below = if entry.is_dir {
+            rules
+                .skips
+                .iter()
+                .filter(|skip| {
+                    is_ancestor_of(&relative_path, &skip.relative_path)
+                        && shown_failure(skip, rules.prefixes, rules.masks)
+                })
+                .count() as u64
+        } else {
+            0
+        };
         listed.push(Subfolder {
             name: name.to_string(),
             relative_path,
+            is_dir: entry.is_dir,
             state,
+            failure,
+            failed_below,
         });
     }
     listed.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1500,7 +1649,19 @@ pub fn list_subfolders(
     // give, because every `relativePath` this call would emit has this path as
     // its ancestor and would inherit the refusal.
     WalkRules::check_prefix(&relative_path)?;
-    let prefixes = state.with_index(|db| db.list_path_exclusions(root_id))?;
+    let (prefixes, mask_names, skips) = state.with_index(|db| {
+        Ok::<_, mnema_index::Error>((
+            db.list_path_exclusions(root_id)?,
+            db.list_masks()?,
+            whole_file_skips(db.skips_for_root(root_id)?),
+        ))
+    })?;
+    // A stored mask that does not compile refuses the listing (the plan's
+    // ruling 10): the scan stops in that state, so ticks saying "indexed"
+    // would be false.
+    // shortcut: skips_for_root reads every skip of the root per expand; filter
+    // in SQL by prefix if a root holds >10k skips.
+    let walk = WalkRules::none().with_masks(mask_names.clone())?;
     let read = std::fs::read_dir(&dir).map_err(|e| refusal(root_id, &relative_path, e))?;
     let entries = directory_entries(read).map_err(|source| Error::SubfolderUnreadable {
         root_id,
@@ -1510,12 +1671,8 @@ pub fn list_subfolders(
     // Compiled once for the whole listing, not once a row: it holds a globset,
     // and `subfolder_state` asks it for every entry.
     let layers = WalkRules::builtin_layers(&root_canonical);
-    Ok(read_subfolders(
-        &layers,
-        &entries,
-        &relative_path,
-        &prefixes,
-    ))
+    let rules = LevelRules::new(&layers, &prefixes, walk.masks(), &mask_names, &skips);
+    Ok(read_subfolders(&rules, &entries, &relative_path))
 }
 
 #[cfg(test)]
@@ -1630,8 +1787,7 @@ mod tests {
         // A root that is not there: nothing in this test reaches the disk —
         // the anchored arm of `BuiltinLayers::prunes` is the only part that
         // would, and none of these names is `target`, `build` or `dist`.
-        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
-        let listing = read_subfolders(&layers, &entries, "", &[]);
+        let listing = level_with(&entries, "", &[], &[], &[]);
 
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
@@ -1643,9 +1799,11 @@ mod tests {
             !names.iter().any(|name| name.contains('\u{FFFD}')),
             "a name was rendered lossily instead of being omitted: {listing:?}"
         );
+        // Three since the folders tree PR 2: files are listed now, so an
+        // unnameable FILE is missing from the answer too and is counted.
         assert_eq!(
-            listing.unnameable, 2,
-            "both unnameable FOLDERS are counted and the unnameable file is not: {listing:?}"
+            listing.unnameable, 3,
+            "both unnameable folders and the unnameable file are counted: {listing:?}"
         );
     }
 
@@ -1654,7 +1812,10 @@ mod tests {
         let row = |name: &str, state| Subfolder {
             name: name.to_string(),
             relative_path: format!("Work/{name}"),
+            is_dir: true,
             state,
+            failure: None,
+            failed_below: 0,
         };
         SubfolderListing {
             entries: vec![
@@ -1669,6 +1830,24 @@ mod tests {
                 row("node_modules", SubfolderState::BuiltIn),
                 row("link", SubfolderState::Symlink),
                 row("trailing ", SubfolderState::UnusableName),
+                Subfolder {
+                    is_dir: false,
+                    ..row(
+                        "x.log",
+                        SubfolderState::Masked {
+                            mask: "*.log".to_string(),
+                        },
+                    )
+                },
+                row("p.jpg", SubfolderState::NotRead),
+                Subfolder {
+                    failure: Some(ScanFailure {
+                        rule: "timeout".to_string(),
+                        reason: "took too long".to_string(),
+                    }),
+                    failed_below: 4,
+                    ..row("slow", SubfolderState::Open)
+                },
             ],
             unnameable: 2,
         }
@@ -1694,8 +1873,7 @@ mod tests {
             entry(b"kilo", true, false),
         ];
 
-        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
-        let listing = read_subfolders(&layers, &entries, "", &[]);
+        let listing = level_with(&entries, "", &[], &[], &[]);
 
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
@@ -1703,6 +1881,249 @@ mod tests {
             vec!["alpha", "bravo", "kilo", "mike", "zulu"],
             "the entries must come back sorted, not in the order they arrived: {listing:?}"
         );
+    }
+
+    // ── Folders tree PR 2: files, masks and scan failures ───────────────────
+
+    fn skip(path: &str, rule: &str, page_no: Option<i64>) -> mnema_index::SkippedFile {
+        mnema_index::SkippedFile {
+            relative_path: path.to_string(),
+            page_no,
+            reason: format!("reason for {path}"),
+            rule: rule.to_string(),
+        }
+    }
+
+    /// One level read with the given rules, against a root that is not there
+    /// (nothing here is `target`, `build` or `dist`, so the anchored layer is
+    /// never asked about the disk).
+    fn level_with(
+        entries: &[Entry],
+        parent: &str,
+        prefixes: &[&str],
+        masks: &[&str],
+        skips: &[mnema_index::SkippedFile],
+    ) -> SubfolderListing {
+        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
+        let prefixes: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
+        let mask_names: Vec<String> = masks.iter().map(|m| m.to_string()).collect();
+        let walk = WalkRules::none().with_masks(mask_names.clone()).unwrap();
+        // Through `whole_file_skips`, as `list_subfolders` reads them.
+        let skips = whole_file_skips(skips.to_vec());
+        let rules = LevelRules::new(&layers, &prefixes, walk.masks(), &mask_names, &skips);
+        read_subfolders(&rules, entries, parent)
+    }
+
+    fn state_of<'a>(listing: &'a SubfolderListing, name: &str) -> &'a Subfolder {
+        listing
+            .entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} is not listed: {listing:?}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_are_listed_beside_folders_sorted_by_name() {
+        let entries = vec![entry(b"b.pdf", false, false), entry(b"a", true, false)];
+        let listing = level_with(&entries, "", &[], &[], &[]);
+        let rows: Vec<(&str, bool)> = listing
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir))
+            .collect();
+        assert_eq!(rows, vec![("a", true), ("b.pdf", false)], "{listing:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_under_a_mask_is_masked_and_names_the_mask() {
+        let entries = vec![entry(b"x.log", false, false), entry(b"y.pdf", false, false)];
+        let listing = level_with(&entries, "", &[], &["*.txt", "*.log"], &[]);
+        assert_eq!(
+            state_of(&listing, "x.log").state,
+            SubfolderState::Masked {
+                mask: "*.log".to_string()
+            }
+        );
+        assert_eq!(state_of(&listing, "y.pdf").state, SubfolderState::Open);
+    }
+
+    /// A mask is file-only (D-c): a folder that shares the name stays open.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_named_like_a_mask_is_not_masked() {
+        let entries = vec![entry(b"x.log", true, false)];
+        let listing = level_with(&entries, "", &[], &["*.log"], &[]);
+        assert_eq!(state_of(&listing, "x.log").state, SubfolderState::Open);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unsupported_or_not_text_file_is_not_read() {
+        let entries = vec![
+            entry(b"a.xyz", false, false),
+            entry(b"p.jpg", false, false),
+            entry(b"t.pdf", false, false),
+        ];
+        let skips = [
+            skip("a.xyz", "unsupported", None),
+            skip("p.jpg", "not_text", None),
+            skip("t.pdf", "timeout", None),
+        ];
+        let listing = level_with(&entries, "", &[], &[], &skips);
+        assert_eq!(state_of(&listing, "a.xyz").state, SubfolderState::NotRead);
+        assert_eq!(state_of(&listing, "p.jpg").state, SubfolderState::NotRead);
+        assert_eq!(state_of(&listing, "t.pdf").state, SubfolderState::Open);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_file_carries_its_rule_and_reason() {
+        let entries = vec![
+            entry(b"t.pdf", false, false),
+            entry(b"n.pdf", false, false),
+            entry(b"ok.pdf", false, false),
+        ];
+        let skips = [
+            skip("d/t.pdf", "timeout", None),
+            skip("d/n.pdf", "no_text_layer", None),
+        ];
+        let listing = level_with(&entries, "d", &[], &[], &skips);
+        assert_eq!(
+            state_of(&listing, "t.pdf").failure,
+            Some(ScanFailure {
+                rule: "timeout".to_string(),
+                reason: "reason for d/t.pdf".to_string()
+            })
+        );
+        assert_eq!(
+            state_of(&listing, "n.pdf")
+                .failure
+                .as_ref()
+                .map(|f| f.rule.as_str()),
+            Some("no_text_layer")
+        );
+        assert_eq!(state_of(&listing, "t.pdf").state, SubfolderState::Open);
+        assert_eq!(state_of(&listing, "ok.pdf").failure, None);
+    }
+
+    /// A skipped PAGE is a page of a document that IS indexed.
+    #[cfg(unix)]
+    #[test]
+    fn a_page_skip_is_not_a_failure() {
+        let entries = vec![entry(b"t.pdf", false, false), entry(b"d", true, false)];
+        let skips = [
+            skip("t.pdf", "timeout", Some(3)),
+            skip("d/u.pdf", "timeout", Some(1)),
+        ];
+        let listing = level_with(&entries, "", &[], &[], &skips);
+        assert_eq!(state_of(&listing, "t.pdf").failure, None);
+        assert_eq!(state_of(&listing, "d").failed_below, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_below_counts_shown_failures_strictly_under() {
+        let entries = vec![entry(b"a", true, false), entry(b"ab", true, false)];
+        let skips = [
+            skip("a/x.pdf", "timeout", None),
+            skip("a/b/y.pdf", "crash", None),
+            skip("ab/z.pdf", "crash", None),
+            skip("a/p.jpg", "not_text", None),
+        ];
+        let listing = level_with(&entries, "", &[], &[], &skips);
+        assert_eq!(state_of(&listing, "a").failed_below, 2, "{listing:?}");
+        assert_eq!(state_of(&listing, "ab").failed_below, 1, "{listing:?}");
+    }
+
+    /// The mark on a collapsed folder and the mark on the file must be one
+    /// answer: a file under a rule or a mask shows no ⚠, so it is not counted.
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_under_a_rule_or_a_mask_is_not_counted() {
+        let entries = vec![entry(b"a", true, false), entry(b"q.pdf", false, false)];
+        let skips = [
+            skip("a/b/y.pdf", "crash", None),
+            skip("a/x.log", "timeout", None),
+            skip("a/k.pdf", "timeout", None),
+            skip("q.pdf", "timeout", None),
+        ];
+        let listing = level_with(&entries, "", &["a/b", "q.pdf"], &["*.log"], &skips);
+        assert_eq!(state_of(&listing, "a").failed_below, 1, "{listing:?}");
+        assert_eq!(state_of(&listing, "q.pdf").failure, None);
+        assert_eq!(state_of(&listing, "q.pdf").state, SubfolderState::Excluded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_rule_reports_the_file_excluded() {
+        let entries = vec![
+            entry(b"b.pdf", false, false),
+            entry(b"b.pdfx", false, false),
+        ];
+        let listing = level_with(&entries, "a", &["a/b.pdf"], &[], &[]);
+        assert_eq!(state_of(&listing, "b.pdf").state, SubfolderState::Excluded);
+        assert_eq!(state_of(&listing, "b.pdfx").state, SubfolderState::Open);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_builtin_file_is_builtin() {
+        let entries = vec![entry(b".DS_Store", false, false)];
+        let listing = level_with(&entries, "", &[], &[], &[]);
+        assert_eq!(
+            state_of(&listing, ".DS_Store").state,
+            SubfolderState::BuiltIn
+        );
+    }
+
+    /// A path that held an unreadable FILE and is a folder now keeps its old
+    /// verdict until the next scan; the folder must not be hidden over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_with_a_stale_not_read_verdict_is_still_listed() {
+        let entries = vec![entry(b"was.xyz", true, false)];
+        let listing = level_with(
+            &entries,
+            "",
+            &[],
+            &[],
+            &[skip("was.xyz", "unsupported", None)],
+        );
+        assert_eq!(state_of(&listing, "was.xyz").state, SubfolderState::Open);
+    }
+
+    /// The anchored layer prunes a FOLDER named `target` beside `Cargo.toml`,
+    /// never a file of that name — the listing asks with the entry's kind.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_named_like_an_anchored_folder_is_listed() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Cargo.toml"), b"x").unwrap();
+        let layers = WalkRules::builtin_layers(root.path());
+        let walk = WalkRules::none();
+        let rules = LevelRules::new(&layers, &[], walk.masks(), &[], &[]);
+        let entries = vec![
+            entry(b"target", false, false),
+            entry(b"Cargo.toml", false, false),
+        ];
+        let listing = read_subfolders(&rules, &entries, "");
+        assert_eq!(state_of(&listing, "target").state, SubfolderState::Open);
+        let dir = vec![entry(b"target", true, false)];
+        assert_eq!(
+            read_subfolders(&rules, &dir, "").entries[0].state,
+            SubfolderState::BuiltIn
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unnameable_file_is_counted() {
+        let entries = vec![entry(b"bad\xfffile.txt", false, false)];
+        let listing = level_with(&entries, "", &[], &[], &[]);
+        assert_eq!(listing.unnameable, 1, "{listing:?}");
+        assert!(listing.entries.is_empty());
     }
 
     /// The wire contract task 5's UI matches on, both directions.
@@ -1741,6 +2162,9 @@ mod tests {
             "builtIn",
             "symlink",
             "unusableName",
+            "masked",
+            "notRead",
+            "open",
         ];
         assert_eq!(
             rows.len(),
@@ -1753,6 +2177,15 @@ mod tests {
 
         // The prefix the row promises to name, and the value of it.
         assert_eq!(rows[2]["state"]["prefix"], "Work", "{v}");
+        assert_eq!(rows[6]["state"]["mask"], "*.log", "{v}");
+        assert_eq!(rows[6]["isDir"], false, "{v}");
+        assert_eq!(rows[0]["isDir"], true, "{v}");
+        assert!(rows[0].get("is_dir").is_none(), "{v}");
+        assert_eq!(rows[8]["failure"]["rule"], "timeout", "{v}");
+        assert_eq!(rows[8]["failure"]["reason"], "took too long", "{v}");
+        assert_eq!(rows[8]["failedBelow"], 4, "{v}");
+        assert!(rows[8].get("failed_below").is_none(), "{v}");
+        assert!(rows[0]["failure"].is_null(), "{v}");
         // A unit variant carries its tag and nothing else: a state that grew a
         // field nobody meant to ship would show up here.
         assert_eq!(
@@ -1780,6 +2213,7 @@ mod tests {
                     folder_path: "notes".into(),
                     searched: false,
                 }],
+                failed: 3,
             }],
         }
     }

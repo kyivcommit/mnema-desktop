@@ -53,6 +53,6 @@
 # field was added for.
 case_ "the unnameable count the pure function computed is the one the command answers with" \
   src-tauri/src/tree.rs \
-  's~    Ok\(read_subfolders\(\n        &layers,\n        &entries,\n        &relative_path,\n        &prefixes,\n    \)\)~    let mut listing = read_subfolders(\&layers, \&entries, \&relative_path, \&prefixes);\n    listing.unnameable = 0; /* mutant: the count is dropped on the way to the wire */\n    Ok(listing)~' \
+  's~    Ok\(read_subfolders\(&rules, &entries, &relative_path\)\)~    let mut listing = read_subfolders(\&rules, \&entries, \&relative_path);\n    listing.unnameable = 0; /* mutant: the count is dropped on the way to the wire */\n    Ok(listing)~' \
   '/* mutant: the count is dropped on the way to the wire */' \
   mnema-desktop 'a_directory_whose_name_is_not_utf8_is_counted_and_never_named_lossily' --test commands

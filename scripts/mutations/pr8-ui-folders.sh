@@ -100,8 +100,8 @@
 # the sole `readFileSync` of it), so no other file could have answered.
 case_ "a variant Rust gains and the window has never heard of must fail the pin" \
   src-tauri/src/tree.rs \
-  "s{    UnusableName,\n\}}{    UnusableName,\n    SomethingNewer,\n\}}" \
-  "    UnusableName,
+  "s{    NotRead,\n\}}{    NotRead,\n    SomethingNewer,\n\}}" \
+  "    NotRead,
     SomethingNewer,
 }" \
   src/lib/ipc.test.ts 'SubfolderState is exactly what tree.rs defines, in the spelling serde sends' runner=vitest
