@@ -90,6 +90,9 @@ fn ticked(state: &SubfolderState) -> bool {
     matches!(state, SubfolderState::Open | SubfolderState::UnusableName)
 }
 
+/// One level of the disk under a set of prefixes — see [`plan_tick`].
+pub(crate) type ReadLevel<'a> = dyn FnMut(&str, &[String]) -> Result<SubfolderListing, Error> + 'a;
+
 /// The whole change one tick makes. `level(dir, prefixes)` lists one level of
 /// the disk classified under `prefixes` — the command hands it the real
 /// directory, read through the same `read_subfolders` the tree draws from, so
@@ -99,7 +102,7 @@ pub(crate) fn plan_tick(
     stored: &[String],
     path: &str,
     tick: Tick,
-    level: &mut dyn FnMut(&str, &[String]) -> Result<SubfolderListing, Error>,
+    level: &mut ReadLevel<'_>,
 ) -> Result<RuleChange, Error> {
     let mut change = RuleChange::default();
     let here = level(parent(path), stored)?;
