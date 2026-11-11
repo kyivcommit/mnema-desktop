@@ -1109,3 +1109,40 @@ fn a_rebuild_in_flight_is_not_a_completion() {
         "the finished document's completion, not the rebuild's newer {rebuilding_at}"
     );
 }
+
+/// Folders tree PR 2: a tick's whole change — rules taken away and rules
+/// stored — lands at once or not at all. A failure on the last insert must
+/// leave the rule the change was taking away in place, or a push-down would
+/// stop half-way with the folder's rule gone and its siblings not yet ruled
+/// out: the state in which a scan indexes what the person kept out.
+#[test]
+fn change_path_exclusions_is_one_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = fresh(&dir);
+    let root = db.insert_watched_root("/tmp/alpha").unwrap();
+    db.add_path_exclusion(root, "a").unwrap();
+    db.conn()
+        .execute_batch(
+            "CREATE TEMP TRIGGER boom BEFORE INSERT ON ignore_rule
+             WHEN NEW.path_prefix = 'a/boom'
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+
+    let failed = db.change_path_exclusions(
+        root,
+        &["a".to_string()],
+        &["a/c".to_string(), "a/boom".to_string()],
+    );
+
+    assert!(failed.is_err(), "the trigger must refuse the last insert");
+    assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a"]);
+
+    db.change_path_exclusions(
+        root,
+        &["a".to_string()],
+        &["a/c".to_string(), "a/d".to_string(), "a/c".to_string()],
+    )
+    .unwrap();
+    assert_eq!(db.list_path_exclusions(root).unwrap(), vec!["a/c", "a/d"]);
+}

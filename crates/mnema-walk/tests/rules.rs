@@ -2037,3 +2037,73 @@ fn a_mask_does_not_swallow_what_the_walk_reports_as_not_a_file() {
     );
     assert!(walked.complete, "naming a symlink is not a read failure");
 }
+
+// ── Folders tree PR 2: a rule may name a FILE (the spec's open question 1) ──
+
+/// The validator is about path shape, not about directories: a file path is a
+/// prefix like any other.
+#[test]
+fn a_file_path_is_a_valid_prefix() {
+    assert!(WalkRules::check_prefix("a/b.pdf").is_ok());
+    assert!(WalkRules::check_prefix("b.pdf").is_ok());
+}
+
+/// `!/a/b.pdf` carries no trailing `/`, so in `.gitignore` semantics it names
+/// a file as well as a folder. Both directions: the file is gone, and nothing
+/// whose name merely starts with it is.
+#[test]
+fn a_prefix_naming_a_file_removes_that_file_only() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a/b.pdf", "a/b.pdf.txt", "a/b.pdfx", "a/c.pdf", "ab.pdf"] {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"x").unwrap();
+    }
+
+    let walked = enumerate(
+        root.path(),
+        &WalkRules::new(false, false, vec!["a/b.pdf".to_string()]).unwrap(),
+    );
+    let mut names: Vec<&str> = walked.found.iter().map(|f| f.relative.as_str()).collect();
+    names.sort_unstable();
+
+    assert_eq!(names, ["a/b.pdf.txt", "a/b.pdfx", "a/c.pdf", "ab.pdf"]);
+}
+
+/// The listing names the mask a file sits under, so it needs to know WHICH
+/// one matched — the first, in the order the masks were given.
+#[test]
+fn matching_names_the_first_mask_that_matches() {
+    let rules = WalkRules::none()
+        .with_masks(vec![
+            "*.log".to_string(),
+            "*.txt".to_string(),
+            "y.*".to_string(),
+        ])
+        .unwrap();
+    assert_eq!(rules.masks().matching("x/y.log"), Some(0));
+    assert_eq!(rules.masks().matching("y.txt"), Some(1));
+    assert_eq!(rules.masks().matching("y.pdf"), Some(2));
+    assert_eq!(rules.masks().matching("z.pdf"), None);
+}
+
+/// A built-in FILE name is pruned when the listing asks about a file.
+#[test]
+fn a_builtin_file_name_is_pruned_as_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    let layers = WalkRules::builtin_layers(root.path());
+    assert!(layers.prunes_entry("a/.DS_Store", false));
+    assert!(!layers.prunes_entry("a/notes.md", false));
+}
+
+/// The anchored layer prunes a DIRECTORY named `target` beside `Cargo.toml`,
+/// never a file of that name: `filter_entry` gates it on `is_dir()`, and so
+/// must the listing's question about a file.
+#[test]
+fn an_anchored_name_is_not_pruned_as_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Cargo.toml"), b"x").unwrap();
+    let layers = WalkRules::builtin_layers(root.path());
+    assert!(layers.prunes_entry("target", true));
+    assert!(!layers.prunes_entry("target", false));
+}

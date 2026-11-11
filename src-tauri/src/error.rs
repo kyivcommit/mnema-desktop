@@ -260,6 +260,15 @@ pub enum Error {
          rules, so a rule naming it would change nothing"
     )]
     AlreadyPrunedByBuiltIn { root_id: i64, relative_path: String },
+    /// A tick under an excluded folder would push the folder's rule down onto
+    /// its siblings, and one of them has a name no exclusion rule can carry
+    /// (`WalkRules::check_prefix`). Storing the rest would start indexing that
+    /// one without a word, so nothing is stored.
+    #[error(
+        "{relative_path:?} in watched folder {root_id} has a name no exclusion rule can carry, \
+         so ticking an entry beside it would start indexing it; rename it first"
+    )]
+    CannotExcludeBeside { root_id: i64, relative_path: String },
     /// `list_subfolders` could not read a folder that is there: a permission
     /// this process does not have, a share that dropped, an entry that failed
     /// mid-listing.

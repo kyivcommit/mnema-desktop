@@ -588,6 +588,8 @@ main select:focus-visible {
   width: 16px;
   height: 16px;
   margin: 0;
+  /* `main input` gives every field 13 px of side padding; a tick takes none. */
+  padding: 0;
   border-radius: 4px;
   display: grid;
   place-items: center;

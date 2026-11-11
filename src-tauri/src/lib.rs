@@ -27,6 +27,7 @@ pub mod scan_state;
 pub mod shortcut;
 pub mod state;
 pub mod theme;
+mod ticks;
 pub mod tray;
 mod tray_icons;
 mod tree;
@@ -85,6 +86,7 @@ pub fn invoke_handler<R: tauri::Runtime>()
         bridge::cancel_job,
         bridge::job_status,
         tree::list_subfolders,
+        ticks::set_tick,
         tree::list_tree,
         tree::set_folder_searched,
         tree::mask_preview,

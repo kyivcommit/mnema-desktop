@@ -86,7 +86,9 @@ export type TreeFile = { relativePath: string; documentId: string };
 export type SearchedFolder = { folderPath: string; searched: boolean };
 // `confirmed`: D202 — false while a folder added through the window waits for
 // the person's Start; no scan reads it until then.
-export type TreeRoot = { rootId: number; absolutePath: string; name: string; confirmed: boolean; files: TreeFile[]; searched: SearchedFolder[] };
+// `failed`: files under the root the last scans could not read, counted the
+// way the folders tree marks them (`tree.rs` `shown_failure`).
+export type TreeRoot = { rootId: number; absolutePath: string; name: string; confirmed: boolean; files: TreeFile[]; searched: SearchedFolder[]; failed: number };
 export type TreeListing = { roots: TreeRoot[] };
 
 // One question the person asked, as the sidebar's conversation list shows it
@@ -139,13 +141,26 @@ export type SubfolderState =
   | { kind: 'excludedByAncestor'; prefix: string }
   | { kind: 'builtIn' }
   | { kind: 'symlink' }
-  | { kind: 'unusableName' };
+  | { kind: 'unusableName' }
+  // Folders tree PR 2. A FILE a stored mask removes, carrying the mask as
+  // stored; no tick, the mask decides.
+  | { kind: 'masked'; mask: string }
+  // A file the last scan recorded as a format this product does not read
+  // (`unsupported`, `not_text`). Not drawn.
+  | { kind: 'notRead' };
 
 // `relativePath` is what goes back to `exclude_subfolder`, never `name`: the
 // two differ at every level below the root, and a rule built from the name
 // would name a folder at the top of the tree instead of the one that was
 // pressed.
-export type Subfolder = { name: string; relativePath: string; state: SubfolderState };
+// `isDir`: files are listed since the folders tree PR 2. `failure`: the last
+// scan could not read this file (only on a row that is indexed).
+// `failedBelow`: for a folder, how many shown failures sit strictly under it.
+export type ScanFailure = { rule: string; reason: string };
+export type Subfolder = {
+  name: string; relativePath: string; isDir: boolean; state: SubfolderState;
+  failure: ScanFailure | null; failedBelow: number;
+};
 
 // A struct rather than a bare array because of `unnameable`: directory entries
 // whose names are not valid UTF-8 are counted and dropped, never rendered
@@ -171,6 +186,14 @@ export const excludeSubfolder = (rootId: number, relativePath: string) =>
 // different things to say to a person.
 export const includeSubfolder = (rootId: number, relativePath: string) =>
   invoke<boolean>('include_subfolder', { rootId, relativePath });
+
+// One tick as ONE change to the root's rules (`src-tauri/src/ticks.rs`): a
+// push-down, a fold-back or "tick everything inside" is decided and written by
+// the shell in one transaction, never as several calls from here.
+export type Tick = 'off' | 'on' | 'all';
+export type RuleChange = { added: string[]; removed: string[] };
+export const setTick = (rootId: number, relativePath: string, tick: Tick) =>
+  invoke<RuleChange>('set_tick', { rootId, relativePath, tick });
 
 // What `pattern` would remove, counted over the INDEX by the walk's own
 // matcher (`tree.rs`). The window has no glob library and must not grow one: a

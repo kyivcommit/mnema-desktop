@@ -4,6 +4,7 @@
   import { locale, t } from '../i18n';
   import { listMasks, maskPreview, addMask, removeMask } from '../lib/ipc';
   import type { JobController } from './jobs';
+  import { masksVersion } from './masksVersion';
 
   // 🔴 Taken for one reason only, and it is the independent review's second
   // finding: this editor has to hear a reading pass end. It starts no job and
@@ -276,6 +277,8 @@
     // After a refusal too: what the person is looking at then is the index as
     // it is now, not the array from before the press.
     await refresh();
+    // The folders tree marks masked files; whatever happened, it re-reads.
+    masksVersion.update((n) => n + 1);
   }
 
   // `void $locale` on every derived sentence: a bare `t()` is evaluated once and

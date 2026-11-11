@@ -81,6 +81,8 @@ export type Key = 'settings_title' | 'indexed_documents'
   | 'settings_folders_exclude_checking' | 'settings_folders_include_checking'
   | 'settings_folders_folder_changed' | 'settings_folders_exclude_cost'
   | 'settings_folders_include_cost' | 'settings_folders_include_cost_held_below'
+  | 'settings_folders_include_cost_push_down' | 'settings_folders_include_all_cost'
+  | 'settings_entry_masked' | 'settings_entry_failed' | 'settings_entry_failed_below'
   | 'settings_folders_include_cost_gone'
   | 'settings_folders_confirm_exclude_heading' | 'settings_folders_confirm_include_heading'
   | 'settings_folders_confirm' | 'settings_folders_confirm_cancel'
@@ -215,7 +217,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_empty: 'Ще жодної теки не додано.',
     settings_folders_add: 'Додати теку',
     settings_folders_remove_selected: 'Видалити виділену теку',
-    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку.',
+    settings_folders_tree_hint: 'Зніміть галку, щоб не індексувати теку чи файл.',
     settings_folders_root_all: 'Усе індексується',
     settings_folders_root_some: 'Частину виключено',
     // Lead-in for a rejected `list_tree` (§10: the rejection's own sentence is
@@ -547,13 +549,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces.
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
-    settings_subfolders_none: 'У цій теці немає підтек.',
-    settings_subfolders_none_indexable: 'Тут немає підтек для індексації: ті, що є, сканування ніколи не читає.',
-    // `unnameable` (tree.rs): записи, чиї назви не є коректним UTF-8, лічать і
-    // не показують — назва, зіпсована при показі, більше не відкриває ту теку,
-    // з якої походить, і правило з неї не виключило б нічого. Речення існує,
+    settings_subfolders_none: 'У цій теці нічого немає.',
+    settings_subfolders_none_indexable: 'Тут нічого індексувати: сканування ніколи не читає того, що лежить у цій теці.',
+    // `unnameable` (tree.rs): записи (теки й файли), чиї назви не є коректним
+    // UTF-8, лічать і не показують — назва, зіпсована при показі, більше не
+    // відкриває той запис, з якого походить, і правило з неї не виключило б
+    // нічого. Речення існує,
     // щоб тека з такими записами не читалась як порожніша, ніж вона є.
-    settings_subfolders_unnameable: '{count, plural, one {# підтеку не показано: її назву не вдалося прочитати як текст.} few {# підтеки не показано: їхні назви не вдалося прочитати як текст.} many {# підтек не показано: їхні назви не вдалося прочитати як текст.} other {# підтеки не показано: їхні назви не вдалося прочитати як текст.}}',
+    settings_subfolders_unnameable: '{count, plural, one {# запис не показано: його назву не вдалося прочитати як текст.} few {# записи не показано: їхні назви не вдалося прочитати як текст.} many {# записів не показано: їхні назви не вдалося прочитати як текст.} other {# запису не показано: їхні назви не вдалося прочитати як текст.}}',
     // Вступ до відмови `list_subfolders`; саме речення бекенда показують
     // дослівно поруч (§10).
     settings_subfolders_failed: 'Не вдалося прочитати підтеки цієї теки.',
@@ -672,6 +675,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // 🔴 І цього рядка немає, коли правило тримає ПРЕДОК: тоді питання малює
     // `settings_subfolder_excluded_by_ancestor`, бо прибирання не звільняє
     // нічого, а не «все, окрім глибшого».
+    settings_folders_include_cost_push_down: 'Від наступного сканування «{path}» індексується, а його текст надсилається провайдеру моделі. Решта в теках над ним лишається виключеною — але нові файли, додані туди згодом, індексуватимуться.',
+    settings_folders_include_all_cost: 'Від наступного сканування все всередині цієї теки індексується, а її текст надсилається провайдеру моделі: {count} правил виключення під нею буде знято.',
+    settings_entry_masked: 'маска {mask}',
+    settings_entry_failed: '⚠ не прочитано',
+    settings_entry_failed_below: '⚠ не прочитано: {count}',
     settings_folders_include_cost_held_below: 'Від наступного сканування все всередині цієї теки індексується знову, а її текст надсилається провайдеру моделі — окрім того, що й далі виключають ваші інші правила глибше за цим шляхом.',
     // 🔴 Рев'ю раунду 1 (I1): те саме вікно вже знає, що теки за цим шляхом
     // немає — `existsOnDisk` приходить із бекенда (`bridge.rs:117`) і саме з
@@ -1266,7 +1274,7 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_empty: 'No folder has been added yet.',
     settings_folders_add: 'Add a folder',
     settings_folders_remove_selected: 'Remove the selected folder',
-    settings_folders_tree_hint: 'Untick a folder to keep it out of the index.',
+    settings_folders_tree_hint: 'Untick a folder or a file to keep it out of the index.',
     settings_folders_root_all: 'Everything is indexed',
     settings_folders_root_some: 'Some of it is excluded',
     settings_folders_load_failed: 'The list of folders could not be read.',
@@ -1444,9 +1452,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_days: '{count, plural, one {# day} other {# days}} ago',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
-    settings_subfolders_none: 'This folder has no subfolders.',
-    settings_subfolders_none_indexable: 'No subfolder here can be indexed: the scan never reads the ones this folder holds.',
-    settings_subfolders_unnameable: '{count, plural, one {# subfolder is not listed: its name could not be read as text.} other {# subfolders are not listed: their names could not be read as text.}}',
+    settings_subfolders_none: 'This folder is empty.',
+    settings_subfolders_none_indexable: 'Nothing here can be indexed: the scan never reads what this folder holds.',
+    settings_subfolders_unnameable: '{count, plural, one {# item is not listed: its name could not be read as text.} other {# items are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
     settings_subfolder_excluded: 'Excluded by your rule.',
@@ -1474,6 +1482,11 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     settings_folders_folder_changed: 'This folder is no longer the one that was on screen: another folder has taken its place. Nothing was changed.',
     settings_folders_exclude_cost: 'As of now: on the next scan the index loses {paths, plural, one {# file} other {# files}} from this folder, and {documents, plural, =0 {no document stops being findable — each is also indexed under another path} one {# document stops being findable: no other path names it} other {# documents stop being findable: no other path names them}}. The scan can remove more than that: files that never finished indexing are not counted here.',
     settings_folders_include_cost: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider.',
+    settings_folders_include_cost_push_down: 'From the next scan on, "{path}" is indexed and its text is sent to the model provider. Everything else in the folders above it stays excluded — but new files added there later are indexed.',
+    settings_folders_include_all_cost: 'From the next scan on, everything inside this folder is indexed and its text is sent to the model provider: {count} exclusion rules under it are removed.',
+    settings_entry_masked: 'mask {mask}',
+    settings_entry_failed: '⚠ scan failed',
+    settings_entry_failed_below: '⚠ {count} failed',
     settings_folders_include_cost_held_below: 'From the next scan on, everything inside this folder is indexed again, and its text is sent to the model provider — except what your other rules further down this path still exclude.',
     settings_folders_include_cost_gone: 'There is no folder at this path right now, so nothing is being indexed today. If a folder appears there later, it is indexed and its text is sent to the model provider.',
     settings_folders_confirm_exclude_heading: 'Exclude {path}?',

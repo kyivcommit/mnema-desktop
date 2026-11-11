@@ -223,11 +223,14 @@ case_ "entries are sorted by name rather than left in read_dir order" \
 # tree. Named by the IPC sorted test, which is what keeps that test — and the
 # `c.txt` half of its assertion — pinned now that the case above moved to the
 # pure function.
-case_ "only directories are listed, never the files beside them" \
+# Folders tree PR 2: files are listed beside the folders, so the old
+# "only directories" case became the opposite claim. The mutant puts the old
+# directory-only filter back.
+case_ "a file is listed beside the folders, not dropped" \
   src-tauri/src/tree.rs \
-  's~        if !entry\.is_dir \{~        if false { /* mutant: files are folders too */~' \
-  'if false { /* mutant: files are folders too */' \
-  mnema-desktop 'list_subfolders_answers_the_directories_sorted_and_not_the_files' --test commands
+  's~    for entry in entries \{\n        // Omitted and counted~    for entry in entries {\n        if !entry.is_dir { continue; } /* mutant: files are dropped again */\n        // Omitted and counted~' \
+  '/* mutant: files are dropped again */' \
+  mnema-desktop 'list_subfolders_answers_folders_and_files_sorted' --test commands
 
 # ---------------------------------------------------------------------------
 # The name that cannot cross the wire (`--lib`; see this file's header)

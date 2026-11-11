@@ -519,6 +519,37 @@ impl Db {
         Ok(changed > 0)
     }
 
+    /// One tick's whole change to a root's rules, in ONE transaction: the
+    /// prefixes in `removed` go, then the ones in `added` are stored (an
+    /// existing one is left as it is, as in [`Db::add_path_exclusion`]).
+    /// Either all of it lands or none of it — a push-down stopped half-way
+    /// would leave the folder's rule gone and its siblings not yet ruled out.
+    pub fn change_path_exclusions(
+        &self,
+        root_id: i64,
+        removed: &[String],
+        added: &[String],
+    ) -> Result<(), Error> {
+        self.transaction(|tx| {
+            for prefix in removed {
+                tx.execute(
+                    "DELETE FROM ignore_rule
+                      WHERE watched_root_id = ?1 AND path_prefix = ?2",
+                    params![root_id, prefix],
+                )?;
+            }
+            for prefix in added {
+                tx.execute(
+                    "INSERT INTO ignore_rule (watched_root_id, path_prefix, tag_id)
+                     VALUES (?1, ?2, NULL)
+                     ON CONFLICT DO NOTHING",
+                    params![root_id, prefix],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Removes the rule, reporting whether one was there. The window needs the
     /// two apart: after a folder is renamed it offers to delete a rule whose
     /// folder is gone, and "there was nothing there" is a different sentence
