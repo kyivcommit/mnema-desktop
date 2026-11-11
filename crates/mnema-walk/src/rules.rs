@@ -444,15 +444,25 @@ impl MaskLayer {
     /// half of. The transform is paid once per entry, not once per entry per
     /// mask, which is why the loop is inside it and not around it.
     pub fn matches(&self, relative_path: &str) -> bool {
+        self.matching(relative_path).is_some()
+    }
+
+    /// Which mask removes the file at `relative_path`: the index of the FIRST
+    /// one that matches, in the order the masks were handed to
+    /// [`WalkRules::with_masks`]. The same answer as [`MaskLayer::matches`]
+    /// and the only implementation of it — `matches` is this, asked as a
+    /// boolean — so the folders listing can name the mask without a second
+    /// copy of the rule.
+    pub fn matching(&self, relative_path: &str) -> Option<usize> {
         // The common case is no masks at all, and it should not pay for a
-        // transform. `any` over an empty slice is `false` either way, so this
-        // is a cost guard and not a rule.
+        // transform. `position` over an empty slice is `None` either way, so
+        // this is a cost guard and not a rule.
         if self.globs.is_empty() {
-            return false;
+            return None;
         }
         let name = relative_path.rsplit('/').next().unwrap_or(relative_path);
         let name = caseless_form(name);
-        self.globs.iter().any(|glob| glob.is_match(&name))
+        self.globs.iter().position(|glob| glob.is_match(&name))
     }
 }
 
@@ -1044,7 +1054,14 @@ impl BuiltinLayers {
     /// Per component, because the layers prune a directory and the walker then
     /// never descends: the whole path is never what matched.
     pub fn prunes(&self, relative_path: &str) -> bool {
-        prunes_a_component(&self.root, &self.over, relative_path, true)
+        self.prunes_entry(relative_path, true)
+    }
+
+    /// [`BuiltinLayers::prunes`] for an entry that may be a FILE: `is_dir`
+    /// says what the last component is, which the anchored layer gates on
+    /// exactly as `filter_entry` gates it on `entry.file_type().is_dir()`.
+    pub fn prunes_entry(&self, relative_path: &str, is_dir: bool) -> bool {
+        prunes_a_component(&self.root, &self.over, relative_path, is_dir)
     }
 }
 
