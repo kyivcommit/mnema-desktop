@@ -1035,6 +1035,19 @@ describe('settings.css gives the DOM-only states a visual form', () => {
     expect(getComputedStyle(document.querySelector('.tags')!).flexShrink).toBe('0');
   });
 
+  // A tick inside `main` met `main input { padding: 0 13px }` and drew as a
+  // 28×16 pill that read as a toggle switch. The tick sets its own padding.
+  it('draws the folders tick as a 16 px square, not a padded input', () => {
+    mount(`<main><div class="folders"><div class="ttree">
+      <input type="checkbox" class="search-check" />
+    </div></div></main>`);
+    const tick = getComputedStyle(document.querySelector('.search-check')!);
+    expect(tick.paddingLeft).toBe('0px');
+    expect(tick.paddingRight).toBe('0px');
+    expect(tick.width).toBe('16px');
+    expect(tick.height).toBe('16px');
+  });
+
   it('gives the folders tree a fixed height and its own scroll', () => {
     mount(`<main><div class="folders"><div class="tbox"><div class="ttree">x</div></div></div></main>`);
     const tree = getComputedStyle(document.querySelector('.ttree')!);
