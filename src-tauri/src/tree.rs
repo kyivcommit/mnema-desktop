@@ -1440,7 +1440,7 @@ fn refusal(root_id: i64, relative_path: &str, source: std::io::Error) -> Error {
 /// the spelling through — and even then nothing silently over-shares, because
 /// the rule such a path saves is dead, and a dead rule is exactly what
 /// `list_exclusions` reports as `existsOnDisk: false` for the person to remove.
-fn subfolder_dir(
+pub(crate) fn subfolder_dir(
     root_canonical: &Path,
     root_id: i64,
     relative_path: &str,
@@ -1662,17 +1662,30 @@ pub fn list_subfolders(
     // shortcut: skips_for_root reads every skip of the root per expand; filter
     // in SQL by prefix if a root holds >10k skips.
     let walk = WalkRules::none().with_masks(mask_names.clone())?;
-    let read = std::fs::read_dir(&dir).map_err(|e| refusal(root_id, &relative_path, e))?;
-    let entries = directory_entries(read).map_err(|source| Error::SubfolderUnreadable {
-        root_id,
-        relative_path: relative_path.clone(),
-        source,
-    })?;
     // Compiled once for the whole listing, not once a row: it holds a globset,
     // and `subfolder_state` asks it for every entry.
     let layers = WalkRules::builtin_layers(&root_canonical);
     let rules = LevelRules::new(&layers, &prefixes, walk.masks(), &mask_names, &skips);
-    Ok(read_subfolders(&rules, &entries, &relative_path))
+    read_level(&dir, root_id, &relative_path, &rules)
+}
+
+/// One level of the disk at `dir` (already resolved by [`subfolder_dir`]),
+/// classified under `rules` — the read `list_subfolders` answers with and the
+/// one `set_tick` decides a push-down or a fold from, so the two cannot see
+/// different siblings.
+pub(crate) fn read_level(
+    dir: &Path,
+    root_id: i64,
+    relative_path: &str,
+    rules: &LevelRules<'_>,
+) -> Result<SubfolderListing, Error> {
+    let read = std::fs::read_dir(dir).map_err(|e| refusal(root_id, relative_path, e))?;
+    let entries = directory_entries(read).map_err(|source| Error::SubfolderUnreadable {
+        root_id,
+        relative_path: relative_path.to_string(),
+        source,
+    })?;
+    Ok(read_subfolders(rules, &entries, relative_path))
 }
 
 #[cfg(test)]

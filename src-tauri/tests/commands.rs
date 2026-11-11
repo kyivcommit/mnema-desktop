@@ -15017,3 +15017,100 @@ fn list_tree_counts_failures_per_root() {
     assert_eq!(failed(one), Some(json!(2)), "{tree}");
     assert_eq!(failed(two), Some(json!(0)), "{tree}");
 }
+
+// ── Folders tree PR 2: set_tick, on the body of the scan ───────────────────
+
+/// A folder with two readable files and a subfolder holding one more.
+fn tick_fixture_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a/d")).unwrap();
+    std::fs::write(dir.path().join("a/b.txt"), "the ticked file").unwrap();
+    std::fs::write(dir.path().join("a/c.txt"), "a sibling").unwrap();
+    std::fs::write(dir.path().join("a/d/e.txt"), "a cousin").unwrap();
+    dir
+}
+
+/// The whole push-down, judged by what the NEXT SCAN indexes, not by the
+/// rules: the folder's rule goes, and only the ticked file comes back.
+#[test]
+fn set_tick_pushes_down_and_the_next_walk_indexes_only_the_ticked_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tick_fixture_dir();
+    let root = root_for(&webview, fixture.path());
+    call(
+        &webview,
+        "exclude_subfolder",
+        json!({ "rootId": root, "relativePath": "a" }),
+    )
+    .expect("excluding a was rejected");
+
+    let change = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "a/b.txt", "tick": "on" }),
+    )
+    .expect("set_tick was rejected");
+    assert_eq!(
+        change,
+        json!({ "added": ["a/c.txt", "a/d"], "removed": ["a"] }),
+        "{change}"
+    );
+
+    scan_to_completion(app.handle());
+    assert_eq!(indexed_paths(&app, root), vec!["a/b.txt".to_string()]);
+}
+
+#[test]
+fn set_tick_off_on_a_file_drops_it_at_the_next_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tick_fixture_dir();
+    let root = root_for(&webview, fixture.path());
+    scan_to_completion(app.handle());
+    assert!(indexed_paths(&app, root).contains(&"a/c.txt".to_string()));
+
+    call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "a/c.txt", "tick": "off" }),
+    )
+    .expect("set_tick was rejected");
+
+    scan_to_completion(app.handle());
+    let mut paths = indexed_paths(&app, root);
+    paths.sort();
+    assert_eq!(paths, vec!["a/b.txt".to_string(), "a/d/e.txt".to_string()]);
+}
+
+#[test]
+fn set_tick_refuses_an_unknown_or_unavailable_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tick_fixture_dir();
+    let root = root_for(&webview, fixture.path());
+
+    let unknown = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root + 100, "relativePath": "a", "tick": "off" }),
+    );
+    assert!(unknown.is_err(), "{unknown:?}");
+
+    let path = fixture.path().to_path_buf();
+    drop(fixture);
+    assert!(!path.exists());
+    let gone = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "a", "tick": "off" }),
+    );
+    let message = format!("{gone:?}");
+    assert!(
+        gone.is_err() && message.contains("not available"),
+        "{message}"
+    );
+}
