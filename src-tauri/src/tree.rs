@@ -105,7 +105,9 @@ fn build_tree_listing(db: &Db) -> Result<TreeListing, mnema_index::Error> {
             let skips = whole_file_skips(db.skips_for_root(r.id)?);
             let failed = skips
                 .iter()
-                .filter(|skip| shown_failure(skip, &prefixes, walk.masks()))
+                .filter(|skip| {
+                    counted_failure(Path::new(&r.absolute_path), skip, &prefixes, walk.masks())
+                })
                 .count() as u64;
             Ok(TreeRoot {
                 failed,
@@ -1304,6 +1306,9 @@ fn subfolder_state(rules: &LevelRules<'_>, relative_path: &str, entry: &Entry) -
 /// the built-in layers (a globset), the person's prefixes, the masks with the
 /// names they are stored under, and the root's whole-file scan verdicts.
 pub(crate) struct LevelRules<'a> {
+    /// The watched folder on disk: a verdict is counted under a collapsed
+    /// folder only while its file is still a regular file there.
+    root: &'a Path,
     layers: &'a BuiltinLayers,
     prefixes: &'a [String],
     masks: &'a MaskLayer,
@@ -1316,6 +1321,7 @@ pub(crate) struct LevelRules<'a> {
 
 impl<'a> LevelRules<'a> {
     pub(crate) fn new(
+        root: &'a Path,
         layers: &'a BuiltinLayers,
         prefixes: &'a [String],
         masks: &'a MaskLayer,
@@ -1323,6 +1329,7 @@ impl<'a> LevelRules<'a> {
         skips: &'a [mnema_index::SkippedFile],
     ) -> Self {
         Self {
+            root,
             layers,
             prefixes,
             masks,
@@ -1364,6 +1371,21 @@ pub(crate) fn whole_file_skips(
 /// ([`Subfolder::failed_below`]) and by the root ([`TreeRoot::failed`]) — so the
 /// three cannot disagree. Shown when the file is indexed: not a hiding rule,
 /// not under one of the person's rules, not under a mask.
+/// A verdict counted in a `⚠ N`: shown, and its file still a regular file on
+/// disk. The walk records `unreadable` for a symlink and for a name that is
+/// not UTF-8 — entries the tree never draws — and a verdict outlives a file
+/// deleted since the last scan; counting those would put a `⚠ N` over a level
+/// whose rows show no ⚠ (PR #101 review).
+fn counted_failure(
+    root: &Path,
+    skip: &mnema_index::SkippedFile,
+    prefixes: &[String],
+    masks: &MaskLayer,
+) -> bool {
+    shown_failure(skip, prefixes, masks)
+        && std::fs::symlink_metadata(root.join(&skip.relative_path)).is_ok_and(|m| m.is_file())
+}
+
 fn shown_failure(skip: &mnema_index::SkippedFile, prefixes: &[String], masks: &MaskLayer) -> bool {
     !hides_the_file(&skip.rule)
         && !prefixes
@@ -1487,7 +1509,7 @@ pub(crate) struct Entry {
 /// `bridge::entry_named` takes and for the same reason: `ReadDir` yields
 /// `io::Result<DirEntry>`, a per-entry error cannot be forced deterministically
 /// out of a real filesystem, and `.flatten()` on it would drop every `Err`
-/// silently — leaving a folder that looks like it holds fewer subfolders than
+/// silently — leaving a folder that looks like it holds fewer entries than
 /// it does.
 ///
 /// **Two of the three filesystem outcomes below are `?`, and those two are the
@@ -1503,8 +1525,9 @@ pub(crate) struct Entry {
 /// **The third does consult it**, because there it really is a boolean: a
 /// symlink's own `file_type` says `symlink` and nothing about what it points at,
 /// so a `metadata` through it decides "is this a directory". A dangling link and
-/// a link to a file are answers — not a directory, not listed. Anything else is
-/// the observer's condition and refuses.
+/// a link to a file are answers — not a directory; since the folders tree PR 2
+/// both are listed as `Symlink` (the walk follows no link) and the window hides
+/// them. Anything else is the observer's condition and refuses.
 fn directory_entries(
     entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
 ) -> std::io::Result<Vec<Entry>> {
@@ -1531,16 +1554,16 @@ fn directory_entries(
     Ok(reduced)
 }
 
-/// The directories among `entries`, sorted by name, plus how many of them had
-/// no name this wire type can carry.
+/// Every entry in `entries` — folders and, since the folders tree PR 2, files —
+/// classified and sorted by name, plus how many had no name this wire type can
+/// carry.
 ///
 /// Sorted by name for the reason the walk sorts (`rules.rs:387`): `read_dir`
 /// order is the filesystem's, and a window that redraws in a different order on
 /// another machine is a window nobody can point at over the phone.
 ///
-/// Only directories are counted in `unnameable`, because only directories would
-/// have been listed: an unnameable *file* is no more missing from this answer
-/// than a nameable one.
+/// Files and folders are both counted in `unnameable`, because both would have
+/// been listed: an unnameable entry of either kind is missing from this answer.
 pub(crate) fn read_subfolders(
     rules: &LevelRules<'_>,
     entries: &[Entry],
@@ -1579,7 +1602,7 @@ pub(crate) fn read_subfolders(
                 .iter()
                 .filter(|skip| {
                     is_ancestor_of(&relative_path, &skip.relative_path)
-                        && shown_failure(skip, rules.prefixes, rules.masks)
+                        && counted_failure(rules.root, skip, rules.prefixes, rules.masks)
                 })
                 .count() as u64
         } else {
@@ -1601,7 +1624,10 @@ pub(crate) fn read_subfolders(
     }
 }
 
-/// One level of a watched folder's own tree, read off the **disk**.
+/// One level of a watched folder's own tree, read off the **disk** — folders
+/// and files alike since the folders tree PR 2. The name stayed
+/// `list_subfolders` (the plan's ruling 9): a rename would touch every caller
+/// and mock and change nothing for a person.
 ///
 /// Off the main thread for the reason given on [`crate::bridge::open_index`].
 ///
@@ -1615,7 +1641,7 @@ pub(crate) fn read_subfolders(
 /// **Nothing here answers short.** Every failure is a refusal with a sentence:
 /// an unknown id, a root that is not there, a path that leaves the root, a
 /// folder that is not there, a folder that cannot be read. `entries: []` is
-/// reserved for its one true meaning — this folder really holds no subfolders
+/// reserved for its one true meaning — this folder really holds nothing
 /// — because a window draws anything else as a tree with nothing left to
 /// exclude, and under D29 a folder nobody excludes is a folder whose text goes
 /// to a third-party provider.
@@ -1665,7 +1691,14 @@ pub fn list_subfolders(
     // Compiled once for the whole listing, not once a row: it holds a globset,
     // and `subfolder_state` asks it for every entry.
     let layers = WalkRules::builtin_layers(&root_canonical);
-    let rules = LevelRules::new(&layers, &prefixes, walk.masks(), &mask_names, &skips);
+    let rules = LevelRules::new(
+        &root_canonical,
+        &layers,
+        &prefixes,
+        walk.masks(),
+        &mask_names,
+        &skips,
+    );
     read_level(&dir, root_id, &relative_path, &rules)
 }
 
@@ -1917,13 +1950,28 @@ mod tests {
         masks: &[&str],
         skips: &[mnema_index::SkippedFile],
     ) -> SubfolderListing {
-        let layers = WalkRules::builtin_layers(Path::new("/nonexistent-root"));
+        // Every skipped path exists as a regular file under a real root, so the
+        // `⚠ N` count sees the files it counts (`counted_failure`).
+        let root = tempfile::tempdir().unwrap();
+        for s in skips {
+            let path = root.path().join(&s.relative_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+        }
+        let layers = WalkRules::builtin_layers(root.path());
         let prefixes: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
         let mask_names: Vec<String> = masks.iter().map(|m| m.to_string()).collect();
         let walk = WalkRules::none().with_masks(mask_names.clone()).unwrap();
         // Through `whole_file_skips`, as `list_subfolders` reads them.
         let skips = whole_file_skips(skips.to_vec());
-        let rules = LevelRules::new(&layers, &prefixes, walk.masks(), &mask_names, &skips);
+        let rules = LevelRules::new(
+            root.path(),
+            &layers,
+            &prefixes,
+            walk.masks(),
+            &mask_names,
+            &skips,
+        );
         read_subfolders(&rules, entries, parent)
     }
 
@@ -2116,7 +2164,7 @@ mod tests {
         std::fs::write(root.path().join("Cargo.toml"), b"x").unwrap();
         let layers = WalkRules::builtin_layers(root.path());
         let walk = WalkRules::none();
-        let rules = LevelRules::new(&layers, &[], walk.masks(), &[], &[]);
+        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &[]);
         let entries = vec![
             entry(b"target", false, false),
             entry(b"Cargo.toml", false, false),
@@ -2128,6 +2176,31 @@ mod tests {
             read_subfolders(&rules, &dir, "").entries[0].state,
             SubfolderState::BuiltIn
         );
+    }
+
+    /// PR #101 review: the walk records `unreadable` for a symlink and for a
+    /// name that is not UTF-8 — rows this tree never draws — and a verdict
+    /// outlives a file deleted since the last scan. A collapsed folder must not
+    /// count a ⚠ that no row under it can show: only regular files on disk.
+    #[cfg(unix)]
+    #[test]
+    fn failed_below_counts_only_files_still_on_disk() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("a")).unwrap();
+        std::fs::write(root.path().join("a/x.pdf"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.path().join("a/x.pdf"), root.path().join("a/link"))
+            .unwrap();
+        let skips = [
+            skip("a/x.pdf", "timeout", None),
+            skip("a/link", "unreadable", None),
+            skip("a/gone.pdf", "timeout", None),
+            skip("a/bad\u{FFFD}name.pdf", "unreadable", None),
+        ];
+        let layers = WalkRules::builtin_layers(root.path());
+        let walk = WalkRules::none();
+        let rules = LevelRules::new(root.path(), &layers, &[], walk.masks(), &[], &skips);
+        let listing = read_subfolders(&rules, &[entry(b"a", true, false)], "");
+        assert_eq!(listing.entries[0].failed_below, 1, "{listing:?}");
     }
 
     #[cfg(unix)]

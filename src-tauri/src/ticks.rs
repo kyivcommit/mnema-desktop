@@ -205,7 +205,12 @@ pub fn set_tick(
     if relative_path.is_empty() {
         return Err(Error::BlankExclusionRule);
     }
-    WalkRules::check_prefix(&relative_path)?;
+    // Only a tick that STORES this path as a rule has to pass the validator.
+    // Taking a rule away must always work, including one an older build
+    // stored under a name today's validator refuses (`include_subfolder`).
+    if tick == Tick::Off {
+        WalkRules::check_prefix(&relative_path)?;
+    }
     let root_canonical = root_path
         .canonicalize()
         .map_err(|_| Error::RootUnavailable(root_id))?;
@@ -219,8 +224,14 @@ pub fn set_tick(
     let walk = WalkRules::none().with_masks(mask_names.clone())?;
     let layers = WalkRules::builtin_layers(&root_canonical);
     let mut level = |dir: &str, prefixes: &[String]| {
-        let rules =
-            crate::tree::LevelRules::new(&layers, prefixes, walk.masks(), &mask_names, &skips);
+        let rules = crate::tree::LevelRules::new(
+            &root_canonical,
+            &layers,
+            prefixes,
+            walk.masks(),
+            &mask_names,
+            &skips,
+        );
         let resolved = crate::tree::subfolder_dir(&root_canonical, root_id, dir)?;
         crate::tree::read_level(&resolved, root_id, dir, &rules)
     };

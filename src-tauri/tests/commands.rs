@@ -14992,8 +14992,19 @@ fn list_tree_counts_failures_per_root() {
 
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
+    std::fs::create_dir(first.path().join("x")).unwrap();
+    for (folder, name) in [
+        (&first, "x/a.pdf"),
+        (&first, "b.pdf"),
+        (&first, "p.jpg"),
+        (&second, "c.pdf"),
+    ] {
+        std::fs::write(folder.path().join(name), "x").unwrap();
+    }
     let one = root_for(&webview, first.path());
     let two = root_for(&webview, second.path());
+    // A verdict whose file was deleted since the last scan is not counted.
+    record_failure(dir.path(), one, "gone.pdf", mnema_index::SkipRule::Timeout);
     record_failure(dir.path(), one, "x/a.pdf", mnema_index::SkipRule::Timeout);
     record_failure(dir.path(), one, "b.pdf", mnema_index::SkipRule::Crash);
     record_failure(dir.path(), one, "p.jpg", mnema_index::SkipRule::NotText);
@@ -15113,4 +15124,38 @@ fn set_tick_refuses_an_unknown_or_unavailable_root() {
         gone.is_err() && message.contains("not available"),
         "{message}"
     );
+}
+
+/// PR #101 review: removing a rule must always work, including one an older
+/// build stored under a name today's validator refuses (`include_subfolder`'s
+/// own argument, `bridge.rs`). Ticking that row back on takes the rule away.
+#[test]
+fn set_tick_on_removes_a_rule_the_validator_now_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_in(dir.path());
+    let webview = main_webview(&app);
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fixture.path().join("old ")).unwrap();
+    let root = root_for(&webview, fixture.path());
+    app.state::<AppState>()
+        .with_index(|db| db.add_path_exclusion(root, "old "))
+        .expect("writing a rule an older build would have stored");
+
+    let change = call(
+        &webview,
+        "set_tick",
+        json!({ "rootId": root, "relativePath": "old ", "tick": "on" }),
+    )
+    .expect("set_tick refused to remove the rule");
+
+    assert_eq!(
+        change,
+        json!({ "added": [], "removed": ["old "] }),
+        "{change}"
+    );
+    let left = app
+        .state::<AppState>()
+        .with_index(|db| db.list_path_exclusions(root))
+        .unwrap();
+    assert!(left.is_empty(), "{left:?}");
 }

@@ -549,13 +549,14 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     // reader announces.
     settings_folders_expand_named: 'Підтеки теки {path}',
     settings_subfolders_loading: 'Читаємо підтеки…',
-    settings_subfolders_none: 'У цій теці немає підтек.',
-    settings_subfolders_none_indexable: 'Тут немає підтек для індексації: ті, що є, сканування ніколи не читає.',
-    // `unnameable` (tree.rs): записи, чиї назви не є коректним UTF-8, лічать і
-    // не показують — назва, зіпсована при показі, більше не відкриває ту теку,
-    // з якої походить, і правило з неї не виключило б нічого. Речення існує,
+    settings_subfolders_none: 'У цій теці нічого немає.',
+    settings_subfolders_none_indexable: 'Тут нічого індексувати: сканування ніколи не читає того, що лежить у цій теці.',
+    // `unnameable` (tree.rs): записи (теки й файли), чиї назви не є коректним
+    // UTF-8, лічать і не показують — назва, зіпсована при показі, більше не
+    // відкриває той запис, з якого походить, і правило з неї не виключило б
+    // нічого. Речення існує,
     // щоб тека з такими записами не читалась як порожніша, ніж вона є.
-    settings_subfolders_unnameable: '{count, plural, one {# підтеку не показано: її назву не вдалося прочитати як текст.} few {# підтеки не показано: їхні назви не вдалося прочитати як текст.} many {# підтек не показано: їхні назви не вдалося прочитати як текст.} other {# підтеки не показано: їхні назви не вдалося прочитати як текст.}}',
+    settings_subfolders_unnameable: '{count, plural, one {# запис не показано: його назву не вдалося прочитати як текст.} few {# записи не показано: їхні назви не вдалося прочитати як текст.} many {# записів не показано: їхні назви не вдалося прочитати як текст.} other {# запису не показано: їхні назви не вдалося прочитати як текст.}}',
     // Вступ до відмови `list_subfolders`; саме речення бекенда показують
     // дослівно поруч (§10).
     settings_subfolders_failed: 'Не вдалося прочитати підтеки цієї теки.',
@@ -1451,9 +1452,9 @@ export const messages: Record<'uk' | 'en', Record<Key, string>> = {
     recent_days: '{count, plural, one {# day} other {# days}} ago',
     settings_folders_expand_named: 'Subfolders of {path}',
     settings_subfolders_loading: 'Reading the subfolders…',
-    settings_subfolders_none: 'This folder has no subfolders.',
-    settings_subfolders_none_indexable: 'No subfolder here can be indexed: the scan never reads the ones this folder holds.',
-    settings_subfolders_unnameable: '{count, plural, one {# subfolder is not listed: its name could not be read as text.} other {# subfolders are not listed: their names could not be read as text.}}',
+    settings_subfolders_none: 'This folder is empty.',
+    settings_subfolders_none_indexable: 'Nothing here can be indexed: the scan never reads what this folder holds.',
+    settings_subfolders_unnameable: '{count, plural, one {# item is not listed: its name could not be read as text.} other {# items are not listed: their names could not be read as text.}}',
     settings_subfolders_failed: 'The subfolders of this folder could not be read.',
     settings_subfolder_open: 'No rule excludes this folder.',
     settings_subfolder_excluded: 'Excluded by your rule.',

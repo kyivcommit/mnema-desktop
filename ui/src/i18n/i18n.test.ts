@@ -241,16 +241,16 @@ describe('i18n', () => {
   it('the unnameable-subfolders count reaches every Ukrainian plural arm', () => {
     setLocale('uk');
     const uk = (n: number) => t('settings_subfolders_unnameable', { count: n });
-    expect(uk(1)).toBe('1 підтеку не показано: її назву не вдалося прочитати як текст.');
-    expect(uk(2)).toBe('2 підтеки не показано: їхні назви не вдалося прочитати як текст.');
-    expect(uk(5)).toBe('5 підтек не показано: їхні назви не вдалося прочитати як текст.');
-    expect(uk(11)).toBe('11 підтек не показано: їхні назви не вдалося прочитати як текст.'); // teen → many
-    expect(uk(21)).toBe('21 підтеку не показано: її назву не вдалося прочитати як текст.');
+    expect(uk(1)).toBe('1 запис не показано: його назву не вдалося прочитати як текст.');
+    expect(uk(2)).toBe('2 записи не показано: їхні назви не вдалося прочитати як текст.');
+    expect(uk(5)).toBe('5 записів не показано: їхні назви не вдалося прочитати як текст.');
+    expect(uk(11)).toBe('11 записів не показано: їхні назви не вдалося прочитати як текст.'); // teen → many
+    expect(uk(21)).toBe('21 запис не показано: його назву не вдалося прочитати як текст.');
 
     setLocale('en');
     const en = (n: number) => t('settings_subfolders_unnameable', { count: n });
-    expect(en(1)).toBe('1 subfolder is not listed: its name could not be read as text.');
-    expect(en(5)).toBe('5 subfolders are not listed: their names could not be read as text.');
+    expect(en(1)).toBe('1 item is not listed: its name could not be read as text.');
+    expect(en(5)).toBe('5 items are not listed: their names could not be read as text.');
   });
 
   // Task 9. Two substitutions in one sentence, and the plural is over only one

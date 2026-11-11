@@ -214,6 +214,11 @@
     | {
         kind: 'include'; path: string; existsOnDisk: boolean;
         heldBelow: boolean; heldAbove: string | null; pushDown: boolean;
+        // Pressed in the RULE LIST: the answer removes that one stored rule
+        // (`include_subfolder`), never a tick — a rule whose folder is gone has
+        // no row for `set_tick` to find, and one under another rule would be
+        // pushed down over every sibling (PR #101 review).
+        fromRule: boolean;
       }
     // A mixed box was clicked: every rule strictly under `path` goes. `rules`
     // is how many, frozen at the press like every other number here.
@@ -712,7 +717,9 @@
   // plus a fallback for a state that cannot happen — `read` fills `tree` and
   // `rules` from one `Promise.all`, so a rendered row and a null rule list do
   // not coexist, and a default no test can reach is a guard that cannot fail.
-  async function askInclude(rootId: number, path: string, existsOnDisk: boolean, pushDown = false) {
+  async function askInclude(
+    rootId: number, path: string, existsOnDisk: boolean, pushDown = false, fromRule = false,
+  ) {
     // Captured before the await for `askExclude`'s reason, and `rules` is read
     // from that same capture on purpose: the question states what was true when
     // it was ASKED, exactly as the `existsOnDisk` its caller hands over at the
@@ -759,6 +766,7 @@
         heldBelow: heldBelow(panel.rules, path),
         heldAbove: heldAbove(panel.rules, path),
         pushDown,
+        fromRule,
       },
     });
   }
@@ -822,7 +830,7 @@
       case 'include':
         ask(rootId);
         patch(rootId, { pending: null });
-        await include(rootId, pending.path, 'on');
+        await include(rootId, pending.path, pending.fromRule ? 'rule' : 'on');
         return;
       case 'all':
         ask(rootId);
@@ -857,7 +865,7 @@
     await read(rootId, want);
   }
 
-  async function include(rootId: number, path: string, tick: 'on' | 'all') {
+  async function include(rootId: number, path: string, tick: 'on' | 'all' | 'rule') {
     const panel = panels[rootId];
     if (panel === undefined) return;
     const want = openPathsOf(panel.tree);
@@ -865,8 +873,14 @@
     try {
       // One `set_tick`: a push-down is decided and written by the shell in one
       // transaction, never as several calls from here (spec C).
-      const change = await setTick(rootId, path, tick);
-      patch(rootId, { alreadyGone: change.added.length === 0 && change.removed.length === 0 });
+      if (tick === 'rule') {
+        // Removing a rule must always work, including one whose folder is
+        // gone or one an older build stored (`bridge.rs`, `include_subfolder`).
+        patch(rootId, { alreadyGone: !(await includeSubfolder(rootId, path)) });
+      } else {
+        const change = await setTick(rootId, path, tick);
+        patch(rootId, { alreadyGone: change.added.length === 0 && change.removed.length === 0 });
+      }
     } catch (e) {
       patch(rootId, { actionError: message(e) });
     }
@@ -1368,35 +1382,23 @@
   // variant added to `tree.rs` and mirrored in `ipc.ts` fail `npm run check`
   // instead of rendering as an ordinary excludable folder.
   //
-  // **Four of the six offer no toggle, and the acceptance criterion this task
-  // must not break is why:** no folder the walk will prune may be offered to a
-  // person as excludable. `builtIn`, `symlink` and `excludedByAncestor` are all
-  // already pruned, and `unusableName` is refused for the opposite reason — its
-  // contents ARE walked, and its name is one no rule can carry — which is why
-  // its sentence says something different rather than something similar.
+  // **Which states offer a tick** (folders tree PR 2). `open` (ticked) and
+  // `excluded` (empty) carry their own rule or none; `excludedByAncestor`
+  // carries an EMPTY tick whose press pushes the ancestor's rule down onto the
+  // siblings (`set_tick`, one transaction). `masked`, `builtIn`, `symlink`,
+  // `notRead` and `unusableName` offer none: a mask or the walk decides, or —
+  // for `unusableName` — its contents ARE walked and its name is one no rule
+  // can carry, which is why its sentence differs rather than resembles.
+  // `builtIn`, `symlink` and `notRead` are not drawn at all.
   //
-  // **`open` and `excluded` can be expanded; the other four cannot.**
-  // `builtIn` and `symlink` are not drawn at all since the folders-tree PR 1;
-  // `symlink` must still never open, because `subfolder_state` asks
+  // **What opens:** `open`, `excluded` and `excludedByAncestor` folders —
+  // under a rule the tree stays readable at every depth so a file inside can
+  // be reached and ticked. `symlink` must never open (`subfolder_state` asks
   // `is_symlink` about the entry itself, so a directory INSIDE a symlinked one
-  // would come back `open`. `builtIn` and `unusableName` are shut because there is nothing below them to decide
-  // either: both questions are asked about the WHOLE relative path
-  // (`layers.prunes` and `check_prefix`, `tree.rs:823` and `:844`), so every
-  // child of such a folder comes back in the same state its parent is in.
-  //
-  // 🔴 `excluded` opens, `excludedByAncestor` stays shut, and the pair is one
-  // decision rather than two. The first pass shut both, which cost two things:
-  // a person who protected `Work` could never look inside to check what they
-  // had protected, and — the reason it was a review finding — every path to an
-  // `excludedByAncestor` row runs through an ancestor that is `Excluded`
-  // (`subfolder_state` asks about an ancestor before asking about the folder
-  // itself, `tree.rs:829-838`), so shutting `excluded` made
-  // `excludedByAncestor` a state the running application could not reach at
-  // all: tested, and unreachable. Opening `excluded` breaks nothing, because
-  // that same precedence is what its children come back as —
-  // `ExcludedByAncestor`, which offers no control and does not open in turn.
-  // The subtree under a rule is therefore readable exactly one level deep, and
-  // no toggle appears over anything the walk has already pruned.
+  // would come back `open`); `builtIn` and `unusableName` are shut because
+  // both questions are asked about the WHOLE relative path, so every child
+  // comes back in its parent's state. Files never open (`buildLevel` gates on
+  // `isDir`).
   function describe(state: SubfolderState): {
     sentence: string;
     control: 'exclude' | 'include' | 'none';
@@ -1519,18 +1521,12 @@
         // rule away is not a tidy-up, it puts a subtree back in front of the
         // next scan.
         //
-        // 🔴 Fix round 3, item 2: `ruleCostLabel`'s ancestor branch can never
-        // fire from here. `control === 'include'` only when `describe` reads
-        // `SubfolderState::Excluded`, and `subfolder_state`
-        // (`src-tauri/src/tree.rs:829-838`) checks an ancestor's prefix
-        // BEFORE the entry's own — a folder held by both its own rule and one
-        // above always reports `ExcludedByAncestor` instead, which `describe`
-        // maps to `control: 'none'`. So `heldAbove` is always null wherever
-        // this call reaches it; the two sites that actually decide what
-        // removing a rule held from above costs are the rule list
-        // (`ruleCostLabel` below) and `confirmView`'s include arm — not here.
-        // Only on the row whose OWN rule the tick removes: under an excluded
-        // folder every row is held from above, and the rule list names it.
+        // Only on the row whose OWN rule the tick removes (`excluded`): under an
+        // excluded folder every row is held from above, and the rule list names
+        // it. `subfolder_state` reports an ancestor before the entry's own rule,
+        // so `ruleCostLabel`'s ancestor branch never fires from here — the rule
+        // list and `confirmView`'s include arm are where a rule held from above
+        // is costed.
         costLabel: entry.state.kind === 'excluded' ? ruleCostLabel(rules, entry.relativePath) : null,
         expandable: expandable && entry.isDir,
         excluded,
@@ -1929,7 +1925,7 @@
                               <button
                                 type="button"
                                 aria-label={ruleAria}
-                                onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk)}>{removeRuleLabel}</button>
+                                onclick={() => askInclude(root.rootId, rule.prefix, rule.existsOnDisk, false, true)}>{removeRuleLabel}</button>
                             </li>
                           {/each}
                         </ul>

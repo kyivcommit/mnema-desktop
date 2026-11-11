@@ -765,7 +765,7 @@ test('built-in and symlinked subfolders are not listed, an open one beside them 
 test('a folder with no subfolders at all says so', async () => {
   await expand([]);
 
-  expect(screen.getByText('This folder has no subfolders.')).toBeTruthy();
+  expect(screen.getByText('This folder is empty.')).toBeTruthy();
 });
 
 // The `–` is read off the stored rules, so a collapsed folder says it too, and
@@ -845,7 +845,7 @@ test('expanding a subfolder asks for that subfolder\'s own path', async () => {
 test('a non-zero unnameable count is stated, so the folder does not read as emptier than it is', async () => {
   await expand([sub('Work')], [], 2);
 
-  expect(screen.getByText('2 subfolders are not listed: their names could not be read as text.')).toBeTruthy();
+  expect(screen.getByText('2 items are not listed: their names could not be read as text.')).toBeTruthy();
 });
 
 test('a zero unnameable count states nothing at all', async () => {
@@ -858,7 +858,7 @@ test('a zero unnameable count states nothing at all', async () => {
 test('a folder with no subfolders says so rather than showing an empty space', async () => {
   await expand([]);
 
-  expect(screen.getByText('This folder has no subfolders.')).toBeTruthy();
+  expect(screen.getByText('This folder is empty.')).toBeTruthy();
 });
 
 // 🔴 D-a, amended twice. A rule is "the folder is gone" when and only when its
@@ -1816,7 +1816,7 @@ test('the expanded panel switches language with everything else on screen', asyn
 
   expect(screen.getByTitle('Жодне правило не виключає цю теку.')).toBeTruthy();
   expect(screen.getByText('Наразі за цим шляхом теки немає.')).toBeTruthy();
-  expect(screen.getByText('1 підтеку не показано: її назву не вдалося прочитати як текст.')).toBeTruthy();
+  expect(screen.getByText('1 запис не показано: його назву не вдалося прочитати як текст.')).toBeTruthy();
   // The sentence that names the outermost rule, in the language it is read in:
   // "спершу", not a promise that removing that rule changes this folder.
   expect(screen.getByTitle('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
@@ -1863,7 +1863,7 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
   expect(text).toBe([
     '–', '/synthetic/root',
     'Indexed: 2 documents',
-    '1 subfolder is not listed: its name could not be read as text.',
+    '1 item is not listed: its name could not be read as text.',
     'Archive', cost,
     // Held from above: an empty tick, the rule in its tooltip (folders tree PR 2).
     'Held',
@@ -4116,8 +4116,8 @@ test('a failed re-read takes Start and the per-root questions off the screen wit
 test('a folder holding only hidden subfolders says nothing here can be indexed, not that it is empty', async () => {
   await expand([sub('node_modules', { kind: 'builtIn' }), sub('Link', { kind: 'symlink' })]);
 
-  expect(screen.queryByText('This folder has no subfolders.')).toBeNull();
-  expect(screen.getByText('No subfolder here can be indexed: the scan never reads the ones this folder holds.')).toBeTruthy();
+  expect(screen.queryByText('This folder is empty.')).toBeNull();
+  expect(screen.getByText('Nothing here can be indexed: the scan never reads what this folder holds.')).toBeTruthy();
 });
 
 // ── Folders tree PR 2: files, marks, and one set_tick per tick ──────────────
@@ -4317,3 +4317,26 @@ test('a change to the masks re-reads the open panels', async () => {
   await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(reads));
   expect(listSubfolders).toHaveBeenLastCalledWith(1, '');
 });
+
+// PR #101 review, Important 1. The rule list removes ONE stored rule through
+// `include_subfolder`, never through `set_tick`: a rule whose folder is gone
+// has no row on disk (set_tick answers an empty change and the rule stays),
+// and a rule under another rule would be "pushed down" over every sibling.
+for (const [prefix, existsOnDisk] of [['Old notes', false], ['Archive/Held', true]] as const) {
+  test(`the rule list removes the rule on ${prefix} itself, not through a tick`, async () => {
+    await openWithRule('en', [
+      { prefix: 'Archive', existsOnDisk: true },
+      { prefix, existsOnDisk },
+    ]);
+    setTick.mockReset();
+
+    await fireEvent.click(screen.getByRole('button', { name: `Remove the rule on ${prefix}` }));
+    await screen.findByTestId('folder-confirm-1');
+    await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+      name: t('settings_folders_confirm_include_named', { path: prefix }),
+    }));
+
+    await waitFor(() => expect(includeSubfolder).toHaveBeenCalledWith(1, prefix));
+    expect(setTick).not.toHaveBeenCalled();
+  });
+}
