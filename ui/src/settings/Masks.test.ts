@@ -1063,3 +1063,22 @@ test('Enter while a preview is being checked asks nothing more', async () => {
 
   expect(maskPreview).toHaveBeenCalledTimes(1);
 });
+
+// Folders tree PR 2: the folders tree marks masked files, so every answer here
+// tells it to re-read (`masksVersion`).
+test('storing a mask tells the folders tree to re-read', async () => {
+  const { masksVersion } = await import('./masksVersion');
+  const { get } = await import('svelte/store');
+  maskPreview.mockResolvedValue({ paths: 1, documents: 1 });
+  await mount([]);
+  const before = get(masksVersion);
+
+  await type('*.log');
+  await fireEvent.click(addButton());
+  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
+  expect(get(masksVersion)).toBe(before);
+  await fireEvent.click(confirmAdd('*.log'));
+
+  await waitFor(() => expect(addMask).toHaveBeenCalledWith('*.log'));
+  await waitFor(() => expect(get(masksVersion)).toBe(before + 1));
+});

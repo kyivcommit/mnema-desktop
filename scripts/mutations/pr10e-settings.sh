@@ -106,8 +106,8 @@ case_ "Folders.svelte: the row never carries the class" \
 
 case_ "Folders.svelte: a row held by an ancestor rule is not excluded" \
   ui/src/settings/Folders.svelte \
-  's~(control: '"'"'none'"'"',\n\s*expandable: false,\n\s*excluded: )true~${1}false~' \
-  'expandable: false,
+  's~(control: '"'"'include'"'"',\n\s*expandable: true,\n\s*excluded: )true~${1}false~' \
+  'expandable: true,
           excluded: false' \
   src/settings/Folders.test.ts 'an excluded subfolder and one held from above are marked as excluded, an open one is not' runner=vitest
 

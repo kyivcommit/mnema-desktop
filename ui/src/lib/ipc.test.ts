@@ -7,6 +7,10 @@ import {
   camelOf, camelOfSnake, rustEnumVariants, rustStrConst, rustStructFields, rustVariantFields,
 } from './rust-enum';
 import type {
+  RuleChange,
+  Subfolder,
+  Tick,
+  TreeRoot,
   AppPrefs,
   Applied,
   AutostartState,
@@ -360,8 +364,8 @@ test('listSubfolders asks for the root level with an empty path, not without one
 test('listSubfolders returns the listing whole — the state tag and its payload included', async () => {
   const listing: SubfolderListing = {
     entries: [
-      { name: 'private', relativePath: 'Work/private', state: { kind: 'excludedByAncestor', prefix: 'Work' } },
-      { name: 'notes', relativePath: 'Work/notes', state: { kind: 'open' } },
+      { name: 'private', relativePath: 'Work/private', isDir: true, state: { kind: 'excludedByAncestor', prefix: 'Work' }, failure: null, failedBelow: 0 },
+      { name: 'notes', relativePath: 'Work/notes', isDir: true, state: { kind: 'open' }, failure: null, failedBelow: 0 },
     ],
     unnameable: 2,
   };
@@ -498,11 +502,13 @@ const byTag: Record<SubfolderState['kind'], SubfolderState> = {
   builtIn: { kind: 'builtIn' },
   symlink: { kind: 'symlink' },
   unusableName: { kind: 'unusableName' },
+  masked: { kind: 'masked', mask: '*.log' },
+  notRead: { kind: 'notRead' },
 };
 
-test('SubfolderState carries every state the shell can send, and exactly those six', () => {
+test('SubfolderState carries every state the shell can send, and exactly those eight', () => {
   expect(Object.keys(byTag).sort()).toEqual(
-    ['builtIn', 'excluded', 'excludedByAncestor', 'open', 'symlink', 'unusableName'],
+    ['builtIn', 'excluded', 'excludedByAncestor', 'masked', 'notRead', 'open', 'symlink', 'unusableName'],
   );
   // The payload the ancestor state carries is the whole reason that row can
   // name the rule holding it.
@@ -536,10 +542,43 @@ test('SubfolderState is exactly what tree.rs defines, in the spelling serde send
   );
 });
 
+// Folders tree PR 2: the row's own fields, the failure it carries, the root's
+// count and set_tick's answer — each against the struct that owns it.
+const SUBFOLDER_FIXTURE: Subfolder = {
+  name: 'a.pdf', relativePath: 'Work/a.pdf', isDir: false, state: { kind: 'open' },
+  failure: { rule: 'timeout', reason: 'took too long' }, failedBelow: 0,
+};
+test('Subfolder is exactly what tree.rs defines, field for field', () => {
+  expect(Object.keys(SUBFOLDER_FIXTURE).sort()).toEqual(
+    rustStructFields(TREE_RS, 'Subfolder').map(camelOfSnake).sort(),
+  );
+  expect(Object.keys(SUBFOLDER_FIXTURE.failure!).sort()).toEqual(
+    rustStructFields(TREE_RS, 'ScanFailure').map(camelOfSnake).sort(),
+  );
+});
+const TREE_ROOT_FIXTURE: TreeRoot = {
+  rootId: 1, absolutePath: '/a', name: 'a', confirmed: true, files: [], searched: [], failed: 0,
+};
+test('TreeRoot is exactly what tree.rs defines, field for field', () => {
+  expect(Object.keys(TREE_ROOT_FIXTURE).sort()).toEqual(
+    rustStructFields(TREE_RS, 'TreeRoot').map(camelOfSnake).sort(),
+  );
+});
+const TICKS_RS = readFileSync(join(HERE, '../../../src-tauri/src/ticks.rs'), 'utf8');
+const RULE_CHANGE_FIXTURE: RuleChange = { added: [], removed: [] };
+test('RuleChange and Tick are exactly what ticks.rs defines', () => {
+  expect(Object.keys(RULE_CHANGE_FIXTURE).sort()).toEqual(
+    rustStructFields(TICKS_RS, 'RuleChange').map(camelOfSnake).sort(),
+  );
+  const ticks: readonly Tick[] = ['off', 'on', 'all'];
+  expect(ticks.slice().sort()).toEqual(rustEnumVariants(TICKS_RS, 'Tick').map(camelOf).sort());
+});
+
 test('the subfolder wire types reject Rust snake_case spellings', () => {
   const listing: SubfolderListing = {
     entries: [{
-      name: 'private', relativePath: 'Work/private', state: { kind: 'open' },
+      name: 'private', relativePath: 'Work/private', isDir: true, state: { kind: 'open' },
+      failure: null, failedBelow: 0,
       // @ts-expect-error TypeScript must reject Rust's pre-serialization spelling.
       relative_path: 'Work/private',
     }],

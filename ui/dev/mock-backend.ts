@@ -146,7 +146,7 @@ const standTree: TreeListing = {
       ],
     },
     {
-      rootId: 2, confirmed: true, absolutePath: '/home/u/papers', searched: [], name: 'papers',
+      rootId: 2, confirmed: true, failed: 3, absolutePath: '/home/u/papers', searched: [], name: 'papers',
       files: [
         { relativePath: '2024/survey.pdf', documentId: 'doc-8' },
         { relativePath: 'index.md', documentId: 'doc-9' },
@@ -293,7 +293,7 @@ export function installMockBackend(win: 'settings' | 'launcher') {
     add_watched_folder: (a) => {
       const rootId = s.nextRootId++;
       const path = a.path as string;
-      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, confirmed: false, files: [], searched: [] }] };
+      s.tree = { ...s.tree, roots: [...s.tree.roots, { rootId, absolutePath: path, name: path.split('/').pop()!, confirmed: false, failed: 0, files: [], searched: [] }] };
       return rootId;
     },
     confirm_watched_folder: (a) => {
@@ -307,21 +307,52 @@ export function installMockBackend(win: 'settings' | 'launcher') {
       s.tree = { ...s.tree, roots: s.tree.roots.filter((r) => r.rootId !== a.rootId) };
       return before - s.tree.roots.length;
     },
-    list_subfolders: (a) => ({
-      entries: a.relativePath === ''
+    // Folders tree PR 2: files beside folders, a masked file, a failed one, a
+    // not-read one (not drawn), and states that follow the stored rules — so a
+    // tick under an excluded folder shows the push-down question.
+    list_subfolders: (a) => {
+      const rules = s.exclusions.get(a.rootId as number) ?? [];
+      const dir = a.relativePath as string;
+      const at = (name: string) => (dir === '' ? name : `${dir}/${name}`);
+      const held = rules.find((p) => at('x').startsWith(`${p}/`));
+      const state = (path: string) =>
+        held !== undefined ? { kind: 'excludedByAncestor', prefix: held }
+        : rules.includes(path) ? { kind: 'excluded' } : { kind: 'open' };
+      const row = (name: string, isDir: boolean, extra: Record<string, unknown> = {}) => ({
+        name, relativePath: at(name), isDir, state: state(at(name)), failure: null, failedBelow: 0, ...extra,
+      });
+      const entries = dir === ''
         ? [
-            { name: 'archive', relativePath: 'archive', state: { kind: 'open' } },
-            { name: 'drafts', relativePath: 'drafts',
-              state: (s.exclusions.get(a.rootId as number) ?? []).includes('drafts') ? { kind: 'excluded' } : { kind: 'open' } },
-            { name: 'node_modules', relativePath: 'node_modules', state: { kind: 'builtIn' } },
+            row('archive', true, { failedBelow: 2 }),
+            row('drafts', true),
+            row('node_modules', true, { state: { kind: 'builtIn' } }),
+            row('notes.md', false),
           ]
-        : [],
-      unnameable: 0,
-    }),
+        : [
+            row('2019', true),
+            row('debug.log', false, { state: { kind: 'masked', mask: '*.log' } }),
+            row('photo.jpg', false, { state: { kind: 'notRead' } }),
+            row('report.pdf', false),
+            row('scan.pdf', false, { failure: { rule: 'no_text_layer', reason: 'no page of this PDF carries a text layer' } }),
+          ];
+      return { entries, unnameable: 0 };
+    },
     list_exclusions: (a) => (s.exclusions.get(a.rootId as number) ?? []).map((prefix) => ({ prefix, existsOnDisk: true })),
     exclude_subfolder: (a) => {
       const id = a.rootId as number;
       s.exclusions.set(id, [...(s.exclusions.get(id) ?? []), a.relativePath as string]);
+    },
+    set_tick: (a) => {
+      const id = a.rootId as number;
+      const path = a.relativePath as string;
+      const list = s.exclusions.get(id) ?? [];
+      if (a.tick === 'off') {
+        s.exclusions.set(id, [...list, path]);
+        return { added: [path], removed: [] };
+      }
+      const removed = list.filter((p) => p === path || path.startsWith(`${p}/`) || (a.tick === 'all' && p.startsWith(`${path}/`)));
+      s.exclusions.set(id, list.filter((p) => !removed.includes(p)));
+      return { added: [], removed };
     },
     include_subfolder: (a) => {
       const id = a.rootId as number;

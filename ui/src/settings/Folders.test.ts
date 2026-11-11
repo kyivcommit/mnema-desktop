@@ -5,6 +5,7 @@ import { setLocale, t } from '../i18n';
 import { createJobController } from './jobs';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
+import { masksVersion } from './masksVersion';
 import type {
   Counts, ScanState, StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile,
   TreeListing, TreeRoot,
@@ -23,6 +24,7 @@ const listSubfolders = vi.fn();
 const listExclusions = vi.fn();
 const excludeSubfolder = vi.fn();
 const includeSubfolder = vi.fn();
+const setTick = vi.fn();
 // The job commands are the REAL wrappers, deliberately: they are what carry
 // the `'start_scan_job'` wire string this file asserts is never sent, and a
 // mock of them would make that assertion about this file's own fake.
@@ -36,6 +38,7 @@ vi.mock('../lib/ipc', async (real) => ({
   listExclusions: (...a: unknown[]) => listExclusions(...a),
   excludeSubfolder: (...a: unknown[]) => excludeSubfolder(...a),
   includeSubfolder: (...a: unknown[]) => includeSubfolder(...a),
+  setTick: (...a: unknown[]) => setTick(...a),
 }));
 
 // The dialog plugin needs its own mock — a separate module from `../lib/ipc`.
@@ -97,6 +100,20 @@ beforeEach(() => {
   listExclusions.mockResolvedValue([]);
   excludeSubfolder.mockReset();
   includeSubfolder.mockReset();
+  setTick.mockReset();
+  // Folders tree PR 2: a tick is ONE `set_tick` now. The tests written before
+  // it assert the write through the two older mocks, so by default the tick
+  // answers through them — `off` as an exclusion, `on` as a removal — and a
+  // rejection there is a rejection here. The tests of `set_tick` itself
+  // replace this and assert the call.
+  setTick.mockImplementation(async (rootId: number, path: string, tick: string) => {
+    if (tick === 'off') {
+      await excludeSubfolder(rootId, path);
+      return { added: [path], removed: [] };
+    }
+    const removed = await includeSubfolder(rootId, path);
+    return { added: [], removed: removed ? [path] : [] };
+  });
   // Defaults for the tests that never expand a row: an empty listing and no
   // rules. A test that expands states its own.
   listSubfolders.mockResolvedValue({ entries: [], unnameable: 0 });
@@ -115,6 +132,7 @@ function root(overrides: Partial<TreeRoot> = {}): TreeRoot {
     files: [],
     searched: [],
     confirmed: true,
+    failed: 0,
     ...overrides,
   };
 }
@@ -491,7 +509,14 @@ test('a language switch reaches the empty-state sentence too', async () => {
 // ── PR 8a, Task 5: the folder row expands ────────────────────────────────────
 
 function sub(name: string, state: SubfolderState = { kind: 'open' }, parent = ''): Subfolder {
-  return { name, relativePath: parent ? `${parent}/${name}` : name, state };
+  return {
+    name, relativePath: parent ? `${parent}/${name}` : name, isDir: true, state,
+    failure: null, failedBelow: 0,
+  };
+}
+// A FILE row (folders tree PR 2): no chevron, a tick, and its own marks.
+function fileRow(name: string, state: SubfolderState = { kind: 'open' }, parent = '', extra: Partial<Subfolder> = {}): Subfolder {
+  return { ...sub(name, state, parent), isDir: false, ...extra };
 }
 function subfolders(entries: Subfolder[], unnameable = 0): SubfolderListing {
   return { entries, unnameable };
@@ -631,7 +656,10 @@ test('an excluded subfolder offers to include it and says what that costs first'
 // asking about the folder itself, `tree.rs:829-838`), so while `excluded` was
 // shut that state was tested and unreachable — and a person who had protected
 // a folder could never look inside to see what they had protected.
-test('an excluded folder opens, and what is inside it names the rule and offers nothing', async () => {
+// Folders tree PR 2: what is inside now carries an EMPTY tick (the plan's
+// ruling 3), whose press pushes the rule down, and it opens further so a file
+// deeper inside can be reached. The rule it is held by is the row's tooltip.
+test('an excluded folder opens, and what is inside it names the rule and offers an empty tick', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   listSubfolders.mockImplementation((_rootId: number, path: string) =>
@@ -652,11 +680,11 @@ test('an excluded folder opens, and what is inside it names the rule and offers 
   await waitFor(() => expect(screen.getByText('tax')).toBeTruthy());
   expect(screen.getByTestId('subfolder-expand-1-Archive').getAttribute('aria-expanded')).toBe('true');
   const held = within(screen.getByTestId('subfolder-1-Archive/tax'));
-  expect(held.getByText('Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
-  // Nothing under a rule is toggleable and nothing under it opens further, so
-  // opening the rule's own folder adds a level to read and no control to press.
-  expect(held.queryAllByRole('button')).toHaveLength(0);
-  expect(screen.queryByTestId('subfolder-expand-1-Archive/tax')).toBeNull();
+  expect(held.getByTitle('Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
+  const check = held.getByRole('checkbox', { name: 'Index Archive/tax' }) as HTMLInputElement;
+  expect(check.checked).toBe(false);
+  expect(check.indeterminate).toBe(false);
+  expect(screen.getByTestId('subfolder-expand-1-Archive/tax')).toBeTruthy();
 });
 
 // The pin in `ipc.test.ts` is what stops this state arriving; this is what the
@@ -681,7 +709,7 @@ test('a state this build has never heard of offers no control, and the rule stay
   expect(screen.getByRole('button', { name: 'Remove the rule on Vault' })).toBeTruthy();
 });
 
-test('an ancestor-held subfolder names the rule holding it and offers no control at all', async () => {
+test('an ancestor-held subfolder names the rule holding it and offers an empty tick', async () => {
   await expand([sub('secret', { kind: 'excludedByAncestor', prefix: 'Work' }, 'Work')]);
 
   const row = within(screen.getByTestId('subfolder-1-Work/secret'));
@@ -691,8 +719,11 @@ test('an ancestor-held subfolder names the rule holding it and offers no control
   // ancestor rule (`tree.rs:755-759`), so with rules on both `Archive` and
   // `Archive/sub` removing `Archive` does not free `Archive/sub/x`. The
   // sentence names the first step and promises no result.
-  expect(row.getByText('Held by your rule on Work. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
-  expect(row.queryAllByRole('button')).toHaveLength(0);
+  expect(row.getByTitle('Held by your rule on Work. Remove that rule first — another rule may still hold this folder.')).toBeTruthy();
+  // One control, an empty tick: no sentence beside it, no "remove the rule"
+  // button — the rule is named in the list under the tree.
+  expect((row.getByRole('checkbox', { name: 'Index Work/secret' }) as HTMLInputElement).checked).toBe(false);
+  expect(row.queryByText('Held by your rule on Work. Remove that rule first — another rule may still hold this folder.')).toBeNull();
 });
 
 // The class is what the stylesheet dims an excluded row by. Both excluded
@@ -981,9 +1012,10 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
     // The tree. `Archive` carries the conditional sentence, because a rule of
     // the person's own remains under it.
     'Archive', RULE_COST.held,
-    // And its child names the OUTERMOST rule, never its own — so on this line
-    // alone the rule on `Archive/Held` is invisible.
-    'Held', heldBy('Archive'),
+    // And its child names the OUTERMOST rule, never its own — in its tooltip
+    // since the folders tree PR 2 (the row carries an empty tick), so on this
+    // line the rule on `Archive/Held` is invisible.
+    'Held',
     // The rule list, which is where it is not invisible.
     'Your exclusion rules for this folder:',
     'Archive', RULE_COST.held, 'Remove the rule',
@@ -995,6 +1027,8 @@ test('the pair reads as one screen: the tree names only the outermost, the rule 
     // rule — which is the point of re-using the tree's own string here.
     'Archive/Held', heldBy('Archive'), 'Remove the rule',
   ].join(' '));
+  expect(screen.getByTestId('subfolder-1-Archive/Held').querySelector('.trow')?.getAttribute('title'))
+    .toBe(heldBy('Archive'));
 });
 
 // 🔴 A sibling is not a rule under it. `Archive2` merely starts with `Archive`;
@@ -1712,7 +1746,10 @@ test('an older listing that lands after a newer one is discarded, not drawn over
 // deepest thing on screen and its own children would never have existed, so
 // nothing would be left to disappear. Measured with two: dropping
 // `describe(...).expandable` from `fetchTree` fails this case and no other.
-test('excluding an open folder keeps that folder open and takes the level under its new ancestor rule away', async () => {
+// Folders tree PR 2: a level under a rule stays open and readable — its rows
+// are now empty ticks that push the rule down — so excluding a folder keeps
+// what was open under it on screen, unticked.
+test('excluding an open folder keeps that folder and what was open under it, unticked', async () => {
   setLocale('en'); // seed, do not inherit
   listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
   let excluded = false;
@@ -1725,7 +1762,9 @@ test('excluding an open folder keeps that folder open and takes the level under 
         sub('notes', excluded ? { kind: 'excludedByAncestor', prefix: 'Work' } : { kind: 'open' }, 'Work'),
       ]));
     }
-    return Promise.resolve(subfolders([sub('drafts', { kind: 'open' }, 'Work/notes')]));
+    return Promise.resolve(subfolders([
+      sub('drafts', excluded ? { kind: 'excludedByAncestor', prefix: 'Work' } : { kind: 'open' }, 'Work/notes'),
+    ]));
   });
   listExclusions.mockImplementation(() =>
     Promise.resolve(excluded ? [{ prefix: 'Work', existsOnDisk: true }] : []));
@@ -1746,10 +1785,11 @@ test('excluding an open folder keeps that folder open and takes the level under 
   // The folder the person just protected is still open, and still openable.
   expect(screen.getByText('notes')).toBeTruthy();
   expect(screen.getByTestId('subfolder-expand-1-Work').getAttribute('aria-expanded')).toBe('true');
-  // The level under the new ancestor rule is gone, and so is the control that
-  // opened it.
-  expect(screen.queryByText('drafts')).toBeNull();
-  expect(screen.queryByTestId('subfolder-expand-1-Work/notes')).toBeNull();
+  // The levels under the new rule stay open, unticked and marked excluded.
+  expect(screen.getByText('drafts')).toBeTruthy();
+  expect(screen.getByTestId('subfolder-expand-1-Work/notes').getAttribute('aria-expanded')).toBe('true');
+  expect((screen.getByRole('checkbox', { name: 'Index Work/notes/drafts' }) as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByTestId('subfolder-1-Work/notes/drafts').classList.contains('excl')).toBe(true);
 });
 
 test('the expanded panel switches language with everything else on screen', async () => {
@@ -1779,13 +1819,13 @@ test('the expanded panel switches language with everything else on screen', asyn
   expect(screen.getByText('1 підтеку не показано: її назву не вдалося прочитати як текст.')).toBeTruthy();
   // The sentence that names the outermost rule, in the language it is read in:
   // "спершу", not a promise that removing that rule changes this folder.
-  expect(screen.getByText('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
+  expect(screen.getByTitle('Утримується вашим правилом на Archive. Спершу приберіть те правило — теку може утримувати ще одне.')).toBeTruthy();
   expect(screen.getByRole('checkbox', { name: 'Індексувати Work' })).toBeTruthy();
   expect(screen.getByRole('checkbox', { name: 'Індексувати Archive' })).toBeTruthy();
   // An excluded folder opens here too — the control exists in both locales, and
-  // the row held by the rule below it still offers none.
+  // the row held by the rule below it offers its empty tick in this language.
   expect(screen.getByRole('button', { name: 'Підтеки теки Archive' })).toBeTruthy();
-  expect(within(screen.getByTestId('subfolder-1-Archive/secret')).queryAllByRole('button')).toHaveLength(0);
+  expect(screen.getByRole('checkbox', { name: 'Індексувати Archive/secret' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Прибрати правило на Old notes' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Підтеки теки /synthetic/root' })).toBeTruthy();
   // The visible button text, not just its aria-label — `removeRuleLabel`
@@ -1825,7 +1865,8 @@ test('the whole expanded row reads as one screen, in order, with every sentence 
     'Indexed: 2 documents',
     '1 subfolder is not listed: its name could not be read as text.',
     'Archive', cost,
-    'Held', 'Held by your rule on Archive. Remove that rule first — another rule may still hold this folder.',
+    // Held from above: an empty tick, the rule in its tooltip (folders tree PR 2).
+    'Held',
     'Trailing', 'This folder is indexed, and its name cannot be written as a rule here — rename it if you need to exclude it.',
     'Work',
     'Your exclusion rules for this folder:',
@@ -4028,7 +4069,7 @@ test('the tree has its own box, with the hint under it', async () => {
   const box = screen.getByTestId('folders-tree');
   expect(within(box).getByText('/synthetic/root')).toBeTruthy();
   expect(within(box).queryByTestId('folders-add')).toBeNull(); // the bar is outside the scroll
-  expect(screen.getByText('Untick a folder to keep it out of the index.')).toBeTruthy();
+  expect(screen.getByText('Untick a folder or a file to keep it out of the index.')).toBeTruthy();
 });
 
 // Final review, Important 2: Start was drawn only for the selected root, so a
@@ -4077,4 +4118,202 @@ test('a folder holding only hidden subfolders says nothing here can be indexed, 
 
   expect(screen.queryByText('This folder has no subfolders.')).toBeNull();
   expect(screen.getByText('No subfolder here can be indexed: the scan never reads the ones this folder holds.')).toBeTruthy();
+});
+
+// ── Folders tree PR 2: files, marks, and one set_tick per tick ──────────────
+
+test('files are listed with a tick and no chevron', async () => {
+  await expand([sub('a'), fileRow('b.pdf')]);
+
+  const row = within(screen.getByTestId('subfolder-1-b.pdf'));
+  expect((row.getByRole('checkbox', { name: 'Index b.pdf' }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.queryByTestId('subfolder-expand-1-b.pdf')).toBeNull();
+  expect(screen.getByTestId('subfolder-expand-1-a')).toBeTruthy();
+});
+
+// Review Focus 1: a rule on a file removes the file itself, so the count is
+// not zero and the question is asked — never the silent zero-cost shortcut.
+test('unticking an indexed file asks with its own count', async () => {
+  await expand([fileRow('b.pdf')], [], 0, [file('b.pdf', 'doc-b'), file('b.pdfx', 'doc-x')]);
+  setTick.mockReset();
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
+
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
+    t('settings_folders_exclude_cost', { paths: 1, documents: 1 }),
+  );
+  expect(setTick).not.toHaveBeenCalled();
+});
+
+test('confirming sends one off for the file and nothing else', async () => {
+  await expand([fileRow('b.pdf')], [], 0, [file('b.pdf', 'doc-b')]);
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: ['b.pdf'], removed: [] });
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+    name: t('settings_folders_confirm_exclude_named', { path: 'b.pdf' }),
+  }));
+
+  await waitFor(() => expect(setTick).toHaveBeenCalledTimes(1));
+  expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'off');
+  expect(excludeSubfolder).not.toHaveBeenCalled();
+});
+
+test('ticking under an excluded folder asks about new files and sends one on', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('a', { kind: 'excluded' })])
+      : subfolders([fileRow('b.pdf', { kind: 'excludedByAncestor', prefix: 'a' }, 'a')])));
+  listExclusions.mockResolvedValue([{ prefix: 'a', existsOnDisk: true }]);
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: [], removed: ['a'] });
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-expand-1-a')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/b.pdf')).toBeTruthy());
+
+  const check = screen.getByRole('checkbox', { name: 'Index a/b.pdf' }) as HTMLInputElement;
+  expect(check.checked).toBe(false);
+  await fireEvent.click(check);
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
+    t('settings_folders_include_cost_push_down', { path: 'a/b.pdf' }),
+  );
+  expect(setTick).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+    name: t('settings_folders_confirm_include_named', { path: 'a/b.pdf' }),
+  }));
+
+  await waitFor(() => expect(setTick).toHaveBeenCalledTimes(1));
+  expect(setTick).toHaveBeenCalledWith(1, 'a/b.pdf', 'on');
+  expect(includeSubfolder).not.toHaveBeenCalled();
+});
+
+test('an excluded folder can be expanded to reach a file inside', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([sub('a', { kind: 'excluded' })])
+      : path === 'a'
+        ? subfolders([sub('d', { kind: 'excludedByAncestor', prefix: 'a' }, 'a')])
+        : subfolders([fileRow('e.txt', { kind: 'excludedByAncestor', prefix: 'a' }, 'a/d')])));
+  listExclusions.mockResolvedValue([{ prefix: 'a', existsOnDisk: true }]);
+  render(Folders, { props: { jobs: createJobController() } });
+  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-expand-1-a')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-expand-1-a/d')).toBeTruthy());
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-a/d'));
+
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/d/e.txt')).toBeTruthy());
+  expect(listSubfolders).toHaveBeenCalledWith(1, 'a/d');
+});
+
+test('clicking a mixed box asks to tick everything with the rule count', async () => {
+  await expand([sub('a'), sub('ab')], [
+    { prefix: 'a/x', existsOnDisk: true },
+    { prefix: 'a/y/z', existsOnDisk: false },
+    { prefix: 'ab', existsOnDisk: true },
+  ]);
+  setTick.mockReset();
+  setTick.mockResolvedValue({ added: [], removed: ['a/x', 'a/y/z'] });
+
+  const check = screen.getByRole('checkbox', { name: 'Index a' }) as HTMLInputElement;
+  expect(check.indeterminate).toBe(true);
+  await fireEvent.click(check);
+  await waitFor(() => expect(screen.getByTestId('folder-confirm-1')).toBeTruthy());
+  expect(screen.getByTestId('folder-confirm-1').textContent).toContain(
+    t('settings_folders_include_all_cost', { count: 2 }),
+  );
+  expect(setTick).not.toHaveBeenCalled();
+  await fireEvent.click(within(screen.getByTestId('folder-confirm-1')).getByRole('button', {
+    name: t('settings_folders_confirm_include_named', { path: 'a' }),
+  }));
+
+  await waitFor(() => expect(setTick).toHaveBeenCalledTimes(1));
+  expect(setTick).toHaveBeenCalledWith(1, 'a', 'all');
+});
+
+test('a masked file has no tick and names the mask', async () => {
+  await expand([fileRow('x.log', { kind: 'masked', mask: '*.log' })]);
+
+  const row = within(screen.getByTestId('subfolder-1-x.log'));
+  expect(row.queryAllByRole('checkbox')).toHaveLength(0);
+  expect(row.getByText(t('settings_entry_masked', { mask: '*.log' }))).toBeTruthy();
+});
+
+test('a not-read file is not listed', async () => {
+  await expand([fileRow('p.jpg', { kind: 'notRead' }), fileRow('b.pdf')]);
+
+  expect(screen.queryByTestId('subfolder-1-p.jpg')).toBeNull();
+  expect(screen.getByTestId('subfolder-1-b.pdf')).toBeTruthy();
+});
+
+test('a failed file says so and the reason is in its title', async () => {
+  await expand([fileRow('t.pdf', { kind: 'open' }, '', {
+    failure: { rule: 'timeout', reason: 'the reader took too long' },
+  })]);
+
+  const mark = screen.getByTestId('subfolder-mark-1-t.pdf');
+  expect(mark.textContent).toBe(t('settings_entry_failed'));
+  expect(mark.getAttribute('title')).toBe('the reader took too long');
+});
+
+test('a collapsed folder and a root show how many failed below', async () => {
+  setLocale('en'); // seed, do not inherit
+  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root', failed: 3 })]));
+  listSubfolders.mockImplementation((_rootId: number, path: string) =>
+    Promise.resolve(path === ''
+      ? subfolders([{ ...sub('a'), failedBelow: 2 }])
+      : subfolders([fileRow('t.pdf', { kind: 'open' }, 'a')])));
+  listExclusions.mockResolvedValue([]);
+  render(Folders, { props: { jobs: createJobController() } });
+
+  await waitFor(() => expect(screen.getByTestId('folder-failed-1')).toBeTruthy());
+  expect(screen.getByTestId('folder-failed-1').textContent).toBe(t('settings_entry_failed_below', { count: 3 }));
+  await fireEvent.click(screen.getByTestId('folder-expand-1'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-mark-1-a')).toBeTruthy());
+  // Open, the root's own rows carry the marks: the root's count goes.
+  expect(screen.queryByTestId('folder-failed-1')).toBeNull();
+  expect(screen.getByTestId('subfolder-mark-1-a').textContent).toBe(t('settings_entry_failed_below', { count: 2 }));
+
+  // Open, the folder's own rows carry the marks: the count goes.
+  await fireEvent.click(screen.getByTestId('subfolder-expand-1-a'));
+  await waitFor(() => expect(screen.getByTestId('subfolder-1-a/t.pdf')).toBeTruthy());
+  expect(screen.queryByTestId('subfolder-mark-1-a')).toBeNull();
+});
+
+test('a refusal from set_tick is shown and the rows are re-read', async () => {
+  await expand([fileRow('b.pdf')]);
+  setTick.mockReset();
+  setTick.mockRejectedValue(new Error('the sibling cannot carry a rule'));
+  const reads = listSubfolders.mock.calls.length;
+
+  await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
+
+  await waitFor(() => expect(screen.getByText('the sibling cannot carry a rule')).toBeTruthy());
+  await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(reads));
+});
+
+// Plan ruling 11: a mask stored or removed changes which files are marked
+// `mask …`, so the open levels are read again; mounting reads nothing extra.
+test('a change to the masks re-reads the open panels', async () => {
+  await expand([fileRow('x.log')]);
+  const reads = listSubfolders.mock.calls.length;
+  await tick();
+  expect(listSubfolders.mock.calls.length).toBe(reads);
+
+  masksVersion.update((n) => n + 1);
+
+  await waitFor(() => expect(listSubfolders.mock.calls.length).toBeGreaterThan(reads));
+  expect(listSubfolders).toHaveBeenLastCalledWith(1, '');
 });

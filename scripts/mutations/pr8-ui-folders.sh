@@ -152,7 +152,7 @@ case_ "an excluded folder must still open, or nothing inside it can be looked at
   ui/src/settings/Folders.svelte \
   "s{      case 'excluded':\n        return \{ sentence: t\('settings_subfolder_excluded'\), control: 'include', expandable: true, excluded: true \};}{      case 'excluded':\n        return \{ sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true \};}" \
   "        return { sentence: t('settings_subfolder_excluded'), control: 'include', expandable: false, excluded: true };" \
-  src/settings/Folders.test.ts 'an excluded folder opens, and what is inside it names the rule and offers nothing' runner=vitest
+  src/settings/Folders.test.ts 'an excluded folder opens, and what is inside it names the rule and offers an empty tick' runner=vitest
 
 # Task 7. These two labels are read inside a `$derived.by` whose only reference
 # to the language is the `void $locale` line, so dropping it freezes the label
