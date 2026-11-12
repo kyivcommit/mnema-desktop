@@ -83,23 +83,6 @@ case_ "the refusal must name the mask as it was typed, beside the folded one" \
   '<p data-testid="mask-refused-heading"></p>' \
   src/settings/Masks.test.ts 'a refused mask shows the backend sentence verbatim, names the mask as typed, and stores nothing' runner=vitest
 
-# A preview of two zeros is not "this rule removes nothing": it is "the indexed
-# set holds nothing that matches today", and it gets a sentence of its own.
-#
-# 🔴 Fix round 7. This comment used to argue from the shared sentence's `=0` arm
-# ("each one is also indexed under another path"), a wording that had already
-# been rewritten twice and that F1 has now deleted outright — so the argument
-# named a string that no longer exists. What actually separates the two strings
-# is the HEDGE: the shared one hedges both ways because its number can be too
-# high, and this number is zero and cannot be, so `_none` warns one way only.
-# The mutant sends `paths === 0` down the shared branch and the named test's
-# whole-sentence `toBe` is what dies.
-case_ "a preview of zero must not borrow the sentence written for a non-zero one" \
-  ui/src/settings/Masks.svelte \
-  "s{          \? p\.paths === 0}{          ? p.paths < 0}" \
-  "          ? p.paths < 0" \
-  src/settings/Masks.test.ts 'a preview of zero asks the question anyway, in a sentence of its own' runner=vitest
-
 # The list on screen after an answer must be what the index holds, not an array
 # this window edited. Measured: it takes five tests with it, including the two
 # that watch the count of reads.
@@ -344,12 +327,12 @@ case_ "the case note must be decided by the mask, not by any uppercase in the an
 # `*.pdf` and `report.*` both stored, removing either leaves `report.pdf`
 # excluded — so "the files this mask was holding back are indexed again" is
 # false about the files it names. It cannot be fixed by counting: those files
-# are NOT in the index, which is why this side has no preview at all. The mutant
-# is the exact string that shipped.
+# are NOT in the index, which is why this side has no preview at all. Since the
+# one-line rewrite (owner, 2026-11-12) the word "only" carries it; the mutant drops it.
 case_ "the removal sentence must not promise that every held-back file comes back" \
   ui/src/i18n/catalog.ts \
-  "s{    settings_masks_remove_cost: 'From the next scan of each folder on, this mask stops holding anything back: each file it was excluding is indexed again — unless another of your rules still excludes it — and its text is sent to the model provider.',}{    settings_masks_remove_cost: 'From the next scan of each folder on, the files this mask was holding back are indexed again, and their text is sent to the model provider.',}" \
-  "the files this mask was holding back are indexed again" \
+  "s{files only this mask excluded are indexed again}{files this mask excluded are indexed again}" \
+  "'From the next scan, files this mask excluded are indexed again" \
   src/settings/Masks.test.ts 'removing states the inverse cost before it removes anything, in both locales' runner=vitest
 
 # 🔴 F2's disclosed half, dropped from the explainer. `?` is deliberately NOT
@@ -376,59 +359,3 @@ case_ "the explainer must disclose that \`?\` counts bytes in Ukrainian too" \
   "s{ А «\\?» замінює один байт, а не одну літеру, тож для літер поза латиницею його треба ставити кілька: «\\?\\.txt» не збігається з «й\\.txt», а «\\?\\?\\.txt» збігається\\.'}{'}" \
   "записані на диску літери з діакритичними знаками.'," \
   src/i18n/i18n.test.ts 'the mask explainer discloses that' runner=vitest
-
-# 🔴 Fix round 5, F3, owner's ruling. The floor word put back, in English.
-# `mask_preview.paths` is a bound in NEITHER direction: it understates, because
-# only `status = 'indexed'` rows are counted while the walk's reconcile set is
-# status-agnostic; and it overstates, because the in-tree `.gitignore` stack is
-# in neither rule set (so a path it already covers counts as surviving and this
-# press is charged for it), and because a rule set that does not compile answers
-# as an empty override, after which `walk_root` stops before phase 2 and removes
-# nothing at all. "At least N" would then be said about a scan that removes
-# zero. Killed by the `not.toContain('at least')` on the screen test — probed
-# in fix round 6 the way its Ukrainian sibling below had to be: with that one
-# assertion deleted the mutant SURVIVES, so the guard is the sole killer and the
-# insertion point really is past every positive assertion here.
-#
-# 🔴 Fix round 7 moved the insertion point by one clause, because F1 deleted the
-# `documents == 0` arm and moved the `, and ` INSIDE the non-zero arms — so
-# `already take, and {documents` no longer exists in the catalogue and the old
-# expression would have matched nothing. The word now goes between
-# `already take` and the `{documents` plural. That is still the one spot the
-# named test's positive assertions do not span: its
-# `toContain('takes 4 files beyond what your rules already take')` ends exactly
-# at the insertion point, and `can remove more than that or fewer` and the
-# `.gitignore` clause both start after it.
-case_ "the add-cost sentence must not claim a floor, in English" \
-  ui/src/i18n/catalog.ts \
-  "s~already take\\{documents~already take, at least\\{documents~" \
-  "already take, at least{documents" \
-  src/settings/Masks.test.ts 'the file count is not stated as a floor' runner=vitest
-
-# The same ruling, the Ukrainian half — the half most of this product's people
-# read, and the one round 4's own regression was written in first. Killed by the
-# language-switch test, which is where the Ukrainian sentence is read off the
-# screen rather than out of the catalogue.
-#
-# 🔴 **The insertion point is the case, and only a probe finds it.** Fix round 5
-# put the floor word at `ця маска забирає {paths`, inside the region the
-# language-switch test's own POSITIVE assertion
-# (`toContain('Станом на зараз ця маска забирає 4 файли')`) reads — so the case
-# died there, on a line that fires for ANY edit to that region, and
-# `not.toContain('щонайменше')` below it never ran. Deleting that guard changed
-# no mutation number: it was unpinned.
-#
-# The word now goes between the plural's closing `}}` and `понад те`, which is
-# the ONE spot in this sentence no positive assertion in that test covers:
-# `забирає 4 файли` ends before it, `може прибрати і більше, і менше` and the
-# `.gitignore` clause both start after it. Measured rather than reasoned — with
-# the mutation applied and `not.toContain('щонайменше')` deleted, the test
-# PASSES, and with the guard back it fails on that line alone. An insertion at
-# `може прибрати і більше` was tried first and rejected for exactly the round-5
-# defect one clause over: the neighbouring `toContain('може прибрати і більше,
-# і менше')` kills it and the guard never runs (fix round 6, F3).
-case_ "the add-cost sentence must not claim a floor, in Ukrainian" \
-  ui/src/i18n/catalog.ts \
-  "s~\\}\\} понад те, що вже забирають~\\}\\} щонайменше понад те, що вже забирають~" \
-  "}} щонайменше понад те, що вже забирають" \
-  src/settings/Masks.test.ts 'every sentence on the section follows a language switch' runner=vitest

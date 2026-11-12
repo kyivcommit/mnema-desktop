@@ -5,6 +5,8 @@
   import { listMasks, maskPreview, addMask, removeMask } from '../lib/ipc';
   import type { JobController } from './jobs';
   import { masksVersion } from './masksVersion';
+  import { unapplied } from './unapplied';
+  import { dialogFocus, focusCancel } from './dialog';
 
   // 🔴 Taken for one reason only, and it is the independent review's second
   // finding: this editor has to hear a reading pass end. It starts no job and
@@ -214,6 +216,9 @@
       const preview = await maskPreview(mask);
       if (n !== previews) return; // a newer question has replaced this one
       pending = { kind: 'add', mask, paths: preview.paths, documents: preview.documents };
+      // No question over nothing (owner, 2026-11-12): a mask that takes no
+      // indexed file is stored on the press, as a folder holding none is.
+      if (preview.paths === 0) await answer();
     } catch (e) {
       if (n !== previews) return;
       pending = null;
@@ -263,10 +268,12 @@
         // The rule as the list will hold it: an already-stored one may be spelt
         // differently from what was typed.
         chosen = added.kind === 'alreadyStored' ? added.stored : p.mask;
+        if (added.kind !== 'alreadyStored') unapplied.set(true);
       } else {
         // `remove_mask` answers whether a row actually went: a second window may
         // have removed the same mask first, and that is a different sentence.
         alreadyGone = !(await removeMask(p.mask));
+        if (!alreadyGone) unapplied.set(true);
       }
     } catch (e) {
       // The check already passed by the time this runs — this is `answer`, not
@@ -460,20 +467,7 @@
       ),
       cost:
         p.kind === 'add'
-          // 🔴 The zero has a sentence of its own, and after fix round 7 the
-          // reason is the HEDGE rather than the documents clause, which no
-          // longer exists: the shared sentence hedges both ways because its
-          // number can be too high (a path an in-tree `.gitignore` already
-          // covers is charged to this press), and this number is zero and
-          // cannot be, so its warning runs one way only.
-          // There is no shortcut past the question either: since fix round 4 a
-          // preview of zero means this mask takes nothing BEYOND what the
-          // stored rules already take — which is also what adding `*.txt` over
-          // a stored `*` answers — and the next scan can still take files that
-          // never finished indexing.
-          ? p.paths === 0
-            ? t('settings_masks_add_cost_none')
-            : t('settings_masks_add_cost', { paths: p.paths, documents: p.documents })
+          ? t('settings_masks_add_cost', { paths: p.paths })
           : t('settings_masks_remove_cost'),
       confirmLabel: t('settings_masks_confirm'),
       confirmAriaLabel: t(
@@ -514,15 +508,31 @@
       <!-- The question, and nothing stored until it is answered. -->
       {#if question}
         {@const q = question}
-        <div data-testid="mask-confirm">
-          {#if q.kind === 'checking'}
-            <p>{q.label}</p>
-          {:else}
-            <p>{q.heading}</p>
-            <p data-testid="mask-confirm-cost">{q.cost}</p>
-            <button type="button" aria-label={q.confirmAriaLabel} onclick={answer}>{q.confirmLabel}</button>
-            <button type="button" aria-label={q.cancelAriaLabel} onclick={dismiss}>{q.cancelLabel}</button>
-          {/if}
+        <div class="scrim">
+          <div
+            class="dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={q.kind === 'checking' ? q.label : q.heading}
+            tabindex="-1"
+            data-testid="mask-confirm"
+            use:dialogFocus
+            onkeydown={(e) => { if (e.key === 'Escape') dismiss(); }}>
+            {#if q.kind === 'checking'}
+              <p>{q.label}</p>
+            {:else}
+              <p class="dialog-heading">{q.heading}</p>
+              <p data-testid="mask-confirm-cost">{q.cost}</p>
+              <div class="dialog-actions">
+                <button type="button" aria-label={q.confirmAriaLabel} onclick={answer}>{q.confirmLabel}</button>
+                <button
+                  type="button"
+                  use:focusCancel
+                  aria-label={q.cancelAriaLabel}
+                  onclick={dismiss}>{q.cancelLabel}</button>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
       <!-- Where the question was, so a person coming back to this panel reads the

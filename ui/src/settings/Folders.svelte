@@ -11,6 +11,8 @@
   } from '../lib/ipc';
   import type { JobController } from './jobs';
   import { masksVersion } from './masksVersion';
+  import { dialogFocus, focusCancel } from './dialog';
+  import { unapplied } from './unapplied';
 
   // §9.2, Tasks 7 and 8 — the folder surface: add, list, remove. Scanning is
   // not this component's any more (Task 8): the single Scan control
@@ -110,11 +112,6 @@
   let removing = $state<number | null>(null);
   // D202: the folder whose Start is on the wire, so its button cannot be pressed twice.
   let starting = $state<number | null>(null);
-  // Owner, 2026-11-12: a stored tick or mask does nothing until a scan. Set by
-  // every change this window stores, cleared when a scan runs (from anywhere).
-  // shortcut: lives in this window only; closing it forgets the reminder, not the change.
-  let unapplied = $state(false);
-  let applying = $state(false);
   // The root the `−` acts on, by id AND path: `watched_root.id` is a rowid
   // alias SQLite hands out again, so an id alone could select another folder.
   let chosen = $state<{ rootId: number; path: string } | null>(null);
@@ -782,7 +779,7 @@
       // One `set_tick`: a fold-back, if the folder empties, lands in the same
       // transaction (`ticks.rs`).
       await setTick(rootId, path, 'off');
-      unapplied = true;
+      unapplied.set(true);
     } catch (e) {
       patch(rootId, { actionError: message(e) });
     }
@@ -802,7 +799,7 @@
       // One `set_tick`: a push-down is decided and written by the shell in one
       // transaction, never as several calls from here (spec C).
       const change = await setTick(rootId, path, tick);
-      unapplied = true;
+      unapplied.set(true);
       // All four sets: a tick that only stores or drops an include changed
       // something too (PR #102 review).
       patch(rootId, {
@@ -1062,7 +1059,6 @@
     let first = true;
     return masksVersion.subscribe(() => {
       if (first) { first = false; return; }
-      unapplied = true;
       for (const id of Object.keys(panels).map(Number)) {
         const panel = panels[id];
         if (panel !== undefined) void read(id, openPathsOf(panel.tree));
@@ -1137,7 +1133,6 @@
     return jobs.state.subscribe(({ scan }) => {
       if (scan.snapshot === seen) return;
       seen = scan.snapshot;
-      if (scan.snapshot.kind === 'running') unapplied = false;
       if (scan.readSeq > seenReadSeq) {
         seenReadSeq = scan.readSeq;
         reread(true);
@@ -1418,24 +1413,6 @@
     }
   }
 
-  // A popup takes the keyboard when it opens — on "Cancel", the answer that
-  // changes nothing — and hands it back to what had it when it closes.
-  function dialogFocus(node: HTMLElement) {
-    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    // The Cancel button focuses itself (`focusCancel`), also when it appears
-    // later — after the "checking" line. Only an empty dialog takes it here.
-    if (!node.contains(document.activeElement)) node.focus();
-    return {
-      destroy() {
-        before?.focus();
-      },
-    };
-  }
-
-  function focusCancel(node: HTMLElement) {
-    node.focus();
-  }
-
   type SubRow = {
     entry: Subfolder;
     sentence: string;
@@ -1684,16 +1661,7 @@
   };
   const removeSelectedLabel = $derived.by(() => { void $locale; return t('settings_folders_remove_selected'); });
   const treeHintLabel = $derived.by(() => { void $locale; return t('settings_folders_tree_hint'); });
-  const applyLabel = $derived.by(() => { void $locale; return t('settings_folders_apply'); });
 
-  async function applyChanges() {
-    applying = true;
-    try {
-      await jobs.scan('full');
-    } finally {
-      applying = false;
-    }
-  }
   // 🔴 PR 8a, fix round 5. Words derived from the boolean `rootChanged` holds,
   // under `void $locale` like every other sentence on this screen.
   const rootChangedLabel = $derived.by(() => {
@@ -2010,13 +1978,4 @@
     </div>
   </div>
   <p class="hint">{treeHintLabel}</p>
-  {#if unapplied}
-    <div class="apply">
-      <button
-        type="button"
-        data-testid="folders-apply"
-        disabled={applying || scanRunning}
-        onclick={applyChanges}>{applyLabel}</button>
-    </div>
-  {/if}
 </div>

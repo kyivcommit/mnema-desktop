@@ -7,6 +7,7 @@ import { tick } from 'svelte';
 const tick_ = tick;
 import { get } from 'svelte/store';
 import { masksVersion } from './masksVersion';
+import { unapplied } from './unapplied';
 import type {
   Counts, ScanState, StoredExclusion, Subfolder, SubfolderListing, SubfolderState, TreeFile,
   TreeListing, TreeRoot,
@@ -75,6 +76,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 let deliver: ((state: ScanState) => void) | null = null;
 
 beforeEach(() => {
+  unapplied.set(false);
   listen.mockReset();
   deliver = null;
   revision = 0;
@@ -4036,9 +4038,8 @@ test('a root whose top level holds a gitignored row is marked – with no rule o
   expect(mark(1).textContent).toBe('–');
 });
 
-// Owner, 2026-11-12: a stored change does nothing until a scan, and nothing on
-// screen said so. "Apply changes" appears after one, starts a full scan, and
-// goes once a scan is running.
+// Owner, 2026-11-12: a stored change does nothing until a scan. The tree marks
+// it in `unapplied`, which `Apply.svelte` turns into "Apply changes".
 async function untickFileWatching(reply: Promise<unknown>) {
   setLocale('en');
   listTree.mockResolvedValue(listing([
@@ -4052,41 +4053,23 @@ async function untickFileWatching(reply: Promise<unknown>) {
   await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
   await fireEvent.click(screen.getByTestId('folder-expand-1'));
   await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Index b.pdf' })).toBeTruthy());
-  expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull();
+  expect(get(unapplied)).toBe(false);
   await fireEvent.click(screen.getByRole('checkbox', { name: 'Index b.pdf' }));
   await waitFor(() => expect(setTick).toHaveBeenCalledWith(1, 'b.pdf', 'off'));
 }
 
-test('a stored change offers Apply changes, which starts a full scan and goes once it runs', async () => {
+test('a stored change marks the change as waiting for a scan', async () => {
   await untickFileWatching(Promise.resolve({ added: ['b.pdf'], removed: [], included: [], unincluded: [] }));
 
-  const apply = await screen.findByRole('button', { name: 'Apply changes' });
-  invoke.mockClear();
-  await fireEvent.click(apply);
-  expect(invoke).toHaveBeenCalledWith('start_scan_job', { entry: 'full' });
-
-  await runEmbeddingAt(0);
-  await waitFor(() => expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull());
+  await waitFor(() => expect(get(unapplied)).toBe(true));
 });
 
-test('a refused change offers no Apply changes', async () => {
+test('a refused change does not mark anything as waiting', async () => {
   await untickFileWatching(Promise.reject(new Error('the index is not open')));
 
   await waitFor(() =>
     expect(screen.getByTestId('folder-subfolder-error-1').textContent).toBe('the index is not open'));
-  expect(screen.queryByRole('button', { name: 'Apply changes' })).toBeNull();
-});
-
-test('a stored mask offers Apply changes too, in the language on screen', async () => {
-  setLocale('uk');
-  listTree.mockResolvedValue(listing([root({ rootId: 1, absolutePath: '/synthetic/root' })]));
-  renderWatching();
-  await waitFor(() => expect(screen.getByText('/synthetic/root')).toBeTruthy());
-  expect(screen.queryByTestId('folders-apply')).toBeNull();
-
-  masksVersion.update((n) => n + 1);
-
-  expect((await screen.findByTestId('folders-apply')).textContent).toBe('Застосувати зміни');
+  expect(get(unapplied)).toBe(false);
 });
 
 // Owner, 2026-11-12: ticking back a file the person unticked names exactly one

@@ -6,6 +6,8 @@ import Masks from './Masks.svelte';
 // it for is the store's seeded `readSeq`.
 import { createJobController } from './jobs';
 import { setLocale, t } from '../i18n';
+import { get } from 'svelte/store';
+import { unapplied } from './unapplied';
 
 // Mocked as the typed wrappers, in the shape `Folders.test.ts:13-34` uses:
 // what this file is about is the screen, and `ipc.test.ts` owns the wire names
@@ -41,6 +43,7 @@ beforeEach(() => {
   addMask.mockReset();
   removeMask.mockReset();
   invoke.mockReset();
+  unapplied.set(false);
   listMasks.mockResolvedValue([]);
   // The ordinary outcome, so a test about something else does not have to
   // restate it. `add_mask` answers which of two things happened and every
@@ -133,13 +136,7 @@ test('adding asks the preview first and shows both its numbers before anything i
   expect(addMask).not.toHaveBeenCalled();
 
   const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toBe(
-    'As of now this mask takes 4 files beyond what your rules already take, and 2'
-    + ' documents stop being findable: no other path will be left naming them. The next scan of'
-    + ' each folder can remove more than that or fewer: files that never finished indexing are'
-    + ' not counted here, and a file a .gitignore in the folder itself already excludes may be'
-    + ' counted here.',
-  );
+  expect(cost).toBe('4 files will disappear from search after the next scan.');
 });
 
 // 🔴 The wait is not instant and must not be silent. `mask_preview` holds the
@@ -229,129 +226,6 @@ test('the older of two overlapping mask previews writes nothing', async () => {
   expect(visibleText(screen.getByTestId('mask-confirm'))).toContain('Add the mask *.tmp?');
   expect(screen.queryByText('Add the mask *.pdf?')).toBeNull();
   expect(confirmAdd('*.tmp')).toBeTruthy();
-});
-
-// 🔴 Fix round 5, F3, owner's ruling, read off the SCREEN rather than out of
-// the catalogue. The sentence used to claim a floor — "at least 4 files" — and
-// the number is a bound in neither direction. It understates, because
-// `mask_preview.paths` counts `status = 'indexed'` rows only while the walk's
-// reconcile set is status-agnostic, so `removed: 6` can follow "4 files". And
-// it overstates, because the in-tree `.gitignore` stack is in neither rule set
-// (`src-tauri/src/tree.rs`, `crates/mnema-walk/src/rules.rs`), so a path it
-// already covers counts as surviving and this press is charged for it — and
-// because a rule set that does not compile answers as an empty override, after
-// which `walk_root` stops before phase 2 and removes nothing at all.
-//
-// So the floor word had to go and one clause has to hedge BOTH directions.
-// `not.toContain('at least')` is the assertion that pins the removal: every
-// other line here would still pass with the word back in.
-test('the file count is not stated as a floor, and one clause hedges both directions', async () => {
-  maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
-  await mount([]);
-
-  await type('*.pdf');
-  await fireEvent.click(addButton());
-
-  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-  const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toContain('takes 4 files beyond what your rules already take');
-  expect(cost).not.toContain('at least');
-  expect(cost).toContain('can remove more than that or fewer');
-  expect(cost).toContain('files that never finished indexing are not counted here');
-  expect(cost).toContain('a file a .gitignore in the folder itself already excludes may be counted here');
-});
-
-// 🔴 The state the two numbers exist to tell apart: every matched path has a
-// second copy elsewhere, so paths go and this rule takes no document's last
-// one. A person told "0 documents" beside a folder they know holds files needs
-// the first number to make sense of it.
-//
-// 🔴 Fix round 7, F1, owner's ruling. At zero the sentence says NOTHING about
-// documents. Three consecutive rounds shipped a clause here claiming more than
-// the arithmetic supports, about loss, in the understating direction, each time
-// in prose that round had just written — so this round stops making the claim
-// rather than phrasing it again. `mask_preview` counts a DIFFERENCE between two
-// rule sets, and two mechanisms take a document's last path from outside both:
-// an in-tree `.gitignore`, which neither set represents, so a path it covers
-// counts as SURVIVING and the next scan takes it anyway
-// (`mask_preview_understates_documents_behind_an_in_tree_gitignore`,
-// `src-tauri/tests/commands.rs`); and `d.status = 'indexed'` in
-// `Db::indexed_files_under_root` (`crates/mnema-index/src/write.rs`), which puts
-// a `pending`, `failed` or `skipped` document's only path outside the counted
-// population entirely.
-//
-// 🔴 The guard is STRUCTURAL, not lexical, and that is the whole point of this
-// round. Round 6's `not.toContain('stops being findable')` pinned the deleted
-// PHRASE; the promise moved into a different verb (`keeps`) and walked straight
-// past it. The `toBe` below is the guard that cannot be walked past: it admits
-// no clause here in any wording.
-//
-// `not.toContain('document')` is strictly weaker, and MEASURED to be weaker —
-// probed with a re-added `=0` arm reading "and every one of them still answers
-// under some other name", it passed and only the `toBe` failed. It is kept for
-// the one thing it does better: when a re-added clause does use the word, it
-// fails FIRST and its message names the property and prints the clause, where
-// the `toBe` prints a paragraph diff. It is not a second killer and must not be
-// read as one.
-test('at zero documents the sentence is the file count and the hedge, and says nothing about documents', async () => {
-  maskPreview.mockResolvedValue({ paths: 4, documents: 0 });
-  await mount([]);
-
-  await type('*.pdf');
-  await fireEvent.click(addButton());
-
-  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-
-  // 🔴 The WHOLE question, not just the cost paragraph. Independent review of
-  // fix round 7 measured that a claim smuggled into a sibling element of
-  // `mask-confirm-cost` dies in `i18n/guard.test.ts` if it is a literal, and is
-  // seen by nothing at all if it arrives as a new catalogue key rendered into a
-  // new element. This family's entire history is a claim surviving in a place
-  // nobody looked, so the assertion is scoped to the container.
-  const whole = visibleText(screen.getByTestId('mask-confirm'));
-  expect(whole).not.toContain('document');
-  expect(whole).not.toContain('документ');
-
-  const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).not.toContain('document');
-  expect(cost).toBe(
-    'As of now this mask takes 4 files beyond what your rules already take. The next scan of'
-    + ' each folder can remove more than that or fewer: files that never finished indexing are'
-    + ' not counted here, and a file a .gitignore in the folder itself already excludes may be'
-    + ' counted here.',
-  );
-});
-
-// A preview of two zeros is not "this rule would remove nothing": since fix
-// round 4 it is "this rule takes nothing your rules do not already take, out of
-// what is indexed today" — which is also what a person adding `*.txt` over a
-// stored `*` sees. The next scan can still take files that never finished
-// indexing, so the question is asked anyway: there is no `paths === 0` shortcut
-// past it.
-test('a preview of zero asks the question anyway, in a sentence of its own', async () => {
-  maskPreview.mockResolvedValue({ paths: 0, documents: 0 });
-  await mount([]);
-
-  await type('*.nothing');
-  await fireEvent.click(addButton());
-
-  await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-  const cost = visibleText(screen.getByTestId('mask-confirm-cost'));
-  expect(cost).toBe(
-    'As of now this mask takes nothing beyond what your rules already take. The next scan of'
-    + ' each folder can still remove files: those that never finished indexing are not counted'
-    + ' here.',
-  );
-  // Fix round 7. This line used to pin `'keeps a path this rule does not take'`
-  // — a phrase F1 has now deleted from the catalogue, which would have left a
-  // guard that cannot fail by construction. What actually separates the two
-  // strings is the HEDGE: the shared sentence hedges both ways ("more than that
-  // or fewer") because its number can be too high, and `_none`'s number is zero
-  // and cannot be, so it warns one way only. That is the property, and it
-  // survives any rewording of either sentence's documents half.
-  expect(cost).not.toContain('can remove more than that or fewer');
-  expect(cost).not.toContain('document');
-  expect(addMask).not.toHaveBeenCalled();
 });
 
 test('confirming stores the mask as typed and re-reads the list', async () => {
@@ -641,17 +515,13 @@ test('removing states the inverse cost before it removes anything, in both local
   await fireEvent.click((await removeMask_('*.pdf')));
 
   expect(visibleText(screen.getByTestId('mask-confirm-cost'))).toBe(
-    'From the next scan of each folder on, this mask stops holding anything back: each file it'
-    + ' was excluding is indexed again — unless another of your rules still excludes it — and'
-    + ' its text is sent to the model provider.',
+    'From the next scan, files only this mask excluded are indexed again and their text is sent to the model provider.',
   );
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
   expect(visibleText(screen.getByTestId('mask-confirm-cost'))).toBe(
-    'Від наступного сканування кожної теки ця маска більше нічого не стримує: кожен файл, який'
-    + ' вона виключала, індексується знову — якщо його не виключає ще якесь ваше правило, — і'
-    + ' його текст надсилається провайдеру моделі.',
+    'Від наступного сканування файли, які виключала лише ця маска, індексуються знову, а їхній текст надсилається провайдеру моделі.',
   );
 
   expect(removeMask).not.toHaveBeenCalled();
@@ -873,33 +743,14 @@ test('every sentence on the section follows a language switch, the standing ques
   await type('*.tmp');
   await fireEvent.click(addButton());
   await waitFor(() => expect(screen.getByTestId('mask-confirm-cost')).toBeTruthy());
-  expect(visibleText(container)).toContain('As of now this mask takes 4 files');
+  expect(visibleText(container)).toContain('4 files will disappear from search');
 
   setLocale('uk');
   await waitFor(() => expect(screen.getByText('Маски файлів')).toBeTruthy());
 
   const text = visibleText(container);
   expect(text).toContain(t('settings_masks_explainer'));
-  expect(text).toContain('Станом на зараз ця маска забирає 4 файли');
-  // Fix round 5, F3: the Ukrainian half of the ruling, off the screen. The
-  // floor word is gone and the one clause hedges both directions here too.
-  expect(text).not.toContain('щонайменше');
-  expect(text).toContain('може прибрати і більше, і менше');
-  expect(text).toContain('а файл, який уже виключає «.gitignore» у самій теці, тут може бути порахований');
-  // Fix round 7, F1: the Ukrainian half of the ruling, read off the SCREEN at
-  // the `documents: 0` this fixture already renders. Scoped to the cost element
-  // so no neighbouring sentence can satisfy it or break it.
-  //
-  // ⚠️ This line is the on-screen echo, not the claim guard. The Ukrainian
-  // claim guard is the whole-sentence `toBe` on `uk(2, 0)` in
-  // `src/i18n/i18n.test.ts`, because a clause avoiding the word «документ»
-  // walks past a `not.toContain` — measured, see the English sibling above. A
-  // `toBe` here instead would be stronger and is deliberately NOT written: this
-  // test is the named killer of the Ukrainian floor case in
-  // `scripts/mutations/pr8-ui-masks.sh`, which depends on
-  // `not.toContain('щонайменше')` above being its SOLE killer, and a `toBe`
-  // would kill that mutant first and unpin the guard.
-  expect(visibleText(screen.getByTestId('mask-confirm-cost'))).not.toContain('документ');
+  expect(text).toContain('4 файли зникнуть з пошуку після наступного сканування.');
   expect(text).toContain(t('settings_masks_confirm_add_heading', { mask: '*.tmp' }));
   // The accessible names follow the switch too, and they are what tells two
   // otherwise identical controls apart.
@@ -907,7 +758,7 @@ test('every sentence on the section follows a language switch, the standing ques
     .toBe('Підтвердити');
   expect((await removeMask_('*.pdf'))).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Додати маску' })).toBeTruthy();
-  expect(text).not.toContain('As of now');
+  expect(text).not.toContain('will disappear');
 });
 
 // Task 11 fix round 1, F5. Two more `$derived`s the switch test above never
@@ -1081,4 +932,54 @@ test('storing a mask tells the folders tree to re-read', async () => {
 
   await waitFor(() => expect(addMask).toHaveBeenCalledWith('*.log'));
   await waitFor(() => expect(get(masksVersion)).toBe(before + 1));
+});
+
+// Owner, 2026-11-12: the mask question as for folders — a modal popup, one
+// line, and none when the mask takes nothing indexed.
+test('a mask that takes nothing indexed is stored at once, with no question', async () => {
+  maskPreview.mockResolvedValue({ paths: 0, documents: 0 });
+  await mount([]);
+
+  await type('*.tmp');
+  await fireEvent.click(addButton());
+
+  await waitFor(() => expect(addMask).toHaveBeenCalledWith('*.tmp'));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(get(unapplied)).toBe(true);
+});
+
+test('the add question is a modal popup in one line: Cancel holds the focus, and Esc stores nothing', async () => {
+  maskPreview.mockResolvedValue({ paths: 4, documents: 2 });
+  await mount([]);
+
+  await type('*.pdf');
+  await fireEvent.click(addButton());
+
+  const dialog = await screen.findByRole('dialog', { name: 'Add the mask *.pdf?' });
+  expect(dialog.getAttribute('aria-modal')).toBe('true');
+  expect(visibleText(dialog)).toBe(
+    'Add the mask *.pdf? 4 files will disappear from search after the next scan. Confirm Cancel');
+  await waitFor(() => expect(document.activeElement).toBe(cancelFor('*.pdf')));
+
+  await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(addMask).not.toHaveBeenCalled();
+  expect(get(unapplied)).toBe(false);
+});
+
+test('the remove question is a modal popup and names the provider', async () => {
+  removeMask.mockResolvedValue(true);
+  await mount(['*.pdf']);
+  await waitFor(() => expect(screen.getByText('*.pdf')).toBeTruthy());
+
+  await fireEvent.click(await removeMask_('*.pdf'));
+
+  const dialog = await screen.findByRole('dialog', { name: 'Remove the mask *.pdf?' });
+  expect(visibleText(dialog)).toBe(
+    'Remove the mask *.pdf? From the next scan, files only this mask excluded are indexed again'
+    + ' and their text is sent to the model provider. Confirm Cancel');
+  await fireEvent.click(confirmRemove('*.pdf'));
+  await waitFor(() => expect(removeMask).toHaveBeenCalledWith('*.pdf'));
+  await waitFor(() => expect(get(unapplied)).toBe(true));
 });
