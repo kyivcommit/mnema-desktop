@@ -24,7 +24,7 @@ pub use space::{AdoptedSpace, Neighbours, PendingChunk, VectorRole};
 pub use text_prep::{prepare_for_search, search_terms};
 pub use write::{
     ChunkAnchor, Citation, INDEX_FORMAT_VERSION, IndexedFileRow, PageOcr, PathEntry, PathOccupant,
-    RecentDocRow, WatchedRootRow,
+    PathRuleChange, RecentDocRow, WatchedRootRow,
 };
 
 impl Error {

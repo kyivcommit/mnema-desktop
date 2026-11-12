@@ -183,7 +183,7 @@ pub(crate) fn plan_tick(
 /// The same guards as `exclude_subfolder` (`bridge.rs`): an unknown root, a
 /// root that is not there, a blank path, a path no rule can carry. Then the
 /// change is planned from the disk and the stored rules and written in one
-/// transaction ([`mnema_index::Db::change_path_exclusions`]).
+/// transaction ([`mnema_index::Db::change_path_rules`]).
 ///
 /// ⚠️ The plan is read outside the index lock and written inside it. The only
 /// writer of these rules is this window, one press at a time, so nothing moves
@@ -237,8 +237,16 @@ pub fn set_tick(
     };
     let change = plan_tick(root_id, &stored, &relative_path, tick, &mut level)?;
     if change != RuleChange::default() {
-        state
-            .with_index(|db| db.change_path_exclusions(root_id, &change.removed, &change.added))?;
+        state.with_index(|db| {
+            db.change_path_rules(
+                root_id,
+                &mnema_index::PathRuleChange {
+                    excluded_removed: change.removed.clone(),
+                    excluded_added: change.added.clone(),
+                    ..Default::default()
+                },
+            )
+        })?;
     }
     Ok(change)
 }
